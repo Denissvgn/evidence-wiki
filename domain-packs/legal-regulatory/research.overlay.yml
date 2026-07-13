@@ -1,0 +1,87 @@
+# Partial research.yml overlay for legal, tax, and regulatory research workspaces.
+# Merge this fragment into a configured workspace; do not use it as a complete
+# standalone research.yml.
+
+project:
+  name: legal-regulatory
+  description: Research workspace for official-source legal, tax, regulatory, administrative, and public-policy evidence.
+  owner_goal: Build a source-grounded knowledge base for current official rules, figures, obligations, procedures, and jurisdiction-specific answers.
+  language: en
+
+domain_pack:
+  name: legal-regulatory
+  version: 0.1.0
+  description: Domain guidance for official-source legal, tax, regulatory, administrative, and public-policy research.
+  compatible_research_yml_contract: "0.1"
+  taxonomy_doc: taxonomy.md
+  claims_doc: claims.md
+  coverage_templates:
+    official-current-figure: coverage-templates/official-current-figure.yml
+  applicable_source_types:
+    - official_web
+    - legal_text
+    - regulation
+    - gazette
+    - agency_guidance
+    - official_form
+    - court_or_regulator_material
+    - public_dataset
+  page_taxonomy:
+    sources: Official laws, regulations, agency pages, forms, guidance, gazettes, and regulator or court materials.
+    entities: Jurisdictions, agencies, courts, regulators, public programs, and regulated entities.
+    concepts: Rules, obligations, deadlines, fees, thresholds, tax categories, eligibility criteria, and compliance concepts.
+    methods: Administrative workflows, registrations, filings, applications, appeals, and compliance procedures.
+    claims: Structured official-source legal, figure, eligibility, procedure, jurisdiction, and factual claims.
+    synthesis: Current-figure tables, procedure maps, jurisdiction comparisons, legal summaries, and compliance briefs.
+    questions: Evidence gaps, jurisdiction-specific unknowns, and official-source acquisition plans.
+    decisions: Accepted or rejected project decisions about legal scope, source authority, and currentness boundaries.
+    outputs: Reusable reports, briefs, tables, checklists, and exportable answer artifacts.
+  extraction_targets:
+    - jurisdiction
+    - issuing_authority
+    - effective_date
+    - currentness_date
+    - eligibility_scope
+    - fee_or_threshold
+    - deadline
+    - procedure_step
+    - governing_norm
+    - official_source_identity
+  recommended_synthesis_outputs:
+    - current_figure_table
+    - official_source_map
+    - procedure_sequence
+    - jurisdiction_comparison
+    - compliance_brief
+    - open_official_source_requests
+  implemented_files:
+    - taxonomy.md
+    - claims.md
+    - coverage-templates/official-current-figure.yml
+  planned_files: []
+
+taxonomy:
+  entity_types:
+    - jurisdiction
+    - agency
+    - regulator
+    - court
+    - public_program
+    - regulated_entity
+  concept_types:
+    - legal_rule
+    - tax_category
+    - fee
+    - threshold
+    - deadline
+    - eligibility
+    - registration
+    - procedure
+    - official_source_identity
+  claim_types:
+    - legal_rule
+    - current_figure
+    - eligibility_rule
+    - procedure_step
+    - jurisdiction_scope
+    - factual

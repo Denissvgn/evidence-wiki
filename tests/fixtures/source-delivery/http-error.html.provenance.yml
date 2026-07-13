@@ -1,0 +1,7 @@
+origin_url: https://official.example/product/spec
+retrieved_at: 2026-07-02T12:01:00Z
+retrieved_by: fetch-agent/manual-web
+source_status: unavailable
+delivery_failure_code: http_error
+delivery_failure_detail: Upstream returned HTTP 503 during the capture attempt.
+delivery_failure_remediation: Retry later, verify the URL, or record the upstream HTTP status in delivery_failure_detail.

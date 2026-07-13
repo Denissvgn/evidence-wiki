@@ -1,0 +1,1 @@
+Synthetic source text for the minimal fixture.

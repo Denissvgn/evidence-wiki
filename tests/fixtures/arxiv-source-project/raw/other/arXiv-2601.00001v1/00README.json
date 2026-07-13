@@ -1,0 +1,16 @@
+{
+  "texlive_version": "2025",
+  "process": {
+    "compiler": "pdflatex"
+  },
+  "sources": [
+    {
+      "filename": "main.tex",
+      "usage": "toplevel"
+    },
+    {
+      "filename": "sections/intro.tex",
+      "usage": "included"
+    }
+  ]
+}

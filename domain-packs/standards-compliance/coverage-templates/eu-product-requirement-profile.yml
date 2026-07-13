@@ -1,0 +1,17 @@
+coverage_profile: eu-product-requirement-profile
+required_facets:
+  - facet_id: product-requirement-authority
+    description: Confirm product category, legal act, harmonised-standard reference, and OJEU or EUR-Lex linkage.
+    evidence_path: product_requirement_profile
+    source_policy: official_standards_registry
+    freshness_policy: current_product_requirement
+    identity_policy: registry_entry_matches_product_requirement
+    min_sources: 1
+  - facet_id: harmonised-standard-identity
+    description: Confirm the harmonised standard designation and status through official registry metadata.
+    evidence_path: standards_registry_reference
+    source_policy: official_standards_registry
+    freshness_policy: current_standard_reference
+    identity_policy: standard_designation_matches_registry
+    min_sources: 1
+optional_facets: []

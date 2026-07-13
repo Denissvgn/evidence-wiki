@@ -1,0 +1,44 @@
+# Jurisdiction profile fixture for source-discovery tests (E34-T01).
+#
+# This is a small, illustrative fixture -- NOT a shipped universal legal
+# database. Each research workspace curates and edits its own
+# sources/jurisdictions.yml; these two profiles exist only to exercise the
+# schema with one country-level and one state-level example.
+schema_version: "1.0"
+jurisdiction_profiles:
+  - jurisdiction_id: us-federal
+    name: United States (Federal)
+    country: US
+    official_domains:
+      - govinfo.gov
+      - ecfr.gov
+      - federalregister.gov
+      - regs.gov
+    legislature_urls:
+      - https://www.congress.gov
+    regulator_urls:
+      - https://www.federalregister.gov
+    court_urls:
+      - https://www.supremecourt.gov
+    gazette_urls:
+      - https://www.govinfo.gov/app/collection/fr
+    blocked_domains: []
+    notes: "U.S. federal primary legal sources (statutes, regulations, courts, Federal Register)."
+  - jurisdiction_id: us-ca
+    name: California (State)
+    country: US
+    state_or_region: CA
+    official_domains:
+      - leginfo.legislature.ca.gov
+      - oal.ca.gov
+      - courts.ca.gov
+    legislature_urls:
+      - https://leginfo.legislature.ca.gov
+    regulator_urls:
+      - https://oal.ca.gov
+    court_urls:
+      - https://courts.ca.gov
+    gazette_urls: []
+    blocked_domains:
+      - example.com
+    notes: "California state primary legal sources."

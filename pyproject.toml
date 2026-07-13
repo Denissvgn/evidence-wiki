@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling==1.30.1"]
+build-backend = "hatchling.build"
+
+[project]
+name = "evidence-wiki"
+version = "0.1.0"
+description = "Verifiable autonomous research workspaces: agent-driven research where every answer cites provenance-tracked sources or blocks with a structured evidence request."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+  "PyYAML>=6.0",
+]
+keywords = [
+  "research",
+  "wiki",
+  "llm",
+  "knowledge-base",
+  "research-agent",
+  "citations",
+  "provenance",
+  "autonomous-research",
+]
+
+[project.optional-dependencies]
+dev = [
+  "hatchling==1.30.1",
+  "build==1.5.0",
+  "twine==6.2.0",
+  "coverage[toml]==7.15.0",
+  "ruff==0.15.17",
+  "pytest==9.0.3",
+]
+
+[project.scripts]
+evidence-wiki = "evidence_wiki.cli:main"
+
+[tool.hatch.build]
+exclude = [
+  "/.git",
+  "/.github",
+  "/.mypy_cache",
+  "/.pytest_cache",
+  "/.ruff_cache",
+  "/.venv",
+  "/build",
+  "/dist",
+  "/env",
+  "/htmlcov",
+  "/pilot-workspaces",
+  "/reports",
+  "/temp_codebase_project",
+  "/temp_workspace",
+  "/venv",
+  "*.egg-info",
+  "*.pyc",
+  "__pycache__",
+  "*-smoke-test",
+  "*-init-test",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/CHANGELOG.md",
+  "/Containerfile",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/README.md",
+  "/RELEASING.md",
+  "/THIRD_PARTY_NOTICES.md",
+  "/domain-packs",
+  "/examples",
+  "/orchestrator",
+  "/pyproject.toml",
+  "/workspace-template",
+  "/src",
+  "/tests",
+  "/tools",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evidence_wiki"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"workspace-template" = "evidence_wiki/assets/workspace-template"
+"domain-packs" = "evidence_wiki/assets/domain-packs"
+"orchestrator" = "evidence_wiki/assets/orchestrator"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E9", "F", "I", "B", "S", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S108", "S603", "S607"]
+
+[tool.coverage.run]
+branch = true
+source = [
+  "src",
+  "workspace-template/scripts",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

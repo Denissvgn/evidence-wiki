@@ -1,0 +1,20 @@
+origin_url: https://www.epa.gov/recycle/battery-collection-best-practices
+url: https://www.epa.gov/recycle/battery-collection-best-practices
+retrieved_at: '2026-07-04T12:00:00Z'
+retrieved_by: fixture/manual
+publication_date: '2026-05-06'
+effective_date: '2026-05-06'
+date_metadata:
+  valid_for_year: 2026
+  note: Fixture records operator-verified date from the captured page text.
+evidence_usability_override:
+  usable: true
+  reviewed_by: fixture-reviewer
+  reviewed_at: '2026-07-04T12:10:00Z'
+  reason: Rich official guidance capture; JavaScript warning is boilerplate and quoted text verified from retrieved bytes.
+sha256: sha256:fixture-official-safety
+checksum: sha256:fixture-official-safety
+checksum_verified: true
+publisher: US Environmental Protection Agency
+source_type: official_web
+jurisdiction: US

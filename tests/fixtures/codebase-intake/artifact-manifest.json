@@ -1,0 +1,33 @@
+{
+  "schema_version": "1",
+  "artifact_kind": "codebase_evidence",
+  "source_id": "codebase:fixture-snapshot-4443d3360c",
+  "generated_at": "2026-07-11T00:00:00Z",
+  "producer": {
+    "name": "synthetic-authorized-worker",
+    "version": "1.0"
+  },
+  "invocation": {
+    "argv": [
+      "external-analyzer",
+      "analyze",
+      "--input",
+      "fixture-snapshot.zip"
+    ],
+    "executed_by": "external_worker",
+    "plugins_enabled": false,
+    "hooks_enabled": false,
+    "network_access": false
+  },
+  "files": [
+    {
+      "path": "context.json",
+      "size_bytes": 386,
+      "sha256": "sha256:bb25deb9f7b39599df40e8ead720a1e8d9e54c7c525ec4b94c7d3159ee718f00"
+    }
+  ],
+  "repository": {
+    "full_name": "attacker/fake-identity-must-not-be-promoted",
+    "revision": "ffffffffffffffffffffffffffffffffffffffff"
+  }
+}

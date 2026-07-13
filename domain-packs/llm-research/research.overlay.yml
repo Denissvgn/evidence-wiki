@@ -1,0 +1,161 @@
+# Partial research.yml overlay for LLM research workspaces.
+# Merge this fragment into a configured workspace; do not use it as a complete
+# standalone research.yml.
+
+project:
+  name: llm-research
+  description: Research workspace for autonomous research systems and LLM-based research agents.
+  owner_goal: Build a source-grounded knowledge base for comparing LLM research systems, methods, evaluations, and implementation evidence.
+  language: en
+
+domain_pack:
+  name: llm-research
+  version: 0.1.0
+  description: Domain guidance for research about LLM systems, autonomous research agents, benchmarks, datasets, and implementation availability.
+  compatible_research_yml_contract: "0.1"
+  taxonomy_doc: taxonomy.md
+  claims_doc: claims.md
+  scaffolds:
+    source_paper: scaffolds/source-paper.md
+    system: scaffolds/system.md
+    method: scaffolds/method.md
+  coverage_templates:
+    academic-negative-claim-probe: coverage-templates/academic-negative-claim-probe.yml
+    academic-method-feasibility: coverage-templates/academic-method-feasibility.yml
+    vendor-product-spec: coverage-templates/vendor-product-spec.yml
+  applicable_source_types:
+    - academic_paper
+    - arxiv_source_bundle
+    - pdf
+    - project_repository
+    - technical_report
+    - benchmark_documentation
+    - dataset_documentation
+  page_taxonomy:
+    sources: Source notes for papers, repositories, benchmark documents, dataset documents, and technical reports.
+    systems: Concrete LLM research systems, agents, frameworks, repositories, prototypes, and named implementations.
+    methods: Reusable techniques, orchestration patterns, state and memory strategies, search procedures, evaluation workflows, and tool-use methods.
+    benchmarks: Evaluation suites, tasks, leaderboards, scoring protocols, challenge sets, and benchmark variants.
+    datasets: Training, evaluation, benchmark, synthetic, human-annotated, and generated datasets.
+    claims: Structured evidence statements, benchmark results, ablations, architecture claims, limitations, cost/runtime claims, and availability claims.
+    synthesis: Cross-source maps, comparison tables, literature reviews, benchmark landscapes, implementation pattern summaries, and research agendas.
+    questions: Open research questions, missing evidence, unresolved comparisons, replication gaps, and source-acquisition plans.
+    decisions: Accepted or rejected project decisions about taxonomy, ingestion scope, synthesis priorities, and implementation direction.
+  extraction_targets:
+    - architecture
+    - orchestration_model
+    - state_memory_strategy
+    - tools
+    - benchmarks
+    - baselines
+    - results
+    - limitations
+    - implementation_availability
+  recommended_synthesis_outputs:
+    - autonomous_research_systems_map
+    - orchestration_patterns_comparison
+    - state_and_memory_patterns_comparison
+    - benchmark_landscape
+    - implementation_availability_matrix
+    - reproducibility_and_artifact_gaps
+    - open_research_agenda
+  implemented_files:
+    - taxonomy.md
+    - scaffolds/source-paper.md
+    - scaffolds/system.md
+    - scaffolds/method.md
+    - claims.md
+    - coverage-templates/academic-negative-claim-probe.yml
+    - coverage-templates/academic-method-feasibility.yml
+    - coverage-templates/vendor-product-spec.yml
+  planned_files: []
+
+wiki:
+  required_dirs:
+    - sources
+    - entities
+    - concepts
+    - methods
+    - systems
+    - benchmarks
+    - datasets
+    - claims
+    - synthesis
+    - questions
+    - decisions
+    - outputs
+  allowed_page_types:
+    - source
+    - entity
+    - concept
+    - method
+    - system
+    - benchmark
+    - dataset
+    - claim
+    - synthesis
+    - question
+    - decision
+    - output
+  frontmatter_type_rules:
+    claim:
+      required_fields:
+        - claim_type
+        - subject
+        - predicate
+        - object
+        - source_ids
+        - scope
+      field_types:
+        claim_type: string
+        subject: string
+        predicate: string
+        object: string
+        metric: string
+        value: scalar
+        unit: string
+        scope: string
+        source_ids: string_list
+      non_empty_fields:
+        - source_ids
+      allowed_values:
+        claim_type:
+          - benchmark_result
+          - ablation_result
+          - architectural_claim
+          - method_claim
+          - limitation
+          - cost_runtime_claim
+          - availability_claim
+          - factual
+
+taxonomy:
+  entity_types:
+    - organization
+    - lab
+    - author
+    - project
+    - repository
+    - tool
+    - model
+  concept_types:
+    - architecture
+    - orchestration_model
+    - state_memory_strategy
+    - tool_use
+    - evaluation_metric
+    - autonomy_level
+    - benchmark_task
+    - dataset_role
+    - baseline_type
+    - limitation
+    - implementation_availability
+  claim_types:
+    - benchmark_result
+    - ablation_result
+    - architectural_claim
+    - method_claim
+    - limitation
+    - cost_runtime_claim
+    - availability_claim
+    - factual

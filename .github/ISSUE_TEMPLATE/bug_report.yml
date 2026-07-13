@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible EvidenceWiki problem in the CLI, template, scripts, or docs.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an EvidenceWiki bug. Please include enough detail for maintainers to reproduce the issue from a clean checkout or generated workspace.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: List the exact commands, files, or workspace state needed to reproduce the problem.
+      placeholder: |
+        1. Run `evidence-wiki init ...`
+        2. Run `python3 -B ...`
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python version, package version or commit, and relevant optional tools.
+      placeholder: |
+        - OS:
+        - Python:
+        - EvidenceWiki version or commit:
+        - Optional tools:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Paste relevant command output, tracebacks, or validation messages.
+      render: text

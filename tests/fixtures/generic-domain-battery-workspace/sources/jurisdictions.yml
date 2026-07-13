@@ -1,0 +1,11 @@
+jurisdiction_profiles:
+  - jurisdiction_id: public-safety-authorities
+    name: Public Safety Authorities
+    country: US
+    official_domains:
+      - epa.gov
+      - usfa.fema.gov
+    regulator_urls:
+      - https://www.epa.gov/
+      - https://www.usfa.fema.gov/
+    notes: Synthetic profile proving generic official trust is reviewed separately from web.allowed_domains.

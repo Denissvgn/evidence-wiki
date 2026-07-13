@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu / Python 3.10
+            os: ubuntu-latest
+            python-version: "3.10"
+          - name: Ubuntu / Python 3.14
+            os: ubuntu-latest
+            python-version: "3.14"
+          - name: macOS / Python 3.12
+            os: macos-latest
+            python-version: "3.12"
+          - name: Windows / Python 3.12
+            os: windows-latest
+            python-version: "3.12"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install development environment (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Install development environment (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install --editable ".[dev]"
+
+      - name: Run tests and quality checks (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          .venv/bin/python -m pytest -q
+          .venv/bin/python -m ruff check .
+          .venv/bin/python tools/sync_vendored_scripts.py --check
+
+      - name: Run tests and quality checks (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\python.exe -m pytest -q
+          .\.venv\Scripts\python.exe -m ruff check .
+          .\.venv\Scripts\python.exe tools\sync_vendored_scripts.py --check
+
+  package:
+    name: Build distributions
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Build and inspect wheel and sdist
+        shell: bash
+        run: |
+          .venv/bin/python -m build --wheel --sdist --no-isolation
+          .venv/bin/python -m twine check dist/*.whl dist/*.tar.gz

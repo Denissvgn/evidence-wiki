@@ -1,0 +1,89 @@
+workspace_init:
+  schema_version: "0.1"
+  target_path: __TARGET__
+  project:
+    name: autonomous-llm-systems-research
+    description: Research workspace for autonomous LLM research systems and implementation evidence.
+    owner_goal: Build a source-grounded map of methods, systems, benchmarks, repositories, and decision-support outputs.
+    language: en
+  domain_guidance:
+    mode: domain_pack
+    rationale: The reusable LLM research domain pack matches the autonomous LLM systems scope.
+  domain_pack:
+    enabled: true
+    name: llm-research
+  questions_asked:
+    - Target workspace path or short project name?
+    - What research scope and outcome should this workspace support?
+    - Are there optional starting sources, URLs, folders, repositories, or an existing wiki?
+  inferred_answers:
+    target_workspace: autonomous-llm-systems-research
+    project_language: en
+    source_roots:
+      - raw/papers
+      - raw/links
+      - raw/code
+    domain_guidance: Use the reusable llm-research domain pack for autonomous LLM research systems.
+    codebase_analysis: Treat the supplied repository as optional source evidence under sources/code_wikis.
+    output_formats:
+      - markdown
+      - csv
+      - json
+      - presentation_outline
+    claim_strictness: structured_claims
+    git_integration: Use explicit user-edit snapshots only.
+  initial_sources:
+    - raw/papers/autonomous-llm-systems.pdf
+    - https://github.com/example/autonomous-llm-system
+    - raw/code/autonomous-llm-system
+  raw:
+    immutable: true
+    source_roots:
+      - raw/papers
+      - raw/links
+      - raw/code
+  claim_strictness: structured_claims
+  ingest:
+    claim_extraction: true
+  lint:
+    validate_claims: true
+  outputs:
+    supported_formats:
+      - markdown
+      - csv
+      - json
+      - presentation_outline
+  integrations:
+    git:
+      snapshot_user_edits: explicit
+    codebase_analysis:
+      enabled: true
+      provider: agent-wiki-cli
+      command: llm-wiki context --src-dir raw/code/autonomous-llm-system --budget 12000 --format json
+      output_dir: sources/code_wikis
+      read_only: true
+      install_hooks: false
+      background_sync: false
+      untrusted_input: acknowledged
+  validation:
+    commands:
+      - python3 scripts/smoke_validate_workspace.py --format text
+      - python3 scripts/source_inventory.py --dry-run --report
+      - python3 scripts/normalize_sources.py --all --dry-run
+      - python3 scripts/lint.py --format text
+    results:
+      - command: python3 scripts/smoke_validate_workspace.py --format text
+        status: pending
+        summary: Run after workspace creation.
+  assumptions:
+    - The LLM research domain pack is an appropriate first-pass match for the research scope.
+    - Supplied papers and repository evidence can be inventoried after workspace creation.
+    - Repository analysis is optional source evidence, not a maintained wiki replacement.
+  skipped_decisions:
+    - No network fetching during initialization.
+    - No codebase-analysis adapter execution during initialization.
+    - No git hooks or background automation during initialization.
+  next_actions:
+    - Run smoke validation from the created workspace root.
+    - Inventory supplied papers, links, and repository evidence.
+    - Normalize source records before creating maintained wiki pages.

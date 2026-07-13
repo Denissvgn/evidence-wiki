@@ -1,0 +1,87 @@
+# Partial research.yml overlay for standards-compliance workspaces.
+# Merge this fragment into a configured workspace; do not use it as a complete
+# standalone research.yml.
+
+project:
+  name: standards-compliance
+  description: Research workspace for standards registry, product requirement, and compliance evidence.
+  owner_goal: Build source-grounded answers about standards identity, currentness, register inclusion, and product/legal requirements.
+  language: en
+
+domain_pack:
+  name: standards-compliance
+  version: 0.1.0
+  description: Domain guidance for standards registry and product requirement research.
+  compatible_research_yml_contract: "0.1"
+  taxonomy_doc: taxonomy.md
+  claims_doc: claims.md
+  coverage_templates:
+    official-standard-reference: coverage-templates/official-standard-reference.yml
+    standards-current-version: coverage-templates/standards-current-version.yml
+    eu-product-requirement-profile: coverage-templates/eu-product-requirement-profile.yml
+    uk-geospatial-standard-register-entry: coverage-templates/uk-geospatial-standard-register-entry.yml
+  applicable_source_types:
+    - standards_registry_entry
+    - harmonised_standard_reference
+    - product_requirement_guidance
+    - geospatial_standard_register_entry
+    - official_legal
+    - official_web
+  page_taxonomy:
+    sources: Standards registries, standards-body pages, open-data metadata snapshots, product guidance, and legal or OJEU references.
+    entities: Standards bodies, registries, regulators, product categories, register owners, managers, and control bodies.
+    concepts: Standard identity, currentness, replacement chains, product requirements, legal acts, harmonised references, and register inclusion.
+    claims: Exact standard identity, current-version, legal/product requirement, and register-inclusion claims.
+    synthesis: Compliance profiles, standards maps, current-version tables, register-entry comparisons, and evidence-gap reports.
+    questions: Evidence gaps, exact-designation checks, product requirement unknowns, and selected-candidate acquisition plans.
+    decisions: Scope, licensing, source-authority, and standards text acquisition decisions.
+    outputs: Compliance summaries, standards evidence reports, current-version tables, and exportable answer artifacts.
+  extraction_targets:
+    - standards_body
+    - designation
+    - edition_or_year
+    - registry_provider
+    - registry_url
+    - standard_status
+    - replacement_chain
+    - product_category
+    - legal_act
+    - ojeu_reference
+    - register_owner
+    - linked_owner_references
+    - terms_status
+  recommended_synthesis_outputs:
+    - standards_registry_evidence_map
+    - current_standard_version_table
+    - eu_product_requirement_profile
+    - uk_geospatial_register_summary
+    - open_standards_evidence_requests
+  implemented_files:
+    - README.md
+    - taxonomy.md
+    - claims.md
+    - coverage-templates/official-standard-reference.yml
+    - coverage-templates/standards-current-version.yml
+    - coverage-templates/eu-product-requirement-profile.yml
+    - coverage-templates/uk-geospatial-standard-register-entry.yml
+  planned_files: []
+
+wiki:
+  required_dirs:
+    - sources
+    - entities
+    - concepts
+    - claims
+    - synthesis
+    - questions
+    - decisions
+    - outputs
+  allowed_page_types:
+    - source
+    - entity
+    - concept
+    - claim
+    - synthesis
+    - question
+    - decision
+    - output

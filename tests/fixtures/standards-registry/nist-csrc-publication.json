@@ -1,0 +1,8 @@
+{
+  "designation": "FIPS 140-3",
+  "title": "Security Requirements for Cryptographic Modules",
+  "publication_date": "2019-03-22",
+  "status": "published",
+  "registry_url": "https://csrc.nist.gov/pubs/fips/140-3/final",
+  "standards_body": "NIST"
+}

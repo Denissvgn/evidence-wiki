@@ -1,0 +1,23 @@
+{
+  "id": "https://openalex.org/W260100001",
+  "doi": "https://doi.org/10.5555/synthetic-retrieval-paper",
+  "display_name": "Synthetic Retrieval Paper",
+  "publication_year": 2026,
+  "type": "article",
+  "authorships": [
+    {
+      "author": {
+        "display_name": "Ada Lovelace"
+      }
+    },
+    {
+      "author": {
+        "display_name": "Grace Hopper"
+      }
+    }
+  ],
+  "open_access": {
+    "is_oa": true,
+    "oa_status": "green"
+  }
+}

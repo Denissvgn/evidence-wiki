@@ -1,0 +1,10 @@
+coverage_profile: vendor-product-spec
+required_facets:
+  - facet_id: official-spec
+    description: Confirm the product specification or capability from an official vendor source.
+    evidence_path: vendor_product_spec
+    source_policy: official_vendor
+    freshness_policy: current_product_spec
+    identity_policy: origin_url_matches_candidate
+    min_sources: 1
+optional_facets: []

@@ -1,0 +1,56 @@
+schema_version: '1.0'
+question_slug: autonomo-madrid
+created_at: '2026-07-04T12:00:00Z'
+updated_at: '2026-07-04T12:00:00Z'
+coverage_profile: madrid-autonomo-high-stakes
+coverage_verdict: blocked
+required_facets:
+  - facet_id: spanish-social-security-current-fee
+    description: Current official Spanish social security reduced-fee amount.
+    required: true
+    evidence_path: legal_current_figure
+    source_policy: official_primary
+    freshness_policy: current_legal_figure
+    identity_policy: official_domain_match
+    min_sources: 1
+    accepted_source_ids: []
+    blocking_request_ids:
+      - req-20260704-current-autonomo-fee
+    facet_verdict: blocked
+  - facet_id: spanish-tax-registration
+    description: Official tax registration and census filing path.
+    required: true
+    evidence_path: legal_current_figure
+    source_policy: official_primary
+    freshness_policy: current_legal_figure
+    identity_policy: official_domain_match
+    min_sources: 1
+    accepted_source_ids:
+      - web:aeat-census
+    blocking_request_ids: []
+    facet_verdict: pass
+  - facet_id: madrid-regional-irpf-scale
+    description: Current official regional tax scale.
+    required: true
+    evidence_path: legal_current_figure
+    source_policy: official_primary
+    freshness_policy: current_legal_figure
+    identity_policy: official_domain_match
+    min_sources: 1
+    accepted_source_ids: []
+    blocking_request_ids:
+      - req-20260704-madrid-irpf-scale
+    facet_verdict: blocked
+  - facet_id: pae-due-circe-individual
+    description: Official individual registration workflow evidence.
+    required: true
+    evidence_path: legal_current_figure
+    source_policy: official_primary
+    freshness_policy: current_legal_figure
+    identity_policy: official_domain_match
+    min_sources: 1
+    accepted_source_ids: []
+    blocking_request_ids:
+      - req-20260704-pae-due-circe-individual
+    facet_verdict: blocked
+optional_facets: []

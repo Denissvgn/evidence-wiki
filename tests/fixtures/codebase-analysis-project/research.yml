@@ -1,0 +1,34 @@
+project:
+  name: codebase-analysis-fixture
+  description: Fixture workspace for optional codebase analysis integration.
+  owner_goal: Test repository evidence as source records.
+  language: en
+raw:
+  immutable: true
+  source_roots:
+    - raw/links
+    - raw/code
+sources:
+  manifest_path: sources/manifest.jsonl
+  normalized_dir: sources/normalized
+  cards_dir: sources/cards
+wiki:
+  root: wiki
+  dirs:
+    - wiki/sources
+outputs:
+  default_dir: wiki/outputs
+  supported_formats:
+    - markdown
+integrations:
+  git:
+    snapshot_user_edits: explicit
+  codebase_analysis:
+    enabled: true
+    provider: agent-wiki-cli
+    command: llm-wiki context --src-dir raw/code/local-fixture --budget 12000 --format json
+    output_dir: sources/code_wikis
+    read_only: true
+    install_hooks: false
+    background_sync: false
+    untrusted_input: acknowledged

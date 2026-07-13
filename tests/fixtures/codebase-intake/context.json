@@ -1,0 +1,12 @@
+{
+  "summary": "Synthetic worker-produced architecture evidence for a bounded inert snapshot.",
+  "components": [
+    "ingest boundary",
+    "normalized evidence",
+    "maintained backlink graph"
+  ],
+  "observations": [
+    "The product reads this file as data and never executes repository content.",
+    "Self-asserted repository identity remains untrusted producer metadata."
+  ]
+}

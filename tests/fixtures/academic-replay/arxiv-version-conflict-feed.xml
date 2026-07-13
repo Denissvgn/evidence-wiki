@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2601.00001v2</id>
+    <published>2026-01-01T00:00:00Z</published>
+    <updated>2026-01-03T00:00:00Z</updated>
+    <title>Synthetic Retrieval Paper</title>
+    <author><name>Ada Lovelace</name></author>
+    <author><name>Grace Hopper</name></author>
+  </entry>
+</feed>

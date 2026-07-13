@@ -1,0 +1,13 @@
+origin_url: https://call2recycle.example/products/5-gallon-ddr-kit
+url: https://call2recycle.example/products/5-gallon-ddr-kit
+retrieved_at: '2026-07-04T12:00:00Z'
+retrieved_by: fixture/manual
+date_metadata:
+  valid_for_year: 2026
+  note: Fixture product page records the current kit specification for the retrieval year.
+sha256: sha256:fixture-vendor-spec
+checksum: sha256:fixture-vendor-spec
+checksum_verified: true
+publisher: Call2Recycle Fixture
+source_type: vendor_spec
+jurisdiction: US

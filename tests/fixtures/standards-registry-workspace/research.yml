@@ -1,0 +1,19 @@
+project:
+  name: standards-registry-fixture
+  language: en
+sources:
+  manifest_path: sources/manifest.jsonl
+  normalized_dir: sources/normalized
+  coverage_dir: sources/coverage
+wiki:
+  root: wiki
+  questions_dir: wiki/questions
+integrations:
+  discovery:
+    enabled: false
+  acquisition:
+    enabled: false
+domain_pack:
+  name: standards-compliance
+  coverage_templates:
+    official-standard-reference: domain-packs/standards-compliance/coverage-templates/official-standard-reference.yml

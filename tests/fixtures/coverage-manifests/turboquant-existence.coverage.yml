@@ -1,0 +1,50 @@
+schema_version: "1.0"
+question_slug: turboquant-existence
+created_at: "2026-06-29T00:00:00Z"
+updated_at: "2026-06-29T00:00:00Z"
+coverage_profile: academic-method-existence
+coverage_verdict: blocked
+required_facets:
+  - facet_id: turboquant-existence
+    description: Confirm whether a method or paper named TurboQuant exists in a real scholarly index.
+    required: true
+    evidence_path: academic_method_existence
+    source_policy: academic_indexed
+    freshness_policy: publication_identity
+    identity_policy: citation_id_resolves
+    min_sources: 1
+    accepted_source_ids: []
+    blocking_request_ids:
+      - req-turboquant-index-resolution
+    facet_verdict: blocked
+    claim_probe:
+      claim_type: method_or_artifact_existence
+      claim_text: TurboQuant exists as a published scholarly method or artifact.
+      claim_verdict: unconfirmed
+      limitation: not found in configured providers for this bounded run; not a global nonexistence claim
+      bounded_provider_results:
+        - provider: arxiv
+          query: TurboQuant
+          max_results: 5
+          result_count: 0
+          exact_match_count: 0
+          network_io_executed: true
+        - provider: openalex
+          query: TurboQuant
+          max_results: 5
+          result_count: 1
+          exact_match_count: 0
+          network_io_executed: true
+optional_facets:
+  - facet_id: turboquant-scope
+    description: Identify whether any confirmed TurboQuant record covers weights, KV cache, activations, or another quantization target.
+    required: false
+    evidence_path: academic_method_existence
+    source_policy: academic_indexed
+    freshness_policy: publication_identity
+    identity_policy: citation_id_resolves
+    min_sources: 1
+    accepted_source_ids: []
+    blocking_request_ids:
+      - req-turboquant-index-resolution
+    facet_verdict: blocked

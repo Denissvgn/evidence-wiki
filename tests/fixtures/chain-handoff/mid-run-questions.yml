@@ -1,0 +1,12 @@
+schema_version: "1.0"
+handoff:
+  task_id: chain-task-0042
+questions:
+  - id: maintenance-cost-gap
+    question: What maintenance cost evidence is missing from the handoff chain?
+    priority: high
+    origin: planner_agent
+    summary: Maintenance cost evidence gap for the golden handoff fixture.
+    context: |
+      This question is injected after source delivery to exercise mid-run intake
+      and the blocked-on-sources polling path.

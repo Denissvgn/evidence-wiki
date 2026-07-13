@@ -1,0 +1,68 @@
+workspace_init:
+  schema_version: "0.1"
+  target_path: __TARGET__
+  project:
+    name: profile-fixture-workspace
+    description: Workspace created from a schema-compliant setup profile.
+    owner_goal: Verify profile-driven initialization before research begins.
+    language: en
+  domain_guidance:
+    mode: none
+    rationale: Generic starter taxonomy is sufficient for the first setup pass.
+  domain_pack:
+    enabled: false
+  questions_asked:
+    - Target workspace path or short project name?
+    - What research scope and outcome should this workspace support?
+    - Are there optional starting sources, URLs, folders, repositories, or an existing wiki?
+  inferred_answers:
+    project_language: en
+    source_roots:
+      - raw/papers
+      - raw/links
+    domain_guidance: Use the generic starter taxonomy for the first setup pass.
+    output_formats:
+      - markdown
+      - json
+    claim_strictness: structured_claims
+    git_integration: Use explicit user-edit snapshots only.
+  initial_sources:
+    - raw/papers/example-paper.pdf
+    - raw/links/seed-urls.md
+  raw:
+    immutable: true
+    source_roots:
+      - raw/papers
+      - raw/links
+  claim_strictness: structured_claims
+  ingest:
+    claim_extraction: true
+  lint:
+    validate_claims: true
+  outputs:
+    supported_formats:
+      - markdown
+      - json
+  integrations:
+    git:
+      snapshot_user_edits: explicit
+  validation:
+    commands:
+      - python3 scripts/smoke_validate_workspace.py --format text
+      - python3 scripts/source_inventory.py --dry-run --report
+      - python3 scripts/normalize_sources.py --all --dry-run
+      - python3 scripts/lint.py --format text
+    results:
+      - command: python3 scripts/smoke_validate_workspace.py --format text
+        status: pending
+        summary: Run after workspace creation.
+  assumptions:
+    - Supplied sources can be routed into papers and links for the first cycle.
+    - The generic wiki taxonomy is enough until a domain pattern repeats.
+  skipped_decisions:
+    - No network fetching during initialization.
+    - No git hooks or background automation during initialization.
+  next_actions:
+    - Run smoke validation from the created workspace root.
+    - Inventory supplied sources before normalization.
+    - Revisit domain guidance after the first source cycle.

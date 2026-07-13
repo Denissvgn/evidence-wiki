@@ -1,0 +1,7 @@
+origin_url: https://standards.example/private-spec
+retrieved_at: 2026-07-02T12:07:00Z
+retrieved_by: fetch-agent/manual-web
+source_status: unavailable
+delivery_failure_code: robots_or_terms_blocked
+delivery_failure_detail: Provider robots or terms policy blocks automated capture for this URL.
+delivery_failure_remediation: Do not fetch automatically; use a permitted manual review path or alternate source.

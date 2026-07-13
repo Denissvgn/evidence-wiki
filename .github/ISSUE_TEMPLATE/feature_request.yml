@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose an EvidenceWiki improvement to the template, CLI, domain packs, scripts, or docs.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the research-workspace workflow this would improve and the smallest useful version of the change.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow gap
+      description: What are you trying to do, and where does the current project fall short?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What should be added or changed?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - CLI initialization
+        - Workspace template
+        - Source inventory or normalization
+        - Linting or validation
+        - Domain packs
+        - Documentation
+        - Packaging or release
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workaround or different approach have you considered?
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add examples, links, or constraints that would help evaluate the request.

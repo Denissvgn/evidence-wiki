@@ -1,0 +1,7 @@
+origin_url: https://standards.example/spec/current
+retrieved_at: 2026-07-02T12:00:00Z
+retrieved_by: fetch-agent/manual-web
+source_status: unavailable
+delivery_failure_code: tls_verification_failed
+delivery_failure_detail: TLS certificate-chain validation failed during official source capture.
+delivery_failure_remediation: Retry with a trusted TLS chain or deliver a reviewer-approved snapshot with provenance.

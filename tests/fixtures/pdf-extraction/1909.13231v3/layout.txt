@@ -1,0 +1,19 @@
+SYNTHETIC LAYOUT FIXTURE - NOT SOURCE TEXT
+TITLE: Distribution Shift Parser Exercise
+AUTHORS: Alex Example | Bailey Example
+REFERENCE LABEL: 1909.13231v3
+
+COLUMN 1: Synthetic layout column for self-supervised adaptation. The text is project-authored and associated with 1909.13231v3 only as a stable regression label. It exercises column boundaries, captions, repeated headers, and page markers.
+COLUMN 2: Synthetic layout column for self-supervised adaptation. The text is project-authored and associated with 1909.13231v3 only as a stable regression label. It exercises column boundaries, captions, repeated headers, and page markers.
+COLUMN 3: Synthetic layout column for self-supervised adaptation. The text is project-authored and associated with 1909.13231v3 only as a stable regression label. It exercises column boundaries, captions, repeated headers, and page markers.
+COLUMN 4: Synthetic layout column for self-supervised adaptation. The text is project-authored and associated with 1909.13231v3 only as a stable regression label. It exercises column boundaries, captions, repeated headers, and page markers.
+COLUMN 5: Synthetic layout column for self-supervised adaptation. The text is project-authored and associated with 1909.13231v3 only as a stable regression label. It exercises column boundaries, captions, repeated headers, and page markers.
+COLUMN 6: Synthetic layout column for self-supervised adaptation. The text is project-authored and associated with 1909.13231v3 only as a stable regression label. It exercises column boundaries, captions, repeated headers, and page markers.
+COLUMN 7: Synthetic layout column for self-supervised adaptation. The text is project-authored and associated with 1909.13231v3 only as a stable regression label. It exercises column boundaries, captions, repeated headers, and page markers.
+COLUMN 8: Synthetic layout column for self-supervised adaptation. The text is project-authored and associated with 1909.13231v3 only as a stable regression label. It exercises column boundaries, captions, repeated headers, and page markers.
+
+Figure 1: Synthetic parser pipeline with inert placeholder boxes.
+Table 1: stage | expected result
+input | retained
+layout marker | classified
+output | deterministic

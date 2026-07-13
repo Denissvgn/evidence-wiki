@@ -1,0 +1,11 @@
+{
+  "final_verdict": "blocked_on_sources",
+  "blocked_request_ids": [
+    "req-20260704-current-autonomo-fee",
+    "req-20260704-madrid-irpf-scale",
+    "req-20260704-pae-due-circe-individual"
+  ],
+  "candidate_total": 2,
+  "official_candidates": 1,
+  "aggregator_candidates": 1
+}

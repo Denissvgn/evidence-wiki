@@ -1,0 +1,7 @@
+origin_url: https://vendor.example/specifications
+retrieved_at: 2026-07-02T12:05:00Z
+retrieved_by: fetch-agent/manual-web
+source_status: unavailable
+delivery_failure_code: content_too_sparse
+delivery_failure_detail: Captured page contains navigation and title text but no source facts.
+delivery_failure_remediation: Acquire a fuller representation before using the source as evidence.

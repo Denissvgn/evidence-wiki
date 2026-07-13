@@ -1,0 +1,16 @@
+project:
+  name: versioned-workspace-fixture
+  description: Synthetic previous-version workspace used for upgrade compatibility tests.
+  owner_goal: Preserve evidence and user-authored files during tooling upgrades.
+  language: en
+raw:
+  immutable: true
+  source_roots:
+    - raw
+sources: {}
+wiki: {}
+taxonomy: {}
+ingest: {}
+lint: {}
+outputs: {}
+integrations: {}

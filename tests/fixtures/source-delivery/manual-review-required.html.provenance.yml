@@ -1,0 +1,7 @@
+origin_url: https://official.example/ambiguous-guidance
+retrieved_at: 2026-07-02T12:08:00Z
+retrieved_by: fetch-agent/manual-web
+source_status: unavailable
+delivery_failure_code: manual_review_required
+delivery_failure_detail: Capture result needs a reviewer to decide whether it is the canonical source.
+delivery_failure_remediation: Keep the source request open until a reviewer records a concrete acquisition decision.

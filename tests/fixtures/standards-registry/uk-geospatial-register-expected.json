@@ -1,0 +1,10 @@
+{
+  "designations": [
+    "ISO 19131:2022",
+    "OGC API - Features",
+    "EPSG Dataset"
+  ],
+  "register_owner": "Geospatial Commission",
+  "register_manager": "Ordnance Survey",
+  "control_body": "BSI IST/36"
+}

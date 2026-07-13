@@ -1,0 +1,20 @@
+schema_version: "1.0"
+question_slug: github-implementation
+created_at: "2026-06-29T00:00:00Z"
+updated_at: "2026-06-29T00:00:00Z"
+coverage_profile: github-implementation
+coverage_verdict: pass
+required_facets:
+  - facet_id: canonical-repository
+    description: Confirm the implementation is tied to a canonical repository and resolvable ref.
+    required: true
+    evidence_path: github_implementation
+    source_policy: canonical_repository
+    freshness_policy: release_snapshot
+    identity_policy: repo_ref_resolves
+    min_sources: 1
+    accepted_source_ids:
+      - github:example-org-example-repo-v1.2.3
+    blocking_request_ids: []
+    facet_verdict: pass
+optional_facets: []

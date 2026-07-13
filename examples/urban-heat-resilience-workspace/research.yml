@@ -1,0 +1,181 @@
+project:
+  name: urban-heat-resilience-workspace
+  description: Example research workspace for comparing urban heat resilience interventions.
+  owner_goal: Demonstrate a public-safe, source-grounded workspace without private
+    pilot artifacts.
+  language: en
+raw:
+  immutable: true
+  source_roots:
+  - raw/papers
+  - raw/web
+  - raw/links
+  - raw/pdf
+  - raw/code
+  - raw/data
+  - raw/media
+  - raw/other
+sources:
+  manifest_path: sources/manifest.jsonl
+  normalized_dir: sources/normalized
+  cards_dir: sources/cards
+  default_status: discovered
+  lifecycle_statuses:
+  - discovered
+  - normalized
+  - noted
+  - integrated
+  - superseded
+  - rejected
+wiki:
+  root: wiki
+  required_dirs:
+  - sources
+  - entities
+  - concepts
+  - methods
+  - systems
+  - benchmarks
+  - datasets
+  - claims
+  - synthesis
+  - questions
+  - decisions
+  - outputs
+  allowed_page_types:
+  - source
+  - entity
+  - concept
+  - method
+  - system
+  - benchmark
+  - dataset
+  - claim
+  - synthesis
+  - question
+  - decision
+  - output
+  frontmatter_required:
+  - type
+  - created
+  - updated
+  - source_ids
+  frontmatter_type_rules:
+    source:
+      field_types:
+        source_ids: string_list
+      non_empty_fields:
+      - source_ids
+    decision:
+      required_fields:
+      - status
+      allowed_values:
+        status:
+        - proposed
+        - accepted
+        - rejected
+        - superseded
+    claim:
+      required_fields:
+      - subject
+      - predicate
+      - object
+      - source_ids
+      field_types:
+        subject: string
+        predicate: string
+        object: string
+        metric: string
+        value: scalar
+        unit: string
+        scope: string
+        source_ids: string_list
+      non_empty_fields:
+      - source_ids
+    question:
+      required_fields:
+      - status
+      field_types:
+        status: string
+        priority: string
+        origin: string
+        question: string
+        answer_page: string
+        blocked_reason: string
+        coverage_required: boolean
+        coverage_manifest: string
+        source_ids: string_list
+      allowed_values:
+        status:
+        - open
+        - in_progress
+        - answered
+        - blocked
+        - deferred
+        - rejected
+        priority:
+        - high
+        - medium
+        - low
+  date_format: YYYY-MM-DD
+  link_style: relative_markdown
+taxonomy:
+  entity_types:
+  - organization
+  - lab
+  - author
+  - project
+  - tool
+  concept_types:
+  - method
+  - architecture
+  - benchmark
+  - dataset
+  - evaluation_metric
+  - limitation
+  claim_types:
+  - factual
+  - benchmark_result
+  - ablation_result
+  - limitation
+  - recommendation
+ingest:
+  source_note_required: true
+  claim_extraction: true
+  ask_before_large_wiki_update: true
+  large_update_page_threshold: 5
+  update_log: true
+lint:
+  validate_structure: true
+  validate_frontmatter: true
+  validate_links: true
+  validate_source_coverage: true
+  validate_claims: true
+  validate_questions: true
+  dataview_aware: true
+  severity_levels:
+  - HIGH
+  - MEDIUM
+  - LOW
+outputs:
+  default_dir: wiki/outputs
+  supported_formats:
+  - markdown
+  - marp
+  - csv
+  - json
+integrations:
+  obsidian:
+    enabled: false
+    dataview: optional
+  git:
+    snapshot_user_edits: explicit
+  codebase_analysis:
+    enabled: false
+    provider: none
+    command: null
+    output_dir: sources/code_wikis
+    read_only: true
+    install_hooks: false
+    background_sync: false
+    untrusted_input: null

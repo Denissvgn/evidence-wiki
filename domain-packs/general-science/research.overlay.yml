@@ -1,0 +1,166 @@
+# Partial research.yml overlay for broad scientific research workspaces.
+# Merge this fragment into a configured workspace; do not use it as a complete
+# standalone research.yml.
+
+project:
+  name: general-science
+  description: Research workspace for broad scientific literature, methods, datasets, and reproducibility evidence.
+  owner_goal: Build a source-grounded knowledge base for comparing scientific evidence, methods, datasets, and open research gaps.
+  language: en
+
+domain_pack:
+  name: general-science
+  version: 0.1.0
+  description: Domain guidance for broad scientific literature reviews, evidence maps, method comparisons, dataset inventories, and reproducibility analysis.
+  compatible_research_yml_contract: "0.1"
+  taxonomy_doc: taxonomy.md
+  claims_doc: claims.md
+  scaffolds:
+    source_paper: scaffolds/source-paper.md
+    method: scaffolds/method.md
+    dataset: scaffolds/dataset.md
+  recommended_acquisition:
+    - arxiv
+    - openalex
+  policy_vocabularies:
+    freshness_policy:
+      pack:general-science/study-recency: Require a reviewer to confirm that study dates, dataset releases, and follow-up literature are recent enough for the scientific question.
+  applicable_source_types:
+    - academic_paper
+    - preprint
+    - arxiv_source_bundle
+    - pdf
+    - technical_report
+    - dataset_documentation
+    - protocol_documentation
+    - benchmark_documentation
+    - review_article
+  page_taxonomy:
+    sources: Source notes for papers, preprints, reports, protocols, dataset papers, reviews, and normalized records.
+    entities: Researchers, organizations, labs, instruments, field sites, projects, collaborations, and named resources.
+    concepts: Definitions, mechanisms, variables, phenomena, constructs, metrics, and theoretical distinctions.
+    methods: Experimental protocols, analysis workflows, measurement methods, instruments, simulations, models, and statistical procedures.
+    systems: Concrete platforms, instruments, experimental systems, simulation systems, or software systems studied as evidence.
+    benchmarks: Evaluation protocols, challenge sets, reference tasks, scoring procedures, and validation suites.
+    datasets: Published datasets, corpora, benchmark collections, observation series, measurement tables, and derived data products.
+    claims: Structured evidence statements, empirical results, methodological claims, dataset claims, limitations, and reproducibility claims.
+    synthesis: Literature maps, evidence tables, method comparisons, dataset inventories, replication maps, and research agendas.
+    questions: Evidence gaps, unresolved hypotheses, missing datasets, replication needs, and source-acquisition plans.
+    decisions: Accepted or rejected project decisions about scope, inclusion criteria, taxonomy, synthesis priorities, and evidence standards.
+    outputs: Reusable artifacts such as evidence maps, review drafts, CSV tables, reports, and presentation outlines.
+  extraction_targets:
+    - research_question
+    - hypothesis
+    - study_design
+    - population_or_scope
+    - methods
+    - datasets
+    - results
+    - limitations
+    - reproducibility_artifacts
+  recommended_synthesis_outputs:
+    - evidence_map
+    - methods_comparison_matrix
+    - dataset_inventory
+    - hypothesis_and_mechanism_map
+    - limitations_and_validity_matrix
+    - reproducibility_and_artifact_availability_table
+    - open_research_agenda
+  implemented_files:
+    - taxonomy.md
+    - scaffolds/source-paper.md
+    - scaffolds/method.md
+    - scaffolds/dataset.md
+    - claims.md
+  planned_files: []
+
+wiki:
+  required_dirs:
+    - sources
+    - entities
+    - concepts
+    - methods
+    - systems
+    - benchmarks
+    - datasets
+    - claims
+    - synthesis
+    - questions
+    - decisions
+    - outputs
+  allowed_page_types:
+    - source
+    - entity
+    - concept
+    - method
+    - system
+    - benchmark
+    - dataset
+    - claim
+    - synthesis
+    - question
+    - decision
+    - output
+  frontmatter_type_rules:
+    claim:
+      required_fields:
+        - claim_type
+        - subject
+        - predicate
+        - object
+        - source_ids
+        - scope
+      field_types:
+        claim_type: string
+        subject: string
+        predicate: string
+        object: string
+        metric: string
+        value: scalar
+        unit: string
+        scope: string
+        source_ids: string_list
+      non_empty_fields:
+        - source_ids
+      allowed_values:
+        claim_type:
+          - empirical_result
+          - hypothesis_claim
+          - method_claim
+          - dataset_claim
+          - limitation
+          - reproducibility_claim
+          - factual
+
+taxonomy:
+  entity_types:
+    - organization
+    - lab
+    - author
+    - researcher
+    - project
+    - collaboration
+    - instrument
+    - field_site
+    - repository
+    - tool
+  concept_types:
+    - phenomenon
+    - mechanism
+    - variable
+    - metric
+    - endpoint
+    - hypothesis
+    - theory
+    - construct
+    - validity_threat
+    - reproducibility_artifact
+    - limitation
+  claim_types:
+    - empirical_result
+    - hypothesis_claim
+    - method_claim
+    - dataset_claim
+    - limitation
+    - reproducibility_claim
+    - factual

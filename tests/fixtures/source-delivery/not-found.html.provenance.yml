@@ -1,0 +1,7 @@
+origin_url: https://official.example/old-product-spec
+retrieved_at: 2026-07-02T12:04:00Z
+retrieved_by: fetch-agent/manual-web
+source_status: not_found
+delivery_failure_code: not_found
+delivery_failure_detail: Official host returned a not-found response for the requested source URL.
+delivery_failure_remediation: Verify whether the source moved, was superseded, or should be replaced by a newer official URL.

@@ -1,0 +1,19 @@
+origin_url: https://www.iso.org/standard/77442.html
+retrieved_at: "2026-07-07T12:00:00Z"
+retrieved_by: fixture
+license: null
+source_type: standards_registry_entry
+terms_url: https://www.iso.org/open-data.html
+supported_evidence_areas:
+  - standards_registry_reference
+standards:
+  registry_provider: iso-open-data
+  standards_body: ISO
+  designation: "ISO 19131:2022"
+  title: Geographic information - Data product specifications
+  edition: 2
+  publication_date: "2022-11-01"
+  status: published
+  registry_url: https://www.iso.org/standard/77442.html
+  dataset_license: ODC-BY-1.0
+notes: Fixture registry entry only; no full standards text acquired.

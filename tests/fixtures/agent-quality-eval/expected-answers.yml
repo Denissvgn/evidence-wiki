@@ -1,0 +1,24 @@
+schema_version: "1.0"
+description: Expected-answer key for the synthetic agent-quality evaluation workspace.
+questions:
+  - slug: cooling-corridors
+    expected_status: answered
+    answer_page: wiki/synthesis/cooling-corridors.md
+    required_answer_phrases:
+      - shaded walking corridors
+      - surface temperatures
+    expected_source_ids:
+      - raw:raw-papers-cooling-corridors-brief-9b77f02fa8
+  - slug: cooling-centers
+    expected_status: answered
+    answer_page: wiki/synthesis/cooling-centers.md
+    required_answer_phrases:
+      - overnight cooling centers
+      - 24-hour staffing
+    expected_source_ids:
+      - raw:raw-web-cooling-center-operations-7aa5fc4988
+  - slug: maintenance-cost-gap
+    expected_status: blocked
+    required_blocked_phrases:
+      - maintenance cost memo
+      - not delivered

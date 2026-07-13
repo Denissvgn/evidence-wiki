@@ -1,0 +1,25 @@
+{
+  "id": "product-official-vs-reseller",
+  "kind": "search",
+  "description": "A product-spec search where the official vendor result must outrank and cause rejection of a reseller or marketing mirror.",
+  "expected_behavior": "The official vendor product-spec page ranks official_primary. A reseller duplicate is preserved in the candidate store with a rejection rationale instead of being silently dropped.",
+  "query": "DGX Spark product specification official vendor",
+  "intent": "web",
+  "results": [
+    {"title": "DGX Spark product specification", "url": "https://docs.vendor.example/products/dgx-spark/spec", "snippet": "Official vendor product specification.", "official": true},
+    {"title": "DGX Spark product specification", "url": "https://reseller.example/dgx-spark/spec", "snippet": "Reseller copy of the official vendor specification."},
+    {"title": "DGX Spark overview and review", "url": "https://reviews.example/dgx-spark", "snippet": "Independent commentary and review."}
+  ],
+  "expected": {
+    "candidates": {
+      "docs.vendor.example": {"trust_tier": "official_primary", "official_source": true, "recommended_action": "fetch", "rationale_includes": "official_primary"},
+      "reseller.example": {"recommended_action": "reject", "risk_flags_include": ["duplicate_of_official"], "rationale_includes": "reject"},
+      "reviews.example": {"trust_tier": "secondary_unknown", "official_source": null, "recommended_action": "review"}
+    },
+    "outranks": [
+      ["docs.vendor.example", "reviews.example"],
+      ["docs.vendor.example", "reseller.example"]
+    ],
+    "rejected": ["reseller.example"]
+  }
+}

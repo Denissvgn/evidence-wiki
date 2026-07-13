@@ -1,0 +1,28 @@
+{
+  "id": "general-search-useful-and-rejected",
+  "kind": "search",
+  "description": "A general research question whose search results include both useful candidates and results that must be rejected (a suspicious executable download and a scraped mirror duplicating the official source).",
+  "expected_behavior": "An official (.gov) source ranks official_primary and outranks generic pages. A useful generic result is retained for review. A direct executable download is rejected as unsafe_or_unusable (suspicious_download). A mirror duplicating the official source is rejected (duplicate_of_official).",
+  "query": "retrieval augmented generation benchmark official guide",
+  "results": [
+    {"title": "Retrieval augmented generation benchmark - official guide", "url": "https://standards.gov/rag-benchmark", "snippet": "Official benchmark guidance."},
+    {"title": "RAG evaluation methodology overview", "url": "https://research.example/rag-eval", "snippet": "A useful methodology write-up."},
+    {"title": "RAG benchmark toolkit installer", "url": "https://downloads.example/rag-benchmark.exe", "snippet": "Download the installer."},
+    {"title": "Retrieval augmented generation benchmark - official guide", "url": "https://mirror.example/rag-benchmark", "snippet": "Full-text mirror of the official guide."}
+  ],
+  "expected": {
+    "candidates": {
+      "standards.gov": {"trust_tier": "official_primary", "official_source": true, "recommended_action": "fetch", "rationale_includes": "official_primary"},
+      "research.example": {"trust_tier": "secondary_unknown", "official_source": null, "recommended_action": "review"},
+      "downloads.example": {"trust_tier": "unsafe_or_unusable", "official_source": false, "recommended_action": "reject", "risk_flags_include": ["suspicious_download"], "rationale_includes": "reject"},
+      "mirror.example": {"recommended_action": "reject", "risk_flags_include": ["duplicate_of_official"], "rationale_includes": "reject"}
+    },
+    "outranks": [
+      ["standards.gov", "research.example"],
+      ["standards.gov", "downloads.example"],
+      ["standards.gov", "mirror.example"],
+      ["research.example", "downloads.example"]
+    ],
+    "rejected": ["downloads.example", "mirror.example"]
+  }
+}

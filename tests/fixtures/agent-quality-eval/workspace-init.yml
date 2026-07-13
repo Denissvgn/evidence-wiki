@@ -1,0 +1,63 @@
+workspace_init:
+  schema_version: "0.1"
+  target_path: __TARGET__
+  handoff:
+    task_id: agent-quality-eval-0001
+    requested_by: release-evaluator
+    chain_run_id: eval-2026-06-13-agent-quality
+  project:
+    name: agent-quality-eval
+    description: Deterministic synthetic workspace for scoring research-agent answer quality.
+    owner_goal: Measure answer correctness, citation precision, and blocked-question handling.
+    language: en
+  domain_guidance:
+    mode: none
+    rationale: Generic starter taxonomy is sufficient for the synthetic evaluation harness.
+  domain_pack:
+    enabled: false
+  initial_sources:
+    - raw/papers/cooling-corridors-brief.md
+    - raw/web/cooling-center-operations.html
+    - raw/papers/parking-shade-distractor.md
+  raw:
+    immutable: true
+    source_roots:
+      - raw/papers
+      - raw/web
+  claim_strictness: structured_claims
+  ingest:
+    claim_extraction: true
+  outputs:
+    supported_formats:
+      - markdown
+      - json
+  integrations:
+    git:
+      snapshot_user_edits: explicit
+  questions:
+    - id: cooling-corridors
+      question: What does the evidence say about shaded walking corridors?
+      priority: high
+      origin: evaluation_fixture
+      text: Answer from the synthetic cooling-corridors source, not the parking-shade distractor.
+    - id: cooling-centers
+      question: What operating model is described for cooling centers?
+      priority: high
+      origin: evaluation_fixture
+      text: Answer from the synthetic cooling-center operations page.
+    - id: maintenance-cost-gap
+      question: What maintenance-cost evidence is available for the cooling corridor program?
+      priority: medium
+      origin: evaluation_fixture
+      text: This is intentionally unanswerable from the delivered sources.
+  assumptions:
+    - All evidence in this fixture is synthetic and uses reserved example.org provenance.
+    - No network fetching runs during evaluation workspace setup.
+  skipped_decisions:
+    - No domain pack is needed for the generic agent-quality evaluation.
+    - No CI gate is attached because outputs depend on the research agent under evaluation.
+  next_actions:
+    - Deliver fixture sources under raw/.
+    - Run inventory and normalization.
+    - Run the research agent under evaluation.
+    - Export answers and score them with tools/score_eval_workspace.py.

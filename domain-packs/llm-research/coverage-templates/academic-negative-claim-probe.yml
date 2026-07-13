@@ -1,0 +1,10 @@
+coverage_profile: academic-negative-claim-probe
+required_facets:
+  - facet_id: method-or-artifact-existence
+    description: Confirm the named method, paper, or research artifact exists in arXiv or OpenAlex before treating the claim as established.
+    evidence_path: academic_method_existence
+    source_policy: openalex_or_arxiv
+    freshness_policy: publication_identity
+    identity_policy: citation_id_resolves
+    min_sources: 1
+optional_facets: []

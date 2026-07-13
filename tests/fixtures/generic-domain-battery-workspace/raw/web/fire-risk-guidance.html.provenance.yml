@@ -1,0 +1,13 @@
+origin_url: https://www.usfa.fema.gov/blog/risks-and-response-strategies-lithium-ion-battery-fires/
+url: https://www.usfa.fema.gov/blog/risks-and-response-strategies-lithium-ion-battery-fires/
+retrieved_at: '2026-07-04T12:00:00Z'
+retrieved_by: fixture/manual
+date_metadata:
+  valid_for_year: 2026
+  note: Fixture records current official public-safety guidance for the retrieval year.
+sha256: sha256:fixture-fire-risk
+checksum: sha256:fixture-fire-risk
+checksum_verified: true
+publisher: U.S. Fire Administration
+source_type: official_web
+jurisdiction: US

@@ -1,0 +1,15 @@
+url: https://aeat.example/census
+origin_url: https://aeat.example/census
+retrieved_at: '2026-07-04T12:00:00Z'
+retrieved_by: fixture/manual
+sha256: sha256:7b9bb18ff56b34104fb7b25d1c7b0fa96e8cd2c0407dfd0551ad80a4df723d10
+checksum: sha256:7b9bb18ff56b34104fb7b25d1c7b0fa96e8cd2c0407dfd0551ad80a4df723d10
+source_type: official_web
+jurisdiction: ES
+publisher: Agencia Tributaria
+date_metadata:
+  valid_for_year: 2026
+supported_evidence_areas:
+  - tax_registration
+  - current_legal_figure
+curation_notes: Synthetic official tax registration source fixture.

@@ -1,0 +1,38 @@
+{
+  "id": "legal-official-vs-secondary",
+  "kind": "legal",
+  "description": "A legal topic where official federal sources must outrank secondary legal databases and a scraped mirror must be rejected.",
+  "expected_behavior": "Official statute/regulation/court sources (govinfo.gov, ecfr.gov, supremecourt.gov, federalregister.gov) rank as official_primary and outrank reputable secondary legal databases (Justia, FindLaw), which are retained as supplemental. A superseded official page keeps official_primary for provenance but is rejected as current evidence. A scraped mirror of the official statute is rejected.",
+  "jurisdiction": "us-federal",
+  "topic": "clean air act",
+  "results": [
+    {"title": "Clean Air Act - official United States Code text", "url": "https://www.govinfo.gov/app/details/USCODE-clean-air-act", "snippet": "Official compilation of the Clean Air Act."},
+    {"title": "Clean Air Act implementing regulation - eCFR Title 40", "url": "https://www.ecfr.gov/current/title-40/clean-air", "snippet": "Electronic Code of Federal Regulations."},
+    {"title": "Massachusetts v. EPA - Supreme Court opinion", "url": "https://www.supremecourt.gov/opinions/05-1120.pdf", "snippet": "Opinion of the Court."},
+    {"title": "Clean Air Act - REPEALED prior version", "url": "https://www.federalregister.gov/old/clean-air-act-1970", "snippet": "This historical version has been superseded."},
+    {"title": "Clean Air Act full text", "url": "https://law.justia.com/codes/us/clean-air-act/", "snippet": "US codes on Justia."},
+    {"title": "Clean Air Act overview and summary", "url": "https://www.findlaw.com/clean-air-act.html", "snippet": "Legal overview from FindLaw."},
+    {"title": "Everything you need to know about the Clean Air Act", "url": "https://greenlawblog.example/clean-air-act", "snippet": "A practitioner blog post."},
+    {"title": "Clean Air Act statute (full-text mirror)", "url": "https://archive-mirror.example/caa", "snippet": "Mirror of the official statute."}
+  ],
+  "expected": {
+    "candidates": {
+      "govinfo.gov": {"trust_tier": "official_primary", "official_source": true, "recommended_action": "fetch", "rationale_includes": "official source"},
+      "ecfr.gov": {"trust_tier": "official_primary", "official_source": true, "recommended_action": "fetch"},
+      "supremecourt.gov": {"trust_tier": "official_primary", "official_source": true, "recommended_action": "fetch"},
+      "federalregister.gov": {"trust_tier": "official_primary", "official_source": true, "recommended_action": "reject", "risk_flags_include": ["superseded_or_historical"]},
+      "law.justia.com": {"trust_tier": "secondary_reputable", "official_source": false, "recommended_action": "review", "risk_flags_include": ["secondary_when_official_available"]},
+      "findlaw.com": {"trust_tier": "secondary_reputable", "official_source": false, "recommended_action": "review", "risk_flags_include": ["secondary_when_official_available"]},
+      "greenlawblog.example": {"trust_tier": "secondary_unknown", "official_source": null, "recommended_action": "review"},
+      "archive-mirror.example": {"recommended_action": "reject", "risk_flags_include": ["possible_mirror", "duplicate_of_official"], "rationale_includes": "reject"}
+    },
+    "outranks": [
+      ["govinfo.gov", "law.justia.com"],
+      ["ecfr.gov", "law.justia.com"],
+      ["law.justia.com", "greenlawblog.example"],
+      ["govinfo.gov", "archive-mirror.example"],
+      ["govinfo.gov", "greenlawblog.example"]
+    ],
+    "rejected": ["federalregister.gov", "archive-mirror.example"]
+  }
+}

@@ -1,0 +1,15 @@
+url: https://madrid.example/tax
+origin_url: https://madrid.example/tax
+retrieved_at: '2026-07-04T12:00:00Z'
+retrieved_by: fixture/manual
+sha256: sha256:ec001b0594d19967ae2e5ed3ea97311f6066c06c768915df9481d810aa29d256
+checksum: sha256:ec001b0594d19967ae2e5ed3ea97311f6066c06c768915df9481d810aa29d256
+source_type: official_web
+jurisdiction: ES-MD
+publisher: Comunidad de Madrid
+date_metadata:
+  valid_for_year: 2026
+supported_evidence_areas:
+  - regional_tax
+  - current_legal_figure
+curation_notes: Synthetic official regional tax source fixture.

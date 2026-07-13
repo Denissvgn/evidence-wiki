@@ -1,0 +1,5 @@
+workspace_system:
+  starter_version: "0.3.0"
+  schema_version: "0.1"
+  created: "2026-04-01"
+  compatible_research_yml_contract: "0.1"

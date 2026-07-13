@@ -1,0 +1,251 @@
+# EvidenceWiki workspace template configuration.
+# Scripts and agent instructions should read this file instead of hardcoding
+# project structure, source states, page types, or validation rules.
+
+project:
+  name: evidence-wiki
+  description: Generic EvidenceWiki workspace for source-grounded research.
+  owner_goal: Build a durable, source-grounded research knowledge base.
+  language: en
+
+raw:
+  immutable: true
+  source_roots:
+    - raw/papers
+    - raw/web
+    - raw/links
+    - raw/pdf
+    - raw/code
+    - raw/data
+    - raw/media
+    - raw/other
+
+sources:
+  manifest_path: sources/manifest.jsonl
+  normalized_dir: sources/normalized
+  cards_dir: sources/cards
+  source_requests_path: sources/source-requests.jsonl
+  coverage_dir: sources/coverage
+  default_status: discovered
+  lifecycle_statuses:
+    - discovered
+    - normalized
+    - noted
+    - integrated
+    - deferred
+    - superseded
+    - rejected
+
+wiki:
+  root: wiki
+  # Canonical default wiki taxonomy. Scripts must read this list instead of
+  # hardcoding wiki folder names.
+  required_dirs:
+    - sources
+    - entities
+    - concepts
+    - methods
+    - systems
+    - benchmarks
+    - datasets
+    - claims
+    - synthesis
+    - questions
+    - decisions
+    - outputs
+  # Page types are singular forms aligned with the default wiki directories.
+  allowed_page_types:
+    - source
+    - entity
+    - concept
+    - method
+    - system
+    - benchmark
+    - dataset
+    - claim
+    - synthesis
+    - question
+    - decision
+    - output
+  frontmatter_required:
+    - type
+    - created
+    - updated
+    - source_ids
+  frontmatter_type_rules:
+    source:
+      field_types:
+        source_ids: string_list
+      non_empty_fields:
+        - source_ids
+    decision:
+      required_fields:
+        - status
+      allowed_values:
+        status:
+          - proposed
+          - accepted
+          - rejected
+          - superseded
+    claim:
+      required_fields:
+        - subject
+        - predicate
+        - object
+        - source_ids
+      field_types:
+        subject: string
+        predicate: string
+        object: string
+        metric: string
+        value: scalar
+        unit: string
+        scope: string
+        source_ids: string_list
+      non_empty_fields:
+        - source_ids
+    question:
+      # Question pages are research task records with a lifecycle. Open
+      # questions may have no evidence yet, so source_ids is not required to be
+      # non-empty here. claimed_by/claimed_at are managed by
+      # scripts/question_claim.py and are required (non-empty) whenever a
+      # question is in_progress; claimed_at is a quoted ISO 8601 timestamp.
+      # confidence/evidence_strength are optional verification fields set by
+      # the research-verify workflow.
+      required_fields:
+        - status
+      field_types:
+        status: string
+        priority: string
+        origin: string
+        question: string
+        answer_page: string
+        blocked_reason: string
+        resolution_reason: string
+        claimed_by: string
+        claimed_at: string
+        confidence: string
+        evidence_strength: string
+        coverage_required: boolean
+        coverage_manifest: string
+        source_ids: string_list
+      allowed_values:
+        status:
+          - open
+          - in_progress
+          - answered
+          - blocked
+          - deferred
+          - rejected
+        priority:
+          - high
+          - medium
+          - low
+        confidence:
+          - high
+          - medium
+          - low
+        evidence_strength:
+          - corroborated
+          - single_source
+          - contested
+  date_format: YYYY-MM-DD
+  link_style: relative_markdown
+
+taxonomy:
+  entity_types:
+    - organization
+    - lab
+    - author
+    - project
+    - tool
+  concept_types:
+    - method
+    - architecture
+    - benchmark
+    - dataset
+    - evaluation_metric
+    - limitation
+  claim_types:
+    - factual
+    - benchmark_result
+    - ablation_result
+    - limitation
+    - recommendation
+
+ingest:
+  source_note_required: true
+  claim_extraction: true
+  ask_before_large_wiki_update: true
+  large_update_page_threshold: 5
+  update_log: true
+
+# Budgets for one unattended research run (the research-run skill loop).
+# Wall-clock and token budgets belong to the orchestrator, not the workspace.
+run:
+  max_questions_per_run: 25
+  max_source_requests_per_run: 10
+  max_releases_per_run: 75
+  max_discovery_results_per_run: 50
+  max_academic_provider_requests_per_run: 25
+  max_manual_url_deliveries_per_run: 10
+  max_open_questions_total: 250
+  max_intake_per_hour: 25
+  max_mcp_intake_batch_questions: 100
+  claim_staleness_hours: 24
+
+lint:
+  validate_structure: true
+  validate_frontmatter: true
+  validate_links: true
+  validate_source_coverage: true
+  validate_claims: true
+  validate_questions: true
+  validate_provenance: true
+  validate_curation_metadata: true
+  validate_source_requests: true
+  validate_output_license_status: true
+  detect_prompt_injection_patterns: true
+  dataview_aware: true
+  severity_levels:
+    - HIGH
+    - MEDIUM
+    - LOW
+
+outputs:
+  default_dir: wiki/outputs
+  supported_formats:
+    - markdown
+    - marp
+    - csv
+    - json
+
+integrations:
+  obsidian:
+    enabled: false
+    dataview: optional
+  git:
+    snapshot_user_edits: explicit
+  codebase_analysis:
+    enabled: false
+    provider: none
+    command: null
+    output_dir: sources/code_wikis
+    read_only: true
+    install_hooks: false
+    background_sync: false
+    untrusted_input: null
+  acquisition:
+    enabled: false
+    providers: []
+    target_root: raw/papers
+    max_downloads_per_run: 10
+    require_license_check: true
+  discovery:
+    enabled: false
+    providers: []
+    candidate_store_path: sources/discovery/candidates.jsonl
+  retrieval:
+    provider: lexical
+    command: null
+    timeout_seconds: 30

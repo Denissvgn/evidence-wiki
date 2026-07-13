@@ -1,0 +1,102 @@
+{
+  "schema_version": "1.0",
+  "run_id": "run-2026-07-04-madrid",
+  "started_at": "2026-07-04T11:00:00Z",
+  "updated_at": "2026-07-04T12:00:00Z",
+  "agent_id": "fixture-pm",
+  "handoff": null,
+  "state": {
+    "current": "blocked_on_sources",
+    "entered_at": "2026-07-04T12:00:00Z",
+    "allowed_next_states": [],
+    "blocking_reason": "Official current source requests remain open."
+  },
+  "state_history": [
+    {
+      "from_state": null,
+      "to_state": "initialized",
+      "changed_at": "2026-07-04T11:00:00Z",
+      "agent_id": "fixture-pm",
+      "reason": "Run state artifact created."
+    },
+    {
+      "from_state": "initialized",
+      "to_state": "planned",
+      "changed_at": "2026-07-04T11:05:00Z",
+      "agent_id": "fixture-pm",
+      "reason": "Plan accepted."
+    },
+    {
+      "from_state": "planned",
+      "to_state": "discovering",
+      "changed_at": "2026-07-04T11:10:00Z",
+      "agent_id": "fixture-pm",
+      "reason": "Discovery candidates recorded."
+    },
+    {
+      "from_state": "discovering",
+      "to_state": "blocked_on_sources",
+      "changed_at": "2026-07-04T12:00:00Z",
+      "agent_id": "fixture-pm",
+      "reason": "Official current source requests remain open."
+    }
+  ],
+  "workspace_baseline": {
+    "captured_at": "2026-07-04T11:00:00Z",
+    "status_path": "runs/run-2026-07-04-madrid/workspace-status-initial.json",
+    "run_report_baseline_path": "runs/run-2026-07-04-madrid/run-report-baseline.json"
+  },
+  "question_counts": {
+    "total": 4,
+    "open": 0,
+    "in_progress": 0,
+    "answered": 1,
+    "blocked": 3,
+    "deferred": 0,
+    "rejected": 0,
+    "claimed": 0
+  },
+  "source_counts": {
+    "manifest_records": 3,
+    "normalized": 3,
+    "unnormalized": 0,
+    "source_requests_open": 3,
+    "source_requests_fulfilled": 0
+  },
+  "candidate_counts": {
+    "total": 2,
+    "new": 0,
+    "selected": 1,
+    "rejected": 1,
+    "fetched": 0
+  },
+  "coverage_counts": {
+    "required": 4,
+    "satisfied": 1,
+    "missing": 3,
+    "unknown": 0
+  },
+  "budget_state": {
+    "questions_processed_this_run": 4,
+    "questions_remaining_this_run": 21,
+    "source_requests_opened_this_run": 3,
+    "source_requests_remaining_this_run": 7,
+    "releases_this_run": 0,
+    "releases_remaining_this_run": 75,
+    "discovery_results_this_run": 2,
+    "discovery_results_remaining_this_run": 48,
+    "acquisition_downloads_this_run": 0,
+    "acquisition_downloads_remaining_this_run": 10,
+    "github_archive_bytes_this_run": 0,
+    "github_archive_bytes_remaining_this_run": 104857600,
+    "academic_provider_requests_this_run": 0,
+    "academic_provider_requests_remaining_this_run": 25,
+    "manual_url_deliveries_this_run": 3,
+    "manual_url_deliveries_remaining_this_run": 7,
+    "stop_reasons": [],
+    "should_stop": false
+  },
+  "budget_overrides": {},
+  "failure_records": [],
+  "final_verdict": "blocked_on_sources"
+}

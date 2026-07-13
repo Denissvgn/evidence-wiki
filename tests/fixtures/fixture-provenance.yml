@@ -1,0 +1,143 @@
+schema_version: "1.0"
+policy:
+  unmapped_fixture: validation_error
+  uncertain_redistribution: remove_or_replace
+  guessed_spdx_identifiers: forbidden
+
+synthetic_defaults: &synthetic_defaults
+  classification: synthetic
+  source_work: Project-authored deterministic regression fixture
+  origin_url: null
+  created_at: 2026-07-11
+  retrieved_at: null
+  copyright_holder: EvidenceWiki contributors
+  license: MIT
+  license_url: LICENSE
+  terms_url: LICENSE
+  redistribution_permission: true
+  attribution: See LICENSE and THIRD_PARTY_NOTICES.md.
+  transformations: Purpose-built minimal data; no third-party prose or binary payload is included.
+
+fixtures:
+  - <<: *synthetic_defaults
+    stable_id: fixture-catalog
+    source_work: Fixture rights catalog
+    shipped_paths:
+      - tests/fixtures/fixture-provenance.yml
+  - <<: *synthetic_defaults
+    stable_id: academic-replay
+    source_work: Synthetic arXiv and OpenAlex response replay
+    shipped_paths:
+      - tests/fixtures/academic-replay/**
+  - <<: *synthetic_defaults
+    stable_id: agent-quality-eval
+    shipped_paths:
+      - tests/fixtures/agent-quality-eval/**
+  - <<: *synthetic_defaults
+    stable_id: arxiv-source-project
+    shipped_paths:
+      - tests/fixtures/arxiv-source-project/**
+  - <<: *synthetic_defaults
+    stable_id: chain-handoff
+    shipped_paths:
+      - tests/fixtures/chain-handoff/**
+  - <<: *synthetic_defaults
+    stable_id: codebase-intake
+    source_work: Synthetic bounded codebase artifact and malicious nonexecution probes
+    transformations: Wholly synthetic inert archive bytes, architecture JSON, and hook-shaped text.
+    shipped_paths:
+      - tests/fixtures/codebase-intake/**
+  - <<: *synthetic_defaults
+    stable_id: codebase-analysis-project
+    shipped_paths:
+      - tests/fixtures/codebase-analysis-project/**
+  - <<: *synthetic_defaults
+    stable_id: coverage
+    shipped_paths:
+      - tests/fixtures/coverage/**
+  - <<: *synthetic_defaults
+    stable_id: coverage-manifests
+    shipped_paths:
+      - tests/fixtures/coverage-manifests/**
+  - <<: *synthetic_defaults
+    stable_id: dataview-index-project
+    shipped_paths:
+      - tests/fixtures/dataview-index-project/**
+  - <<: *synthetic_defaults
+    stable_id: discovery
+    source_work: Synthetic provider discovery and ranking replay
+    shipped_paths:
+      - tests/fixtures/discovery/**
+  - <<: *synthetic_defaults
+    stable_id: domain-packs
+    shipped_paths:
+      - tests/fixtures/domain-packs/**
+  - <<: *synthetic_defaults
+    stable_id: end-to-end-init-project
+    shipped_paths:
+      - tests/fixtures/end-to-end-init-project/**
+  - <<: *synthetic_defaults
+    stable_id: generic-domain-battery-workspace
+    source_work: Synthetic generic-domain official and vendor evidence workspace
+    shipped_paths:
+      - tests/fixtures/generic-domain-battery-workspace/**
+  - <<: *synthetic_defaults
+    stable_id: madrid-autonomo-workspace
+    source_work: Synthetic Madrid official-source evaluation workspace
+    shipped_paths:
+      - tests/fixtures/madrid-autonomo-workspace/**
+  - <<: *synthetic_defaults
+    stable_id: minimal-project
+    shipped_paths:
+      - tests/fixtures/minimal-project/**
+  - <<: *synthetic_defaults
+    stable_id: mutation-fault-recovery
+    source_work: Synthetic deterministic mutation-boundary fault matrix
+    transformations: Wholly synthetic fault points, error classes, lifecycle states, and external-lane declarations.
+    shipped_paths:
+      - tests/fixtures/mutation-fault-recovery/**
+  - <<: *synthetic_defaults
+    stable_id: pdf-extraction
+    source_work: Synthetic PDF reading-order and layout parser inputs
+    transformations: Wholly synthetic prose and layout markers shaped to exercise title, abstract, column, table, and figure extraction.
+    shipped_paths:
+      - tests/fixtures/pdf-extraction/**
+  - <<: *synthetic_defaults
+    stable_id: publication-security
+    source_work: Synthetic publication security boundary matrix
+    transformations: Wholly synthetic active-content, path, permission, and credential-handling probes.
+    shipped_paths:
+      - tests/fixtures/publication-security/**
+  - <<: *synthetic_defaults
+    stable_id: publication-source-matrix
+    source_work: Synthetic mixed-source publication pipeline matrix
+    transformations: Wholly synthetic text, binary, parser identity, drift, interruption, and extraction-loss probes.
+    shipped_paths:
+      - tests/fixtures/publication-source-matrix/**
+  - <<: *synthetic_defaults
+    stable_id: run-controller
+    shipped_paths:
+      - tests/fixtures/run-controller/**
+  - <<: *synthetic_defaults
+    stable_id: source-delivery
+    shipped_paths:
+      - tests/fixtures/source-delivery/**
+  - <<: *synthetic_defaults
+    stable_id: standards-registry
+    source_work: Synthetic standards-provider response replay using factual designation metadata
+    shipped_paths:
+      - tests/fixtures/standards-registry/**
+  - <<: *synthetic_defaults
+    stable_id: standards-registry-workspace
+    source_work: Synthetic standards-registry evaluation workspace
+    shipped_paths:
+      - tests/fixtures/standards-registry-workspace/**
+  - <<: *synthetic_defaults
+    stable_id: workspace-init-profile
+    shipped_paths:
+      - tests/fixtures/workspace-init-profile.yml
+  - <<: *synthetic_defaults
+    stable_id: versioned-workspaces
+    source_work: Synthetic previous-version workspaces for upgrade compatibility tests
+    shipped_paths:
+      - tests/fixtures/versioned-workspaces/**

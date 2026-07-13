@@ -1,0 +1,57 @@
+workspace_init:
+  schema_version: "0.1"
+  target_path: __TARGET__
+  handoff:
+    task_id: chain-task-0042
+    requested_by: planner-agent
+    chain_run_id: run-2026-06-13-golden
+  project:
+    name: chain-handoff-fixture
+    description: Deterministic fixture for the orchestrator handoff chain.
+    owner_goal: Exercise the machine handoff contract from deploy through export.
+    language: en
+  domain_guidance:
+    mode: none
+    rationale: Generic starter taxonomy is sufficient for the golden handoff fixture.
+  domain_pack:
+    enabled: false
+  initial_sources:
+    - raw/pdf/2601.00002v1.pdf
+    - raw/papers/arXiv-2601.00002v1/main.tex
+    - raw/papers/chain-context.md
+    - raw/web/chain-results.html
+  raw:
+    immutable: true
+    source_roots:
+      - raw/papers
+      - raw/web
+      - raw/pdf
+  claim_strictness: structured_claims
+  ingest:
+    claim_extraction: true
+  outputs:
+    supported_formats:
+      - markdown
+      - json
+  integrations:
+    git:
+      snapshot_user_edits: explicit
+  questions:
+    - id: benchmark-evidence
+      question: What evidence supports the chain handoff benchmark?
+      priority: high
+      origin: parent_agent
+    - id: implementation-risk
+      question: What implementation risks remain for the handoff chain?
+      priority: medium
+      origin: parent_agent
+  assumptions:
+    - All evidence in this fixture is synthetic and hosted under reserved example.org URLs.
+    - No network fetching runs during the golden fixture.
+  skipped_decisions:
+    - No domain pack is needed for the generic handoff contract.
+    - No background automation or hooks are enabled.
+  next_actions:
+    - Deliver fixture sources under raw/.
+    - Run inventory and normalization.
+    - Poll workspace status until complete or blocked on sources.

@@ -1,0 +1,72 @@
+{
+  "id": "paper-companion-repository",
+  "kind": "github",
+  "description": "A paper with known authors and a companion code repository. GitHub discovery (E32-T02) must rank the canonical companion repository ahead of a fork/mirror and an archived, unlicensed copy.",
+  "expected_behavior": "The canonical, actively maintained, licensed companion repository ranks primary_non_official and outranks both a fork (a possible mirror, demoted to secondary_unknown) and an archived repository with no detected license. Canonical ownership is never asserted from search, so every repository stays recommended_action: review (never auto-fetched).",
+  "paper": {
+    "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+    "arxiv_id": "2005.11401",
+    "authors": ["Patrick Lewis", "Ethan Perez", "Aleksandra Piktus"]
+  },
+  "pending_author_expansion": "Author-publication ranking quality is guarded by the dedicated author-publications scenario (E35-T02); this scenario guards companion-repository ranking only.",
+  "query": "retrieval augmented generation rag benchmark",
+  "items": [
+    {
+      "full_name": "rag-project/rag-benchmark",
+      "name": "rag-benchmark",
+      "owner": {"login": "rag-project"},
+      "html_url": "https://github.com/rag-project/rag-benchmark",
+      "url": "https://api.github.com/repos/rag-project/rag-benchmark",
+      "description": "Official retrieval augmented generation rag benchmark companion code.",
+      "default_branch": "main",
+      "license": {"spdx_id": "MIT", "key": "mit"},
+      "stargazers_count": 2000,
+      "forks_count": 300,
+      "archived": false,
+      "fork": false,
+      "pushed_at": "2026-05-01T00:00:00Z"
+    },
+    {
+      "full_name": "someuser/rag-benchmark",
+      "name": "rag-benchmark",
+      "owner": {"login": "someuser"},
+      "html_url": "https://github.com/someuser/rag-benchmark",
+      "url": "https://api.github.com/repos/someuser/rag-benchmark",
+      "description": "Fork of retrieval augmented generation rag benchmark.",
+      "default_branch": "main",
+      "license": {"spdx_id": "MIT", "key": "mit"},
+      "stargazers_count": 5,
+      "forks_count": 0,
+      "archived": false,
+      "fork": true,
+      "pushed_at": "2026-02-01T00:00:00Z"
+    },
+    {
+      "full_name": "oldlab/rag-benchmark",
+      "name": "rag-benchmark",
+      "owner": {"login": "oldlab"},
+      "html_url": "https://github.com/oldlab/rag-benchmark",
+      "url": "https://api.github.com/repos/oldlab/rag-benchmark",
+      "description": "Archived retrieval augmented generation rag benchmark snapshot.",
+      "default_branch": "master",
+      "license": null,
+      "stargazers_count": 40,
+      "forks_count": 3,
+      "archived": true,
+      "fork": false,
+      "pushed_at": "2021-01-01T00:00:00Z"
+    }
+  ],
+  "expected": {
+    "candidates": {
+      "rag-project/rag-benchmark": {"trust_tier": "primary_non_official", "official_source": null, "recommended_action": "review"},
+      "someuser/rag-benchmark": {"trust_tier": "secondary_unknown", "official_source": null, "recommended_action": "review", "risk_flags_include": ["possible_mirror"]},
+      "oldlab/rag-benchmark": {"trust_tier": "primary_non_official", "official_source": null, "recommended_action": "review", "risk_flags_include": ["archived", "license_uncertain"]}
+    },
+    "outranks": [
+      ["rag-project/rag-benchmark", "someuser/rag-benchmark"],
+      ["rag-project/rag-benchmark", "oldlab/rag-benchmark"]
+    ],
+    "rejected": []
+  }
+}

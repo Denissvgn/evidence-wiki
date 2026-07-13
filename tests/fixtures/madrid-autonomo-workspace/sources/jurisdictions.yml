@@ -1,0 +1,21 @@
+jurisdiction_profiles:
+  - jurisdiction_id: es
+    name: Spain
+    country: ES
+    official_domains:
+      - seg-social.example
+      - aeat.example
+      - circe.example
+    regulator_urls:
+      - https://seg-social.example/
+      - https://aeat.example/
+    notes: Synthetic official domains for regression tests.
+  - jurisdiction_id: es-md
+    name: Madrid
+    country: ES
+    state_or_region: Madrid
+    official_domains:
+      - madrid.example
+    regulator_urls:
+      - https://madrid.example/
+    notes: Synthetic regional official domain for regression tests.

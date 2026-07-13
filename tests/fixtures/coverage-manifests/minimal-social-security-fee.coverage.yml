@@ -1,0 +1,33 @@
+schema_version: "1.0"
+question_slug: minimal-social-security-fee
+created_at: "2026-06-29T00:00:00Z"
+updated_at: "2026-06-29T00:00:00Z"
+coverage_profile: legal-current-figure
+coverage_verdict: pass
+required_facets:
+  - facet_id: current-reduced-fee-amount
+    description: Current reduced social-security fee amount for new autonomos under the real-income contribution system.
+    required: true
+    evidence_path: legal_current_figure
+    source_policy: official_primary
+    freshness_policy: current_legal_figure
+    identity_policy: official_domain_match
+    min_sources: 1
+    accepted_source_ids:
+      - web:seg-social-cuota-reducida-2026
+    blocking_request_ids: []
+    facet_verdict: pass
+  - facet_id: eligibility-and-duration
+    description: Eligibility and duration rules for the reduced fee, including extension conditions.
+    required: true
+    evidence_path: legal_current_figure
+    source_policy: official_primary
+    freshness_policy: current_legal_figure
+    identity_policy: official_domain_match
+    min_sources: 1
+    accepted_source_ids:
+      - web:seg-social-cuota-reducida-2026
+      - web:boe-rdl-13-2022
+    blocking_request_ids: []
+    facet_verdict: pass
+optional_facets: []

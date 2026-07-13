@@ -1,0 +1,68 @@
+schema_version: "1.0"
+question_slug: standards-registry-positive
+created_at: "2026-07-07T12:00:00Z"
+updated_at: "2026-07-07T12:00:00Z"
+coverage_profile: standards-registry-fixture
+coverage_verdict: pending
+required_facets:
+  - facet_id: iso-current-standard
+    description: ISO 19131:2022 is identified from official registry metadata.
+    required: true
+    evidence_path: standards_registry_reference
+    source_policy: official_standards_registry
+    freshness_policy: current_standard_reference
+    identity_policy: standard_designation_matches_registry
+    min_sources: 1
+    accepted_source_ids:
+      - web:iso-19131
+    blocking_request_ids: []
+    facet_verdict: pending
+  - facet_id: eu-product-requirement
+    description: EU toy safety product requirement is linked to OJEU harmonised-standard evidence.
+    required: true
+    evidence_path: product_requirement_profile
+    source_policy: official_standards_registry
+    freshness_policy: current_product_requirement
+    identity_policy: registry_entry_matches_product_requirement
+    min_sources: 1
+    accepted_source_ids:
+      - web:eu-ojeu-toy
+    blocking_request_ids: []
+    facet_verdict: pending
+  - facet_id: nist-publication
+    description: NIST publication identity is captured through the owning NIST publication surface.
+    required: true
+    evidence_path: standards_registry_reference
+    source_policy: official_standards_registry
+    freshness_policy: current_standard_reference
+    identity_policy: standard_designation_matches_registry
+    min_sources: 1
+    accepted_source_ids:
+      - web:nist-fips-140-3
+    blocking_request_ids: []
+    facet_verdict: pending
+  - facet_id: uk-geospatial-register
+    description: GOV.UK geospatial register entry preserves register and linked owner metadata.
+    required: true
+    evidence_path: standards_registry_reference
+    source_policy: official_standards_registry
+    freshness_policy: current_standard_reference
+    identity_policy: standard_designation_matches_registry
+    min_sources: 1
+    accepted_source_ids:
+      - web:uk-geospatial-iso19131
+    blocking_request_ids: []
+    facet_verdict: pending
+  - facet_id: withdrawn-standard-negative
+    description: Withdrawn ISO 19131:2007 must block publication as current evidence.
+    required: true
+    evidence_path: standards_registry_reference
+    source_policy: official_standards_registry
+    freshness_policy: current_standard_reference
+    identity_policy: standard_designation_matches_registry
+    min_sources: 1
+    accepted_source_ids:
+      - web:iso-19131-withdrawn
+    blocking_request_ids: []
+    facet_verdict: pending
+optional_facets: []

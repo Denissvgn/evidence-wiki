@@ -1,0 +1,6 @@
+{
+  "process": {
+    "compiler": "pdflatex"
+  },
+  "texlive_version": "synthetic-2026"
+}

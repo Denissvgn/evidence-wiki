@@ -1,0 +1,56 @@
+schema_version: '1.0'
+question_slug: curbside-battery-recycling-pilot-safety
+created_at: '2026-07-04T12:00:00Z'
+updated_at: '2026-07-04T12:00:00Z'
+coverage_profile: generic-domain-battery-safety
+coverage_verdict: pass
+required_facets:
+- facet_id: official-safety-guidance
+  description: Official battery collection safety and operations guidance.
+  required: true
+  evidence_path: official_guidance
+  source_policy: official_primary
+  freshness_policy: current_legal_figure
+  identity_policy: official_domain_match
+  min_sources: 1
+  accepted_source_ids:
+  - web:official-safety-guidance
+  blocking_request_ids: []
+  facet_verdict: pass
+- facet_id: fire-risk-standards
+  description: Official public-safety guidance about lithium-ion battery fire risk.
+  required: true
+  evidence_path: official_guidance
+  source_policy: primary_or_official
+  freshness_policy: no_staleness_check
+  identity_policy: official_domain_match
+  min_sources: 1
+  accepted_source_ids:
+  - web:fire-risk-guidance
+  blocking_request_ids: []
+  facet_verdict: pass
+- facet_id: vendor-container-spec
+  description: Vendor product specification for battery collection container handling.
+  required: true
+  evidence_path: vendor_product_spec
+  source_policy: official_vendor
+  freshness_policy: current_product_spec
+  identity_policy: origin_url_matches_candidate
+  min_sources: 1
+  accepted_source_ids:
+  - web:vendor-container-spec
+  blocking_request_ids: []
+  facet_verdict: pass
+optional_facets:
+- facet_id: academic-supplement
+  description: Optional scholarly supplement for battery fire incident context.
+  required: false
+  evidence_path: academic_method_existence
+  source_policy: academic_indexed
+  freshness_policy: publication_identity
+  identity_policy: citation_id_resolves
+  min_sources: 1
+  accepted_source_ids: []
+  blocking_request_ids:
+  - req-academic-supplement-403
+  facet_verdict: blocked

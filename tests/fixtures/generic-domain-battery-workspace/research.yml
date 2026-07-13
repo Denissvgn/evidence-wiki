@@ -1,0 +1,151 @@
+project:
+  name: generic-domain-battery-hardening-fixture
+  description: Synthetic generic-domain hardening regression fixture.
+  owner_goal: Verify generic official guidance and vendor evidence without network access.
+  language: en
+
+raw:
+  immutable: true
+  source_roots:
+    - raw/web
+
+sources:
+  manifest_path: sources/manifest.jsonl
+  normalized_dir: sources/normalized
+  cards_dir: sources/cards
+  source_requests_path: sources/source-requests.jsonl
+  coverage_dir: sources/coverage
+  default_status: discovered
+  lifecycle_statuses:
+    - discovered
+    - normalized
+    - noted
+    - integrated
+    - deferred
+    - superseded
+    - rejected
+
+wiki:
+  root: wiki
+  required_dirs:
+    - sources
+    - entities
+    - concepts
+    - methods
+    - systems
+    - benchmarks
+    - datasets
+    - claims
+    - synthesis
+    - questions
+    - decisions
+    - outputs
+  allowed_page_types:
+    - source
+    - entity
+    - concept
+    - method
+    - system
+    - benchmark
+    - dataset
+    - claim
+    - synthesis
+    - question
+    - decision
+    - output
+  frontmatter_required:
+    - type
+    - created
+    - updated
+    - source_ids
+  frontmatter_type_rules:
+    question:
+      required_fields:
+        - status
+      field_types:
+        status: string
+        priority: string
+        question: string
+        answer_page: string
+        blocked_reason: string
+        blocking_request_ids: string_list
+        source_ids: string_list
+      allowed_values:
+        status:
+          - open
+          - in_progress
+          - answered
+          - human_review
+          - blocked
+          - deferred
+          - rejected
+        priority:
+          - high
+          - medium
+          - low
+  date_format: YYYY-MM-DD
+  link_style: relative_markdown
+
+taxonomy:
+  entity_types:
+    - organization
+  concept_types:
+    - requirement
+  claim_types:
+    - factual
+
+ingest:
+  source_note_required: false
+  claim_extraction: false
+  ask_before_large_wiki_update: false
+  large_update_page_threshold: 10
+  update_log: true
+
+run:
+  max_questions_per_run: 25
+  max_source_requests_per_run: 10
+  max_releases_per_run: 75
+  max_discovery_results_per_run: 50
+  max_academic_provider_requests_per_run: 25
+  max_manual_url_deliveries_per_run: 10
+  max_open_questions_total: 250
+  max_intake_per_hour: 25
+  max_mcp_intake_batch_questions: 100
+  claim_staleness_hours: 24
+
+lint:
+  validate_structure: false
+  validate_frontmatter: false
+  validate_links: false
+  validate_source_coverage: false
+  validate_claims: false
+  validate_questions: false
+  validate_provenance: false
+  validate_curation_metadata: false
+  validate_source_requests: false
+  validate_output_license_status: false
+  detect_prompt_injection_patterns: false
+  dataview_aware: false
+  severity_levels:
+    - HIGH
+    - MEDIUM
+    - LOW
+
+outputs:
+  default_dir: wiki/outputs
+  supported_formats:
+    - markdown
+
+integrations:
+  discovery:
+    enabled: true
+    jurisdictions_path: sources/jurisdictions.yml
+  acquisition:
+    enabled: false
+    web:
+      allowed_domains:
+        - epa.gov
+        - usfa.fema.gov
+        - call2recycle.example
+  codebase_analysis:
+    enabled: false

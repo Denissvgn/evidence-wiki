@@ -1,0 +1,20 @@
+schema_version: "1.0"
+question_slug: vendor-product-spec
+created_at: "2026-06-29T00:00:00Z"
+updated_at: "2026-06-29T00:00:00Z"
+coverage_profile: vendor-product-spec
+coverage_verdict: pass
+required_facets:
+  - facet_id: official-spec
+    description: Confirm the product specification from an official vendor page.
+    required: true
+    evidence_path: vendor_product_spec
+    source_policy: official_vendor
+    freshness_policy: current_product_spec
+    identity_policy: origin_url_matches_candidate
+    min_sources: 1
+    accepted_source_ids:
+      - web:vendor-official-product-spec
+    blocking_request_ids: []
+    facet_verdict: pass
+optional_facets: []

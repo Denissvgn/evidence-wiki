@@ -1,0 +1,52 @@
+{
+  "id": "author-publications",
+  "kind": "authors",
+  "description": "A paper with a known ORCID-author. Author-publication discovery (E35-T02) must propose the author's topically-related work for review and reject an unrelated work as out of scope, while never asserting official publisher authority and never re-proposing the seed paper itself.",
+  "expected_behavior": "The related publication (title shares terms with the analyzed paper) is retained as primary_non_official with recommended_action review and an exact orcid_exact identity match; an unrelated work with zero topical overlap is rejected as out_of_scope. The seed paper is never proposed. Identity is exact (ORCID), so no identity_inferred flag is raised.",
+  "paper": {
+    "source_id": "paper:rag-seed",
+    "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+    "doi": "10.1000/rag-seed",
+    "author_orcid": "https://orcid.org/0000-0002-1825-0097",
+    "authors": ["Ada Lovelace"]
+  },
+  "works": [
+    {
+      "id": "https://openalex.org/W111",
+      "display_name": "Retrieval Augmented Generation Benchmarks",
+      "doi": "https://doi.org/10.1000/rag-bench",
+      "publication_year": 2023,
+      "type": "article",
+      "cited_by_count": 150,
+      "open_access": {"is_oa": true, "oa_status": "gold"},
+      "best_oa_location": {"landing_page_url": "https://example.com/rag-bench", "pdf_url": null, "license": "cc-by"}
+    },
+    {
+      "id": "https://openalex.org/W222",
+      "display_name": "Marine Biology of Pacific Coral Reefs",
+      "doi": "https://doi.org/10.1000/reefs",
+      "publication_year": 2011,
+      "type": "article",
+      "cited_by_count": 3,
+      "open_access": {"is_oa": false, "oa_status": null},
+      "best_oa_location": null
+    }
+  ],
+  "expected": {
+    "candidates": {
+      "W111": {
+        "trust_tier": "primary_non_official",
+        "official_source": null,
+        "recommended_action": "review",
+        "quality_gates": {
+          "author_identity": {"status": "passed", "identity_match": "orcid_exact"}
+        }
+      },
+      "W222": {"recommended_action": "reject", "risk_flags_include": ["out_of_scope"]}
+    },
+    "outranks": [
+      ["W111", "W222"]
+    ],
+    "rejected": ["W222"]
+  }
+}

@@ -1,0 +1,13 @@
+url: https://seg-social.es/fixture/canonical-official-web
+retrieved_at: "2026-07-04T12:00:00Z"
+sha256: sha256:f829e6cf86e87d61cfe7d25ff6e5d1d7fa7c5b9d0471e23cf214b53efd78cbaf
+source_type: official_web
+jurisdiction: ES
+publisher: Seguridad Social
+date_metadata:
+  effective_date: "2026-01-01"
+  valid_for_year: 2026
+supported_evidence_areas:
+  - social_security_contributions
+  - current_legal_figure
+curation_notes: Official fixture for canonical manual web source delivery.

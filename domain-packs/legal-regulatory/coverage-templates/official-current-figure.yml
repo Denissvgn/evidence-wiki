@@ -1,0 +1,10 @@
+coverage_profile: official-current-figure
+required_facets:
+  - facet_id: current-official-figure
+    description: Confirm the current legal, tax, fee, threshold, deadline, benefit, or regulatory figure from an official primary source.
+    evidence_path: legal_current_figure
+    source_policy: official_primary
+    freshness_policy: current_legal_figure
+    identity_policy: official_domain_match
+    min_sources: 1
+optional_facets: []

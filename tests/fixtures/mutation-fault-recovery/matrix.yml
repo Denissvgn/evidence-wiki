@@ -1,0 +1,54 @@
+schema_version: "1.0"
+fault_taxonomy:
+  before_temp_write: MUTATION_FAULT_INJECTED
+  after_temp_write: MUTATION_FAULT_INJECTED
+  before_replace: MUTATION_FAULT_INJECTED
+  after_replace: MUTATION_FAULT_INJECTED
+  during_event_append: RUN_MUTATION_WRITE_FAILED
+  during_upgrade: MUTATION_FAULT_INJECTED
+
+mutation_classes:
+  inventory:
+    implementation: scripts/source_inventory.py::write_manifest
+    boundaries: [before_temp_write, after_temp_write, before_replace, after_replace]
+  normalization:
+    implementation: scripts/normalize_sources.py::write_normalized_source
+    boundaries: [before_temp_write, after_temp_write, before_replace, after_replace]
+  question_mutation:
+    implementation: scripts/question_claim.py::write_page_atomic
+    boundaries: [before_temp_write, after_temp_write, before_replace, after_replace]
+  candidate_mutation:
+    implementation: scripts/discover_sources.py::rewrite_candidates
+    boundaries: [before_temp_write, after_temp_write, before_replace, after_replace]
+  indexing:
+    implementation: scripts/query_index.py::write_fts_index
+    boundaries: [before_temp_write, after_temp_write, before_replace, after_replace]
+  run_finalization:
+    implementation: scripts/run_controller.py::commit_run_mutation
+    boundaries: [before_temp_write, after_temp_write, before_replace, after_replace, during_event_append]
+  upgrade:
+    implementation: scripts/init_research_workspace.py::refresh_managed_path
+    boundaries: [before_temp_write, after_temp_write, before_replace, after_replace, during_upgrade]
+
+environment_faults:
+  - read_only
+  - missing_directory
+  - corrupt_jsonl
+  - corrupt_yaml
+  - corrupt_index
+  - transient_lock
+  - quota_exhausted
+
+lifecycle_recovery:
+  - sleep_resume
+  - crash
+  - adopt
+  - abandon
+
+invariants:
+  - prior_good_state_preserved_or_complete_new_state_committed
+  - partial_artifact_never_accepted
+  - retry_is_idempotent
+  - raw_evidence_unchanged
+  - unrelated_user_edits_unchanged
+  - stale_ownership_changes_only_through_audited_adopt_or_abandon

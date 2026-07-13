@@ -1,0 +1,7 @@
+/reports/ export-ignore
+/pilot-workspaces/ export-ignore
+/AGENTS.md export-ignore
+/.env export-ignore
+/.claude/ export-ignore
+/.agents/ export-ignore
+/.codex/ export-ignore

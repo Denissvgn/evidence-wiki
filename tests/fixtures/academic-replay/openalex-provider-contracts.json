@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0",
+  "ambiguous_title_search": {
+    "meta": {"count": 3, "page": 1, "per_page": 3},
+    "results": [
+      {
+        "id": "https://openalex.org/W260100001",
+        "doi": "https://doi.org/10.5555/openalex-one",
+        "display_name": "Synthetic Retrieval Paper",
+        "publication_year": 2026,
+        "type": "article",
+        "authorships": [{"author": {"display_name": "Ada Lovelace"}}]
+      },
+      {
+        "id": "https://openalex.org/W260100001",
+        "doi": "https://doi.org/10.5555/openalex-one",
+        "display_name": "Synthetic Retrieval Paper",
+        "publication_year": 2026,
+        "type": "article",
+        "authorships": [{"author": {"display_name": "Ada Lovelace"}}]
+      },
+      {
+        "id": "https://openalex.org/W260100099",
+        "doi": "https://doi.org/10.5555/openalex-other",
+        "display_name": "Synthetic Retrieval Paper",
+        "publication_year": 2024,
+        "type": "article",
+        "authorships": [{"author": {"display_name": "Alex Example"}}]
+      }
+    ]
+  },
+  "unknown_license_work": {
+    "id": "https://openalex.org/W260100004",
+    "doi": "https://doi.org/10.5555/openalex-unknown-license",
+    "display_name": "Open License Vocabulary Study",
+    "publication_year": 2025,
+    "type": "article",
+    "open_access": {
+      "is_oa": true,
+      "oa_status": "green",
+      "oa_url": "https://publisher.example/open-license.pdf"
+    },
+    "best_oa_location": {
+      "is_oa": true,
+      "landing_page_url": "https://publisher.example/open-license",
+      "pdf_url": "https://publisher.example/open-license.pdf",
+      "license": "publisher-open-v1",
+      "license_id": "publisher-open-v1",
+      "source": {"display_name": "Journal of Provider Contracts"}
+    },
+    "locations": []
+  },
+  "missing_doi_work": {
+    "id": "https://openalex.org/W260100001",
+    "doi": null,
+    "display_name": "Synthetic Retrieval Paper",
+    "publication_year": 2026,
+    "authorships": [
+      {"author": {"display_name": "Ada Lovelace"}},
+      {"author": {"display_name": "Grace Hopper"}}
+    ]
+  }
+}

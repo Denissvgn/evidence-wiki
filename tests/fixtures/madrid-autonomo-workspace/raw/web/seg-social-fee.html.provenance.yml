@@ -1,0 +1,15 @@
+url: https://seg-social.example/fee
+origin_url: https://seg-social.example/fee
+retrieved_at: '2026-07-04T12:00:00Z'
+retrieved_by: fixture/manual
+sha256: sha256:8ed9d4bc2545819287e72f4c1d586413a72728efe54287bf5382647bd0593775
+checksum: sha256:8ed9d4bc2545819287e72f4c1d586413a72728efe54287bf5382647bd0593775
+source_type: official_web
+jurisdiction: ES
+publisher: Seguridad Social
+date_metadata:
+  valid_for_year: 2026
+supported_evidence_areas:
+  - social_security_contributions
+  - current_legal_figure
+curation_notes: Synthetic official source fixture with currentness metadata.

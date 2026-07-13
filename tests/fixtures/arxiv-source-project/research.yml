@@ -1,0 +1,141 @@
+project:
+  name: arxiv-source-fixture
+  description: Synthetic fixture for arXiv bundle inventory and normalization tests.
+  owner_goal: Exercise source inventory, PDF pairing, link parsing, and LaTeX includes.
+  language: en
+
+raw:
+  immutable: true
+  source_roots:
+    - raw/other
+    - raw/pdf
+    - raw/links
+
+sources:
+  manifest_path: sources/manifest.jsonl
+  normalized_dir: sources/normalized
+  cards_dir: sources/cards
+  default_status: discovered
+  lifecycle_statuses:
+    - discovered
+    - normalized
+    - noted
+    - integrated
+    - deferred
+    - superseded
+    - rejected
+
+wiki:
+  root: wiki
+  required_dirs:
+    - sources
+    - entities
+    - concepts
+    - methods
+    - systems
+    - benchmarks
+    - datasets
+    - claims
+    - synthesis
+    - questions
+    - decisions
+    - outputs
+  allowed_page_types:
+    - source
+    - entity
+    - concept
+    - method
+    - system
+    - benchmark
+    - dataset
+    - claim
+    - synthesis
+    - question
+    - decision
+    - output
+  frontmatter_required:
+    - type
+    - created
+    - updated
+    - source_ids
+  frontmatter_type_rules:
+    source:
+      field_types:
+        source_ids: string_list
+      non_empty_fields:
+        - source_ids
+    decision:
+      required_fields:
+        - status
+      allowed_values:
+        status:
+          - proposed
+          - accepted
+          - rejected
+          - superseded
+    claim:
+      required_fields:
+        - claim_type
+        - subject
+        - predicate
+        - object
+        - source_ids
+        - scope
+      field_types:
+        claim_type: string
+        subject: string
+        predicate: string
+        object: string
+        metric: string
+        value: scalar
+        unit: string
+        scope: string
+        source_ids: string_list
+      non_empty_fields:
+        - source_ids
+      allowed_values:
+        claim_type:
+          - factual
+          - benchmark_result
+  date_format: YYYY-MM-DD
+  link_style: relative_markdown
+
+taxonomy:
+  entity_types:
+    - organization
+  concept_types:
+    - method
+  claim_types:
+    - factual
+    - benchmark_result
+
+ingest:
+  source_note_required: true
+  claim_extraction: true
+  ask_before_large_wiki_update: true
+  large_update_page_threshold: 5
+  update_log: true
+
+lint:
+  validate_structure: true
+  validate_frontmatter: true
+  validate_links: true
+  validate_source_coverage: true
+  validate_claims: true
+  dataview_aware: true
+  severity_levels:
+    - HIGH
+    - MEDIUM
+    - LOW
+
+outputs:
+  default_dir: wiki/outputs
+  supported_formats:
+    - markdown
+
+integrations:
+  obsidian:
+    enabled: false
+    dataview: optional
+  git:
+    snapshot_user_edits: explicit

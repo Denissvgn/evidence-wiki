@@ -1,0 +1,86 @@
+{
+  "id": "paper-companion-composite",
+  "kind": "companions",
+  "description": "A paper whose companions arrive from every channel: links cited in the paper, a publisher landing page in provider metadata, a GitHub repository search, and a general web search. Companion discovery (E35-T03) must compose them into one ranked, de-duplicated list.",
+  "expected_behavior": "Origin is the dominant ranking signal: paper-cited inline links outrank provider-metadata, which outranks github-search hits, which outrank general-search hits. A repository cited inline collapses against its github-search duplicate (the inline origin wins). A canonical publisher (doi.org) landing page is official_primary; a generic project page found only by search is downgraded to secondary_unknown. Every candidate stays recommended_action: review and nothing is fetched.",
+  "paper": {
+    "source_id": "paper:gnnflow",
+    "title": "GNNFlow: Graph Neural Networks for Streaming Data",
+    "arxiv_id": "2106.01234",
+    "authors": ["Jane Smith", "John Doe"],
+    "links": [
+      "https://github.com/labx/gnnflow",
+      "https://zenodo.org/records/77777"
+    ],
+    "landing_page_url": "https://doi.org/10.1145/gnnflow",
+    "body": "Reference implementation cited above. This work: https://arxiv.org/abs/2106.01234 . Companion preprint: https://arxiv.org/abs/2107.55555 ."
+  },
+  "items": [
+    {
+      "full_name": "labx/gnnflow",
+      "name": "gnnflow",
+      "owner": {"login": "labx"},
+      "html_url": "https://github.com/labx/gnnflow",
+      "url": "https://api.github.com/repos/labx/gnnflow",
+      "description": "GNNFlow reference implementation.",
+      "default_branch": "main",
+      "license": {"spdx_id": "MIT", "key": "mit"},
+      "stargazers_count": 800,
+      "forks_count": 90,
+      "archived": false,
+      "fork": false,
+      "pushed_at": "2026-05-01T00:00:00Z"
+    },
+    {
+      "full_name": "other/gnnflow-impl",
+      "name": "gnnflow-impl",
+      "owner": {"login": "other"},
+      "html_url": "https://github.com/other/gnnflow-impl",
+      "url": "https://api.github.com/repos/other/gnnflow-impl",
+      "description": "An independent GNNFlow reimplementation.",
+      "default_branch": "main",
+      "license": {"spdx_id": "Apache-2.0", "key": "apache-2.0"},
+      "stargazers_count": 50,
+      "forks_count": 4,
+      "archived": false,
+      "fork": false,
+      "pushed_at": "2026-03-01T00:00:00Z"
+    }
+  ],
+  "results": [
+    {"url": "https://figshare.com/articles/88888", "title": "GNNFlow streaming benchmark data"},
+    {"url": "https://blog.example.com/gnn-notes", "title": "Notes on streaming graph neural networks"}
+  ],
+  "expected": {
+    "candidates": {
+      "https://github.com/labx/gnnflow": {
+        "trust_tier": "primary_non_official",
+        "official_source": null,
+        "recommended_action": "review",
+        "quality_gates": {
+          "companion_repository": {"status": "review_required", "repository_link_origin": "paper_inline"}
+        }
+      },
+      "https://zenodo.org/records/77777": {"trust_tier": "primary_non_official", "official_source": null, "recommended_action": "review"},
+      "https://arxiv.org/abs/2107.55555": {"trust_tier": "primary_non_official", "official_source": null, "recommended_action": "review"},
+      "https://doi.org/10.1145/gnnflow": {"trust_tier": "official_primary", "official_source": true, "recommended_action": "review"},
+      "https://github.com/other/gnnflow-impl": {
+        "trust_tier": "primary_non_official",
+        "official_source": null,
+        "recommended_action": "review",
+        "quality_gates": {
+          "companion_repository": {"status": "review_required", "repository_link_origin": "github_search"}
+        }
+      },
+      "https://figshare.com/articles/88888": {"trust_tier": "primary_non_official", "official_source": null, "recommended_action": "review"},
+      "https://blog.example.com/gnn-notes": {"trust_tier": "secondary_unknown", "official_source": null, "recommended_action": "review"}
+    },
+    "outranks": [
+      ["https://github.com/labx/gnnflow", "https://github.com/other/gnnflow-impl"],
+      ["https://doi.org/10.1145/gnnflow", "https://github.com/other/gnnflow-impl"],
+      ["https://github.com/other/gnnflow-impl", "https://figshare.com/articles/88888"],
+      ["https://figshare.com/articles/88888", "https://blog.example.com/gnn-notes"]
+    ],
+    "rejected": []
+  }
+}

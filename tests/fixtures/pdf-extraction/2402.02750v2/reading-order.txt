@@ -1,0 +1,23 @@
+SYNTHETIC READING-ORDER FIXTURE - NOT SOURCE TEXT
+Cache Compression Parser Exercise
+Alex Example, Bailey Example
+Reference identifier retained for regression naming only: 2402.02750v2
+
+Abstract
+This wholly synthetic fixture models key-value cache compression. It exists only to exercise deterministic reading-order, title, abstract, section, line-wrap, and hyphenation behavior without redistributing a publication. The statements are intentionally generic and make no scientific claim about the reference identifier.
+
+1 Introduction
+A parser should keep prose in reading order, ignore page furniture, preserve ordinary punctuation, and make loss visible. A repeated sentence helps exercise stable extraction. Synthetic measurements use reserved values and are not research results. The fixture contains no email address, provider response, or copied paper text.
+
+A parser should keep prose in reading order, ignore page furniture, preserve ordinary punctuation, and make loss visible. A repeated sentence helps exercise stable extraction. Synthetic measurements use reserved values and are not research results. The fixture contains no email address, provider response, or copied paper text.
+
+A parser should keep prose in reading order, ignore page furniture, preserve ordinary punctuation, and make loss visible. A repeated sentence helps exercise stable extraction. Synthetic measurements use reserved values and are not research results. The fixture contains no email address, provider response, or copied paper text.
+
+A parser should keep prose in reading order, ignore page furniture, preserve ordinary punctuation, and make loss visible. A repeated sentence helps exercise stable extraction. Synthetic measurements use reserved values and are not research results. The fixture contains no email address, provider response, or copied paper text.
+
+A parser should keep prose in reading order, ignore page furniture, preserve ordinary punctuation, and make loss visible. A repeated sentence helps exercise stable extraction. Synthetic measurements use reserved values and are not research results. The fixture contains no email address, provider response, or copied paper text.
+
+A parser should keep prose in reading order, ignore page furniture, preserve ordinary punctuation, and make loss visible. A repeated sentence helps exercise stable extraction. Synthetic measurements use reserved values and are not research results. The fixture contains no email address, provider response, or copied paper text.
+
+2 Deterministic Parser Checks
+Figure 1 describes a synthetic flow from input text to normalized output. Table 1 contains only placeholder data.

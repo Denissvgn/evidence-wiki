@@ -1,0 +1,1 @@
+Unknown optional workspace files are preserved.

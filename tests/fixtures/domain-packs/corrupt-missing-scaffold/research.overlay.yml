@@ -1,0 +1,19 @@
+project:
+  name: corrupt-missing-scaffold
+  description: Corrupted domain pack fixture for validator tests.
+  owner_goal: Prove missing referenced files fail pack validation.
+  language: en
+
+domain_pack:
+  name: corrupt-missing-scaffold
+  version: 0.1.0
+  compatible_research_yml_contract: "0.1"
+  taxonomy_doc: taxonomy.md
+  claims_doc: claims.md
+  scaffolds:
+    source_paper: scaffolds/missing.md
+  implemented_files:
+    - taxonomy.md
+    - claims.md
+    - scaffolds/missing.md
+  planned_files: []

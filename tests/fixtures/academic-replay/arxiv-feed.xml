@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry><id>http://arxiv.org/abs/2601.00001v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00002v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00003v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00004v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00005v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00006v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00007v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00008v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00009v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00010v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+  <entry><id>http://arxiv.org/abs/2601.00011v1</id><published>2026-01-01T00:00:00Z</published><updated>2026-01-02T00:00:00Z</updated><title>Synthetic Retrieval Paper</title><author><name>Ada Lovelace</name></author><author><name>Grace Hopper</name></author></entry>
+</feed>

@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.0",
+  "run_id": "run-2026-06-28T120000Z-sample",
+  "started_at": "2026-06-28T12:00:00Z",
+  "updated_at": "2026-06-28T12:05:00Z",
+  "agent_id": "agent-pm",
+  "handoff": {
+    "task_id": "research-task-0042",
+    "requested_by": "planner-agent",
+    "chain_run_id": "chain-run-2026-06-28-a"
+  },
+  "state": {
+    "current": "planned",
+    "entered_at": "2026-06-28T12:05:00Z",
+    "allowed_next_states": [
+      "discovering",
+      "failed"
+    ],
+    "blocking_reason": null
+  },
+  "state_history": [
+    {
+      "from_state": null,
+      "to_state": "initialized",
+      "changed_at": "2026-06-28T12:00:00Z",
+      "agent_id": "agent-pm",
+      "reason": "Run state artifact created."
+    },
+    {
+      "from_state": "initialized",
+      "to_state": "planned",
+      "changed_at": "2026-06-28T12:05:00Z",
+      "agent_id": "agent-pm",
+      "reason": "Initial plan accepted."
+    }
+  ],
+  "workspace_baseline": {
+    "captured_at": "2026-06-28T12:00:00Z",
+    "status_path": "runs/run-2026-06-28T120000Z-sample/workspace-status-initial.json",
+    "run_report_baseline_path": "runs/run-2026-06-28T120000Z-sample/run-report-baseline.json"
+  },
+  "question_counts": {
+    "total": 4,
+    "open": 3,
+    "in_progress": 1,
+    "answered": 0,
+    "blocked": 0,
+    "deferred": 0,
+    "rejected": 0,
+    "claimed": 1
+  },
+  "source_counts": {
+    "manifest_records": 2,
+    "normalized": 2,
+    "unnormalized": 0,
+    "source_requests_open": 0,
+    "source_requests_fulfilled": 0
+  },
+  "candidate_counts": {
+    "total": 0,
+    "new": 0,
+    "selected": 0,
+    "rejected": 0,
+    "fetched": 0
+  },
+  "coverage_counts": {
+    "required": 0,
+    "satisfied": 0,
+    "missing": 0,
+    "unknown": 4
+  },
+  "budget_state": {
+    "questions_processed_this_run": 1,
+    "questions_remaining_this_run": 24,
+    "source_requests_opened_this_run": 0,
+    "source_requests_remaining_this_run": 10,
+    "releases_this_run": 1,
+    "releases_remaining_this_run": 74,
+    "discovery_results_this_run": 0,
+    "discovery_results_remaining_this_run": 50,
+    "acquisition_downloads_this_run": 0,
+    "acquisition_downloads_remaining_this_run": 10,
+    "github_archive_bytes_this_run": 0,
+    "github_archive_bytes_remaining_this_run": 104857600,
+    "academic_provider_requests_this_run": 0,
+    "academic_provider_requests_remaining_this_run": 25,
+    "manual_url_deliveries_this_run": 0,
+    "manual_url_deliveries_remaining_this_run": 10,
+    "stop_reasons": [],
+    "should_stop": false
+  },
+  "budget_overrides": {},
+  "failure_records": [],
+  "final_verdict": null
+}

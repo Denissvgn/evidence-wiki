@@ -1,0 +1,7 @@
+origin_url: https://publisher.example/article
+retrieved_at: 2026-07-02T12:06:00Z
+retrieved_by: fetch-agent/manual-web
+source_status: unavailable
+delivery_failure_code: license_or_terms_unknown
+delivery_failure_detail: Capture completed, but reuse terms could not be identified from the page or site.
+delivery_failure_remediation: Review source terms or license before reusing the captured content.

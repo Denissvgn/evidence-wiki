@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "document_type": "run_report_baseline",
+  "generated_at": "2026-07-04T11:00:00Z",
+  "question_status": {
+    "generated_at": "2026-07-04T11:00:00Z",
+    "total": 4,
+    "by_status": {
+      "answered": 1,
+      "blocked": 3
+    },
+    "by_priority": {
+      "high": 4
+    },
+    "actionable": 0,
+    "blocked": 3,
+    "answered": 1,
+    "questions": [
+      {
+        "slug": "registration-basics",
+        "status": "answered",
+        "priority": "high"
+      },
+      {
+        "slug": "current-fee",
+        "status": "blocked",
+        "priority": "high"
+      },
+      {
+        "slug": "madrid-irpf",
+        "status": "blocked",
+        "priority": "high"
+      },
+      {
+        "slug": "pae-registration",
+        "status": "blocked",
+        "priority": "high"
+      }
+    ]
+  },
+  "source_requests": {
+    "requests_path": "sources/source-requests.jsonl",
+    "open_total": 3,
+    "open": []
+  },
+  "normalized_sources": []
+}
