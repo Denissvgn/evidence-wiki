@@ -30,3 +30,4 @@ env/
 temp/
 RELEASING.md
 !workspace-template/AGENTS.md
+!examples/urban-heat-resilience-workspace/AGENTS.md
