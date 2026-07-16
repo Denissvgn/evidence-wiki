@@ -11,6 +11,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+GIT_ATTRIBUTES = REPO_ROOT / ".gitattributes"
 
 
 def load_script_module(name: str, filename: str):
@@ -177,6 +178,13 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
         for runner in ("ubuntu-latest", "macos-latest", "windows-latest"):
             self.assertIn(f"os: {runner}", workflow)
         self.assertIn('python-version: "3.10"', workflow)
+
+    def test_git_checkout_preserves_checksum_bound_fixture_bytes(self):
+        attributes = GIT_ATTRIBUTES.read_text(encoding="utf-8").splitlines()
+
+        self.assertIn("* text=auto eol=lf", attributes)
+        self.assertIn("*.pdf binary", attributes)
+        self.assertIn("*.zip binary", attributes)
 
     def test_tests_use_the_platform_temporary_directory(self):
         posix_temp_root = "/" + "tmp"

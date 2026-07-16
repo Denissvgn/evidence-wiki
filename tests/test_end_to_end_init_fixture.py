@@ -139,7 +139,7 @@ class EndToEndInitFixtureTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertIn("writes: none", output)
             self.assertIn("init report: docs/workspace-init-report.md", output)
-            self.assertIn(str(profile_path), output)
+            self.assertIn(str(profile_path.resolve()), output)
             self.assertFalse(target.exists())
 
 

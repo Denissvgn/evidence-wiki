@@ -729,7 +729,7 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(target.resolve(), server.project_root)
         self.assertFalse(status["isError"])
         self.assertEqual(
-            str(target.resolve()),
+            target.resolve().as_posix(),
             status["structuredContent"]["workspace_health"]["project_root"],
         )
         self.assertFalse(export["isError"])

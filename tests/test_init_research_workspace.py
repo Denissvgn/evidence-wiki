@@ -302,7 +302,7 @@ class InitResearchWorkspaceTests(unittest.TestCase):
             self.assertTrue(config["lint"]["validate_claims"])
             self.assertTrue((target / "raw" / "links").is_dir())
             self.assertFalse((target / "domain-packs").exists())
-            self.assertIn(str(profile_path), (target / "log.md").read_text())
+            self.assertIn(profile_path.resolve().as_posix(), (target / "log.md").read_text())
             self.assertTrue((target / "docs" / "workspace-init-report.md").is_file())
             self.assertIn("Init report: docs/workspace-init-report.md", (target / "log.md").read_text())
 
@@ -542,7 +542,7 @@ class InitResearchWorkspaceTests(unittest.TestCase):
 
             self.assertIn("init report: docs/workspace-init-report.md", output)
             self.assertIn("writes: none", output)
-            self.assertIn(str(profile_path), output)
+            self.assertIn(str(profile_path.resolve()), output)
             self.assertFalse(target.exists())
 
     def test_profile_can_use_custom_init_report_path(self):

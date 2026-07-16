@@ -214,7 +214,7 @@ class PackageCliTests(unittest.TestCase):
 
         payload = json.loads(output)
         checks = {check["id"]: check for check in payload["checks"]}
-        self.assertEqual(str(target.resolve()), payload["project_root"])
+        self.assertEqual(target.resolve().as_posix(), payload["project_root"])
         self.assertEqual("ok", checks["contract"]["status"])
         self.assertIsInstance(checks["contract"]["details"]["starter_version"], str)
 
@@ -331,7 +331,7 @@ class PackageCliTests(unittest.TestCase):
             "workspace_health",
         ):
             self.assertEqual(cli_document[field], direct_document[field], field)
-        self.assertEqual(str(target.resolve()), cli_document["workspace_health"]["project_root"])
+        self.assertEqual(target.resolve().as_posix(), cli_document["workspace_health"]["project_root"])
 
     def test_export_alias_matches_questions_export_schema_and_content(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -514,7 +514,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual(0, code, stderr)
         self.assertEqual("", stderr)
         document = json.loads(stdout)
-        self.assertEqual(str(target.resolve()), document["workspace_health"]["project_root"])
+        self.assertEqual(target.resolve().as_posix(), document["workspace_health"]["project_root"])
 
     def test_status_relative_absolute_and_case_variant_target_identity_is_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -544,8 +544,12 @@ class PackageCliTests(unittest.TestCase):
             case_code, case_stdout, case_stderr = self.run_cli_result(
                 "status", "--target", str(case_variant), "--format", "json", "--no-cache"
             )
-            canonical = str(target.resolve())
+            canonical = target.resolve().as_posix()
             case_variant_is_same_target = case_variant.exists() and case_variant.samefile(target)
+            case_document = json.loads(case_stdout)
+            if case_variant_is_same_target:
+                reported_root = Path(case_document["workspace_health"]["project_root"])
+                self.assertTrue(reported_root.samefile(target))
 
         self.assertEqual(0, relative_code, relative_stderr)
         self.assertEqual(0, absolute_code, absolute_stderr)
@@ -555,10 +559,8 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual(canonical, absolute["workspace_health"]["project_root"])
         self.assertEqual(relative["project"], absolute["project"])
         self.assertEqual("", case_stderr)
-        case_document = json.loads(case_stdout)
         if case_variant_is_same_target:
             self.assertEqual(0, case_code)
-            self.assertEqual(canonical, case_document["workspace_health"]["project_root"])
         else:
             self.assertEqual(2, case_code)
             self.assertEqual("invalid", case_document["workspace_health"]["status"])

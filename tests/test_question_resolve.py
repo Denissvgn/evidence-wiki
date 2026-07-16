@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -217,22 +218,23 @@ class QuestionResolveTests(unittest.TestCase):
             self.seed_manifest(target)
             answer = self.write_answer_page(target)
 
-            code, payload, stderr = self.run_resolve(
-                target,
-                "answer",
-                "--slug",
-                "which-benchmarks",
-                "--agent-id",
-                "agent-a",
-                "--answer-page",
-                answer.relative_to(target).as_posix(),
-                "--source-id",
-                "raw:bench-survey-2026",
-                "--confidence",
-                "high",
-                "--evidence-strength",
-                "corroborated",
-            )
+            with mock.patch.object(RESOLVE.os.path, "relpath", return_value=r"..\synthesis\benchmarks.md"):
+                code, payload, stderr = self.run_resolve(
+                    target,
+                    "answer",
+                    "--slug",
+                    "which-benchmarks",
+                    "--agent-id",
+                    "agent-a",
+                    "--answer-page",
+                    answer.relative_to(target).as_posix(),
+                    "--source-id",
+                    "raw:bench-survey-2026",
+                    "--confidence",
+                    "high",
+                    "--evidence-strength",
+                    "corroborated",
+                )
 
             self.assertEqual(0, code, stderr)
             self.assertTrue(payload["ok"])

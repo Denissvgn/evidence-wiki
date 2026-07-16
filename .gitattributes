@@ -1,3 +1,7 @@
+* text=auto eol=lf
+*.pdf binary
+*.zip binary
+
 /reports/ export-ignore
 /pilot-workspaces/ export-ignore
 /AGENTS.md export-ignore

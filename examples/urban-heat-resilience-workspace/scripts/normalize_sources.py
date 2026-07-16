@@ -1740,7 +1740,7 @@ def is_likely_author_or_affiliation_line(line: str) -> bool:
 
 
 def truncate_inline_abstract(line: str) -> tuple[str, bool]:
-    match = re.search(r"\s+Abstract\b", line)
+    match = re.search(r"(?:^|\s+)Abstract\b", line, flags=re.IGNORECASE)
     if match is None:
         return line, False
     return line[: match.start()].strip(), True
@@ -1796,8 +1796,8 @@ def infer_pdf_title(text: str, source_id: str) -> tuple[str, str]:
             break
         line, truncated = truncate_inline_abstract(line)
         if truncated:
-            truncated_inline = True
             if line:
+                truncated_inline = True
                 title_lines.append(line)
             break
         if is_pdf_metadata_line(line) or is_likely_author_or_affiliation_line(line):

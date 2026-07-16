@@ -1071,7 +1071,10 @@ class RunControllerTests(unittest.TestCase):
                     self.assertEqual("", stdout)
                     self.assertEqual("RUN_ID_INVALID", json.loads(stderr)["error_code"])
             self.assertFalse((target / "runs" / "bad").exists())
-            self.assertFalse((target / "runs" / "..").exists())
+            runs_root = target / "runs"
+            run_state_files = list(runs_root.rglob("run-state.json")) if runs_root.exists() else []
+            self.assertEqual([], run_state_files)
+            self.assertFalse((target / "run-state.json").exists())
 
 
 if __name__ == "__main__":

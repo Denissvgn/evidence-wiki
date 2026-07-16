@@ -11,7 +11,7 @@ import sys
 import tarfile
 import tempfile
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -139,6 +139,13 @@ def run_is_still_eligible(run_dir: Path, older_than_days: int, evaluated_at: dat
     return state.get("current") in TERMINAL_STATES and updated_at is not None and updated_at <= cutoff
 
 
+def exclude_runtime_locks(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+    """Exclude ephemeral lock state, which may be unreadable while held on Windows."""
+    if ".locks" in PurePosixPath(member.name).parts:
+        return None
+    return member
+
+
 def publish_archive_without_overwrite(run_dir: Path, archive_path: Path) -> bool:
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, tmp_name = tempfile.mkstemp(
@@ -151,7 +158,7 @@ def publish_archive_without_overwrite(run_dir: Path, archive_path: Path) -> bool
     try:
         with tmp_path.open("r+b") as output:
             with tarfile.open(fileobj=output, mode="w:gz") as archive:
-                archive.add(run_dir, arcname=run_dir.name)
+                archive.add(run_dir, arcname=run_dir.name, filter=exclude_runtime_locks)
             output.flush()
             os.fsync(output.fileno())
         try:
