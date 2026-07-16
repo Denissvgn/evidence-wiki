@@ -109,6 +109,17 @@ class PdfSuccessPathTests(unittest.TestCase):
         self.assertNotIn("Abstract", title)
         self.assertEqual("low", confidence)
 
+    def test_pdf_title_inference_stops_when_abstract_heading_shares_its_line_with_body(self):
+        title, confidence = NORMALIZE.infer_pdf_title(
+            "A Tiny PDF Fixture For Normalization\n"
+            "Abstract This PDF-only fixture exercises extraction.\n"
+            "1 Introduction The body follows.\n",
+            "paper:tiny-fixture",
+        )
+
+        self.assertEqual("A Tiny PDF Fixture For Normalization", title)
+        self.assertEqual("high", confidence)
+
     def test_pdf_text_hygiene_strips_arxiv_watermark_and_joins_hyphen_breaks(self):
         text = NORMALIZE.normalize_pdf_text(
             "A method for self-\n"
@@ -358,7 +369,7 @@ class PdfSuccessPathTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("pdftotext"), "pdftotext is required for the PDF success path")
     def test_pdf_only_source_inventory_normalization_and_lint(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "workspace"
             (root / "raw" / "pdf").mkdir(parents=True)
             (root / "sources" / "normalized").mkdir(parents=True)

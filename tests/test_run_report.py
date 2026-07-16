@@ -213,7 +213,7 @@ class RunReportTests(unittest.TestCase):
         )
 
     def test_report_diffs_backlog_and_names_touched_questions(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             baseline = root / "baseline.json"
@@ -250,7 +250,7 @@ class RunReportTests(unittest.TestCase):
             self.assertIn(request_id, report_text)
 
     def test_empty_run_reports_no_touched_questions(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             baseline = root / "baseline.json"
@@ -269,7 +269,7 @@ class RunReportTests(unittest.TestCase):
             self.assertIn("- None.", (target / document["report_path"]).read_text())
 
     def test_added_question_appears_as_added(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             baseline = root / "baseline.json"
@@ -291,7 +291,7 @@ class RunReportTests(unittest.TestCase):
             self.assertEqual("added", touched["late-arrival"]["change"])
 
     def test_baseline_without_generated_at_degrades_with_warning(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             baseline = root / "baseline.json"
@@ -308,7 +308,7 @@ class RunReportTests(unittest.TestCase):
             self.assertTrue(any("generated_at" in warning for warning in document["warnings"]))
 
     def test_source_normalized_before_baseline_on_same_day_is_excluded(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             baseline = root / "baseline.json"
@@ -335,7 +335,7 @@ class RunReportTests(unittest.TestCase):
             self.assertIn("- None.", report_text)
 
     def test_source_normalized_after_baseline_is_included(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             baseline = root / "baseline.json"
@@ -360,7 +360,7 @@ class RunReportTests(unittest.TestCase):
             self.assertIn("`paper:after-baseline`", (target / document["report_path"]).read_text())
 
     def test_legacy_date_only_normalized_source_is_separate_with_warning(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             baseline = root / "baseline.json"
@@ -389,7 +389,7 @@ class RunReportTests(unittest.TestCase):
             self.assertIn("`paper:legacy-date`", report_text)
 
     def test_baseline_command_captures_questions_requests_and_normalized_sources(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             request_id = self.block_question_with_request(target, "needs-evidence")
@@ -417,10 +417,10 @@ class RunReportTests(unittest.TestCase):
             self.assertEqual(1, document["source_requests"]["open_total"])
             normalized = {record["source_id"]: record for record in document["normalized_sources"]}
             self.assertEqual("2026-06-14T12:00:01Z", normalized["paper:baseline-source"]["normalized_at"])
-            self.assertEqual(str(baseline), command_report["baseline_path"])
+            self.assertEqual(str(baseline.resolve()), command_report["baseline_path"])
 
     def test_report_accepts_rich_baseline_artifact(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             baseline = root / "run-baseline.json"
@@ -446,7 +446,7 @@ class RunReportTests(unittest.TestCase):
             self.assertEqual(["paper:after-rich-baseline"], document["sources_normalized"])
 
     def test_report_uses_run_controller_baseline_and_includes_run_summary(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             self.write_candidate_records(target)
@@ -505,7 +505,7 @@ class RunReportTests(unittest.TestCase):
             self.assertIn("`initialized` -> `planned`", report_text)
 
     def test_report_without_run_id_keeps_legacy_no_run_shape(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             baseline = root / "run-baseline.json"
@@ -518,7 +518,7 @@ class RunReportTests(unittest.TestCase):
             self.assertEqual({"present": False}, json.loads(stdout)["run_controller"])
 
     def test_report_fails_when_run_state_is_malformed(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             run_id = "run-2026-06-29T100000Z-bad"
@@ -533,7 +533,7 @@ class RunReportTests(unittest.TestCase):
             self.assertEqual("RUN_STATE_INVALID", json.loads(stderr)["error_code"])
 
     def test_invalid_baseline_exits_2(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             missing = root / "missing.json"

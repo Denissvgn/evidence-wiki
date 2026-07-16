@@ -11,6 +11,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+GIT_ATTRIBUTES = REPO_ROOT / ".gitattributes"
 
 
 def load_script_module(name: str, filename: str):
@@ -177,6 +178,48 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
         for runner in ("ubuntu-latest", "macos-latest", "windows-latest"):
             self.assertIn(f"os: {runner}", workflow)
         self.assertIn('python-version: "3.10"', workflow)
+
+    def test_git_checkout_preserves_checksum_bound_fixture_bytes(self):
+        attributes = GIT_ATTRIBUTES.read_text(encoding="utf-8").splitlines()
+
+        self.assertIn("* text=auto eol=lf", attributes)
+        self.assertIn("*.pdf binary", attributes)
+        self.assertIn("*.zip binary", attributes)
+
+    def test_tests_use_the_platform_temporary_directory(self):
+        posix_temp_root = "/" + "tmp"
+        posix_only_temporary_directory = f'TemporaryDirectory(dir="{posix_temp_root}")'
+        offenders = [
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in sorted((REPO_ROOT / "tests").glob("test_*.py"))
+            if posix_only_temporary_directory in path.read_text(encoding="utf-8")
+        ]
+
+        self.assertEqual([], offenders)
+
+    def test_ci_propagates_every_windows_python_failure(self):
+        workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+        failure_guard = "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+
+        for step_name in (
+            "Install development environment (Windows)",
+            "Run tests and quality checks (Windows)",
+        ):
+            with self.subTest(step=step_name):
+                marker = f"      - name: {step_name}\n"
+                self.assertIn(marker, workflow)
+                step = workflow.split(marker, 1)[1].split("\n      - name:", 1)[0]
+                lines = [line.strip() for line in step.splitlines() if line.strip()]
+                python_commands = [
+                    index
+                    for index, line in enumerate(lines)
+                    if line.startswith(("python ", ".\\.venv\\Scripts\\python.exe "))
+                ]
+
+                self.assertEqual(3, len(python_commands))
+                for index in python_commands:
+                    self.assertLess(index + 1, len(lines))
+                    self.assertEqual(failure_guard, lines[index + 1])
 
 
 if __name__ == "__main__":

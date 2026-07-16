@@ -179,7 +179,7 @@ class HtmlNormalizationTests(NormalizationCoverageBase):
     """E19-T01: HTML inventory mapping and stdlib extraction."""
 
     def test_inventory_classifies_html_with_fingerprint(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "web" / "spectral-reasoning.html").write_text(WELL_FORMED_HTML)
 
@@ -190,7 +190,7 @@ class HtmlNormalizationTests(NormalizationCoverageBase):
             self.assertTrue(html_record["raw_fingerprint"].startswith("sha256:"))
 
     def test_well_formed_page_extracts_title_outline_links_and_text(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "web" / "spectral-reasoning.html").write_text(WELL_FORMED_HTML)
             records = self.run_inventory(workspace)
@@ -215,7 +215,7 @@ class HtmlNormalizationTests(NormalizationCoverageBase):
             self.assertIsNone(frontmatter["needs_ocr"])
 
     def test_malformed_html_degrades_to_text_with_warnings(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             malformed = (
                 "<html><body>"
@@ -234,7 +234,7 @@ class HtmlNormalizationTests(NormalizationCoverageBase):
             self.assertNotEqual("failed", frontmatter["status"])
 
     def test_huge_page_is_truncated_with_warning(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             filler = "<p>" + ("padding text block " * 50) + "</p>\n"
             page = "<html><head><title>Huge Page</title></head><body>\n"
@@ -251,7 +251,7 @@ class HtmlNormalizationTests(NormalizationCoverageBase):
             self.assertIn("padding text block", source.extracted_text)
 
     def test_page_without_title_falls_back_to_heading(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "web" / "untitled.html").write_text(
                 "<html><body><h1>Heading Title</h1><p>Body text here.</p></body></html>"
@@ -265,7 +265,7 @@ class HtmlNormalizationTests(NormalizationCoverageBase):
             self.assertTrue(any("no <title> element" in warning for warning in source.warnings))
 
     def test_html_record_is_searchable_via_query_index(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "web" / "spectral-reasoning.html").write_text(WELL_FORMED_HTML)
             records = self.run_inventory(workspace)
@@ -294,7 +294,7 @@ class TableNormalizationTests(NormalizationCoverageBase):
     """E19-T03: CSV/TSV table normalization."""
 
     def test_clean_csv_yields_columns_rows_and_sample_table(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "data" / "benchmark-scores.csv").write_text(
                 "model,spectra_score,latency_ms\n"
@@ -319,7 +319,7 @@ class TableNormalizationTests(NormalizationCoverageBase):
             self.assertEqual("high", frontmatter["confidence"])
 
     def test_ragged_tsv_reports_warning(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "data" / "ragged.tsv").write_text(
                 "col_a\tcol_b\tcol_c\n"
@@ -337,7 +337,7 @@ class TableNormalizationTests(NormalizationCoverageBase):
             )
 
     def test_huge_csv_is_truncated_with_lower_bound_count(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             row = "value-a,value-b,value-c\n"
             rows_needed = NORMALIZE.TABLE_MAX_BYTES // len(row) + 10
@@ -353,7 +353,7 @@ class TableNormalizationTests(NormalizationCoverageBase):
             self.assertIn("Data rows: at least", source.extracted_text)
 
     def test_xlsx_table_stays_classified_only(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "data" / "workbook.xlsx").write_bytes(b"PK\x03\x04 not a real workbook")
             records = self.run_inventory(workspace)
@@ -365,7 +365,7 @@ class TableNormalizationTests(NormalizationCoverageBase):
             self.assertEqual([], QUERY.unnormalized_source_ids(workspace, config))
 
     def test_csv_columns_are_findable_via_query_index(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "data" / "benchmark-scores.csv").write_text(
                 "model,spectra_score,latency_ms\nalpha,71.5,120\n"
@@ -394,7 +394,7 @@ class NeedsOcrDetectionTests(NormalizationCoverageBase):
         return self.normalize_record(workspace, pdf_record, shutil.which("pdftotext"))
 
     def test_text_pdf_behavior_is_unchanged(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "pdf" / "text-paper.pdf").write_bytes(text_pdf_bytes())
 
@@ -406,7 +406,7 @@ class NeedsOcrDetectionTests(NormalizationCoverageBase):
             self.assertFalse(any("needs OCR" in warning for warning in source.warnings))
 
     def test_image_only_pdf_is_flagged_needs_ocr(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "pdf" / "scanned-paper.pdf").write_bytes(image_only_pdf_bytes())
 
@@ -420,7 +420,7 @@ class NeedsOcrDetectionTests(NormalizationCoverageBase):
             self.assertIn("needs_ocr: true", output_path.read_text())
 
     def test_needs_ocr_surfaces_in_lint_and_status(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "pdf" / "scanned-paper.pdf").write_bytes(image_only_pdf_bytes())
             self.normalize_pdf(workspace)
@@ -440,7 +440,7 @@ class NeedsOcrDetectionTests(NormalizationCoverageBase):
             self.assertEqual(1, sources["needs_ocr"])
 
     def test_text_pdf_keeps_status_and_lint_clean_of_ocr_signals(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "raw" / "pdf" / "text-paper.pdf").write_bytes(text_pdf_bytes())
             self.normalize_pdf(workspace)

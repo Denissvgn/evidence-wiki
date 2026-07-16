@@ -191,7 +191,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
             "This paper itself lives at https://arxiv.org/abs/2005.11401."  # self-link -> excluded
         )
         normalized = self.normalized_doc("paper:rag", links=links, body=body)
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[self.paper_record("paper:rag")], normalized=normalized)
             # Inline-only: no network expected.
             self.install_github(github_payload())  # not used because --no-github
@@ -226,7 +226,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
     def test_provider_metadata_landing_page_becomes_publisher_page(self):
         metadata = {"primary_location": {"landing_page_url": "https://aclanthology.org/2024.acl-long.1"}}
         normalized = self.normalized_doc("paper:oa", links=[], body="body")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir), manifest=[self.paper_record("paper:oa", metadata=metadata)], normalized=normalized
             )
@@ -242,7 +242,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
     def test_provider_metadata_repository_records_metadata_link_origin(self):
         metadata = {"primary_location": {"landing_page_url": "https://github.com/acme/rag-toolkit"}}
         normalized = self.normalized_doc("paper:oa", links=[], body="body")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir), manifest=[self.paper_record("paper:oa", metadata=metadata)], normalized=normalized
             )
@@ -267,7 +267,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
         # plus a second repo. The inline one wins; the search duplicate collapses.
         links = ["https://github.com/acme/rag-toolkit", "https://zenodo.org/records/1"]
         normalized = self.normalized_doc("paper:rag", links=links, body="")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[self.paper_record("paper:rag")], normalized=normalized)
             self.install_github(github_payload(repo("acme/rag-toolkit"), repo("other/rag-impl")))
             code, stdout, stderr = self.run_companions(
@@ -295,7 +295,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
     def test_no_github_flag_skips_github_phase(self):
         links = ["https://github.com/acme/rag-toolkit"]
         normalized = self.normalized_doc("paper:rag", links=links, body="")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[self.paper_record("paper:rag")], normalized=normalized)
             # If github ran, the throwing transport would fail the test.
             DISCOVER.GITHUB_TRANSPORT = lambda *a: (_ for _ in ()).throw(AssertionError("github should not run"))
@@ -312,7 +312,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
 
     def test_search_phase_skipped_with_warning_when_no_provider(self):
         normalized = self.normalized_doc("paper:rag", links=["https://github.com/acme/rag-toolkit"], body="")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[self.paper_record("paper:rag")], normalized=normalized)
             self.install_github(github_payload())
             code, stdout, _ = self.run_companions(workspace, "--source-id", "paper:rag")
@@ -328,7 +328,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
         search_results = [
             {"url": "https://zenodo.org/records/99921", "title": "RAG evaluation dataset"},
         ]
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.paper_record("paper:rag")],
@@ -348,7 +348,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
     def test_search_generic_host_is_secondary_unknown(self):
         normalized = self.normalized_doc("paper:rag", links=[], body="")
         search_results = [{"url": "https://blog.example.com/rag-notes", "title": "RAG notes"}]
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.paper_record("paper:rag")],
@@ -368,7 +368,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
     def test_search_only_repository_records_search_origin_quality_gate(self):
         normalized = self.normalized_doc("paper:rag", links=[], body="")
         search_results = [{"url": "https://github.com/search-only/rag-toolkit", "title": "RAG toolkit code"}]
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.paper_record("paper:rag")],
@@ -396,7 +396,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
         links = ["https://github.com/acme/rag-toolkit"]  # paper_inline
         normalized = self.normalized_doc("paper:rag", links=links, body="")
         search_results = [{"url": "https://blog.example.com/rag-notes", "title": "RAG notes"}]  # search
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.paper_record("paper:rag")],
@@ -420,7 +420,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
     def test_request_id_is_carried_onto_candidates(self):
         links = ["https://zenodo.org/records/1"]
         normalized = self.normalized_doc("paper:rag", links=links, body="")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[self.paper_record("paper:rag")], normalized=normalized)
             code, stdout, _ = self.run_companions(
                 workspace, "--source-id", "paper:rag", "--request-id", "req-abc",
@@ -433,7 +433,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
 
     def test_disabled_discovery_refuses(self):
         normalized = self.normalized_doc("paper:rag", links=[], body="")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir), manifest=[self.paper_record("paper:rag")], normalized=normalized, enabled=False
             )
@@ -442,7 +442,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
         self.assertEqual("DISCOVERY_DISABLED", json.loads(stderr)["error_code"])
 
     def test_unknown_source_id_is_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[self.paper_record("paper:rag")])
             code, _, stderr = self.run_companions(workspace, "--source-id", "paper:missing", "--no-github", "--no-search")
         self.assertEqual(2, code)
@@ -451,7 +451,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
     def test_re_run_does_not_duplicate_candidates(self):
         links = ["https://zenodo.org/records/1", "https://github.com/acme/rag-toolkit"]
         normalized = self.normalized_doc("paper:rag", links=links, body="")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[self.paper_record("paper:rag")], normalized=normalized)
             self.install_github(github_payload())
             code1, out1, _ = self.run_companions(workspace, "--source-id", "paper:rag")
@@ -469,7 +469,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
     def test_candidates_are_review_required_and_seed_linked(self):
         links = ["https://zenodo.org/records/1"]
         normalized = self.normalized_doc("paper:rag", links=links, body="")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[self.paper_record("paper:rag")], normalized=normalized)
             code, stdout, _ = self.run_companions(
                 workspace, "--source-id", "paper:rag", "--no-github", "--no-search"
@@ -490,7 +490,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
         normalized = self.normalized_doc(
             "paper:rag", title="RAGKit: A Retrieval Toolkit", arxiv_id="2005.11401", links=[], body=""
         )
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.paper_record("paper:rag")],
@@ -524,7 +524,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
             "paper:rag", title="RAGKit: A Retrieval Toolkit", arxiv_id="2005.11401", links=[], body=""
         )
         captured: list[str] = []
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[self.paper_record("paper:rag")], normalized=normalized)
             DISCOVER.GITHUB_TRANSPORT = lambda url, timeout, headers: (captured.append(url) or github_payload())
             DISCOVER.GITHUB_CLOCK = lambda: 0.0
@@ -541,7 +541,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
         # reflect the adapter, not merely that a provider was configured.
         normalized = self.normalized_doc("paper:rag", links=[], body="")
         search_results = [{"url": "https://zenodo.org/records/1", "title": "data"}]
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.paper_record("paper:rag")],

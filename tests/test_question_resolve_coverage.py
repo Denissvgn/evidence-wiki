@@ -158,7 +158,7 @@ class QuestionResolveCoverageTests(unittest.TestCase):
         return yaml.safe_load(self.question_text(target, slug).split("---\n", 2)[1])
 
     def test_partial_coverage_refuses_answer_without_mutating_claimed_question(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.run_claim(target, "minimal-social-security-fee")
             self.seed_manifest_source(target, "web:seg-social-cuota-reducida-2026")
@@ -191,7 +191,7 @@ class QuestionResolveCoverageTests(unittest.TestCase):
             self.assertEqual("agent-a", frontmatter["claimed_by"])
 
     def test_complete_academic_coverage_allows_answer_resolution(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.run_claim(target, "turboquant-existence")
             self.seed_manifest_source(target, "paper:turboquant")
@@ -222,7 +222,7 @@ class QuestionResolveCoverageTests(unittest.TestCase):
             self.assertNotIn("claimed_by", frontmatter)
 
     def test_missing_required_manifest_returns_coverage_required(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.run_claim(target, "which-benchmarks")
             self.seed_manifest_source(target, "raw:bench-survey-2026")
@@ -247,7 +247,7 @@ class QuestionResolveCoverageTests(unittest.TestCase):
             self.assertEqual("sources/coverage/which-benchmarks.yml", payload["details"]["manifest_path"])
 
     def test_invalid_manifest_and_unsafe_override_return_manifest_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.run_claim(target, "which-benchmarks")
             self.seed_manifest_source(target, "raw:bench-survey-2026")
@@ -295,7 +295,7 @@ class QuestionResolveCoverageTests(unittest.TestCase):
             self.assertEqual("COVERAGE_MANIFEST_INVALID", payload["error_code"])
 
     def test_source_id_only_answer_still_works_without_coverage_gate(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.run_claim(target, "which-benchmarks")
             self.seed_manifest_source(target, "raw:bench-survey-2026")
@@ -318,7 +318,7 @@ class QuestionResolveCoverageTests(unittest.TestCase):
             self.assertEqual("answered", payload["status"])
 
     def test_coverage_manifest_argument_without_require_coverage_does_not_gate(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.run_claim(target, "which-benchmarks")
             self.seed_manifest_source(target, "raw:bench-survey-2026")

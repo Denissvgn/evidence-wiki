@@ -132,7 +132,7 @@ class SourceDeliveryTests(unittest.TestCase):
         return sidecar
 
     def test_incremental_delivery_is_idempotent(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             code, _ = self.run_inventory_main(workspace)
             self.assertEqual(0, code)
@@ -164,7 +164,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertEqual("2020-01-01T00:00:00Z", paper["detected_at"])
 
     def test_json_missing_config_uses_error_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             missing_workspace = Path(tmpdir) / "missing"
 
             code, stdout, stderr = self.run_inventory_capture(
@@ -183,7 +183,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertIn("--project-root", envelope["remediation"])
 
     def test_json_invalid_manifest_uses_error_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             manifest = workspace / "sources" / "manifest.jsonl"
             manifest.write_text("{not json}\n")
@@ -202,7 +202,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertIn("Invalid JSONL", envelope["message"])
 
     def test_json_report_shape_for_arxiv_fixture(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
 
             code, stdout, stderr = self.run_inventory_capture(
@@ -229,7 +229,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertIn("summary paired=1", stderr)
 
     def test_json_report_includes_malformed_sidecar_warning(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             sidecar = workspace / "raw" / "pdf" / "2601.00001v1.pdf.provenance.yml"
             sidecar.write_text("{[ this is not yaml\n")
@@ -249,7 +249,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertIn("warning:", stderr)
 
     def test_json_reject_mismatch_uses_error_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(
                 workspace,
@@ -280,7 +280,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertEqual(["paper:2601.00001v1"], envelope["details"]["source_ids"])
 
     def test_json_dry_run_without_report_emits_jsonl_records(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
 
             code, stdout, stderr = self.run_inventory_capture(
@@ -298,7 +298,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertIn("would write 3 records", stderr)
 
     def test_text_report_output_remains_markdown(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
 
             code, stdout, stderr = self.run_inventory_capture(
@@ -316,7 +316,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertIn("would write 3 records", stderr)
 
     def test_normalize_json_missing_manifest_uses_error_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             (workspace / "sources" / "manifest.jsonl").unlink()
 
@@ -330,7 +330,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertIn("Missing manifest", envelope["message"])
 
     def test_normalize_json_missing_poppler_uses_error_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.inventory_workspace(workspace)
             self.force_pdf_fallback_manifest(workspace)
@@ -351,7 +351,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertIn("pdftotext", envelope["message"])
 
     def test_normalize_dry_run_json_report_shape(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.inventory_workspace(workspace)
 
@@ -382,7 +382,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertEqual({"would_create"}, {action["action"] for action in report["actions"]})
 
     def test_normalize_all_json_report_lists_created_actions(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.inventory_workspace(workspace)
 
@@ -406,7 +406,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertIn("warnings", action)
 
     def test_normalize_json_keeps_partial_pdf_extraction_nonfatal(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.inventory_workspace(workspace)
             self.force_pdf_fallback_manifest(workspace)
@@ -438,7 +438,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertTrue(any("needs OCR" in warning for warning in action["warnings"]))
 
     def test_normalize_text_output_remains_stderr_summary(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.inventory_workspace(workspace)
 
@@ -450,7 +450,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertIn("summary selector=all selected=3 planned=3", stderr)
 
     def test_sidecar_merges_provenance_with_verified_checksum(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             pdf_rel = "raw/pdf/2601.00001v1.pdf"
             self.write_sidecar(
@@ -480,7 +480,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertFalse([warning for warning in warnings if "provenance" in warning])
 
     def test_sidecar_preserves_curation_metadata_fields(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(
                 workspace,
@@ -506,7 +506,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertFalse(any("unknown provenance field ignored: candidate_id" in warning for warning in warnings))
 
     def test_currentness_sidecar_fields_are_preserved(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(
                 workspace,
@@ -543,7 +543,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertFalse(any("source_status" in warning for warning in warnings))
 
     def test_canonical_web_sidecar_preserves_official_metadata_fields(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.add_raw_web_root(workspace)
             raw_rel = "raw/web/canonical-official-web.html"
@@ -591,7 +591,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertFalse(any("unknown provenance field ignored" in warning for warning in warnings))
 
     def test_sidecar_preserves_complete_evidence_usability_override(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.add_raw_web_root(workspace)
             raw_rel = "raw/web/official-guidance.html"
@@ -629,7 +629,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertFalse(any("evidence_usability_override" in warning for warning in warnings), warnings)
 
     def test_sidecar_rejects_invalid_evidence_usability_override(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(
                 workspace,
@@ -655,7 +655,7 @@ class SourceDeliveryTests(unittest.TestCase):
         )
 
     def test_legacy_web_sidecar_name_is_reported_without_merging(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.add_raw_web_root(workspace)
             raw_rel = "raw/web/legacy-official-web.html"
@@ -689,7 +689,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertTrue(any("missing canonical provenance sidecar" in warning for warning in warnings))
 
     def test_delivery_failure_sidecar_fields_are_preserved_and_validated(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(
                 workspace,
@@ -865,7 +865,7 @@ class SourceDeliveryTests(unittest.TestCase):
         )
 
     def test_sidecar_files_are_excluded_from_manifest_records(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(workspace, "raw/pdf/2601.00001v1.pdf", {"origin_url": "https://example.org/x"})
 
@@ -876,7 +876,7 @@ class SourceDeliveryTests(unittest.TestCase):
                     self.assertNotIn(".provenance.yml", raw_path, f"sidecar leaked into record {record['id']}")
 
     def test_checksum_mismatch_marks_record_for_review(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             pdf_rel = "raw/pdf/2601.00001v1.pdf"
             self.write_sidecar(
@@ -893,7 +893,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertTrue(any("checksum mismatch" in warning for warning in warnings))
 
     def test_directory_sidecar_matches_bundle_but_cannot_verify_checksum(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(
                 workspace,
@@ -909,7 +909,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertTrue(any("directory target" in warning for warning in warnings))
 
     def test_null_license_is_preserved_as_known_unknown(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(
                 workspace,
@@ -929,7 +929,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertFalse([warning for warning in warnings if "provenance license" in warning])
 
     def test_malformed_sidecar_degrades_to_warning(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             sidecar = workspace / "raw" / "pdf" / "2601.00001v1.pdf.provenance.yml"
             sidecar.write_text("{[ this is not yaml\n")
@@ -941,7 +941,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertTrue(any("malformed provenance sidecar" in warning for warning in warnings))
 
     def test_invalid_fields_are_dropped_with_warnings(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(
                 workspace,
@@ -966,7 +966,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertTrue(any("unknown provenance field ignored: surprise" in warning for warning in warnings))
 
     def test_orphan_sidecar_warns_without_failing(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(workspace, "raw/pdf/missing-file.pdf", {"origin_url": "https://example.org/x"})
 
@@ -975,7 +975,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertTrue(any("target does not exist" in warning for warning in warnings))
 
     def test_provenance_propagates_into_normalized_frontmatter(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             self.write_sidecar(
                 workspace,
@@ -1004,7 +1004,7 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertEqual("fetch-agent/arxiv", provenance["retrieved_by"])
 
     def test_sidecar_change_updates_raw_fingerprint(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
             records, _ = self.build_records(workspace)
             before = self.record_by_id(records, "paper:2601.00001v1")["raw_fingerprint"]

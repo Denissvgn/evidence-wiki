@@ -77,7 +77,7 @@ class PipelineE2ETests(unittest.TestCase):
         stage will report LOW source_missing_noted issues for the new normalized
         records, which is expected and accepted by this test.
         """
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             shutil.copytree(ARXIV_FIXTURE, workspace)
 
@@ -143,7 +143,7 @@ class PipelineE2ETests(unittest.TestCase):
 
     def test_query_results_reference_normalized_source(self):
         """Query results from stage 4 should resolve to paths under sources/normalized/."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             shutil.copytree(ARXIV_FIXTURE, workspace)
 

@@ -54,7 +54,7 @@ class LinkParsingAdversarialTests(unittest.TestCase):
         )
 
     def test_inventory_merges_duplicate_urls_and_preserves_fragment_and_query_ids(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             (workspace / "raw" / "links").mkdir(parents=True)
             (workspace / "research.yml").write_text(
@@ -114,7 +114,7 @@ class ManifestAdversarialTests(unittest.TestCase):
         return [issue for issue in results["issues"] if issue["category"] == "source_manifest"]
 
     def test_manifest_reports_missing_required_fields_non_string_ids_and_conflicting_kinds(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             manifest = project / "sources" / "manifest.jsonl"
             manifest.write_text(
@@ -140,7 +140,7 @@ class ManifestAdversarialTests(unittest.TestCase):
         self.assertTrue(all(issue["severity"] == "HIGH" for issue in self.source_manifest_issues(results)))
 
     def test_manifest_large_valid_line_and_unexpected_nested_metadata_do_not_crash(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             manifest = project / "sources" / "manifest.jsonl"
             record = {

@@ -212,7 +212,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
             self.assertIn(ADA_ORCID, url)
             return works_payload(related, unrelated, seed_work)
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -299,7 +299,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
         unrelated = make_work("W222", "Marine Biology of Pacific Reefs", year=2010, is_oa=False)
         self.install_transport(lambda url, t, h: works_payload(related, unrelated))
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -335,7 +335,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
                 return authors_payload(resolved_author)
             return works_payload(related)
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -373,7 +373,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
             self.assertIn("/authors", url)
             return authors_payload(a1, a2)
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -408,7 +408,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
                 return authors_payload(resolved_author)
             return works_payload(related)
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -438,7 +438,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
     def test_no_author_match_emits_no_match_warning(self):
         def transport(url, timeout, headers):
             return authors_payload()  # empty results
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -459,7 +459,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
     # --- Default (no flag) stays read-only -----------------------------------
 
     def test_without_flag_no_network_and_authors_seed_list_returned(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -480,7 +480,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
     # --- Disabled gate -------------------------------------------------------
 
     def test_disabled_discovery_refuses(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -499,7 +499,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
     def test_re_run_does_not_duplicate_candidates(self):
         related = make_work("W111", "Retrieval Augmented Generation Benchmarks", is_oa=True)
         self.install_transport(lambda url, t, h: works_payload(related))
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -531,7 +531,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
             captured_urls.append(url)
             return works_payload(related)
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -556,7 +556,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
 
     def test_rate_limit_surfaces_openalex_rate_limited(self):
         self.install_transport(lambda url, t, h: (_ for _ in ()).throw(http_error(429)))
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(
@@ -571,7 +571,7 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
 
     def test_auth_failure_surfaces_openalex_auth_required(self):
         self.install_transport(lambda url, t, h: (_ for _ in ()).throw(http_error(401)))
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[self.openalex_paper_record(

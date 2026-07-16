@@ -668,6 +668,7 @@ def build_question_record(
 
 
 def build_export(project_root: Path, status_filter: list[str] | None) -> dict[str, Any]:
+    project_root = Path(project_root).expanduser().resolve()
     config = load_config(project_root)
     question_status = load_sibling_module("question_status")
     questions_dir = question_status.questions_directory(project_root, config)

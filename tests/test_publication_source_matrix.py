@@ -553,7 +553,7 @@ class PublicationSourceMatrixTests(unittest.TestCase):
                 inventory = self.run_inventory(workspace)
             self.assertEqual(0, inventory[0], inventory[2])
             before = raw_snapshot(workspace)
-            normalized_root = workspace / "sources" / "normalized"
+            normalized_root = (workspace / "sources" / "normalized").resolve()
             original_replace = Path.replace
             replacements = 0
 

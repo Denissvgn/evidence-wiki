@@ -187,7 +187,7 @@ class VerifyCitationsTests(unittest.TestCase):
         return {record["source_id"]: record for record in document["results"]}
 
     def test_local_provider_provenance_verifies_without_network(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             self.add_source(
                 workspace,
@@ -280,7 +280,7 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertIn("reacquire the exact work", wrong_work["remediation"])
 
     def test_local_valid_metadata_without_provider_provenance_skips_no_live(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             self.add_source(
                 workspace,
@@ -301,7 +301,7 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertEqual("skipped_no_live", result["result"])
 
     def test_requested_source_with_missing_title_or_identifier_is_insufficient(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             self.add_source(
                 workspace,
@@ -324,7 +324,7 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertTrue(any("title" in reason.lower() for reason in result["reasons"]))
 
     def test_live_arxiv_verifies_mismatches_and_not_found_with_mocked_transport(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 acquisition={
@@ -441,7 +441,7 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertEqual("not_found", result["result"])
 
     def test_live_provider_backed_source_with_empty_authors_is_insufficient_metadata(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 acquisition={
@@ -493,7 +493,7 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertTrue(any("openalex enrich" in reason.lower() for reason in result["reasons"]))
 
     def test_live_openalex_verifies_doi_work_id_mismatch_and_not_found(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 acquisition={
@@ -688,7 +688,7 @@ class VerifyCitationsTests(unittest.TestCase):
                 self.assertTrue(comparison["unmatched_local"], comparison)
 
     def test_live_openalex_author_name_forms_return_auditable_match_details(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 acquisition={
@@ -752,7 +752,7 @@ class VerifyCitationsTests(unittest.TestCase):
         )
 
     def test_live_openalex_version_lag_is_verified_with_diagnostic_for_provider_acquired_source(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 acquisition={
@@ -820,7 +820,7 @@ class VerifyCitationsTests(unittest.TestCase):
                 {"author": {"display_name": "Taylor Logic"}},
             ],
         }
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 acquisition={
@@ -938,7 +938,7 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertTrue(any("openalex_identity_conflict_unrecorded" in reason for reason in unrecorded["reasons"]))
 
     def test_live_mode_refuses_disabled_or_disallowed_provider_before_transport(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             self.add_source(
                 workspace,
@@ -956,7 +956,7 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertEqual("ACQUISITION_DISABLED", json.loads(stderr)["error_code"])
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 acquisition={
@@ -984,7 +984,7 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertEqual("ACQUISITION_PROVIDER_DISABLED", json.loads(stderr)["error_code"])
 
     def test_openalex_api_key_is_redacted_from_fatal_and_result_output(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 acquisition={
@@ -1018,7 +1018,7 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertNotIn("secret-value", stdout)
         self.assertNotIn("api_key=", stdout)
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 acquisition={

@@ -284,7 +284,8 @@ def validate_answer_page(project_root: Path, config: dict[str, Any], question_pa
         )
     if not target.is_file():
         raise ResolveError(EXIT_INVALID, "ANSWER_PAGE_MISSING", f"answer page does not exist: {relative}")
-    return PurePosixPath(os.path.relpath(target, start=question_path.parent.resolve())).as_posix()
+    native_relative = os.path.relpath(target, start=question_path.parent.resolve())
+    return PurePosixPath(native_relative.replace("\\", "/")).as_posix()
 
 
 def selected_coverage_manifest_path(project_root: Path, config: dict[str, Any], slug: str, value: str | None) -> Path:

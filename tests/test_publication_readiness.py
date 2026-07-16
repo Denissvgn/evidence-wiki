@@ -293,7 +293,7 @@ evidence_strength: corroborated""",
         }
 
     def test_publication_readiness_ships_when_artifacts_are_complete(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.write_ship_ready_vendor_fixture(target)
 
@@ -413,7 +413,7 @@ evidence_strength: corroborated""",
         self.assertTrue(all(item.get("policy") for item in clean["verdict_reasons"]))
 
     def test_publication_readiness_no_ship_when_human_review_pending(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.write_ship_ready_vendor_fixture(target)
             question = target / "wiki" / "questions" / "vendor-product-spec.md"
@@ -437,7 +437,7 @@ evidence_strength: corroborated""",
         self.assertTrue(any("pending required human review" in reason for reason in document["reasons"]["safety"]))
 
     def test_publication_readiness_ships_after_human_review_approval(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.write_ship_ready_vendor_fixture(target)
             question = target / "wiki" / "questions" / "vendor-product-spec.md"
@@ -460,7 +460,7 @@ evidence_strength: corroborated""",
         self.assertEqual("ship", document["verdict"])
 
     def test_publication_readiness_blocks_on_failed_coverage(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.write_ship_ready_vendor_fixture(target)
             coverage_path = target / "sources" / "coverage" / "vendor-product-spec.yml"
@@ -476,7 +476,7 @@ evidence_strength: corroborated""",
         self.assertTrue(any("vendor-product-spec" in reason for reason in document["reasons"]["coverage"]))
 
     def test_publication_readiness_requires_blocked_request_links(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             question = target / "wiki" / "questions" / "vendor-product-spec.md"
             question.write_text(
@@ -498,7 +498,7 @@ evidence_strength: corroborated""",
         )
 
     def test_publication_readiness_no_ships_current_legal_source_without_date_metadata(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.write_ship_ready_vendor_fixture(target)
             manifest_path = target / "sources" / "manifest.jsonl"
@@ -514,7 +514,7 @@ evidence_strength: corroborated""",
         self.assertTrue(any("current legal figure" in reason for reason in document["reasons"]["currentness"]))
 
     def test_publication_readiness_no_ships_withdrawn_standard_reference(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.write_ship_ready_vendor_fixture(target)
             manifest_path = target / "sources" / "manifest.jsonl"
@@ -558,7 +558,7 @@ evidence_strength: corroborated""",
         self.assertIn("standard_status_withdrawn", currentness)
 
     def test_publication_readiness_no_ships_failed_grounding_quote(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.write_ship_ready_vendor_fixture(target)
             question = target / "wiki" / "questions" / "vendor-product-spec.md"
@@ -579,7 +579,7 @@ evidence_strength: corroborated""",
         self.assertTrue(any("web:vendor-official-product-spec" in reason for reason in document["reasons"]["grounding"]))
 
     def test_publication_readiness_no_ships_when_workspace_leaks_secret(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.write_ship_ready_vendor_fixture(target)
             (target / "runs" / "run-leak").mkdir(parents=True, exist_ok=True)
@@ -595,7 +595,7 @@ evidence_strength: corroborated""",
         self.assertTrue(any("bearer_token" in reason for reason in document["reasons"]["safety"]))
 
     def test_publication_readiness_generates_evaluation_bundle(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.write_ship_ready_vendor_fixture(target)
 

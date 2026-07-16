@@ -229,7 +229,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
             self.assertIn(expected, readiness)
 
     def test_documented_source_cycle_has_nonzero_normalization_plan(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             shutil.copytree(ARXIV_FIXTURE, workspace)
 
@@ -623,7 +623,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
         self.assertIn("evidence-wiki orchestrator-guide", README.read_text())
 
     def test_research_acquire_default_workspace_is_inert(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             calls = []
 
@@ -680,7 +680,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
             self.assertIn("Do not run provider fetch commands", RESEARCH_ACQUIRE_SKILL.read_text())
 
     def test_research_acquire_loop_fulfills_request_and_reopens_question(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(
                 root,
@@ -1036,7 +1036,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
                 self.assertIn("skills/domain-pack-create.md", path.read_text())
 
     def test_documented_question_api_cycle_executes_on_fixture_workspace(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "workspace"
             profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text())
@@ -1260,7 +1260,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
             self.assertIn(expected, acquire)
 
     def test_pm_subagent_no_child_agent_failure_path_leaves_terminal_run(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(
                 Path(tmpdir),
                 [{"id": "delegation-question", "question": "Can the PM delegate work?", "priority": "high"}],
@@ -1434,7 +1434,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
         self.assertIn("question_resolve.py answer --slug", handoff)
         self.assertIn("question_resolve.py answer|block|defer|reject --slug", handoff)
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(
                 root,
@@ -1635,7 +1635,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
 
     def test_research_run_loop_drives_fixture_to_blocked_on_sources(self):
         """Execute the research-run skill command sequence on a seeded fixture."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "workspace"
             profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text())
@@ -1856,7 +1856,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
     def test_research_discover_loop_proposes_selects_and_plans_without_fetching(self):
         """Execute the documented discover -> review -> select -> plan-fetch chain
         on a fixture workspace with a fixture search backend (no network)."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(
                 Path(tmpdir),
                 [{"id": "which-rule", "question": "Which federal rule applies?", "priority": "high"}],

@@ -118,7 +118,7 @@ class SourceRequestsTests(unittest.TestCase):
         return markdown[0]["id"]
 
     def test_add_records_request_and_log_entry(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
 
             payload = self.add_request(target, "--question-slug", "which-benchmarks")
@@ -138,7 +138,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertIn("source-request | Recorded source request", (target / "log.md").read_text())
 
     def test_add_duplicate_open_request_is_noop(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             first = self.add_request(target)
 
@@ -149,7 +149,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual(1, len(self.artifact_lines(target)))
 
     def test_list_orders_offset_times_by_utc_and_mutation_persists_canonical_z(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             path = target / "sources" / "source-requests.jsonl"
             records = [
@@ -241,7 +241,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual(1, log_text.count(f"Needs: https://example.org/source-{index}\n"))
 
     def test_add_rejects_unknown_question_slug(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
 
             code, _, stderr = self.run_requests(
@@ -263,7 +263,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual([], self.artifact_lines(target))
 
     def test_list_filters_by_status(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.add_request(target)
             self.add_request(target, query="arXiv:2601.00002")
@@ -280,7 +280,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual([], payload["requests"])
 
     def test_fulfill_round_trip_with_delivered_source(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             request_id = self.add_request(target)["request"]["request_id"]
             source_id = self.deliver_and_inventory(target)
@@ -313,7 +313,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertIn("already fulfilled", stderr)
 
     def test_fulfill_rejects_unknown_request_and_source(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             request_id = self.add_request(target)["request"]["request_id"]
 
@@ -331,7 +331,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual("open", self.artifact_lines(target)[0]["status"])
 
     def test_plan_fetch_arxiv_request_suggests_download_without_mutation(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             created = self.add_request(target, "--question-slug", "which-benchmarks", query="arXiv:2601.00001v1")
             request_id = created["request"]["request_id"]
@@ -401,7 +401,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual(log_before, (target / "log.md").read_text())
 
     def test_plan_fetch_unversioned_arxiv_request_suggests_id_search_without_mutation(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             created = self.add_request(target, "--question-slug", "which-benchmarks")
             request_id = created["request"]["request_id"]
@@ -439,7 +439,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual(log_before, (target / "log.md").read_text())
 
     def test_plan_fetch_doi_request_suggests_openalex_get(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             request_id = self.add_request(target, query="https://doi.org/10.5555/example")["request"]["request_id"]
 
@@ -455,7 +455,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertIn("openalex download-pdf", route["reason"])
 
     def test_plan_fetch_ambiguous_paper_query_suggests_candidate_routes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             request_id = self.add_request(target, query="Synthetic retrieval benchmark survey")["request"]["request_id"]
 
@@ -556,7 +556,7 @@ class SourceRequestsTests(unittest.TestCase):
         )
 
     def test_plan_fetch_fulfilled_request_reports_no_routes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             request_id = self.add_request(target)["request"]["request_id"]
             source_id = self.deliver_and_inventory(target)
@@ -571,7 +571,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertTrue(any(source_id in warning for warning in payload["warnings"]))
 
     def test_plan_fetch_non_paper_request_reports_unsupported(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             code, created, stderr = self.requests_json(
                 target,
@@ -594,7 +594,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertTrue(any("manual delivery" in warning for warning in payload["warnings"]))
 
     def test_plan_fetch_unknown_request_uses_json_error_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
 
             code, stdout, stderr = self.run_requests(
@@ -613,7 +613,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual("REQUEST_UNKNOWN", envelope["error_code"])
 
     def test_workspace_status_surfaces_open_requests_in_blocked_verdict(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             request_id = self.add_request(target, "--question-slug", "which-benchmarks")["request"]["request_id"]
             self.set_question_status(
@@ -638,7 +638,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertTrue(any(request_id in reason for reason in document["readiness"]["reasons"]))
 
     def test_workspace_status_flags_blocked_questions_without_requests(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.set_question_status(
                 target,

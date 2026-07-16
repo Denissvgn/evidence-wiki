@@ -235,7 +235,7 @@ optional_facets:
         raise AssertionError(f"Question not exported: {slug}")
 
     def test_answered_question_record_carries_answer_and_citations(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir), handoff={"task_id": "chain-task-0042"})
 
             code, document = self.export_json(target)
@@ -275,7 +275,7 @@ optional_facets:
             )
 
     def test_export_surfaces_pending_and_approved_human_review_state(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             question = target / "wiki" / "questions" / "benchmarks.md"
             text = question.read_text(encoding="utf-8")
@@ -331,7 +331,7 @@ optional_facets:
             self.assertEqual("reviewer-a", record["human_review"]["reviewer"])
 
     def test_export_includes_grounding_and_quote_verification(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             question = target / "wiki" / "questions" / "benchmarks.md"
             question.write_text(
@@ -367,7 +367,7 @@ optional_facets:
         self.assertEqual("verified", answered["grounding_verification"]["grounding"][0]["result"])
 
     def test_export_includes_blocked_question_request_details(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             contamination = target / "wiki" / "questions" / "contamination.md"
             contamination.write_text(
@@ -424,7 +424,7 @@ optional_facets:
         )
 
     def test_export_surfaces_coverage_facets_and_linked_source_requests(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             question = target / "wiki" / "questions" / "benchmarks.md"
             question.write_text(
@@ -475,7 +475,7 @@ optional_facets:
             self.assertEqual("not_applicable", facets["optional-context"]["facet_verdict"])
 
     def test_export_surfaces_unconfirmed_negative_claim_probe_without_citation(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(
                 Path(tmpdir),
                 questions=[
@@ -519,7 +519,7 @@ optional_facets:
             self.assertEqual("unconfirmed", facets["required-identity"]["claim_probe"]["claim_verdict"])
 
     def test_export_includes_policy_verification_currentness_and_candidate_trace_blocks(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             self.write_candidate(
                 target,
@@ -593,7 +593,7 @@ optional_facets:
         )
 
     def test_export_surfaces_evidence_usability_override_audit(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             record = dict(MANIFEST_RECORD)
             record["provenance"] = {
@@ -626,7 +626,7 @@ optional_facets:
         )
 
     def test_export_refuses_tampered_signed_handoff_when_secret_configured(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(os.environ, {"EVIDENCE_WIKI_HANDOFF_SECRET": "workspace-secret"}):
                 target = self.seed_answered_workspace(
                     Path(tmpdir),
@@ -652,7 +652,7 @@ optional_facets:
             self.assertEqual("invalid", envelope["details"]["handoff_signature_status"])
 
     def test_citation_surfaces_checksum_provenance(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             checksum = "sha256:" + "a" * 64
             record = dict(MANIFEST_RECORD)
@@ -671,7 +671,7 @@ optional_facets:
             self.assertIs(True, citation["checksum_verified"])
 
     def test_citation_surfaces_academic_publication_metadata(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             record = dict(MANIFEST_RECORD)
             record["provenance"] = {
@@ -708,7 +708,7 @@ optional_facets:
         )
 
     def test_citation_surfaces_manual_web_evidence_metadata(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             record = dict(MANIFEST_RECORD)
             record["provenance"] = {
@@ -740,7 +740,7 @@ optional_facets:
         )
 
     def test_citation_surfaces_standards_metadata(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             record = dict(MANIFEST_RECORD)
             record["provenance"] = {
@@ -774,7 +774,7 @@ optional_facets:
         )
 
     def test_answer_summary_falls_back_to_first_body_paragraph(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             (target / "wiki" / "synthesis").mkdir(parents=True, exist_ok=True)
             (target / "wiki" / "synthesis" / "contamination-notes.md").write_text(ANSWER_PAGE_NO_SUMMARY)
@@ -792,7 +792,7 @@ optional_facets:
             self.assertEqual("First paragraph of the answer body text.", answered["answer_summary"])
 
     def test_missing_answer_page_surfaces_as_warning_not_crash(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.set_question_fields(
                 target,
@@ -810,7 +810,7 @@ optional_facets:
             self.assertTrue(any("missing answer page" in warning for warning in document["warnings"]))
 
     def test_unknown_source_id_yields_citation_with_warning(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.set_question_fields(
                 target,
@@ -833,7 +833,7 @@ optional_facets:
             self.assertTrue(any("not in manifest" in warning for warning in document["warnings"]))
 
     def test_status_filter_limits_exported_records_but_not_counts(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
 
             code, document = self.export_json(target, "--status", "answered")
@@ -845,7 +845,7 @@ optional_facets:
             self.assertEqual(["benchmarks"], [record["slug"] for record in document["questions"]])
 
     def test_jsonl_format_emits_envelope_then_question_records(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
 
             code, stdout, _ = self.run_export("--project-root", str(target), "--format", "jsonl")
@@ -860,7 +860,7 @@ optional_facets:
                 self.assertEqual("question", record["record_type"])
 
     def test_output_flag_writes_file_and_export_is_deterministic(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             output_path = Path(tmpdir) / "export.json"
 
@@ -879,7 +879,7 @@ optional_facets:
             self.assertEqual(first, second)
 
     def test_export_is_read_only(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
             snapshot = {
                 path: path.read_bytes()
@@ -898,7 +898,7 @@ optional_facets:
             self.assertEqual(snapshot, after)
 
     def test_missing_workspace_exits_2(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             code, _, stderr = self.run_export("--project-root", str(Path(tmpdir) / "nope"))
             self.assertEqual(2, code)
             self.assertIn("Missing config", stderr)

@@ -361,7 +361,7 @@ class DiscoveryQualityEvalHarness(unittest.TestCase):
         )
         for scenario in scenarios:
             with self.subTest(scenario=scenario["id"]):
-                with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+                with tempfile.TemporaryDirectory() as tmpdir:
                     produced = self.run_scenario(scenario, Path(tmpdir))
                 failures = self.score_scenario(scenario, produced)
                 self.assertEqual([], failures, f"{scenario['id']} regressions:\n" + "\n".join(failures))

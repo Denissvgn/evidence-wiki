@@ -147,7 +147,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
     # --- route construction per candidate type --------------------------------
 
     def test_github_candidate_suggests_repo_metadata(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate(
                 "cand-gh", "req-test01", provider="github", source_type="code_repository",
                 url="https://github.com/acme/rag-toolkit", trust_tier="primary_non_official",
@@ -170,14 +170,14 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertIsNone(route["manual_delivery"])
 
     def test_github_candidate_recognized_by_url_without_code_source_type(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-gh2", "req-test01", source_type="web_page", url="https://github.com/x/y")
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[cand])
             report = self.plan(workspace, request_id)
         self.assertEqual("github", self.routes_by_id(report)["cand-gh2"]["provider"])
 
     def test_versioned_arxiv_paper_candidate_suggests_download(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate(
                 "cand-paper", "req-test01", source_type="paper",
                 url="https://arxiv.org/abs/2601.00001v2", trust_tier="secondary_reputable", official_source=None,
@@ -202,7 +202,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         )
 
     def test_arxiv_paper_metadata_suggests_download_and_preserves_budget(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate(
                 "cand-paper-meta",
                 "req-test01",
@@ -255,7 +255,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertEqual(cand["provider_budget"], route["provider_budget"])
 
     def test_unversioned_arxiv_candidate_suggests_id_search(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-arxiv0", "req-test01", source_type="paper", url="arXiv:2601.00001")
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[cand])
             report = self.plan(workspace, request_id)
@@ -264,7 +264,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertEqual("search-by-id", route["route"])
 
     def test_doi_candidate_suggests_openalex_get(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-doi", "req-test01", source_type="paper", url="https://doi.org/10.1234/abcd.efgh")
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[cand])
             report = self.plan(workspace, request_id)
@@ -274,7 +274,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertIn("10.1234/abcd.efgh", route["command"])
 
     def test_openalex_oa_paper_metadata_suggests_pdf_download(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate(
                 "cand-openalex-oa",
                 "req-test01",
@@ -313,7 +313,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertEqual(cand["paper"], route["paper"])
 
     def test_openalex_metadata_only_paper_suggests_get_and_warns(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate(
                 "cand-openalex-metadata",
                 "req-test01",
@@ -363,7 +363,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertTrue(any("cand-openalex-metadata" in warning and "not open access" in warning for warning in report["warnings"]))
 
     def test_uncertain_openalex_paper_suggests_resolve_and_warns(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate(
                 "cand-openalex-uncertain",
                 "req-test01",
@@ -398,7 +398,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertTrue(any("cand-openalex-uncertain" in warning and "license" in warning for warning in report["warnings"]))
 
     def test_official_legal_candidate_suggests_web_get(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate(
                 "cand-legal", "req-test01", provider="legal", source_type="official_legal",
                 url="https://www.govinfo.gov/clean-air-act",
@@ -414,7 +414,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertIsNone(route["manual_delivery"])
 
     def test_standards_registry_candidate_suggests_selected_web_get_with_defaults(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate(
                 "cand-iso-19131",
                 "req-test01",
@@ -440,7 +440,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertIn("--source-type standards_registry_entry", route["command"])
 
     def test_dataset_candidate_manual_delivery_to_data_root(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-data", "req-test01", source_type="dataset", url="https://data.example/set")
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[cand])
             report = self.plan(workspace, request_id)
@@ -451,7 +451,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
     # --- selection scoping, status, and read-only guarantee -------------------
 
     def test_only_selected_candidates_for_this_request_are_included(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             mine = candidate("cand-mine", "req-test01", source_type="official_legal", url="https://govinfo.gov/a")
             other = candidate("cand-other", "req-OTHER", source_type="official_legal", url="https://govinfo.gov/b")
             unselected = candidate("cand-new", "req-test01", url="https://govinfo.gov/c")
@@ -466,7 +466,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertEqual(1, report["selected_candidate_count"])
 
     def test_selected_for_request_id_is_canonical_selection_link(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-newlink", "legacy-ignored", source_type="official_legal", url="https://govinfo.gov/a")
             cand["selected_for_request_id"] = "req-test01"
             cand.pop("selected_request_id")
@@ -477,7 +477,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertEqual(1, report["selected_candidate_count"])
 
     def test_candidates_upgrade_unsupported_web_request_to_ready(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-legal", "req-test01", source_type="official_legal", url="https://govinfo.gov/a")
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[cand], request_kind="web")
             report = self.plan(workspace, request_id)
@@ -486,7 +486,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertNotIn(REQUESTS.UNSUPPORTED_KIND_WARNING, report["warnings"])
 
     def test_no_candidates_keeps_legacy_behavior(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[], request_kind="web")
             report = self.plan(workspace, request_id)
         self.assertEqual("unsupported", report["plan_status"])
@@ -494,7 +494,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertEqual(0, report["selected_candidate_count"])
 
     def test_plan_fetch_never_mutates_artifacts_or_runs_network(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-legal", "req-test01", source_type="official_legal", url="https://govinfo.gov/a")
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[cand])
             store = workspace / "sources" / "discovery" / "candidates.jsonl"
@@ -508,7 +508,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
     # --- trust-tier threshold and provider allow-list warnings ----------------
 
     def test_low_trust_candidate_warns_against_default_threshold(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             low = candidate("cand-blog", "req-test01", trust_tier="secondary_unknown", official_source=None, recommended_action="review")
             ok = candidate("cand-ok", "req-test01", trust_tier="official_primary", url="https://govinfo.gov/a")
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[low, ok])
@@ -520,7 +520,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertFalse(any("cand-ok" in w and "below the required" in w for w in report["warnings"]))
 
     def test_request_min_trust_tier_override_tightens_threshold(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-db", "req-test01", trust_tier="secondary_reputable", official_source=False, recommended_action="review")
             workspace, request_id = self.write_workspace(
                 Path(tmpdir), candidates=[cand], request_extra={"min_trust_tier": "official_primary"}
@@ -530,21 +530,21 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertTrue(any("cand-db" in w and "below the required 'official_primary'" in w for w in report["warnings"]))
 
     def test_rejected_recommendation_is_flagged(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-rej", "req-test01", trust_tier="official_primary", recommended_action="reject", url="https://govinfo.gov/a")
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[cand])
             report = self.plan(workspace, request_id)
         self.assertTrue(any("cand-rej" in w and "reject" in w for w in report["warnings"]))
 
     def test_acquisition_disabled_warns_even_with_candidate_routes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-gh", "req-test01", source_type="code_repository", url="https://github.com/a/b")
             workspace, request_id = self.write_workspace(Path(tmpdir), candidates=[cand], acquisition_enabled=False)
             report = self.plan(workspace, request_id)
         self.assertIn(REQUESTS.ACQUISITION_DISABLED_WARNING, report["warnings"])
 
     def test_candidate_provider_not_allowlisted_warns(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             cand = candidate("cand-gh", "req-test01", source_type="code_repository", url="https://github.com/a/b")
             workspace, request_id = self.write_workspace(
                 Path(tmpdir), candidates=[cand], acquisition_enabled=True, providers=["arxiv"]

@@ -140,7 +140,7 @@ class WorkspacePathSafetyTests(unittest.TestCase):
                     self.assertFalse(external_marker.exists())
 
     def test_option_like_manifest_basename_stays_inside_generated_sources(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = self.copy_fixture(MINIMAL_FIXTURE, root)
             marker = root / "must-not-exist"
@@ -155,7 +155,7 @@ class WorkspacePathSafetyTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
     def test_normalize_rejects_unsafe_normalized_dir_in_dry_run_and_write_modes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = self.copy_fixture(ARXIV_FIXTURE, root)
             self.run_inventory(workspace)
@@ -174,7 +174,7 @@ class WorkspacePathSafetyTests(unittest.TestCase):
                     self.assertFalse((root / "escaped").exists())
 
     def test_lint_reports_high_config_issue_for_escaped_wiki_root(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = self.copy_fixture(MINIMAL_FIXTURE, root)
             outside = root / "outside-wiki"
@@ -190,7 +190,7 @@ class WorkspacePathSafetyTests(unittest.TestCase):
         self.assertTrue(any(issue["severity"] == "HIGH" for issue in results["issues"]))
 
     def test_smoke_reports_high_config_issue_for_escaped_source_path(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_fixture(MINIMAL_FIXTURE, Path(tmpdir))
             config = self.load_config(workspace)
             config["sources"]["normalized_dir"] = "../escaped"
@@ -202,7 +202,7 @@ class WorkspacePathSafetyTests(unittest.TestCase):
         self.assertTrue(any(issue["severity"] == "HIGH" for issue in results["issues"]))
 
     def test_query_rejects_unsafe_normalized_dir(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_fixture(MINIMAL_FIXTURE, Path(tmpdir))
             config = self.load_config(workspace)
             config["sources"]["normalized_dir"] = "../escaped"
@@ -214,7 +214,7 @@ class WorkspacePathSafetyTests(unittest.TestCase):
         self.assertIn("sources.normalized_dir", str(context.exception))
 
     def test_mcp_query_rejects_unsafe_index_path_without_sqlite_side_effects(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = self.copy_fixture(MINIMAL_FIXTURE, root)
             traversal_target = root.parent / f"{root.name}-traversal-index.sqlite3"
@@ -244,7 +244,7 @@ class WorkspacePathSafetyTests(unittest.TestCase):
                         self.assertFalse(Path(f"{escaped_base}{suffix}").exists())
 
     def test_question_status_rejects_unsafe_wiki_root(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             (workspace / "research.yml").write_text("wiki:\n  root: ..\\escaped\n")
 
@@ -260,7 +260,7 @@ class WorkspacePathSafetyTests(unittest.TestCase):
         self.assertIn("wiki.root", payload["message"])
 
     def test_json_smoke_output_includes_config_path_issue(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_fixture(MINIMAL_FIXTURE, Path(tmpdir))
             config = self.load_config(workspace)
             config["sources"]["manifest_path"] = "https://example.org/manifest.jsonl"

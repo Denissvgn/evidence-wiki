@@ -244,7 +244,7 @@ class LegalExecuteRankingTests(unittest.TestCase):
         return json.loads(stdout)
 
     def test_execute_ranks_official_sources_first(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.execute(self.write_workspace(Path(tmpdir)))
         self.assertEqual("execute", report["mode"])
         self.assertEqual("legal", report["provider"])
@@ -263,7 +263,7 @@ class LegalExecuteRankingTests(unittest.TestCase):
         self.assertTrue(all(c["discovered_by"] == DISCOVER.LEGAL_DISCOVERED_BY for c in candidates))
 
     def test_execute_classifies_each_source_correctly(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.execute(self.write_workspace(Path(tmpdir)))
         by_host = {c["search"]["host"]: c for c in report["candidates"]}
 
@@ -298,14 +298,14 @@ class LegalExecuteRankingTests(unittest.TestCase):
         self.assertEqual("reject", mirror["recommended_action"])
 
     def test_every_candidate_has_nonempty_rationale(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.execute(self.write_workspace(Path(tmpdir)))
         for candidate in report["candidates"]:
             self.assertTrue(candidate["rationale"].strip())
             self.assertIn("recommended_action", candidate["rationale"])
 
     def test_execute_without_provider_refuses(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), provider=False)
             code, stdout, stderr = self.run_legal(
                 workspace, "--jurisdiction", "us-federal", "--topic", "x", "--execute"
@@ -315,7 +315,7 @@ class LegalExecuteRankingTests(unittest.TestCase):
         self.assertEqual("SEARCH_PROVIDER_DISABLED", json.loads(stderr)["error_code"])
 
     def test_plan_mode_writes_nothing(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             code, stdout, _ = self.run_legal(workspace, "--jurisdiction", "us-federal", "--topic", "x")
             store = workspace / "sources" / "discovery" / "candidates.jsonl"

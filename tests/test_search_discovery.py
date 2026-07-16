@@ -142,7 +142,7 @@ class SearchQueryPlannerTests(SearchTestBase):
     """E33-T02: planning is the read-only default; --execute runs the plan."""
 
     def test_default_plan_is_single_general_web_query(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None)
             code, stdout, stderr = self.run_search(workspace, "--query", "carbon capture efficiency")
             stored = self.store_records(workspace)
@@ -160,7 +160,7 @@ class SearchQueryPlannerTests(SearchTestBase):
 
     def test_intents_produce_distinct_plans(self):
         plans = {}
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None)
             for intent in ("paper", "code", "dataset", "legal", "web"):
                 code, stdout, _ = self.run_search(workspace, "--query", "topic", "--intent", intent)
@@ -180,7 +180,7 @@ class SearchQueryPlannerTests(SearchTestBase):
         self.assertEqual(len(set(signatures.values())), len(signatures), "every intent must plan distinct queries")
 
     def test_legal_plan_uses_official_terms_and_prefers_official(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None)
             code, stdout, _ = self.run_search(
                 workspace, "--query", "emissions reporting", "--jurisdiction", "us-federal"
@@ -197,7 +197,7 @@ class SearchQueryPlannerTests(SearchTestBase):
             self.assertIn(term, joined)
 
     def test_every_planned_query_records_required_fields(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None)
             code, stdout, _ = self.run_search(
                 workspace, "--query", "topic", "--intent", "paper",
@@ -213,7 +213,7 @@ class SearchQueryPlannerTests(SearchTestBase):
             self.assertTrue(planned["rationale"].strip())
 
     def test_request_kind_drives_intent(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None)
             self.write_request(workspace, "req-paper00001", "paper")
             self.write_request(workspace, "req-code000001", "code")
@@ -232,7 +232,7 @@ class SearchQueryPlannerTests(SearchTestBase):
     def test_unknown_request_id_is_recorded_without_error(self):
         # Lenient like github discovery: an unknown request_id is still linked; it
         # just does not drive intent (falls back to the general web intent).
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None)
             code, stdout, _ = self.run_search(workspace, "--query", "topic", "--request-id", "req-missing00")
         self.assertEqual(0, code)
@@ -242,7 +242,7 @@ class SearchQueryPlannerTests(SearchTestBase):
         self.assertEqual("web", report["intent"])
 
     def test_explicit_intent_overrides_request_kind(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None)
             self.write_request(workspace, "req-paper00001", "paper")
             code, stdout, _ = self.run_search(
@@ -252,14 +252,14 @@ class SearchQueryPlannerTests(SearchTestBase):
         self.assertEqual("code", json.loads(stdout)["intent"])
 
     def test_plan_works_without_provider_configured(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None)
             code, stdout, _ = self.run_search(workspace, "--query", "topic", "--intent", "paper")
         self.assertEqual(0, code, "planning must not require a search provider")
         self.assertEqual("plan", json.loads(stdout)["mode"])
 
     def test_plan_disabled_discovery_refuses(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None, enabled=False)
             code, _, stderr = self.run_search(workspace, "--query", "topic")
         self.assertEqual(2, code)
@@ -272,7 +272,7 @@ class SearchQueryPlannerTests(SearchTestBase):
         original = socket.socket
         socket.socket = forbid_socket
         try:
-            with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+            with tempfile.TemporaryDirectory() as tmpdir:
                 workspace = self.write_workspace(Path(tmpdir), None)
                 code, _, _ = self.run_search(workspace, "--query", "topic", "--intent", "legal")
         finally:
@@ -286,7 +286,7 @@ class SearchQueryPlannerTests(SearchTestBase):
             "import json,sys,hashlib;q=sys.argv[-1];"
             "print(json.dumps([{'title':q,'url':'https://example.org/'+hashlib.sha1(q.encode()).hexdigest()[:8]}]))"
         )
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: command", f'command: [{sys.executable!r}, "-c", {program!r}]'],
@@ -304,7 +304,7 @@ class SearchExecutionTests(SearchTestBase):
     """E33-T01 backend behavior, reached through `--execute`."""
 
     def test_fixture_results_normalize_to_candidates_and_write_store(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Official CFR", "https://www.govinfo.gov/app/collection/cfr", snippet="Code of Federal Regulations"),
@@ -342,7 +342,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual([candidate["candidate_id"]], [r["candidate_id"] for r in stored])
 
     def test_request_id_links_candidates_else_discovery_run_id(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(Path(tmpdir), result("A", "https://example.org/a"))
             code, stdout, _ = self.run_search(
                 workspace, "--query", "thing", "--request-id", "req-1a2b3c4d5e", execute=True
@@ -360,7 +360,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertRegex(exploratory["discovery_run_id"], r"^disc-[0-9a-f]{10}$")
 
     def test_jurisdiction_passes_through_to_candidates(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(Path(tmpdir), result("A", "https://example.org/a"))
             code, stdout, _ = self.run_search(
                 workspace, "--query", "thing", "--jurisdiction", "us-federal", execute=True
@@ -371,7 +371,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("us-federal", report["candidates"][0]["jurisdiction"])
 
     def test_max_results_caps_candidates(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 *[result(f"R{i}", f"https://example.org/{i}") for i in range(10)],
@@ -381,7 +381,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual(3, json.loads(stdout)["count"])
 
     def test_domain_allowlist_keeps_only_matching_hosts(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("gov", "https://www.govinfo.gov/x"),
@@ -396,7 +396,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual(["data.govinfo.gov", "govinfo.gov"], hosts)
 
     def test_domain_blocklist_drops_matching_hosts(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("gov", "https://www.govinfo.gov/x"),
@@ -410,7 +410,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual(["govinfo.gov"], hosts)
 
     def test_duplicate_urls_are_collapsed(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("first", "https://example.org/a"),
@@ -421,7 +421,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual(1, json.loads(stdout)["count"])
 
     def test_results_without_http_url_are_skipped(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 {"title": "no url"},
@@ -435,7 +435,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("https://example.org/ok", candidates[0]["url"])
 
     def test_rerunning_same_query_is_idempotent(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(Path(tmpdir), result("A", "https://example.org/a"))
             _, out1, _ = self.run_search(workspace, "--query", "thing", execute=True)
             _, out2, _ = self.run_search(workspace, "--query", "thing", execute=True)
@@ -446,7 +446,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual(1, len(stored))
 
     def test_no_provider_configured_refuses_on_execute(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), None)
             code, stdout, stderr = self.run_search(workspace, "--query", "thing", execute=True)
         self.assertEqual(2, code)
@@ -456,21 +456,21 @@ class SearchExecutionTests(SearchTestBase):
         self.assertFalse(envelope["details"]["network_io_executed"])
 
     def test_provider_none_refuses_on_execute(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), ["provider: none"])
             code, _, stderr = self.run_search(workspace, "--query", "thing", execute=True)
         self.assertEqual(2, code)
         self.assertEqual("SEARCH_PROVIDER_DISABLED", json.loads(stderr)["error_code"])
 
     def test_unknown_provider_is_config_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), ["provider: bing"])
             code, _, stderr = self.run_search(workspace, "--query", "thing", execute=True)
         self.assertEqual(2, code)
         self.assertEqual("CONFIG_INVALID", json.loads(stderr)["error_code"])
 
     def test_disabled_discovery_refuses_before_provider(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir), result("A", "https://example.org/a"), enabled=False
             )
@@ -479,7 +479,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("DISCOVERY_DISABLED", json.loads(stderr)["error_code"])
 
     def test_missing_fixture_file_is_provider_failed(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: fixture", "fixture_path: sources/discovery/fixtures/absent.jsonl"],
@@ -489,7 +489,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("SEARCH_PROVIDER_FAILED", json.loads(stderr)["error_code"])
 
     def test_malformed_fixture_is_response_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: fixture", "fixture_path: sources/discovery/fixtures/results.jsonl"],
@@ -502,7 +502,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("DISCOVERY_RESPONSE_INVALID", json.loads(stderr)["error_code"])
 
     def test_fixture_path_traversal_is_config_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: fixture", "fixture_path: ../../etc/passwd"],
@@ -516,7 +516,7 @@ class SearchExecutionTests(SearchTestBase):
             "import json,sys;"
             "print(json.dumps([{'title':'cmd hit','url':'https://example.org/cmd','snippet':sys.argv[-1]}]))"
         )
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: command", f'command: [{sys.executable!r}, "-c", {program!r}]'],
@@ -530,7 +530,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("example.org", report["candidates"][0]["search"]["host"])
 
     def test_command_provider_nonzero_exit_is_provider_failed(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: command", f'command: [{sys.executable!r}, "-c", "import sys; sys.exit(3)"]'],
@@ -540,7 +540,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("SEARCH_PROVIDER_FAILED", json.loads(stderr)["error_code"])
 
     def test_command_provider_missing_binary_is_provider_failed(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: command", 'command: ["this-binary-does-not-exist-12345"]'],
@@ -550,7 +550,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("SEARCH_PROVIDER_FAILED", json.loads(stderr)["error_code"])
 
     def test_command_provider_bad_json_is_response_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: command", f'command: [{sys.executable!r}, "-c", "print(\'not json\')"]'],
@@ -560,7 +560,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("DISCOVERY_RESPONSE_INVALID", json.loads(stderr)["error_code"])
 
     def test_http_provider_returns_candidates_and_records_network(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: http", "endpoint: https://search.example.internal/api", "query_param: q"],
@@ -583,7 +583,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertIn("search.example.internal", seen["url"])
 
     def test_http_provider_requires_explicit_endpoint(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), ["provider: http", "query_param: q"])
             self.install_http(lambda *a: http_body())
             code, _, stderr = self.run_search(workspace, "--query", "x", execute=True)
@@ -591,7 +591,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("CONFIG_INVALID", json.loads(stderr)["error_code"])
 
     def test_http_provider_network_error_is_reported(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: http", "endpoint: https://search.example.internal/api"],
@@ -606,7 +606,7 @@ class SearchExecutionTests(SearchTestBase):
         self.assertEqual("DISCOVERY_NETWORK_ERROR", json.loads(stderr)["error_code"])
 
     def test_http_provider_bad_json_is_response_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 ["provider: http", "endpoint: https://search.example.internal/api"],
@@ -623,7 +623,7 @@ class SearchExecutionTests(SearchTestBase):
         original = socket.socket
         socket.socket = forbid_socket
         try:
-            with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+            with tempfile.TemporaryDirectory() as tmpdir:
                 ok = self.fixture_workspace(Path(tmpdir) / "ok", result("A", "https://example.org/a"))
                 off = self.write_workspace(Path(tmpdir) / "off", None, enabled=False)
                 no_provider = self.write_workspace(Path(tmpdir) / "np", None)
@@ -656,7 +656,7 @@ class SearchTrustRankingTests(SearchTestBase):
     def test_official_source_outranks_higher_ranked_seo_result(self):
         # The blog is returned first by the provider (rank 1) but a generic
         # secondary source; the official .gov result (rank 2) wins on tier.
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Air quality trends blog post", "https://enviro-explainers.example/trends",
@@ -676,7 +676,7 @@ class SearchTrustRankingTests(SearchTestBase):
         self.assertEqual(1, candidates[1]["search"]["provider_rank"])
 
     def test_official_candidate_recommended_for_fetch_when_clean(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Clean Air Act Section 60 text", "https://www.govinfo.gov/clean-air-act-60",
@@ -690,7 +690,7 @@ class SearchTrustRankingTests(SearchTestBase):
 
     def test_unknown_officialness_requires_review_never_fetch(self):
         # A generic blog has unverified provenance: official_source null, review.
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Random blog summary", "https://someone.example/post", snippet="a post"),
@@ -705,7 +705,7 @@ class SearchTrustRankingTests(SearchTestBase):
         self.assertIn("unknown_officialness", candidate["reasoning"]["risk_flags"])
 
     def test_suspicious_executable_download_is_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Installer", "https://example.org/tools/installer.exe", snippet="download"),
@@ -720,7 +720,7 @@ class SearchTrustRankingTests(SearchTestBase):
     def test_suspicious_archive_download_is_rejected_for_web_intent(self):
         # A .zip is suspicious for a generic web result, but legitimate for a
         # dataset intent (covered by the next test).
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Bundle", "https://example.org/data/bundle.zip", snippet="download"),
@@ -732,7 +732,7 @@ class SearchTrustRankingTests(SearchTestBase):
         self.assertIn("suspicious_download", candidate["reasoning"]["risk_flags"])
 
     def test_archive_is_not_suspicious_for_dataset_intent(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Survey dataset", "https://data.example/survey.zip", snippet="data distribution"),
@@ -746,7 +746,7 @@ class SearchTrustRankingTests(SearchTestBase):
     def test_mirror_duplicate_of_official_is_rejected(self):
         # A non-official mirror of the same content as an official source in the
         # same run is rejected (recorded with rationale, not silently dropped).
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Clean Air Act Section 60 text mirror", "https://mirror.example/cache/clean-air",
@@ -767,7 +767,7 @@ class SearchTrustRankingTests(SearchTestBase):
         self.assertEqual("fetch", official["recommended_action"])
 
     def test_terms_prohibited_mirror_is_unsafe(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Unauthorized full-text mirror", "https://paper-mirror.example/full-text",
@@ -781,7 +781,7 @@ class SearchTrustRankingTests(SearchTestBase):
         self.assertIn("terms_prohibited", candidate["reasoning"]["risk_flags"])
 
     def test_official_domains_config_promotes_to_official_primary(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.official_workspace(
                 Path(tmpdir),
                 ["acme-standards.org"],
@@ -798,7 +798,7 @@ class SearchTrustRankingTests(SearchTestBase):
     def test_domain_allowlist_treated_as_official_for_legal_query(self):
         # With prefer_official (legal intent via --jurisdiction), an allowlisted
         # official domain is recognized as official_primary.
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Emissions reporting statute", "https://regulator.example/statute",
@@ -815,7 +815,7 @@ class SearchTrustRankingTests(SearchTestBase):
         self.assertIs(True, candidate["official_source"])
 
     def test_result_official_hint_is_respected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 {"title": "Some page", "url": "https://example.org/some", "official": True, "snippet": "page"},
@@ -827,7 +827,7 @@ class SearchTrustRankingTests(SearchTestBase):
         self.assertIs(True, candidate["official_source"])
 
     def test_stale_published_date_raises_risk_flag(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("Old note", "https://example.org/note", snippet="a note", published="2010-05-01"),
@@ -839,7 +839,7 @@ class SearchTrustRankingTests(SearchTestBase):
         self.assertEqual("review", candidate["recommended_action"])
 
     def test_exact_phrase_match_recorded_and_boosts_relevance(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(
                 Path(tmpdir),
                 result("The quick brown fox jumps", "https://example.org/exact", snippet="over the lazy dog"),

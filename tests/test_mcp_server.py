@@ -124,7 +124,7 @@ class McpServerTests(unittest.TestCase):
         }
 
     def test_initialize_and_tools_list_expose_expected_metadata(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             server = MCP.ResearchWikiMcpServer(target)
 
@@ -168,7 +168,7 @@ class McpServerTests(unittest.TestCase):
             self.assertEqual(["batch"], tools["intake_questions"]["inputSchema"]["required"])
 
     def test_read_tools_return_same_json_payloads_as_underlying_scripts(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             server = MCP.ResearchWikiMcpServer(target)
 
@@ -216,7 +216,7 @@ class McpServerTests(unittest.TestCase):
             )
 
     def test_query_index_limit_is_capped_before_search(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             server = MCP.ResearchWikiMcpServer(target)
             captured_limits: list[int] = []
@@ -241,7 +241,7 @@ class McpServerTests(unittest.TestCase):
             self.assertEqual([QUERY_INDEX.MAX_QUERY_LIMIT], captured_limits)
 
     def test_intake_questions_dry_run_and_apply_match_script_contract(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             dry_target = self.init_workspace(root, name="dry-run-workspace")
             batch = {
@@ -266,7 +266,7 @@ class McpServerTests(unittest.TestCase):
             self.assertTrue((apply_target / "wiki" / "questions" / "which-benchmarks-are-robust.md").is_file())
 
     def test_intake_questions_limit_failure_uses_shared_error_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             config_path = target / "research.yml"
             config = yaml.safe_load(config_path.read_text())
@@ -291,7 +291,7 @@ class McpServerTests(unittest.TestCase):
             self.assertFalse((target / "wiki" / "questions" / "which-benchmark-suites-are-robust.md").exists())
 
     def test_intake_questions_field_cap_failure_preserves_error_details(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             server = MCP.ResearchWikiMcpServer(target)
 
@@ -329,7 +329,7 @@ class McpServerTests(unittest.TestCase):
             self.assertFalse((target / "wiki" / "questions" / "which-benchmark-suites-are-robust.md").exists())
 
     def test_intake_questions_rejects_oversized_mcp_batch_before_writes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             config_path = target / "research.yml"
             config = yaml.safe_load(config_path.read_text())
@@ -443,7 +443,7 @@ class McpServerTests(unittest.TestCase):
         )
 
     def test_tool_execution_errors_use_shared_error_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             server = MCP.ResearchWikiMcpServer(target)
 
@@ -458,7 +458,7 @@ class McpServerTests(unittest.TestCase):
             self.assertEqual("CONFIG_MISSING", missing_status["structuredContent"]["error_code"])
 
     def test_export_answers_reports_handoff_signature_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             with mock.patch.dict(os.environ, {"EVIDENCE_WIKI_HANDOFF_SECRET": "workspace-secret"}):
                 target = self.init_workspace(
@@ -492,7 +492,7 @@ class McpServerTests(unittest.TestCase):
             (None, "Tool exited without a status code."),
         ):
             with self.subTest(exit_code=exit_code):
-                server = MCP.ResearchWikiMcpServer("/tmp")
+                server = MCP.ResearchWikiMcpServer(tempfile.gettempdir())
 
                 def exit_from_tool(name, arguments, exit_code=exit_code):
                     raise SystemExit(exit_code)
@@ -511,7 +511,7 @@ class McpServerTests(unittest.TestCase):
     def test_os_error_tool_failure_is_sanitized_and_logged(self):
         secret_path = "/tmp/private-workspace/raw/secret-note.md"
         raw_message = f"Permission denied while reading {secret_path}"
-        server = MCP.ResearchWikiMcpServer("/tmp")
+        server = MCP.ResearchWikiMcpServer(tempfile.gettempdir())
 
         def fail_from_tool(name, arguments):
             raise OSError(raw_message)
@@ -535,7 +535,7 @@ class McpServerTests(unittest.TestCase):
     def test_string_system_exit_failure_is_sanitized_and_logged(self):
         secret_path = "/tmp/private-workspace/research.yml"
         raw_message = f"Invalid YAML in {secret_path}: while scanning a quoted scalar"
-        server = MCP.ResearchWikiMcpServer("/tmp")
+        server = MCP.ResearchWikiMcpServer(tempfile.gettempdir())
 
         def fail_from_tool(name, arguments):
             raise SystemExit(raw_message)
@@ -559,7 +559,7 @@ class McpServerTests(unittest.TestCase):
     def test_sqlite_tool_failure_is_sanitized_and_logged(self):
         secret_path = "/tmp/private-workspace/.research-cache/index.db"
         raw_message = f"unable to open database file at {secret_path}: malformed sqlite_master"
-        server = MCP.ResearchWikiMcpServer("/tmp")
+        server = MCP.ResearchWikiMcpServer(tempfile.gettempdir())
 
         def fail_from_tool(name, arguments):
             raise sqlite3.Error(raw_message)
@@ -581,7 +581,7 @@ class McpServerTests(unittest.TestCase):
         self.assertIn(raw_message, stderr.getvalue())
 
     def test_protocol_errors_and_stdio_loop_emit_only_json_rpc_messages(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             server = MCP.ResearchWikiMcpServer(target)
 
@@ -723,16 +723,27 @@ class McpServerTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
             status = self.call_tool(server, "workspace_status")
+            export = self.call_tool(server, "export_answers")
+            direct_export = EXPORT.build_export(alias, None)
 
         self.assertEqual(target.resolve(), server.project_root)
         self.assertFalse(status["isError"])
         self.assertEqual(
-            str(target.resolve()),
+            target.resolve().as_posix(),
             status["structuredContent"]["workspace_health"]["project_root"],
+        )
+        self.assertFalse(export["isError"])
+        self.assertEqual(
+            without_generated_at(direct_export),
+            without_generated_at(export["structuredContent"]),
+        )
+        self.assertEqual(
+            "wiki/questions/benchmarks.md",
+            export["structuredContent"]["questions"][0]["question_page"],
         )
 
     def test_json_rpc_rejects_invalid_ids_without_echoing_them(self):
-        server = MCP.ResearchWikiMcpServer("/tmp")
+        server = MCP.ResearchWikiMcpServer(tempfile.gettempdir())
         invalid_ids = [
             {"nested": "object"},
             ["array"],
@@ -753,7 +764,7 @@ class McpServerTests(unittest.TestCase):
                 self.assertEqual("id must be a string, finite number, or null", response["error"]["message"])
 
     def test_json_rpc_accepts_valid_request_ids(self):
-        server = MCP.ResearchWikiMcpServer("/tmp")
+        server = MCP.ResearchWikiMcpServer(tempfile.gettempdir())
         valid_ids = ["req-1", 0, 42, 3.25, None]
 
         for message_id in valid_ids:
@@ -765,7 +776,7 @@ class McpServerTests(unittest.TestCase):
                 self.assertIn("tools", response["result"])
 
     def test_no_id_request_style_messages_are_ignored_without_mutation(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             protocol_server = MCP.ResearchWikiMcpServer(target)
             questions_dir = target / "wiki" / "questions"
@@ -814,7 +825,7 @@ class McpServerTests(unittest.TestCase):
             self.assertEqual(log_before, (target / "log.md").read_text())
 
     def test_stdio_loop_rejects_oversized_json_rpc_line_and_continues(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             protocol_server = MCP.ResearchWikiMcpServer(target)
             valid_request = json.dumps(
@@ -845,7 +856,7 @@ class McpServerTests(unittest.TestCase):
             self.assertIn("tools", tools_response["result"])
 
     def test_stdio_loop_sanitizes_parse_errors_and_continues(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             protocol_server = MCP.ResearchWikiMcpServer(target)
             malformed_line = '{"jsonrpc":"2.0","id":1,"method":"tools/list",bad}'
@@ -885,7 +896,7 @@ class McpServerTests(unittest.TestCase):
             self.assertIn("tools", tools_response["result"])
 
     def test_stdio_loop_reports_unexpected_message_exception_and_continues(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             protocol_server = MCP.ResearchWikiMcpServer(target)
             original_handle_message = protocol_server.handle_message
@@ -926,7 +937,7 @@ class McpServerTests(unittest.TestCase):
             self.assertIn("tools", tools_response["result"])
 
     def test_stdio_loop_internal_errors_do_not_echo_invalid_ids(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             protocol_server = MCP.ResearchWikiMcpServer(target)
 

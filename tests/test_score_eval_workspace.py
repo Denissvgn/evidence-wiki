@@ -55,7 +55,7 @@ class ScoreEvalWorkspaceTests(unittest.TestCase):
         return json.loads(stdout.getvalue())
 
     def test_scores_answered_blocked_and_distractor_citations(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             export_path = root / "export.json"
             expected_path = root / "expected.yml"
@@ -143,7 +143,7 @@ class ScoreEvalWorkspaceTests(unittest.TestCase):
         self.assertIn("raw:parking-distractor", by_slug["cooling-corridors"]["findings"][0])
 
     def test_missing_and_unexpected_questions_are_reported(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             export_path = root / "export.json"
             expected_path = root / "expected.yml"

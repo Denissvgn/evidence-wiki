@@ -148,6 +148,7 @@ class WorkspaceGcTests(unittest.TestCase):
                 names = set(archive.getnames())
             self.assertIn(f"{terminal_run}/run-state.json", names)
             self.assertIn(f"{terminal_run}/events.jsonl", names)
+            self.assertFalse(any(".locks" in Path(name).parts for name in names))
 
     def test_apply_uses_unique_temp_archive_and_preserves_existing_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
