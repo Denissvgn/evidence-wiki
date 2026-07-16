@@ -31,3 +31,4 @@ temp/
 RELEASING.md
 !workspace-template/AGENTS.md
 !examples/urban-heat-resilience-workspace/AGENTS.md
+!tests/fixtures/madrid-autonomo-workspace/AGENTS.md

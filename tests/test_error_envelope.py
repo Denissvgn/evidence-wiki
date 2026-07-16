@@ -223,7 +223,7 @@ class ErrorEnvelopeTests(unittest.TestCase):
     def test_workspace_status_json_failure_uses_shared_health_document(self):
         status = load_script_module("error_envelope_status", "workspace_status.py")
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             code, stdout, stderr = self.run_module(status, ["--project-root", tmpdir, "--format", "json"])
 
         self.assertEqual(2, code)
@@ -243,7 +243,7 @@ class ErrorEnvelopeTests(unittest.TestCase):
 
     def test_question_claim_json_conflict_uses_error_envelope_with_details(self):
         claim = load_script_module("error_envelope_question_claim", "question_claim.py")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             code, _, stderr = self.run_module(
                 claim,

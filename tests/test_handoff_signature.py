@@ -60,7 +60,7 @@ class HandoffSignatureTests(unittest.TestCase):
         )
 
     def test_secret_source_precedence_and_blank_env(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / ".research-handoff-secret").write_text("sidecar-secret\n", encoding="utf-8")
 

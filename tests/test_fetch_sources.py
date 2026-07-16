@@ -408,7 +408,7 @@ class FetchSourcesTests(unittest.TestCase):
         return int(code or 0), stdout.getvalue(), stderr.getvalue()
 
     def test_default_workspace_rejects_json_provider_command_before_network(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             calls = []
 
@@ -441,7 +441,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual([], calls)
 
     def test_enabled_workspace_rejects_provider_not_in_allow_list(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 {
@@ -473,7 +473,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIn("not listed", envelope["message"])
 
     def test_unsafe_target_root_is_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 {
@@ -505,7 +505,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIn("target_root", envelope["message"])
 
     def test_max_downloads_per_run_is_enforced_for_bounded_commands(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 {
@@ -537,7 +537,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIn("max_downloads_per_run", envelope["message"])
 
     def test_provenance_helper_writes_sidecar_with_checksum(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "paper.pdf"
             target.write_bytes(b"pdf bytes")
@@ -567,7 +567,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertRegex(payload["checksum"], r"^sha256:[0-9a-f]{64}$")
 
     def test_arxiv_search_parses_atom_response_to_compact_json(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_enabled_workspace(Path(tmpdir))
             calls = []
 
@@ -619,7 +619,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual(30.0, calls[0][1])
 
     def test_arxiv_id_list_search_writes_output_file_and_small_stdout(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_enabled_workspace(Path(tmpdir))
             calls = []
 
@@ -658,7 +658,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual(["2"], query["max_results"])
 
     def test_arxiv_rate_limiter_waits_between_requests(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_enabled_workspace(Path(tmpdir))
             sleeps = []
             now = [100.0]
@@ -698,7 +698,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual([3.0], sleeps)
 
     def test_arxiv_retry_succeeds_after_transient_failure(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_enabled_workspace(Path(tmpdir))
             attempts = []
 
@@ -751,7 +751,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual([1.0, 2.0, 4.0, 8.0, 8.0], [self.fetch.retry_backoff_seconds(i) for i in range(1, 6)])
 
     def test_interrupted_marker_is_quarantined_and_retry_commits_one_evidence_pair(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "raw" / "papers" / "paper.pdf"
             target.parent.mkdir(parents=True)
             target.write_bytes(b"incomplete")
@@ -775,7 +775,7 @@ class FetchSourcesTests(unittest.TestCase):
             self.assertEqual(1, len(list(target.parent.glob("paper.pdf.provenance.yml"))))
 
     def test_failed_artifact_transaction_never_promotes_partial_evidence(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "raw" / "papers" / "paper.pdf"
             with self.assertRaises(self.fetch.FetchSourcesError) as raised:
                 with self.fetch.acquisition_artifact_transaction(target):
@@ -790,7 +790,7 @@ class FetchSourcesTests(unittest.TestCase):
             self.assertEqual(1, len(list(quarantine.glob("paper.pdf.*.interrupted"))))
 
     def test_inventory_refuses_marker_backed_payload_until_sidecar_commit(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_enabled_workspace(Path(tmpdir))
             target = workspace / "raw" / "papers" / "incomplete.pdf"
             target.write_bytes(b"incomplete payload")
@@ -838,7 +838,7 @@ class FetchSourcesTests(unittest.TestCase):
                 print(json.dumps({"committed": False, "error_code": exc.error_code}))
             """
         )
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "raw" / "papers" / "same.pdf"
             with self.fetch.acquisition_artifact_transaction(target):
                 self.fetch.atomic_write_bytes(target, b"parent")
@@ -867,7 +867,7 @@ class FetchSourcesTests(unittest.TestCase):
             self.assertEqual("https://official.example/parent", provenance["origin_url"])
 
     def test_repeated_invocations_enforce_retained_run_download_budget(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_web_workspace(Path(tmpdir), limit=1)
             run_id = self.write_active_run(workspace)
 
@@ -902,7 +902,7 @@ class FetchSourcesTests(unittest.TestCase):
             self.assertFalse((workspace / "raw" / "web" / "official-example-second.html").exists())
 
     def test_retained_github_byte_fallback_blocks_cumulative_overrun(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(
                 Path(tmpdir),
                 {
@@ -946,7 +946,7 @@ class FetchSourcesTests(unittest.TestCase):
             self.assertFalse(self.fetch.acquisition_marker_path(refused).exists())
 
     def test_arxiv_timeout_exhaustion_returns_json_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_enabled_workspace(Path(tmpdir))
 
             def transport(_url: str, _timeout: float) -> bytes:
@@ -974,7 +974,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIn("timed out", envelope["message"])
 
     def test_arxiv_pdf_download_writes_file_checksum_and_request_sidecar(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_enabled_workspace(Path(tmpdir))
             urls = []
 
@@ -1037,7 +1037,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertRegex(provenance["checksum"], r"^sha256:[0-9a-f]{64}$")
 
     def test_arxiv_pdf_download_degrades_when_metadata_lookup_fails(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_enabled_workspace(Path(tmpdir))
             urls = []
 
@@ -1078,7 +1078,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIn("metadata lookup failed", provenance["notes"].lower())
 
     def test_arxiv_source_download_extracts_bundle_and_inventory_records_provenance(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_enabled_workspace(Path(tmpdir))
             archive = tar_gz_bytes(
                 {
@@ -1138,7 +1138,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual("req-source", paper["provenance"]["request_id"])
 
     def test_arxiv_source_download_rejects_unsafe_archive_member(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = self.build_enabled_workspace(root)
             archive = tar_gz_bytes({"../escape.tex": b"escaped"})
@@ -1174,7 +1174,7 @@ class FetchSourcesTests(unittest.TestCase):
             {"caf\u00e9.tex": b"one", "cafe\u0301.tex": b"two"},
         )
         for members in cases:
-            with self.subTest(members=tuple(members)), tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+            with self.subTest(members=tuple(members)), tempfile.TemporaryDirectory() as tmpdir:
                 workspace = self.build_enabled_workspace(Path(tmpdir))
                 archive = tar_gz_bytes(members)
                 self.install_transport(lambda _url, _timeout, payload=archive: payload)
@@ -1197,7 +1197,7 @@ class FetchSourcesTests(unittest.TestCase):
                 self.assertEqual("ACQUISITION_ARCHIVE_UNSAFE", json.loads(stderr)["error_code"])
 
     def test_acquisition_rejects_symlinked_target_ancestor(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = self.build_enabled_workspace(root)
             outside = root / "outside"
@@ -1236,7 +1236,7 @@ class FetchSourcesTests(unittest.TestCase):
             ("ARXIV_MAX_UNCOMPRESSED_BYTES", 3, {"large.tex": b"1234"}),
         )
         for constant, limit, members in cases:
-            with self.subTest(constant=constant), tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+            with self.subTest(constant=constant), tempfile.TemporaryDirectory() as tmpdir:
                 workspace = self.build_enabled_workspace(Path(tmpdir))
                 archive = tar_gz_bytes(members)
                 self.install_transport(lambda _url, _timeout, payload=archive: payload)
@@ -1261,7 +1261,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertFalse((workspace / "raw" / "papers" / "arxiv-2601.00001v1").exists())
 
     def test_arxiv_source_archive_enforces_limits_without_materializing_all_headers(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "source"
             archive = tar_gz_bytes({"main.tex": b"content"})
             with mock.patch.object(self.fetch.tarfile.TarFile, "getmembers", side_effect=AssertionError("unbounded")):
@@ -1270,7 +1270,7 @@ class FetchSourcesTests(unittest.TestCase):
             self.assertEqual(b"content", (target / "main.tex").read_bytes())
 
     def test_openalex_resolve_parses_exact_work_to_compact_json(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             calls = []
             sleeps = []
@@ -1324,7 +1324,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual([], sleeps)
 
     def test_openalex_resolve_requires_exact_enough_result(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
 
             def transport(_url: str, _timeout: float, _headers: dict[str, str]) -> bytes:
@@ -1355,7 +1355,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIn("get --id-or-doi", envelope["remediation"])
 
     def test_openalex_resolve_allow_unconfirmed_returns_bounded_probe_report(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
 
             def transport(_url: str, _timeout: float, _headers: dict[str, str]) -> bytes:
@@ -1451,7 +1451,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIsNone(review["resolved"])
 
     def test_openalex_get_uses_env_api_key_and_normalizes_doi(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             calls = []
 
@@ -1492,7 +1492,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertNotIn("test-openalex-key", calls[0][1].get("User-Agent", ""))
 
     def test_openalex_network_error_redacts_env_api_key(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
 
             def transport(url: str, _timeout: float, _headers: dict[str, str]) -> bytes:
@@ -1527,7 +1527,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIn("api_key=%5BREDACTED%5D", envelope["message"])
 
     def test_openalex_download_pdf_writes_license_provenance_and_inventory_record(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             calls = []
 
@@ -1669,7 +1669,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIn("no safe SPDX mapping", pdf_provenance["notes"])
 
     def test_openalex_enrich_updates_existing_arxiv_sidecar_with_identity(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             target = workspace / "raw" / "papers" / "2601.00001v1.pdf"
             target.write_bytes(b"%PDF-1.4\nSynthetic PDF bytes\n")
@@ -1750,7 +1750,7 @@ class FetchSourcesTests(unittest.TestCase):
             ("cc-by", "unresolved"),
         ]
         for slug, expected_license in cases:
-            with self.subTest(slug=slug), tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+            with self.subTest(slug=slug), tempfile.TemporaryDirectory() as tmpdir:
                 workspace = self.build_openalex_workspace(Path(tmpdir))
                 sidecar = self.write_arxiv_source_for_enrichment(workspace)
                 work = {
@@ -1803,7 +1803,7 @@ class FetchSourcesTests(unittest.TestCase):
                 self.assertEqual("https://arxiv.org/abs/2601.00001v1", provenance["terms_url"])
 
     def test_openalex_enrich_records_title_lag_evidence(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             sidecar = self.write_arxiv_source_for_enrichment(
                 workspace,
@@ -1851,7 +1851,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual("matched", provenance["openalex_identity_evidence"]["authors"])
 
     def test_openalex_enrich_records_wrong_work_conflict_evidence(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             sidecar = self.write_arxiv_source_for_enrichment(
                 workspace,
@@ -1911,7 +1911,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual("https://arxiv.org/abs/2504.19874", provenance["doi_resolution"]["resolved_url"])
 
     def test_openalex_enrich_records_uncorroborated_wrong_work_conflict(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             sidecar = self.write_arxiv_source_for_enrichment(
                 workspace,
@@ -1968,7 +1968,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual("https://example.org/not-the-paper", provenance["doi_resolution"]["resolved_url"])
 
     def test_openalex_enrich_records_doi_resolution_network_error_without_failing_command(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             sidecar = self.write_arxiv_source_for_enrichment(
                 workspace,
@@ -2020,7 +2020,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertIn("synthetic DOI timeout", provenance["doi_resolution"]["error"])
 
     def test_openalex_enrich_records_unresolved_404_without_failing_command(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             target = workspace / "raw" / "papers" / "2601.00001v1.pdf"
             target.write_bytes(b"%PDF-1.4\nSynthetic PDF bytes\n")
@@ -2085,7 +2085,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual("not_found", provenance["openalex_enrichment_error"])
 
     def test_openalex_enrich_missing_identifier_does_not_report_network_io(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             target = workspace / "raw" / "papers" / "paper-without-id.pdf"
             target.write_bytes(b"%PDF-1.4\nSynthetic PDF bytes\n")
@@ -2149,7 +2149,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual("missing_arxiv_id_or_doi", provenance["openalex_enrichment_error"])
 
     def test_openalex_get_output_writes_metadata_snapshot_with_explicit_null_license(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
 
             def transport(_url: str, _timeout: float, _headers: dict[str, str]) -> bytes:
@@ -2221,7 +2221,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual("metadata_only", record["provenance"]["academic_source_type"])
 
     def test_openalex_download_pdf_refuses_output_outside_target_root(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
 
             def transport(_url: str, _timeout: float, _headers: dict[str, str]) -> bytes:
@@ -2256,7 +2256,7 @@ class FetchSourcesTests(unittest.TestCase):
         ]
         for status, error_code, guidance in cases:
             with self.subTest(status=status):
-                with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+                with tempfile.TemporaryDirectory() as tmpdir:
                     workspace = self.build_openalex_workspace(Path(tmpdir))
 
                     def transport(_url: str, _timeout: float, _headers: dict[str, str], status=status) -> bytes:
@@ -2322,7 +2322,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual(self.fetch.OPENALEX_PDF_CONTENT_TYPES, calls[1][1]["expected_content_types"])
 
     def test_openalex_download_pdf_refuses_non_open_access_work(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_openalex_workspace(Path(tmpdir))
             calls = []
 
@@ -2832,7 +2832,7 @@ class GithubAcquisitionTests(unittest.TestCase):
     # --- repository metadata snapshot -----------------------------------
 
     def test_repo_metadata_writes_snapshot_and_provenance(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             self.install_github_transport([("/repos/", github_repo_metadata("acme/tool", license_key="MIT"))])
             code, stdout, stderr = self.run_fetch(
@@ -2866,7 +2866,7 @@ class GithubAcquisitionTests(unittest.TestCase):
         self.assertRegex(provenance["checksum"], r"^sha256:[0-9a-f]{64}$")
 
     def test_repo_metadata_accepts_url_and_records_license_uncertainty(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             self.install_github_transport([("/repos/", github_repo_metadata("acme/tool", license_key=None))])
             code, stdout, _ = self.run_fetch(
@@ -2884,7 +2884,7 @@ class GithubAcquisitionTests(unittest.TestCase):
     # --- release asset metadata -----------------------------------------
 
     def test_release_metadata_latest_writes_snapshot(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             self.install_github_transport([("/releases/latest", github_release_payload("v1.0.0"))])
             code, stdout, stderr = self.run_fetch(
@@ -2912,7 +2912,7 @@ class GithubAcquisitionTests(unittest.TestCase):
         self.assertEqual(4096, snapshot["assets"][0]["size"])
 
     def test_release_metadata_missing_release_returns_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             self.install_github_transport(
                 [("/releases/latest", HTTPError(url="x", code=404, msg="not found", hdrs=None, fp=None))]
@@ -2929,7 +2929,7 @@ class GithubAcquisitionTests(unittest.TestCase):
 
     def test_download_archive_writes_file_provenance_without_extraction(self):
         archive = tar_gz_bytes({"tool/main.py": b"print('hi')\n", "tool/README.md": b"# tool\n"})
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             calls = self.install_github_transport(
                 [
@@ -2980,7 +2980,7 @@ class GithubAcquisitionTests(unittest.TestCase):
                 self.assertNotIn(fragment, url)
 
     def test_download_archive_refuses_oversize_repo_metadata_before_download(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir), github={"max_archive_bytes": 1024})
             calls = self.install_github_transport(
                 [
@@ -3004,7 +3004,7 @@ class GithubAcquisitionTests(unittest.TestCase):
 
     def test_download_archive_refuses_oversize_downloaded_bytes(self):
         big_archive = tar_gz_bytes({"tool/data.bin": b"x" * 4096})
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir), github={"max_archive_bytes": 32})
             self.install_github_transport(
                 [
@@ -3029,7 +3029,7 @@ class GithubAcquisitionTests(unittest.TestCase):
     def test_requires_exactly_one_of_repo_or_url(self):
         for selector in ([], ["--repo", "acme/tool", "--url", "https://github.com/acme/tool"]):
             with self.subTest(selector=selector):
-                with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+                with tempfile.TemporaryDirectory() as tmpdir:
                     workspace = self.build_github_workspace(Path(tmpdir))
                     self.install_github_transport([("/repos/", github_repo_metadata("acme/tool"))])
                     code, stdout, stderr = self.run_fetch(
@@ -3041,7 +3041,7 @@ class GithubAcquisitionTests(unittest.TestCase):
                 self.assertEqual("GITHUB_REPO_INVALID", json.loads(stderr)["error_code"])
 
     def test_invalid_ref_is_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             self.install_github_transport([("/repos/", github_repo_metadata("acme/tool"))])
             code, _, stderr = self.run_fetch(
@@ -3056,7 +3056,7 @@ class GithubAcquisitionTests(unittest.TestCase):
     def test_token_authenticates_without_leaking_value(self):
         secret = "ghp_supersecrettokenvalue1234567890"
         os.environ["GITHUB_TOKEN"] = secret
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             seen = {}
 
@@ -3123,7 +3123,7 @@ class GithubAcquisitionTests(unittest.TestCase):
         self.assertIn("access_token=%5BREDACTED%5D", stderr)
 
     def test_unauthenticated_sends_no_authorization_header(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             calls = self.install_github_transport([("/repos/", github_repo_metadata("acme/tool"))])
             code, stdout, _ = self.run_fetch(
@@ -3137,7 +3137,7 @@ class GithubAcquisitionTests(unittest.TestCase):
     # --- auth / rate limit ----------------------------------------------
 
     def test_auth_failure_returns_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             self.install_github_transport(
                 [("/repos/", HTTPError(url="x", code=401, msg="bad creds", hdrs=None, fp=None))]
@@ -3154,7 +3154,7 @@ class GithubAcquisitionTests(unittest.TestCase):
     def test_rate_limit_returns_envelope(self):
         for status in (403, 429):
             with self.subTest(status=status):
-                with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+                with tempfile.TemporaryDirectory() as tmpdir:
                     workspace = self.build_github_workspace(Path(tmpdir))
                     self.install_github_transport(
                         [("/repos/", HTTPError(url="x", code=status, msg="limited", hdrs=None, fp=None))]
@@ -3169,7 +3169,7 @@ class GithubAcquisitionTests(unittest.TestCase):
     # --- acquisition gate ------------------------------------------------
 
     def test_disabled_acquisition_does_not_call_transport(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             (workspace / "research.yml").write_text(
                 yaml.safe_dump(
@@ -3197,7 +3197,7 @@ class GithubAcquisitionTests(unittest.TestCase):
         self.assertEqual("ACQUISITION_DISABLED", json.loads(stderr)["error_code"])
 
     def test_provider_not_allow_listed_is_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             (workspace / "research.yml").write_text(
                 yaml.safe_dump(
@@ -3221,7 +3221,7 @@ class GithubAcquisitionTests(unittest.TestCase):
         self.assertEqual("ACQUISITION_PROVIDER_DISABLED", json.loads(stderr)["error_code"])
 
     def test_existing_target_is_not_overwritten(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             existing = workspace / "raw" / "code" / "github-acme-tool-metadata.json"
             existing.parent.mkdir(parents=True, exist_ok=True)
@@ -3238,7 +3238,7 @@ class GithubAcquisitionTests(unittest.TestCase):
 
     def test_downloaded_archive_is_inventoried_with_provenance_and_no_execution(self):
         archive = tar_gz_bytes({"tool/main.py": b"print('hi')\n"})
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_github_workspace(Path(tmpdir))
             self.install_github_transport(
                 [

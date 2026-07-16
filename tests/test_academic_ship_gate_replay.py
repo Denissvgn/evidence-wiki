@@ -994,7 +994,7 @@ class AcademicShipGateReplayTests(unittest.TestCase):
 
     def test_fixed_academic_shape_reaches_ship_with_mocked_live_providers(self):
         self.install_provider_fixtures()
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             arxiv = self.verify_report(workspace, "arxiv")
             openalex = self.verify_report(workspace, "openalex")
@@ -1023,7 +1023,7 @@ class AcademicShipGateReplayTests(unittest.TestCase):
     def test_live_issue_classes_replay_as_ship_with_recorded_evidence(self):
         self.install_arxiv_records(self.live_issue_arxiv_records())
         self.install_openalex_records(self.live_issue_openalex_records())
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_live_issue_workspace(Path(tmpdir))
             arxiv = self.verify_report(workspace, "arxiv")
             openalex = self.verify_report(workspace, "openalex")
@@ -1106,7 +1106,7 @@ class AcademicShipGateReplayTests(unittest.TestCase):
                 )
             }
         )
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace, records, summary = self.build_paired_latex_workspace(Path(tmpdir))
             paper = next(record for record in records if record["id"] == f"paper:{arxiv_id}")
             normalization_method = NORMALIZE.normalization_method(workspace, paper)
@@ -1144,7 +1144,7 @@ class AcademicShipGateReplayTests(unittest.TestCase):
         expected_identifier = "doi:10.48550/arxiv.2504.19874"
         self.install_single_openalex_work(self.wrong_work_openalex_record(), expected_identifier=expected_identifier)
         self.install_doi_resolution("https://arxiv.org/abs/2504.19874")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_wrong_work_enrichment_workspace(Path(tmpdir))
             enrich = self.run_openalex_enrich(workspace)
             sidecar = yaml.safe_load(
@@ -1175,7 +1175,7 @@ class AcademicShipGateReplayTests(unittest.TestCase):
         expected_identifier = "doi:10.48550/arxiv.2504.19874"
         self.install_single_openalex_work(self.wrong_work_openalex_record(), expected_identifier=expected_identifier)
         self.install_doi_resolution("https://example.org/not-the-paper")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_wrong_work_enrichment_workspace(Path(tmpdir))
             enrich = self.run_openalex_enrich(workspace)
             sidecar = yaml.safe_load(
@@ -1203,7 +1203,7 @@ class AcademicShipGateReplayTests(unittest.TestCase):
 
     def test_unrecorded_openalex_wrong_work_still_replays_no_ship(self):
         self.install_openalex_records(self.live_issue_openalex_records())
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_live_issue_workspace(Path(tmpdir), record_conflict=False)
             openalex = self.verify_report(workspace, "openalex")
             lint_report = self.lint_report(workspace)
@@ -1224,7 +1224,7 @@ class AcademicShipGateReplayTests(unittest.TestCase):
 
     def test_negative_control_replays_historical_academic_no_ship_signals(self):
         self.install_provider_fixtures()
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir), broken=True)
             arxiv = self.verify_report(workspace, "arxiv")
             openalex = self.verify_report(workspace, "openalex")

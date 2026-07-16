@@ -107,7 +107,7 @@ class LegalPlanShapeTests(LegalTestBase):
     """The plan distinguishes legal categories and is official-source-first."""
 
     def test_country_profile_drives_official_domains(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.plan(
                 self.fixture_workspace(Path(tmpdir)),
                 "--jurisdiction", "us-federal", "--topic", "emissions reporting",
@@ -126,7 +126,7 @@ class LegalPlanShapeTests(LegalTestBase):
         self.assertFalse(report["network_io_executed"])
 
     def test_plan_distinguishes_all_legal_categories(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.plan(
                 self.fixture_workspace(Path(tmpdir)),
                 "--jurisdiction", "us-federal", "--topic", "emissions",
@@ -142,7 +142,7 @@ class LegalPlanShapeTests(LegalTestBase):
         self.assertIn("emissions statute", [q["query"] for q in queries])
 
     def test_official_domain_query_construction(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.plan(
                 self.fixture_workspace(Path(tmpdir)),
                 "--jurisdiction", "us-federal", "--topic", "wetlands",
@@ -160,7 +160,7 @@ class LegalPlanShapeTests(LegalTestBase):
         )
 
     def test_state_profile_matching_and_blocked_domains(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.plan(
                 self.fixture_workspace(Path(tmpdir)),
                 "--jurisdiction", "us-ca", "--topic", "rent control",
@@ -176,7 +176,7 @@ class LegalPlanShapeTests(LegalTestBase):
         self.assertTrue(all(q["domain_blocklist"] == ["example.com"] for q in report["planned_queries"]))
 
     def test_jurisdiction_resolves_by_display_name(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.plan(
                 self.fixture_workspace(Path(tmpdir)),
                 "--jurisdiction", "California (State)", "--topic", "zoning",
@@ -186,7 +186,7 @@ class LegalPlanShapeTests(LegalTestBase):
         self.assertEqual("California (State)", report["jurisdiction_name"])
 
     def test_max_results_is_recorded(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.plan(
                 self.fixture_workspace(Path(tmpdir)),
                 "--jurisdiction", "us-federal", "--topic", "x", "--max-results", "3",
@@ -198,7 +198,7 @@ class LegalWarningTests(LegalTestBase):
     """Missing/incomplete profiles warn but still produce a plan."""
 
     def test_unknown_jurisdiction_warns_and_still_plans(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             report = self.plan(
                 self.fixture_workspace(Path(tmpdir)),
                 "--jurisdiction", "atlantis", "--topic", "shipping",
@@ -211,7 +211,7 @@ class LegalWarningTests(LegalTestBase):
         self.assertEqual(EXPECTED_LEGAL_CATEGORIES, {q["legal_category"] for q in report["planned_queries"]})
 
     def test_no_profiles_file_warns(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))  # no jurisdictions.yml
             report = self.plan(workspace, "--jurisdiction", "us-federal", "--topic", "x")
         self.assertFalse(report["jurisdiction_resolved"])
@@ -229,7 +229,7 @@ class LegalWarningTests(LegalTestBase):
             "    state_or_region: TX\n"
             "    legislature_urls: [https://capitol.texas.gov]\n"
         )
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), jurisdictions_content=content)
             report = self.plan(workspace, "--jurisdiction", "us-tx", "--topic", "water rights")
         self.assertTrue(report["jurisdiction_resolved"])
@@ -244,7 +244,7 @@ class LegalGateAndSafetyTests(LegalTestBase):
     """The discovery gate, argument validation, and read-only guarantees."""
 
     def test_disabled_discovery_refuses(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(Path(tmpdir), enabled=False)
             code, stdout, stderr = self.run_legal(workspace, "--jurisdiction", "us-federal", "--topic", "x")
         self.assertEqual(2, code)
@@ -252,7 +252,7 @@ class LegalGateAndSafetyTests(LegalTestBase):
         self.assertEqual("DISCOVERY_DISABLED", json.loads(stderr)["error_code"])
 
     def test_empty_topic_is_value_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.fixture_workspace(Path(tmpdir))
             code, _, stderr = self.run_legal(workspace, "--jurisdiction", "us-federal", "--topic", "   ")
         self.assertEqual(2, code)
@@ -266,7 +266,7 @@ class LegalGateAndSafetyTests(LegalTestBase):
             "    name: No roots\n"
             "    country: US\n"  # no official source root -> invalid (E34-T01)
         )
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), jurisdictions_content=bad)
             code, _, stderr = self.run_legal(workspace, "--jurisdiction", "us-federal", "--topic", "x")
         self.assertEqual(2, code)
@@ -279,7 +279,7 @@ class LegalGateAndSafetyTests(LegalTestBase):
         original = socket.socket
         socket.socket = forbid_socket
         try:
-            with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+            with tempfile.TemporaryDirectory() as tmpdir:
                 workspace = self.fixture_workspace(Path(tmpdir))
                 report = self.plan(workspace, "--jurisdiction", "us-federal", "--topic", "x")
                 stored = self.store_records(workspace)

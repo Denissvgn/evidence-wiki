@@ -61,8 +61,11 @@ jobs:
         shell: pwsh
         run: |
           python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\.venv\Scripts\python.exe -m pip install --editable ".[dev]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run tests and quality checks (POSIX)
         if: runner.os != 'Windows'
@@ -77,8 +80,11 @@ jobs:
         shell: pwsh
         run: |
           .\.venv\Scripts\python.exe -m pytest -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\.venv\Scripts\python.exe -m ruff check .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\.venv\Scripts\python.exe tools\sync_vendored_scripts.py --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   package:
     name: Build distributions

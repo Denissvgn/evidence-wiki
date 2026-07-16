@@ -221,7 +221,7 @@ class ChainHandoffE2ETests(unittest.TestCase):
         )
         self.assertEqual(0, code)
         self.assertTrue(path.is_file())
-        self.assertEqual(str(path), payload["baseline_path"])
+        self.assertEqual(str(path.resolve()), payload["baseline_path"])
         return json.loads(path.read_text(encoding="utf-8"))
 
     def enable_arxiv_acquisition(self, workspace: Path) -> None:
@@ -359,7 +359,7 @@ class ChainHandoffE2ETests(unittest.TestCase):
                     process.communicate()
 
     def test_golden_handoff_chain_contract(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = self.deploy_workspace(root)
             scripts = self.load_workspace_scripts(workspace)

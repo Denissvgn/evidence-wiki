@@ -48,7 +48,7 @@ class MadridAutonomoEvaluationTests(unittest.TestCase):
         run_report_module = load_script_module("madrid_run_report", SCRIPTS / "run_report.py")
         expected_summary = json.loads((FIXTURE / "reports" / "expected-summary.json").read_text(encoding="utf-8"))
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = copy_fixture(Path(tmpdir))
 
             status = status_module.build_status_document(workspace)
@@ -100,7 +100,7 @@ class MadridAutonomoEvaluationTests(unittest.TestCase):
     def test_missing_blocking_request_link_changes_verdict_to_attention_required(self):
         status_module = load_script_module("madrid_status_attention", SCRIPTS / "workspace_status.py")
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = copy_fixture(Path(tmpdir))
             question_path = workspace / "wiki" / "questions" / "current-fee.md"
             text = question_path.read_text(encoding="utf-8")
@@ -135,7 +135,7 @@ class MadridAutonomoEvaluationTests(unittest.TestCase):
     def test_legacy_web_sidecar_name_produces_inventory_finding(self):
         inventory_module = load_script_module("madrid_inventory", SCRIPTS / "source_inventory.py")
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = copy_fixture(Path(tmpdir))
             canonical = workspace / "raw" / "web" / "seg-social-fee.html.provenance.yml"
             legacy = workspace / "raw" / "web" / "seg-social-fee.provenance.yml"

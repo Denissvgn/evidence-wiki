@@ -213,7 +213,7 @@ class JurisdictionCommandTests(unittest.TestCase):
 
     def test_validate_succeeds_on_fixture(self):
         fixture = FIXTURE_YAML.read_text(encoding="utf-8")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), content=fixture)
             code, stdout, stderr = self.run_cmd(workspace, "validate")
         self.assertEqual(0, code, stderr)
@@ -226,7 +226,7 @@ class JurisdictionCommandTests(unittest.TestCase):
 
     def test_list_shows_country_and_state_profiles(self):
         fixture = FIXTURE_YAML.read_text(encoding="utf-8")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), content=fixture)
             code, stdout, _ = self.run_cmd(workspace, "list")
         self.assertEqual(0, code)
@@ -239,7 +239,7 @@ class JurisdictionCommandTests(unittest.TestCase):
 
     def test_show_returns_full_profile(self):
         fixture = FIXTURE_YAML.read_text(encoding="utf-8")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), content=fixture)
             code, stdout, _ = self.run_cmd(workspace, "show", "--jurisdiction", "us-federal")
         self.assertEqual(0, code)
@@ -250,7 +250,7 @@ class JurisdictionCommandTests(unittest.TestCase):
 
     def test_show_unknown_jurisdiction_is_error(self):
         fixture = FIXTURE_YAML.read_text(encoding="utf-8")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), content=fixture)
             code, stdout, stderr = self.run_cmd(workspace, "show", "--jurisdiction", "zz-missing")
         self.assertEqual(2, code)
@@ -258,7 +258,7 @@ class JurisdictionCommandTests(unittest.TestCase):
         self.assertEqual("JURISDICTION_UNKNOWN", json.loads(stderr)["error_code"])
 
     def test_missing_file_reports_empty_not_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), content=None)
             code_v, stdout_v, _ = self.run_cmd(workspace, "validate")
             code_l, stdout_l, _ = self.run_cmd(workspace, "list")
@@ -277,7 +277,7 @@ class JurisdictionCommandTests(unittest.TestCase):
             "    country: US\n"
             "    blocked_domains: []\n"  # no official source root
         )
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), content=bad)
             code, stdout, stderr = self.run_cmd(workspace, "validate")
         self.assertEqual(2, code)
@@ -288,7 +288,7 @@ class JurisdictionCommandTests(unittest.TestCase):
 
     def test_path_traversal_is_config_invalid(self):
         fixture = FIXTURE_YAML.read_text(encoding="utf-8")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), jurisdictions_path="../escape.yml", content=fixture)
             code, _, stderr = self.run_cmd(workspace, "validate")
         self.assertEqual(2, code)
@@ -297,7 +297,7 @@ class JurisdictionCommandTests(unittest.TestCase):
     def test_works_with_discovery_disabled(self):
         # Jurisdiction validation is offline and runs before the discovery gate.
         fixture = FIXTURE_YAML.read_text(encoding="utf-8")
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), enabled=False, content=fixture)
             code, stdout, _ = self.run_cmd(workspace, "validate")
         self.assertEqual(0, code)

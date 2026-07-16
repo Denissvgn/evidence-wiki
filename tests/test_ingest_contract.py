@@ -199,7 +199,7 @@ class IngestContractTests(unittest.TestCase):
         )
 
     def test_lint_recognizes_source_note_contract_and_lifecycle_states(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
 
             results = LINT.run_checks(workspace, LINT.load_config(workspace))

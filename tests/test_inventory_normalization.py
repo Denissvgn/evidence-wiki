@@ -91,7 +91,7 @@ class InventoryNormalizationTests(unittest.TestCase):
         self.assertEqual("example.org", web_links[0]["metadata"]["host"])
 
     def test_normalization_warns_per_source_for_unsupported_kind(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "ws"
             shutil.copytree(FIXTURE_ROOT, target)
             (target / "sources").mkdir(exist_ok=True)
@@ -649,7 +649,7 @@ class InventoryNormalizationTests(unittest.TestCase):
         self.assertNotIn("evidence_usability_override_applied", frontmatter["provenance"])
 
     def test_write_normalized_source_records_timestamp_metadata_on_create_and_update(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             normalized_root = Path(tmpdir) / "sources" / "normalized"
             record = {
                 "id": "link:example-org-fixture-project-e51812dad4",
@@ -775,7 +775,7 @@ class InventoryNormalizationTests(unittest.TestCase):
         }
 
     def test_latex_normalization_records_bidirectional_arxiv_bibliography_references(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             first = self.write_latex_paper(
                 workspace,
@@ -818,7 +818,7 @@ class InventoryNormalizationTests(unittest.TestCase):
             self.assertEqual(["paper:2601.00001v1"], second_frontmatter["references_source_ids"])
 
     def test_latex_normalization_matches_doi_references_from_bibtex(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             citing = self.write_latex_paper(
                 workspace,
@@ -848,7 +848,7 @@ class InventoryNormalizationTests(unittest.TestCase):
             self.assertEqual(["paper:doi-target"], frontmatter["references_source_ids"])
 
     def test_latex_reference_matching_ignores_unmatched_duplicates_and_self_references(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             citing = self.write_latex_paper(
                 workspace,
@@ -947,7 +947,7 @@ class LatexSafetyTests(unittest.TestCase):
 
     def test_circular_include_returns_cyclic_warning(self):
         r"""A→B→A circular \input{} should complete with a 'cyclic include skipped' warning."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             a = root / "a.tex"
             b = root / "b.tex"
@@ -963,7 +963,7 @@ class LatexSafetyTests(unittest.TestCase):
 
     def test_depth_exceeded_returns_depth_warning(self):
         """An include encountered at MAX_INCLUDE_DEPTH+1 should warn about depth exceeded."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             entry = root / "entry.tex"
             sub = root / "sub.tex"
@@ -982,7 +982,7 @@ class LatexSafetyTests(unittest.TestCase):
 
     def test_path_traversal_with_dotdot_is_blocked(self):
         r"""An \input{} containing '..' should be blocked with an 'unsafe include path' warning."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             entry = root / "entry.tex"
             entry.write_text(r"\input{../outside}")
@@ -996,7 +996,7 @@ class LatexSafetyTests(unittest.TestCase):
 
     def test_missing_include_file_returns_warning(self):
         r"""An \input{} pointing to a non-existent file should produce a 'not found' warning."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             entry = root / "entry.tex"
             entry.write_text(r"\input{nonexistent}")
@@ -1021,7 +1021,7 @@ class ConcurrentInventoryTests(unittest.TestCase):
 
     def test_inventory_idempotent_on_repeat_run(self):
         """Running inventory twice on the same workspace produces identical manifests."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             shutil.copytree(FIXTURE_ROOT, workspace)
 
@@ -1038,7 +1038,7 @@ class ConcurrentInventoryTests(unittest.TestCase):
         """Two concurrent inventory runs must not corrupt the manifest (atomic write guard)."""
         import threading
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             shutil.copytree(FIXTURE_ROOT, workspace)
 

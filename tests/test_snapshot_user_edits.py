@@ -82,7 +82,7 @@ class SnapshotUserEditsTests(unittest.TestCase):
         return stdout.getvalue()
 
     def test_dry_run_reports_scoped_paths_without_staging(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "wiki" / "new-note.md").write_text("# New note\n")
             (workspace / "docs" / "guide.md").write_text("# Guide\n")
@@ -99,7 +99,7 @@ class SnapshotUserEditsTests(unittest.TestCase):
         self.assertEqual("", staged)
 
     def test_requires_explicit_snapshot_policy(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir), policy="disabled")
 
             with self.assertRaises(SystemExit) as context:
@@ -108,7 +108,7 @@ class SnapshotUserEditsTests(unittest.TestCase):
         self.assertIn("snapshot_user_edits", str(context.exception))
 
     def test_rejects_unsafe_extra_paths_before_git_status(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             outside = Path(tmpdir) / "outside.md"
             unsafe_paths = [
@@ -126,7 +126,7 @@ class SnapshotUserEditsTests(unittest.TestCase):
                         self.run_script(workspace, "--path", unsafe_path)
 
     def test_commit_refuses_when_staged_changes_already_exist(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "docs" / "staged.md").write_text("# Staged\n")
             self.git(workspace, "add", "docs/staged.md")
@@ -137,7 +137,7 @@ class SnapshotUserEditsTests(unittest.TestCase):
         self.assertIn("Commit or unstage existing index changes", str(context.exception))
 
     def test_commit_snapshots_only_scoped_human_editable_paths(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir))
             (workspace / "wiki" / "new-note.md").write_text("# New note\n")
             (workspace / "docs" / "guide.md").write_text("# Guide\n")
@@ -156,7 +156,7 @@ class SnapshotUserEditsTests(unittest.TestCase):
         self.assertIn("?? sources/normalized/generated.md", status)
 
     def test_custom_wiki_root_is_reported_once(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir), wiki_root="knowledge")
             (workspace / "knowledge" / "note.md").write_text("# Note\n")
 
@@ -166,7 +166,7 @@ class SnapshotUserEditsTests(unittest.TestCase):
         self.assertNotIn("- wiki\n", output)
 
     def test_absolute_configured_wiki_root_is_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.build_workspace(Path(tmpdir), wiki_root="wiki")
             config = workspace / "research.yml"
             config.write_text(config.read_text().replace("root: wiki", f"root: {workspace / 'wiki'}"))

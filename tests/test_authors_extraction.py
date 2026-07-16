@@ -177,7 +177,7 @@ class AuthorsCommandTests(unittest.TestCase):
         return int(code or 0), stdout.getvalue(), stderr.getvalue()
 
     def test_local_paper_emits_seed_list_with_provenance_and_confidence(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[{"id": "paper:local-1", "kind": "paper", "status": "normalized"}],
@@ -195,7 +195,7 @@ class AuthorsCommandTests(unittest.TestCase):
         self.assertEqual([], report["warnings"])
 
     def test_openalex_metadata_enriches_frontmatter_names(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[{
@@ -220,7 +220,7 @@ class AuthorsCommandTests(unittest.TestCase):
         self.assertEqual("openalex", ada["source"])
 
     def test_max_results_bounds_the_seed_list(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[{"id": "paper:many", "kind": "paper", "status": "normalized"}],
@@ -231,7 +231,7 @@ class AuthorsCommandTests(unittest.TestCase):
         self.assertEqual(3, json.loads(stdout)["count"])
 
     def test_missing_normalized_record_warns_but_succeeds(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[{"id": "paper:bare", "kind": "paper", "status": "classified"}],
@@ -246,7 +246,7 @@ class AuthorsCommandTests(unittest.TestCase):
         self.assertEqual(0, report["count"])
 
     def test_unknown_source_id_is_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[{"id": "paper:x", "kind": "paper"}])
             code, stdout, stderr = self.run_authors(workspace, "--source-id", "paper:missing")
         self.assertEqual(2, code)
@@ -254,7 +254,7 @@ class AuthorsCommandTests(unittest.TestCase):
         self.assertEqual("SOURCE_UNKNOWN", json.loads(stderr)["error_code"])
 
     def test_disabled_discovery_refuses(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 manifest=[{"id": "paper:local-1", "kind": "paper"}],
@@ -266,7 +266,7 @@ class AuthorsCommandTests(unittest.TestCase):
         self.assertEqual("DISCOVERY_DISABLED", json.loads(stderr)["error_code"])
 
     def test_empty_source_id_is_value_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), manifest=[{"id": "paper:x", "kind": "paper"}])
             code, _, stderr = self.run_authors(workspace, "--source-id", "   ")
         self.assertEqual(2, code)

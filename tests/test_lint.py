@@ -858,7 +858,7 @@ class NormalizedSourceLintTests(unittest.TestCase):
         return project / "sources" / "normalized" / "paper--fixture-static.md"
 
     def test_normalized_missing_source_note_issue_names_source_and_expected_path(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             for source_note in (project / "wiki" / "sources").glob("*.md"):
                 source_note.unlink()
@@ -873,7 +873,7 @@ class NormalizedSourceLintTests(unittest.TestCase):
 
     def test_normalized_status_failed_emits_high_issue(self):
         """Bug 2B: normalized record with status:failed → HIGH pdf_extraction_failed."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             norm = self._normalized_record_path(project)
             text = norm.read_text()
@@ -887,7 +887,7 @@ class NormalizedSourceLintTests(unittest.TestCase):
 
     def test_normalized_title_confidence_low_emits_warning(self):
         """Bug 3C: normalized record with title_confidence:low → WARNING pdf_title_uncertain."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             norm = self._normalized_record_path(project)
             text = norm.read_text()
@@ -906,7 +906,7 @@ class NormalizedSourceLintTests(unittest.TestCase):
 
     def test_normalized_title_confidence_none_emits_warning(self):
         """Bug 3C: normalized record with title_confidence:none → WARNING pdf_title_uncertain."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             norm = self._normalized_record_path(project)
             text = norm.read_text()
@@ -924,7 +924,7 @@ class NormalizedSourceLintTests(unittest.TestCase):
 
     def test_normalized_failed_status_does_not_emit_title_warning(self):
         """Bug 3C: status:failed suppresses pdf_title_uncertain even if confidence is low."""
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             norm = self._normalized_record_path(project)
             text = norm.read_text()
@@ -948,7 +948,7 @@ class FrontmatterRobustnessTests(unittest.TestCase):
     """E15-T02: load_frontmatter() handles malformed files without raising."""
 
     def test_truncated_yaml_no_closing_fence(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "truncated.md"
             path.write_text("---\nkey: value\n")  # no closing ---
 
@@ -959,7 +959,7 @@ class FrontmatterRobustnessTests(unittest.TestCase):
         self.assertIn("unterminated", error)
 
     def test_binary_garbage_content(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "binary.md"
             path.write_bytes(b"\xff\xfe\x00\x01 not utf-8")
 
@@ -969,7 +969,7 @@ class FrontmatterRobustnessTests(unittest.TestCase):
         self.assertIsNotNone(error)
 
     def test_yaml_root_is_list_not_mapping(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "list-root.md"
             path.write_text("---\n- item1\n- item2\n\n---\n")
 
@@ -980,7 +980,7 @@ class FrontmatterRobustnessTests(unittest.TestCase):
         self.assertIn("mapping", error)
 
     def test_empty_file_returns_missing_frontmatter_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "empty.md"
             path.write_text("")
 
@@ -991,7 +991,7 @@ class FrontmatterRobustnessTests(unittest.TestCase):
         self.assertIn("missing", error)
 
     def test_empty_frontmatter_block_returns_empty_dict(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "empty-block.md"
             path.write_text("---\n\n---\n\n# Body\n")  # blank line between fences
 
@@ -1002,7 +1002,7 @@ class FrontmatterRobustnessTests(unittest.TestCase):
         self.assertEqual({}, frontmatter)
 
     def test_yaml_null_field_parses_without_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "null-field.md"
             path.write_text("---\ntype: ~\ncreated: 2026-01-01\n\n---\n\n# Body\n")
 
@@ -1030,7 +1030,7 @@ class ManifestRobustnessTests(unittest.TestCase):
         return [i for i in results["issues"] if i["category"] == category]
 
     def test_invalid_json_line_emits_issue_and_continues(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             manifest = project / "sources" / "manifest.jsonl"
             manifest.write_text(manifest.read_text() + "NOT_VALID_JSON\n")
@@ -1042,7 +1042,7 @@ class ManifestRobustnessTests(unittest.TestCase):
         self.assertTrue(any(i["severity"] == "HIGH" for i in issues))
 
     def test_json_list_line_emits_issue_and_continues(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             manifest = project / "sources" / "manifest.jsonl"
             manifest.write_text(manifest.read_text() + '["not","a","dict"]\n')
@@ -1053,7 +1053,7 @@ class ManifestRobustnessTests(unittest.TestCase):
         self.assertTrue(issues)
 
     def test_blank_lines_between_records_are_skipped(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             manifest = project / "sources" / "manifest.jsonl"
             original = manifest.read_text()
@@ -1073,7 +1073,7 @@ class ManifestRobustnessTests(unittest.TestCase):
         )
 
     def test_duplicate_ids_in_manifest_does_not_crash(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             manifest = project / "sources" / "manifest.jsonl"
             original = manifest.read_text().strip()
@@ -1086,7 +1086,7 @@ class ManifestRobustnessTests(unittest.TestCase):
         self.assertIsNotNone(results)
 
     def test_empty_manifest_runs_without_crash(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             (project / "sources" / "manifest.jsonl").write_text("")
 
@@ -1305,7 +1305,7 @@ Reusable output grounded in `{source_id}`.
         )
 
     def test_uncited_automated_web_source_missing_terms_or_license_fires_low(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_web_source(
                 project,
@@ -1329,7 +1329,7 @@ Reusable output grounded in `{source_id}`.
         self.assertNotIn("provenance_missing_license", self.issue_categories(results))
 
     def test_cited_automated_web_source_missing_source_note_fires_medium(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_web_source(
                 project,
@@ -1353,7 +1353,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(1, results["stats"]["curation_missing_source_note"])
 
     def test_cited_automated_web_source_missing_origin_url_fires_high(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_web_source(
                 project,
@@ -1376,7 +1376,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(1, results["stats"]["curation_missing_origin_url"])
 
     def test_cited_automated_web_source_missing_checksum_fires_high(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_web_source(
                 project,
@@ -1398,7 +1398,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(1, results["stats"]["curation_missing_checksum"])
 
     def test_curation_metadata_lint_is_config_gated(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_web_source(project, {"retrieved_by": "fetch-agent/manual-web"})
             self.add_output_page(project)
@@ -1420,7 +1420,7 @@ Reusable output grounded in `{source_id}`.
         self.assertNotIn("curation_missing_checksum", self.issue_categories(results))
 
     def test_terms_note_satisfies_output_license_status_for_web_source(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_web_source(
                 project,
@@ -1442,7 +1442,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(0, results["stats"]["output_license_missing"])
 
     def test_request_linked_web_source_missing_candidate_id_fires_low(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_web_source(
                 project,
@@ -1466,7 +1466,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual("provenance.candidate_id", issues[0]["field"])
 
     def test_automated_delivery_without_license_fires_medium(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(
                 project,
@@ -1484,7 +1484,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(1, results["stats"]["provenance_missing_license"])
 
     def test_automated_delivery_with_unresolved_license_and_terms_fires_low(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(
                 project,
@@ -1507,7 +1507,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(1, results["stats"]["provenance_license_unresolved"])
 
     def test_automated_delivery_with_unresolved_license_without_terms_stays_medium(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(
                 project,
@@ -1526,7 +1526,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(1, results["stats"]["provenance_missing_license"])
 
     def test_automated_delivery_with_license_passes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(project, {"retrieved_by": "fetch-agent/arxiv", "license": "CC-BY-4.0"})
 
@@ -1536,7 +1536,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(1, results["stats"]["provenance_records"])
 
     def test_manual_provenance_without_retrieved_by_passes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(project, {"origin_url": "https://example.org/paper"})
 
@@ -1545,7 +1545,7 @@ Reusable output grounded in `{source_id}`.
         self.assertNotIn("provenance_missing_license", self.issue_categories(results))
 
     def test_blocked_question_without_request_fires_low(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.add_blocked_question(project)
 
@@ -1558,7 +1558,7 @@ Reusable output grounded in `{source_id}`.
         self.assertIn("which-benchmarks", issues[0]["recommendation"])
 
     def test_blocked_question_with_linked_request_passes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.add_blocked_question(project)
             self.write_requests(
@@ -1584,7 +1584,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(1, results["stats"]["source_requests_open"])
 
     def test_answered_coverage_required_question_without_manifest_fires_high(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.add_answered_coverage_question(project)
 
@@ -1596,7 +1596,7 @@ Reusable output grounded in `{source_id}`.
         self.assertIn("sources/coverage/which-benchmarks.yml", issues[0]["message"])
 
     def test_answered_coverage_required_question_with_blocked_manifest_fires_high(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.add_answered_coverage_question(project)
             self.write_coverage_manifest(
@@ -1631,7 +1631,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual("blocked", issues[0]["actual"])
 
     def test_answered_coverage_required_question_with_invalid_manifest_fires_high(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.add_answered_coverage_question(project)
             self.write_coverage_manifest(project, valid=False)
@@ -1643,7 +1643,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual("HIGH", issues[0]["severity"])
 
     def test_answered_coverage_required_question_with_passing_manifest_has_no_coverage_issue(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.add_answered_coverage_question(project)
             self.write_coverage_manifest(project, accepted_source_ids=["paper:fixture-static"])
@@ -1656,7 +1656,7 @@ Reusable output grounded in `{source_id}`.
         self.assertNotIn("question_coverage_invalid", categories)
 
     def test_answered_coverage_required_question_without_grounding_fires_high(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.add_answered_coverage_question(project, grounding=False)
             self.write_coverage_manifest(project, accepted_source_ids=["paper:fixture-static"])
@@ -1669,7 +1669,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual("grounding", issues[0]["field"])
 
     def test_answered_question_self_verification_fires_medium(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.add_answered_coverage_question(project, verified_by="answer-agent")
             self.write_coverage_manifest(project, accepted_source_ids=["paper:fixture-static"])
@@ -1682,7 +1682,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual("verified_by", issues[0]["field"])
 
     def test_fulfilled_request_with_missing_source_fires_medium(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.write_requests(
                 project,
@@ -1708,7 +1708,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual("paper:never-delivered", issues[0]["actual"])
 
     def test_fulfilled_request_with_existing_source_passes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.write_requests(
                 project,
@@ -1731,7 +1731,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(1, results["stats"]["source_requests_fulfilled"])
 
     def test_malformed_request_line_is_reported(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             (project / "sources" / "source-requests.jsonl").write_text("NOT_VALID_JSON\n")
 
@@ -1742,7 +1742,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual("MEDIUM", issues[0]["severity"])
 
     def test_new_checks_are_config_gated(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(project, {"retrieved_by": "fetch-agent/arxiv"})
             self.add_blocked_question(project)
@@ -1764,7 +1764,7 @@ Reusable output grounded in `{source_id}`.
         self.assertFalse(results["config"]["enabled_checks"]["source_requests"])
 
     def test_output_citing_fetched_source_without_license_fires_low(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(
                 project,
@@ -1784,7 +1784,7 @@ Reusable output grounded in `{source_id}`.
         self.assertTrue(results["config"]["enabled_checks"]["output_license_status"])
 
     def test_output_citing_fetched_source_with_license_passes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(project, {"retrieved_by": "fetch-agent/arxiv", "license": "CC-BY-4.0"})
             self.add_output_page(project)
@@ -1796,7 +1796,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(0, results["stats"]["output_license_missing"])
 
     def test_non_output_citation_does_not_fire_output_license_lint(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(project, {"retrieved_by": "fetch-agent/arxiv"})
 
@@ -1807,7 +1807,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(0, results["stats"]["output_license_missing"])
 
     def test_output_license_lint_is_config_gated(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(project, {"retrieved_by": "fetch-agent/arxiv"})
             self.add_output_page(project)
@@ -1827,7 +1827,7 @@ Reusable output grounded in `{source_id}`.
         self.assertFalse(results["config"]["enabled_checks"]["output_license_status"])
 
     def test_output_citing_academic_source_without_publication_metadata_fires_low(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(
                 project,
@@ -1853,7 +1853,7 @@ Reusable output grounded in `{source_id}`.
         self.assertTrue(results["config"]["enabled_checks"]["academic_publication_metadata"])
 
     def test_output_citing_academic_source_with_publication_metadata_passes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(
                 project,
@@ -1877,7 +1877,7 @@ Reusable output grounded in `{source_id}`.
         self.assertEqual(0, results["stats"]["academic_metadata_missing"])
 
     def test_recorded_openalex_identity_conflict_fires_low_visibility_lint(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(
                 project,
@@ -1910,7 +1910,7 @@ Reusable output grounded in `{source_id}`.
         self.assertNotIn("provenance_missing_license", self.issue_categories(results))
 
     def test_academic_metadata_lint_is_config_gated(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             self.set_manifest_provenance(
                 project,

@@ -198,7 +198,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual("ok", checks["pyyaml"]["status"])
 
     def test_doctor_target_maps_to_workspace_project_root(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "workspace"
             self.run_cli(
                 "init",
@@ -256,7 +256,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual(direct_document, cli_document)
 
     def test_fleet_status_command_aggregates_targets_as_json(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "workspace"
             self.run_cli(
                 "init",
@@ -278,7 +278,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual("fleet-cli-workspace", payload["targets"][0]["project_name"])
 
     def test_status_cli_matches_workspace_script_for_unicode_spaced_target(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "workspace Ω with spaces"
             self.run_cli(
                 "init",
@@ -334,7 +334,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual(str(target.resolve()), cli_document["workspace_health"]["project_root"])
 
     def test_export_alias_matches_questions_export_schema_and_content(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "export-workspace"
             self.run_cli(
                 "init",
@@ -454,7 +454,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual(cli_page, direct_page)
 
     def test_status_invalid_target_returns_machine_document_and_unreadable_exit(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "missing-workspace"
             code, stdout, stderr = self.run_cli_result(
                 "status", "--target", str(target), "--format", "json", "--no-cache"
@@ -489,7 +489,7 @@ class PackageCliTests(unittest.TestCase):
         )
 
     def test_status_resolves_supported_symlink_alias_to_canonical_workspace(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "canonical-workspace"
             alias = root / "workspace-alias"
@@ -544,18 +544,19 @@ class PackageCliTests(unittest.TestCase):
             case_code, case_stdout, case_stderr = self.run_cli_result(
                 "status", "--target", str(case_variant), "--format", "json", "--no-cache"
             )
+            canonical = str(target.resolve())
+            case_variant_is_same_target = case_variant.exists() and case_variant.samefile(target)
 
         self.assertEqual(0, relative_code, relative_stderr)
         self.assertEqual(0, absolute_code, absolute_stderr)
         relative = json.loads(relative_stdout)
         absolute = json.loads(absolute_stdout)
-        canonical = str(target.resolve())
         self.assertEqual(canonical, relative["workspace_health"]["project_root"])
         self.assertEqual(canonical, absolute["workspace_health"]["project_root"])
         self.assertEqual(relative["project"], absolute["project"])
         self.assertEqual("", case_stderr)
         case_document = json.loads(case_stdout)
-        if case_variant.exists():
+        if case_variant_is_same_target:
             self.assertEqual(0, case_code)
             self.assertEqual(canonical, case_document["workspace_health"]["project_root"])
         else:
@@ -665,7 +666,7 @@ class PackageCliTests(unittest.TestCase):
             self.assertTrue(results["ok"], results["issues"])
 
     def test_questions_add_and_export_round_trip_through_cli(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "workspace"
             self.run_cli(
                 "init",
@@ -712,7 +713,7 @@ class PackageCliTests(unittest.TestCase):
             )
 
     def test_questions_add_limit_failure_returns_typed_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "workspace"
             self.run_cli(
                 "init",
@@ -760,7 +761,7 @@ class PackageCliTests(unittest.TestCase):
             self.assertFalse((target / "wiki" / "questions" / "which-datasets-matter.md").exists())
 
     def test_questions_add_field_cap_failure_returns_typed_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "workspace"
             self.run_cli(
                 "init",

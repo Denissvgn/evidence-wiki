@@ -152,7 +152,7 @@ class IntakeQuestionsTests(unittest.TestCase):
         self.assertEqual(log_before, (target / "log.md").read_text())
 
     def test_happy_path_creates_pages_index_and_log(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             batch_path = self.write_batch(root, VALID_BATCH)
@@ -193,7 +193,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertIn("task_id: chain-task-0042", log_text)
 
     def test_secret_configured_rejects_unsigned_handoff_batch_atomically(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             batch_path = self.write_batch(root, VALID_BATCH)
@@ -217,7 +217,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             )
 
     def test_secret_configured_accepts_signed_handoff_batch(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             batch = dict(VALID_BATCH)
@@ -232,7 +232,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertEqual("verified", report["handoff_signature_status"])
 
     def test_created_pages_pass_lint_and_appear_in_question_status(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             batch_path = self.write_batch(root, VALID_BATCH)
@@ -251,7 +251,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertIn("which-datasets-are-contaminated", slugs)
 
     def test_rerunning_same_batch_is_idempotent(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             batch_path = self.write_batch(root, VALID_BATCH)
@@ -278,7 +278,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertEqual(1, (target / "log.md").read_text().count("intake | Injected question batch"))
 
     def test_dedup_matches_seeded_questions_by_normalized_text(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(
                 root,
@@ -297,7 +297,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertEqual("seeded", report["skipped_duplicates"][0]["duplicate_of"])
 
     def test_within_batch_duplicates_are_skipped(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             batch = {
@@ -330,7 +330,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             {"schema_version": "1.0", "handoff": {"unknown_key": "x"}, "questions": [{"question": "Q?"}]},
             {"schema_version": "1.0", "extra_top": True, "questions": [{"question": "Q?"}]},
         ]
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             log_before = (target / "log.md").read_text()
@@ -348,7 +348,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertEqual(log_before, (target / "log.md").read_text())
 
     def test_missing_workspace_exits_2(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             batch_path = self.write_batch(root, VALID_BATCH)
             code, _, stderr = self.run_intake(
@@ -358,7 +358,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertIn("Missing config", stderr)
 
     def test_dry_run_prints_planned_pages_as_json_and_writes_nothing(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             batch_path = self.write_batch(root, VALID_BATCH)
@@ -383,7 +383,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertEqual(log_before, (target / "log.md").read_text())
 
     def test_dry_run_content_wraps_untrusted_summary_and_context(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             batch_path = self.write_batch(
@@ -437,7 +437,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertEqual(log_before, (target / "log.md").read_text())
 
     def test_reads_json_batch_from_stdin(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             stdin = io.StringIO(json.dumps(VALID_BATCH))
@@ -455,7 +455,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertIn("Batch source: stdin", (target / "log.md").read_text())
 
     def test_slug_collision_with_existing_page_gets_suffixed(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(
                 root,
@@ -505,7 +505,7 @@ class IntakeQuestionsTests(unittest.TestCase):
                 "overlong-context.yaml",
             ),
         ]
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             for item, expected_field, actual_bytes, max_bytes, name in cases:
@@ -521,7 +521,7 @@ class IntakeQuestionsTests(unittest.TestCase):
                     )
 
     def test_exact_intake_field_byte_limits_are_accepted(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             batch_path = self.write_batch(
@@ -545,7 +545,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertTrue((target / "wiki" / "questions" / f"{'q' * 60}.md").is_file())
 
     def test_intake_field_limits_count_utf8_bytes(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             overlong = "é" * 513
@@ -561,7 +561,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             )
 
     def test_total_cap_rejects_batch_atomically_with_json_error(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(
                 root,
@@ -599,7 +599,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertEqual(log_before, (target / "log.md").read_text())
 
     def test_duplicate_only_batch_is_allowed_when_total_cap_is_full(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(
                 root,
@@ -618,7 +618,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertEqual(1, report["counts"]["skipped_duplicates"])
 
     def test_hourly_rate_limit_rejects_later_batch_atomically(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             self.update_run_config(target, max_intake_per_hour=1)
@@ -654,7 +654,7 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertEqual(log_before, (target / "log.md").read_text())
 
     def test_dry_run_enforces_limits_without_consuming_rate_budget(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(
                 root,

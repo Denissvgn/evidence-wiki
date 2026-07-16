@@ -47,7 +47,7 @@ class GenericDomainHardeningRegressionTests(unittest.TestCase):
         readiness_module = load_script_module("gdh_readiness", SCRIPTS / "publication_readiness.py")
         status_module = load_script_module("gdh_status", SCRIPTS / "workspace_status.py")
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = copy_fixture(Path(tmpdir))
 
             coverage_code, coverage_stdout, coverage_stderr = self.run_module(

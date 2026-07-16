@@ -182,7 +182,7 @@ class CandidateLifecycleTests(unittest.TestCase):
     # --- list ------------------------------------------------------------
 
     def test_list_reports_all_candidates_and_counts(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [candidate("cand-aaa1110000"), candidate("cand-bbb2220000")],
@@ -203,7 +203,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertTrue(all(c["lifecycle_migration"]["review_state_inferred"] is False for c in report["candidates"]))
 
     def test_list_defaults_legacy_candidate_policy_fields(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [candidate("cand-paper0000", source_type="paper")],
@@ -225,7 +225,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual(["academic_method_existence"], record["evidence_areas"])
 
     def test_list_filters_by_status(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [
@@ -267,7 +267,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual(1, report["state_counts"]["reviewed"])
 
     def test_list_filters_by_request_id_across_candidate_link_fields(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [
@@ -299,7 +299,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         )
 
     def test_list_works_with_no_store(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [])
             (workspace / "sources" / "discovery" / "candidates.jsonl").unlink()
             code, stdout, _ = self.run_cli(
@@ -311,7 +311,7 @@ class CandidateLifecycleTests(unittest.TestCase):
     # --- select (link existing request) ----------------------------------
 
     def test_select_links_existing_request_and_audits(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [candidate("cand-aaa1110000")],
@@ -351,7 +351,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual("disc-1a2b3c4d5e", events[0]["run_id"])
 
     def test_select_unknown_request_is_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [candidate("cand-aaa1110000")])
             code, stdout, stderr = self.run_cli(
                 ["--project-root", str(workspace), "--format", "json", "candidates", "select",
@@ -366,7 +366,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual([], self.audit_events(workspace))
 
     def test_select_unknown_candidate_is_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [candidate("cand-aaa1110000")],
@@ -380,7 +380,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual("CANDIDATE_UNKNOWN", json.loads(stderr)["error_code"])
 
     def test_select_is_idempotent_with_canonical_selected_for_request_id(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [
@@ -410,7 +410,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual([], events)
 
     def test_select_requires_exactly_one_of_request_or_create(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [candidate("cand-aaa1110000")])
             # neither
             code, _, stderr = self.run_cli(
@@ -428,7 +428,7 @@ class CandidateLifecycleTests(unittest.TestCase):
             self.assertEqual("VALUE_INVALID", json.loads(stderr)["error_code"])
 
     def test_select_is_idempotent_for_same_request(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [candidate("cand-aaa1110000")],
@@ -473,7 +473,7 @@ class CandidateLifecycleTests(unittest.TestCase):
     # --- select (create request) -----------------------------------------
 
     def test_select_create_request_mints_and_links_request(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [candidate("cand-aaa1110000", source_type="code_repository")],
@@ -498,7 +498,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual(request["request_id"], stored[0]["selected_request_id"])
 
     def test_select_create_request_is_idempotent(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [candidate("cand-aaa1110000")])
             argv = ["--project-root", str(workspace), "--format", "json", "candidates", "select",
                     "--candidate-id", "cand-aaa1110000", "--create-request"]
@@ -513,7 +513,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual(1, len(requests))
 
     def test_create_request_validates_question_slug(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [candidate("cand-aaa1110000")])
             code, _, stderr = self.run_cli(
                 ["--project-root", str(workspace), "--format", "json", "candidates", "select",
@@ -526,7 +526,7 @@ class CandidateLifecycleTests(unittest.TestCase):
     # --- reject ----------------------------------------------------------
 
     def test_reject_records_reason_and_audits(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [candidate("cand-bbb2220000")])
             code, stdout, stderr = self.run_cli(
                 ["--project-root", str(workspace), "--format", "json", "candidates", "reject",
@@ -547,7 +547,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual("lower-trust mirror of official source", events[0]["reason"])
 
     def test_reject_is_idempotent_for_same_reason(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [candidate("cand-bbb2220000")])
             argv = ["--project-root", str(workspace), "--format", "json", "candidates", "reject",
                     "--candidate-id", "cand-bbb2220000", "--reason", "mirror"]
@@ -578,7 +578,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual(1, len(events))
 
     def test_rejected_candidate_is_terminal_and_cannot_be_selected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(
                 Path(tmpdir),
                 [candidate("cand-aaa1110000")],
@@ -602,7 +602,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual(1, len(events))
 
     def test_blank_reason_is_value_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [candidate("cand-bbb2220000")])
             code, _, stderr = self.run_cli(
                 ["--project-root", str(workspace), "--format", "json", "candidates", "reject",
@@ -840,7 +840,7 @@ class CandidateLifecycleTests(unittest.TestCase):
     # --- malformed store -------------------------------------------------
 
     def test_malformed_store_is_workspace_unreadable(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [candidate("cand-aaa1110000")])
             store = workspace / "sources" / "discovery" / "candidates.jsonl"
             store.write_text(store.read_text() + "{not valid json\n", encoding="utf-8")
@@ -859,7 +859,7 @@ class CandidateLifecycleTests(unittest.TestCase):
         original = socket.socket
         socket.socket = forbid_socket
         try:
-            with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+            with tempfile.TemporaryDirectory() as tmpdir:
                 workspace = self.write_workspace(
                     Path(tmpdir),
                     [candidate("cand-aaa1110000")],

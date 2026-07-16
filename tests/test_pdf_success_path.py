@@ -358,7 +358,7 @@ class PdfSuccessPathTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("pdftotext"), "pdftotext is required for the PDF success path")
     def test_pdf_only_source_inventory_normalization_and_lint(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "workspace"
             (root / "raw" / "pdf").mkdir(parents=True)
             (root / "sources" / "normalized").mkdir(parents=True)

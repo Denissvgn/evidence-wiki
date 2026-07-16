@@ -201,11 +201,12 @@ class PublicationOperationsMatrixTests(unittest.TestCase):
             query = SCALE.run_indexed_query(restored, query_config, index_path, SCALE.DEFAULT_QUERY)
             after_hashes = self.durable_hashes(restored)
             config = yaml.safe_load((restored / "research.yml").read_text(encoding="utf-8"))
+            restored_canonical = restored.resolve().as_posix()
 
         self.assertNotEqual(source, restored)
         self.assertEqual(before_hashes, after_hashes)
         self.assertNotEqual("missing", doctor["verdict"])
-        self.assertEqual(restored.as_posix(), doctor["project_root"])
+        self.assertEqual(restored_canonical, doctor["project_root"])
         self.assertEqual("complete", status["readiness"]["verdict"])
         self.assertEqual(0, SCALE.count_lint_issues(lint, "HIGH"))
         self.assertEqual(benchmark["counts"]["indexed_documents"], indexed)

@@ -82,7 +82,7 @@ class DoctorScriptTests(unittest.TestCase):
         cls.doctor = load_script_module("evidence_wiki_doctor_tests", DOCTOR_PATH)
 
     def test_json_report_contains_contract_and_writable_workspace_details(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = make_workspace(Path(tmpdir))
 
             report = self.doctor.build_report(workspace, env=FakeEnvironment())
@@ -108,7 +108,7 @@ class DoctorScriptTests(unittest.TestCase):
         )
 
     def test_missing_optional_tools_degrade_with_path_manipulation(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = make_workspace(Path(tmpdir))
             with mock.patch.dict(os.environ, {"PATH": ""}):
                 report = self.doctor.build_report(workspace)
@@ -123,7 +123,7 @@ class DoctorScriptTests(unittest.TestCase):
         self.assertIn("version-control", checks["git"]["implication"])
 
     def test_semantic_retrieval_check_reports_enabled_command_config(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = make_workspace(Path(tmpdir))
             (workspace / "research.yml").write_text(
                 "integrations:\n"
@@ -144,7 +144,7 @@ class DoctorScriptTests(unittest.TestCase):
         self.assertEqual("local-semantic", checks["semantic_retrieval"]["details"]["provider"])
 
     def test_readable_env_file_warns_without_printing_secret_values(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = make_workspace(Path(tmpdir))
             (workspace / ".env").write_text("OPENALEX_API_KEY=super-secret-value\n", encoding="utf-8")
 
@@ -158,7 +158,7 @@ class DoctorScriptTests(unittest.TestCase):
         self.assertNotIn("super-secret-value", serialized)
 
     def test_missing_pyyaml_is_required_failure(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = make_workspace(Path(tmpdir))
             stdout = io.StringIO()
             env = FakeEnvironment(yaml_error=ImportError("No module named yaml"))
@@ -174,7 +174,7 @@ class DoctorScriptTests(unittest.TestCase):
         self.assertTrue(checks["pyyaml"]["required"])
 
     def test_python_too_old_is_required_failure(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = make_workspace(Path(tmpdir))
             stdout = io.StringIO()
             env = FakeEnvironment(python_version=(3, 9, 18))

@@ -458,7 +458,7 @@ class AutonomousWorkflowFixtureTests(unittest.TestCase):
         coverage_path.write_text(yaml.safe_dump(coverage, sort_keys=False), encoding="utf-8")
 
     def test_offline_multi_path_fixture_reaches_publication_ship(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.init_workspace(Path(tmpdir))
             self.seed_raw_sources(workspace)
 

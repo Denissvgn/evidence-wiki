@@ -130,7 +130,7 @@ class GithubDiscoveryTests(unittest.TestCase):
     # --- repository search ----------------------------------------------
 
     def test_repository_search_emits_candidates_and_writes_store(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             calls = []
 
@@ -193,7 +193,7 @@ class GithubDiscoveryTests(unittest.TestCase):
         self.assertEqual([candidate["candidate_id"]], stored_ids)
 
     def test_search_does_not_fetch_repository_contents(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             urls = []
 
@@ -222,7 +222,7 @@ class GithubDiscoveryTests(unittest.TestCase):
         ]
         for raw, expected, uncertain in cases:
             with self.subTest(license=raw):
-                with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+                with tempfile.TemporaryDirectory() as tmpdir:
                     workspace = self.write_workspace(Path(tmpdir))
                     self.install_transport(lambda *_, raw=raw: search_payload(repo("acme/tool", license_key=raw)))
                     code, stdout, _ = self.run_cli(
@@ -237,7 +237,7 @@ class GithubDiscoveryTests(unittest.TestCase):
     # --- archived repos --------------------------------------------------
 
     def test_archived_repo_is_flagged(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             self.install_transport(lambda *_: search_payload(repo("acme/tool", archived=True)))
             code, stdout, _ = self.run_cli(
@@ -252,7 +252,7 @@ class GithubDiscoveryTests(unittest.TestCase):
     # --- forks -----------------------------------------------------------
 
     def test_fork_is_secondary_unknown_possible_mirror(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             self.install_transport(lambda *_: search_payload(repo("someone/tool", fork=True)))
             code, stdout, _ = self.run_cli(
@@ -267,7 +267,7 @@ class GithubDiscoveryTests(unittest.TestCase):
     # --- candidate ranking ----------------------------------------------
 
     def test_candidates_rank_by_trust_tier_then_scores(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             # A fork (secondary_unknown) is returned first by the provider, but a
             # well-licensed non-fork must outrank it; tier beats provider order.
@@ -287,7 +287,7 @@ class GithubDiscoveryTests(unittest.TestCase):
         self.assertEqual("secondary_unknown", candidates[1]["trust_tier"])
 
     def test_exact_owner_repo_match_outranks_fuzzy_within_tier(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             self.install_transport(
                 lambda *_: search_payload(
@@ -306,7 +306,7 @@ class GithubDiscoveryTests(unittest.TestCase):
         self.assertIn("acme/llm", winner["reasoning"]["matched_query_terms"])
 
     def test_max_results_caps_emitted_candidates(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             many = [repo(f"acme/tool-{index}", description="tool") for index in range(5)]
             self.install_transport(lambda *_: search_payload(*many))
@@ -322,7 +322,7 @@ class GithubDiscoveryTests(unittest.TestCase):
     def test_rate_limit_returns_envelope_with_token_guidance(self):
         for status in (403, 429):
             with self.subTest(status=status):
-                with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+                with tempfile.TemporaryDirectory() as tmpdir:
                     workspace = self.write_workspace(Path(tmpdir))
 
                     def transport(_url, _timeout, _headers, status=status):
@@ -343,7 +343,7 @@ class GithubDiscoveryTests(unittest.TestCase):
                 self.assertTrue(envelope["details"]["network_io_executed"])
 
     def test_auth_failure_returns_envelope(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
 
             def transport(_url, _timeout, _headers):
@@ -360,7 +360,7 @@ class GithubDiscoveryTests(unittest.TestCase):
         self.assertIn("GITHUB_TOKEN", envelope["remediation"])
 
     def test_network_error_is_retried_then_reported(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             attempts = []
 
@@ -377,7 +377,7 @@ class GithubDiscoveryTests(unittest.TestCase):
         self.assertEqual("DISCOVERY_NETWORK_ERROR", json.loads(stderr)["error_code"])
 
     def test_missing_items_list_is_response_invalid(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             self.install_transport(lambda *_: json.dumps({"total_count": 0}).encode("utf-8"))
             code, _, stderr = self.run_cli(
@@ -391,7 +391,7 @@ class GithubDiscoveryTests(unittest.TestCase):
     def test_token_used_flag_and_authorization_header_without_leaking_token(self):
         secret = "ghp_supersecrettokenvalue1234567890"
         os.environ["GITHUB_TOKEN"] = secret
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             seen_headers = {}
 
@@ -416,7 +416,7 @@ class GithubDiscoveryTests(unittest.TestCase):
         self.assertNotIn(secret, store_text)
 
     def test_unauthenticated_discovery_sends_no_authorization_header(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             seen_headers = {}
 
@@ -435,7 +435,7 @@ class GithubDiscoveryTests(unittest.TestCase):
     # --- request linkage + idempotency ----------------------------------
 
     def test_request_id_links_candidates(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             self.install_transport(lambda *_: search_payload(repo("acme/tool")))
             code, stdout, _ = self.run_cli(
@@ -449,7 +449,7 @@ class GithubDiscoveryTests(unittest.TestCase):
         self.assertIsNone(candidate["discovery_run_id"])
 
     def test_blank_optional_request_id_is_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             self.install_transport(lambda *_: search_payload(repo("acme/tool")))
             code, stdout, stderr = self.run_cli(
@@ -462,7 +462,7 @@ class GithubDiscoveryTests(unittest.TestCase):
         self.assertEqual("VALUE_INVALID", envelope["error_code"])
 
     def test_rerunning_same_query_is_idempotent(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
             self.install_transport(lambda *_: search_payload(repo("acme/tool"), repo("acme/other")))
 
@@ -483,7 +483,7 @@ class GithubDiscoveryTests(unittest.TestCase):
     # --- disabled gate does not touch the network -----------------------
 
     def test_disabled_discovery_never_calls_transport(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), enabled=False)
             called = []
             self.install_transport(lambda *args: called.append(args) or b"{}")
