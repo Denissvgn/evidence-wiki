@@ -7,8 +7,12 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib import resources
-from importlib.resources.abc import Traversable
 from pathlib import Path
+
+try:
+    from importlib.resources.abc import Traversable
+except ImportError:  # Python 3.10
+    from importlib.abc import Traversable
 
 ASSETS_DIR = "assets"
 STARTER_DIR = "workspace-template"
