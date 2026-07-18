@@ -5,9 +5,11 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCKS_PATH = REPO_ROOT / "workspace-template" / "scripts" / "_workspace_locks.py"
@@ -181,7 +183,7 @@ class WorkspaceLockTests(unittest.TestCase):
                 old_time = time.time() - (locks.DEFAULT_STALE_EXCLUSIVE_LOCK_SECONDS + 60)
                 os.utime(exclusive_path, (old_time, old_time))
 
-                with locks.workspace_lock(lock_path, purpose="stale recovery", timeout_seconds=1.0) as acquired:
+                with locks.workspace_lock(lock_path, purpose="stale recovery", timeout_seconds=2.0) as acquired:
                     self.assertEqual("exclusive", acquired.backend)
                     self.assertTrue(exclusive_path.is_file())
                     contents = exclusive_path.read_text(encoding="utf-8")
@@ -203,6 +205,29 @@ class WorkspaceLockTests(unittest.TestCase):
             self.assertFalse(removed)
             self.assertTrue(exclusive_path.is_file())
             self.assertIn("successor-token", exclusive_path.read_text(encoding="utf-8"))
+
+    def test_stale_break_does_not_unlink_lock_renewed_after_observation(self):
+        locks = load_locks_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exclusive_path = Path(tmpdir) / "workspace.lock.exclusive"
+            exclusive_path.write_text("ownership_token=live-owner-token\n", encoding="utf-8")
+            old_mtime_ns = time.time_ns() - 60_000_000_000
+            os.utime(exclusive_path, ns=(old_mtime_ns, old_mtime_ns))
+            observation = locks._stale_exclusive_lock_observation(exclusive_path, stale_after_seconds=1.0)
+
+            self.assertIsNotNone(observation)
+            renewed_mtime_ns = old_mtime_ns + 1_000_000_000
+            os.utime(exclusive_path, ns=(renewed_mtime_ns, renewed_mtime_ns))
+            removed = locks._break_stale_exclusive_lock(
+                exclusive_path,
+                observation.ownership_token,
+                stale_after_seconds=1.0,
+                expected_mtime_ns=observation.mtime_ns,
+            )
+
+            self.assertFalse(removed)
+            self.assertTrue(exclusive_path.is_file())
+            self.assertIn("live-owner-token", exclusive_path.read_text(encoding="utf-8"))
 
     def test_exclusive_release_does_not_unlink_replacement_owner(self):
         locks = load_locks_module()
@@ -239,6 +264,101 @@ class WorkspaceLockTests(unittest.TestCase):
             finally:
                 locks.LOCK_BACKENDS = old_backends
 
+    def test_exclusive_backend_does_not_break_lock_renewed_during_stale_confirmation(self):
+        locks = load_locks_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "workspace.lock"
+            exclusive_path = locks._exclusive_lock_path(lock_path)
+            exclusive_path.write_text("ownership_token=live-owner-token\n", encoding="utf-8")
+            old_mtime_ns = time.time_ns() - 60_000_000_000
+            os.utime(exclusive_path, ns=(old_mtime_ns, old_mtime_ns))
+
+            def renew_before_confirmation(_deadline, _grace_seconds):
+                renewed_mtime_ns = old_mtime_ns + 1_000_000_000
+                os.utime(exclusive_path, ns=(renewed_mtime_ns, renewed_mtime_ns))
+                return True
+
+            original_break_stale = locks._break_stale_exclusive_lock
+            with (
+                mock.patch.object(locks, "_wait_for_stale_recheck", side_effect=renew_before_confirmation),
+                mock.patch.object(locks, "_break_stale_exclusive_lock", wraps=original_break_stale) as break_stale,
+                self.assertRaises(locks.LockUnavailableError),
+            ):
+                locks._acquire_exclusive(
+                    lock_path,
+                    deadline=time.monotonic() + 0.05,
+                    poll_interval_seconds=0.001,
+                    stale_after_seconds=1.0,
+                )
+
+            break_stale.assert_not_called()
+            self.assertTrue(exclusive_path.is_file())
+            self.assertIn("live-owner-token", exclusive_path.read_text(encoding="utf-8"))
+
+    def test_exclusive_backend_does_not_break_stale_lock_after_deadline(self):
+        locks = load_locks_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "workspace.lock"
+            exclusive_path = locks._exclusive_lock_path(lock_path)
+            exclusive_path.write_text("ownership_token=stale-owner-token\n", encoding="utf-8")
+            old_mtime_ns = time.time_ns() - 60_000_000_000
+            os.utime(exclusive_path, ns=(old_mtime_ns, old_mtime_ns))
+
+            original_break_stale = locks._break_stale_exclusive_lock
+            with (
+                mock.patch.object(locks, "_break_stale_exclusive_lock", wraps=original_break_stale) as break_stale,
+                self.assertRaises(locks.LockUnavailableError),
+            ):
+                locks._acquire_exclusive(
+                    lock_path,
+                    deadline=time.monotonic() - 1.0,
+                    poll_interval_seconds=0.001,
+                    stale_after_seconds=1.0,
+                )
+
+            break_stale.assert_not_called()
+            self.assertTrue(exclusive_path.is_file())
+            self.assertIn("stale-owner-token", exclusive_path.read_text(encoding="utf-8"))
+
+    def test_exclusive_heartbeat_retries_after_transient_removal_guard_collision(self):
+        locks = load_locks_module()
+
+        class StopAfterTwoHeartbeats:
+            def __init__(self):
+                self.wait_calls = 0
+
+            def wait(self, _seconds):
+                self.wait_calls += 1
+                return self.wait_calls > 2
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exclusive_path = Path(tmpdir) / "workspace.lock.exclusive"
+            ownership_token = "live-owner-token"
+            exclusive_path.write_text(f"ownership_token={ownership_token}\n", encoding="utf-8")
+            old_mtime_ns = time.time_ns() - 60_000_000_000
+            os.utime(exclusive_path, ns=(old_mtime_ns, old_mtime_ns))
+            guard = locks._exclusive_removal_guard_path(exclusive_path)
+            guard.mkdir()
+            observed_outcomes = []
+            original_touch = locks._touch_exclusive_lock_if_owned
+
+            def touch_and_release_guard(path, token):
+                outcome = original_touch(path, token)
+                observed_outcomes.append(outcome)
+                if outcome is locks._ExclusiveHeartbeatOutcome.RETRY:
+                    guard.rmdir()
+                return outcome
+
+            with mock.patch.object(locks, "_touch_exclusive_lock_if_owned", side_effect=touch_and_release_guard):
+                locks._exclusive_heartbeat(exclusive_path, ownership_token, StopAfterTwoHeartbeats(), 0.0)
+
+            self.assertEqual(
+                [locks._ExclusiveHeartbeatOutcome.RETRY, locks._ExclusiveHeartbeatOutcome.RENEWED],
+                observed_outcomes,
+            )
+            self.assertEqual(ownership_token, locks._exclusive_ownership_token(exclusive_path))
+            self.assertGreater(exclusive_path.stat().st_mtime_ns, old_mtime_ns)
+
     def test_exclusive_backend_heartbeat_prevents_live_lock_from_aging_stale(self):
         locks = load_locks_module()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -249,19 +369,32 @@ class WorkspaceLockTests(unittest.TestCase):
                 with locks.workspace_lock(
                     lock_path,
                     purpose="heartbeat owner",
-                    stale_exclusive_after_seconds=0.15,
+                    stale_exclusive_after_seconds=2.0,
                 ):
                     exclusive_path = locks._exclusive_lock_path(lock_path)
-                    old_time = time.time() - 60
-                    os.utime(exclusive_path, (old_time, old_time))
-                    time.sleep(0.08)
-                    self.assertLess(time.time() - exclusive_path.stat().st_mtime, 0.15)
+                    renewed = threading.Event()
+                    armed = threading.Event()
+                    original_touch = locks._touch_exclusive_lock_if_owned
+
+                    def observe_renewal(path, token):
+                        outcome = original_touch(path, token)
+                        if armed.is_set() and outcome is locks._ExclusiveHeartbeatOutcome.RENEWED:
+                            renewed.set()
+                        return outcome
+
+                    with mock.patch.object(locks, "_touch_exclusive_lock_if_owned", side_effect=observe_renewal):
+                        old_mtime_ns = time.time_ns() - 60_000_000_000
+                        os.utime(exclusive_path, ns=(old_mtime_ns, old_mtime_ns))
+                        armed.set()
+                        self.assertTrue(renewed.wait(4.0), "heartbeat did not renew the forced-stale lock")
+
+                    self.assertGreater(exclusive_path.stat().st_mtime_ns, old_mtime_ns)
                     with self.assertRaises(locks.LockUnavailableError):
                         with locks.workspace_lock(
                             lock_path,
                             purpose="competing owner",
-                            timeout_seconds=0.05,
-                            stale_exclusive_after_seconds=0.15,
+                            timeout_seconds=0.1,
+                            stale_exclusive_after_seconds=2.0,
                         ):
                             pass
             finally:

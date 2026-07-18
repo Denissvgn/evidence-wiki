@@ -201,7 +201,9 @@ archival, and log appends. Native `fcntl` or `msvcrt` advisory locks provide the
 reported multi-process safety guarantee. The ownership-token exclusive-create
 fallback still coordinates writers on filesystems with atomic exclusive creation,
 but its owner-death and stale-lock recovery are explicitly best effort rather than
-reported as a native-lock guarantee. The helper refuses mutation with
+reported as a native-lock guarantee. Before it removes a stale fallback lock, it
+requires a bounded renewal grace period plus repeated matching ownership-token and
+timestamp observations. The helper refuses mutation with
 `LOCK_UNAVAILABLE` if no lock can be established. `EVIDENCE_WIKI_SINGLE_WRITER=1`
 is reserved for operator-controlled single-writer development runs on filesystems
 where no lock primitive is available.

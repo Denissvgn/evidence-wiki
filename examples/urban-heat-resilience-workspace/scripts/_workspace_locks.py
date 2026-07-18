@@ -24,6 +24,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 try:  # pragma: no cover - platform dependent import
@@ -94,6 +95,25 @@ class _AcquiredBackend:
 
 class _BackendUnsupported(Exception):
     pass
+
+
+class _ExclusiveHeartbeatOutcome(Enum):
+    """Result of one fallback-lock heartbeat attempt.
+
+    A removal guard can be held briefly by a competing stale-recovery attempt.
+    That contention does not prove that this owner lost its lock, so callers
+    must retry rather than stopping the heartbeat permanently.
+    """
+
+    RENEWED = "renewed"
+    RETRY = "retry"
+    OWNERSHIP_LOST = "ownership_lost"
+
+
+@dataclass(frozen=True)
+class _ExclusiveLockObservation:
+    ownership_token: str
+    mtime_ns: int
 
 
 def available_lock_backends() -> tuple[str, ...]:
@@ -225,24 +245,59 @@ def _exclusive_lock_path(lock_path: Path) -> Path:
     return lock_path.with_name(f"{lock_path.name}.exclusive")
 
 
+def _is_stale_exclusive_mtime(mtime_ns: int, stale_after_seconds: float) -> bool:
+    stale_after_ns = int(max(stale_after_seconds, 0.0) * 1_000_000_000)
+    return time.time_ns() - mtime_ns >= stale_after_ns
+
+
 def _is_stale_exclusive_lock(path: Path, stale_after_seconds: float) -> bool:
     try:
-        age = time.time() - path.stat().st_mtime
+        mtime_ns = path.stat().st_mtime_ns
     except OSError:
         return False
-    return age >= stale_after_seconds
+    return _is_stale_exclusive_mtime(mtime_ns, stale_after_seconds)
 
 
-def _exclusive_ownership_token(path: Path) -> str | None:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-        return None
+def _ownership_token_from_lines(lines: list[str]) -> str | None:
     for line in lines:
         key, separator, value = line.partition("=")
         if separator and key == "ownership_token" and value:
             return value
     return None
+
+
+def _read_exclusive_ownership_token(path: Path) -> str | None:
+    return _ownership_token_from_lines(path.read_text(encoding="utf-8").splitlines())
+
+
+def _exclusive_ownership_token(path: Path) -> str | None:
+    try:
+        return _read_exclusive_ownership_token(path)
+    except (OSError, UnicodeError):
+        return None
+
+
+def _exclusive_lock_observation(path: Path) -> _ExclusiveLockObservation | None:
+    """Read a stable token/mtime pair, or refuse to reason about the file."""
+    try:
+        before_mtime_ns = path.stat().st_mtime_ns
+        ownership_token = _read_exclusive_ownership_token(path)
+        after_mtime_ns = path.stat().st_mtime_ns
+    except (OSError, UnicodeError):
+        return None
+    if ownership_token is None or before_mtime_ns != after_mtime_ns:
+        return None
+    return _ExclusiveLockObservation(ownership_token=ownership_token, mtime_ns=after_mtime_ns)
+
+
+def _stale_exclusive_lock_observation(
+    path: Path,
+    stale_after_seconds: float,
+) -> _ExclusiveLockObservation | None:
+    observation = _exclusive_lock_observation(path)
+    if observation is None or not _is_stale_exclusive_mtime(observation.mtime_ns, stale_after_seconds):
+        return None
+    return observation
 
 
 def _exclusive_removal_guard_path(path: Path) -> Path:
@@ -254,8 +309,12 @@ def _remove_exclusive_lock_if_owned(
     expected_token: str | None,
     *,
     require_stale_after_seconds: float | None = None,
+    expected_mtime_ns: int | None = None,
+    deadline: float | None = None,
 ) -> bool:
     if expected_token is None:
+        return False
+    if deadline is not None and time.monotonic() >= deadline:
         return False
     guard = _exclusive_removal_guard_path(path)
     try:
@@ -265,12 +324,19 @@ def _remove_exclusive_lock_if_owned(
     except OSError:
         return False
     try:
-        if _exclusive_ownership_token(path) != expected_token:
+        if deadline is not None and time.monotonic() >= deadline:
             return False
-        if require_stale_after_seconds is not None and not _is_stale_exclusive_lock(
-            path,
+        observation = _exclusive_lock_observation(path)
+        if observation is None or observation.ownership_token != expected_token:
+            return False
+        if expected_mtime_ns is not None and observation.mtime_ns != expected_mtime_ns:
+            return False
+        if require_stale_after_seconds is not None and not _is_stale_exclusive_mtime(
+            observation.mtime_ns,
             require_stale_after_seconds,
         ):
+            return False
+        if deadline is not None and time.monotonic() >= deadline:
             return False
         try:
             path.unlink()
@@ -290,31 +356,51 @@ def _break_stale_exclusive_lock(
     path: Path,
     expected_token: str | None,
     stale_after_seconds: float = DEFAULT_STALE_EXCLUSIVE_LOCK_SECONDS,
+    *,
+    expected_mtime_ns: int | None = None,
+    deadline: float | None = None,
 ) -> bool:
     # Stale breakers and owner release serialize through a separate removal
-    # guard, then re-read the token. A successor can be created after unlink,
-    # but no remover holding the guard performs a second unlink.
+    # guard, then re-read the token and timestamp. A successor can be created
+    # after unlink, but no remover holding the guard performs a second unlink.
     return _remove_exclusive_lock_if_owned(
         path,
         expected_token,
         require_stale_after_seconds=stale_after_seconds,
+        expected_mtime_ns=expected_mtime_ns,
+        deadline=deadline,
     )
 
 
-def _touch_exclusive_lock_if_owned(path: Path, expected_token: str) -> bool:
+def _touch_exclusive_lock_if_owned(
+    path: Path,
+    expected_token: str,
+) -> _ExclusiveHeartbeatOutcome:
     guard = _exclusive_removal_guard_path(path)
     try:
         guard.mkdir()
+    except FileExistsError:
+        return _ExclusiveHeartbeatOutcome.RETRY
     except OSError:
-        return False
+        return _ExclusiveHeartbeatOutcome.RETRY
     try:
-        if _exclusive_ownership_token(path) != expected_token:
-            return False
         try:
-            path.touch(exist_ok=True)
-            return True
+            observed_token = _read_exclusive_ownership_token(path)
+        except FileNotFoundError:
+            return _ExclusiveHeartbeatOutcome.OWNERSHIP_LOST
+        except (IsADirectoryError, NotADirectoryError, UnicodeError):
+            return _ExclusiveHeartbeatOutcome.OWNERSHIP_LOST
         except OSError:
-            return False
+            return _ExclusiveHeartbeatOutcome.RETRY
+        if observed_token != expected_token:
+            return _ExclusiveHeartbeatOutcome.OWNERSHIP_LOST
+        try:
+            os.utime(path, None)
+        except FileNotFoundError:
+            return _ExclusiveHeartbeatOutcome.OWNERSHIP_LOST
+        except OSError:
+            return _ExclusiveHeartbeatOutcome.RETRY
+        return _ExclusiveHeartbeatOutcome.RENEWED
     finally:
         try:
             guard.rmdir()
@@ -323,9 +409,30 @@ def _touch_exclusive_lock_if_owned(path: Path, expected_token: str) -> bool:
 
 
 def _exclusive_heartbeat(path: Path, ownership_token: str, stop: threading.Event, interval_seconds: float) -> None:
-    while not stop.wait(interval_seconds):
-        if not _touch_exclusive_lock_if_owned(path, ownership_token):
+    retry_interval_seconds = max(0.01, min(interval_seconds, 0.05))
+    wait_seconds = interval_seconds
+    while not stop.wait(wait_seconds):
+        outcome = _touch_exclusive_lock_if_owned(path, ownership_token)
+        if outcome is _ExclusiveHeartbeatOutcome.OWNERSHIP_LOST:
             return
+        wait_seconds = interval_seconds if outcome is _ExclusiveHeartbeatOutcome.RENEWED else retry_interval_seconds
+
+
+def _exclusive_heartbeat_interval(stale_after_seconds: float) -> float:
+    return max(0.01, min(60.0, stale_after_seconds / 3.0))
+
+
+def _stale_recovery_grace_seconds(stale_after_seconds: float) -> float:
+    """Give a live fallback owner one bounded chance to renew its heartbeat."""
+    return min(0.5, _exclusive_heartbeat_interval(stale_after_seconds))
+
+
+def _wait_for_stale_recheck(deadline: float, grace_seconds: float) -> bool:
+    """Wait for a renewal grace period without extending an acquire timeout."""
+    if time.monotonic() + grace_seconds >= deadline:
+        return False
+    time.sleep(grace_seconds)
+    return time.monotonic() < deadline
 
 
 def _acquire_exclusive(
@@ -340,7 +447,7 @@ def _acquire_exclusive(
     ownership_token = secrets.token_hex(16)
     payload = f"pid={os.getpid()}\ncreated_at={time.time():.6f}\nownership_token={ownership_token}\n"
     encoded = payload.encode("utf-8")
-    already_broke_stale = False
+    already_attempted_stale_recovery = False
     while True:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -353,7 +460,7 @@ def _acquire_exclusive(
                 path.unlink(missing_ok=True)
                 raise
             heartbeat_stop = threading.Event()
-            heartbeat_interval = max(0.01, min(60.0, stale_after_seconds / 3.0))
+            heartbeat_interval = _exclusive_heartbeat_interval(stale_after_seconds)
             heartbeat_thread = threading.Thread(
                 target=_exclusive_heartbeat,
                 args=(path, ownership_token, heartbeat_stop, heartbeat_interval),
@@ -369,16 +476,28 @@ def _acquire_exclusive(
                 heartbeat_thread=heartbeat_thread,
             )
         except FileExistsError as exc:
-            if not already_broke_stale and _is_stale_exclusive_lock(path, stale_after_seconds):
-                # Break at most once per acquire attempt: if the file keeps
-                # reappearing immediately after a break, a live holder is
-                # actively renewing it and it is not actually stale.
-                already_broke_stale = True
-                observed_token = _exclusive_ownership_token(path)
-                _break_stale_exclusive_lock(path, observed_token, stale_after_seconds)
-                continue
             if time.monotonic() >= deadline:
                 raise LockUnavailableError(f"Timed out acquiring workspace lock for {lock_path}") from exc
+            if not already_attempted_stale_recovery:
+                observation = _stale_exclusive_lock_observation(path, stale_after_seconds)
+                if observation is not None:
+                    # Confirm that this is the same unchanged lock after a
+                    # bounded renewal grace period. This limits stale recovery
+                    # to a best-effort fallback without deleting a lock whose
+                    # owner just renewed it.
+                    already_attempted_stale_recovery = True
+                    grace_seconds = _stale_recovery_grace_seconds(stale_after_seconds)
+                    if _wait_for_stale_recheck(deadline, grace_seconds):
+                        confirmation = _stale_exclusive_lock_observation(path, stale_after_seconds)
+                        if confirmation == observation and time.monotonic() < deadline:
+                            _break_stale_exclusive_lock(
+                                path,
+                                observation.ownership_token,
+                                stale_after_seconds,
+                                expected_mtime_ns=observation.mtime_ns,
+                                deadline=deadline,
+                            )
+                    continue
             _sleep_until(deadline, poll_interval_seconds)
         except OSError as exc:
             raise _BackendUnsupported(str(exc)) from exc
