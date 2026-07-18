@@ -522,12 +522,3 @@ files do not land in the repository root.
 
 See `CONTRIBUTING.md` for local setup, test expectations, style rules, and pull
 request guidance.
-
-## Release Engineering (Maintainers)
-
-See `RELEASING.md` for the local build, verification, and publication checklist.
-CI tests supported Python versions on Ubuntu, macOS, and Windows and builds both
-distribution formats. PyPI publishing is a separate release-gated workflow: it
-can start only after a GitHub Release is published, re-runs the release gates,
-and uses Trusted Publishing without a stored PyPI token. The root `Containerfile`
-builds the current source into a small non-root runtime image.
