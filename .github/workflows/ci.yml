@@ -115,4 +115,4 @@ jobs:
         shell: bash
         run: |
           .venv/bin/python -m build --wheel --sdist --no-isolation
-          .venv/bin/python -m twine check dist/*.whl dist/*.tar.gz
+          .venv/bin/python -m twine check --strict dist/*.whl dist/*.tar.gz

@@ -36,6 +36,12 @@ dev = [
 [project.scripts]
 evidence-wiki = "evidence_wiki.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/Denissvgn/evidence-wiki"
+Repository = "https://github.com/Denissvgn/evidence-wiki"
+Issues = "https://github.com/Denissvgn/evidence-wiki/issues"
+Changelog = "https://github.com/Denissvgn/evidence-wiki/blob/main/CHANGELOG.md"
+
 [tool.hatch.build]
 exclude = [
   "/.git",

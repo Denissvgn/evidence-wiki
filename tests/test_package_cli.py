@@ -870,11 +870,13 @@ class PackageCliTests(unittest.TestCase):
         self.assertIn('"workspace-template" = "evidence_wiki/assets/workspace-template"', pyproject)
         self.assertIn('"domain-packs" = "evidence_wiki/assets/domain-packs"', pyproject)
 
-    def test_pyproject_does_not_invent_repository_metadata(self):
+    def test_pyproject_publishes_public_repository_metadata(self):
         pyproject = (REPO_ROOT / "pyproject.toml").read_text()
 
         self.assertIn('license = { text = "MIT" }', pyproject)
-        self.assertNotIn("[project.urls]", pyproject)
+        self.assertIn("[project.urls]", pyproject)
+        self.assertIn('Repository = "https://github.com/Denissvgn/evidence-wiki"', pyproject)
+        self.assertIn('Issues = "https://github.com/Denissvgn/evidence-wiki/issues"', pyproject)
 
 
 if __name__ == "__main__":

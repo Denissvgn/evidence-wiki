@@ -144,6 +144,13 @@ with two harness families, and exposes a third integration surface:
   question intake, answer export, and source-request listing over stdio
   without changing the canonical CLI/script contracts.
 
+### How This Project Was Built
+
+EvidenceWiki was planned, written, and tested entirely with AI coding agents.
+Most of the work was done with OpenAI Codex using GPT-5.5 and GPT-5.6, with
+Anthropic Claude also used for parts of the project. No code in this repository
+was manually authored by a human.
+
 A concrete end-to-end pairing with Claude Code, matching the tour above:
 
 1. `python3 -m pip install evidence-wiki`, then ask the agent:
@@ -520,5 +527,7 @@ request guidance.
 
 See `RELEASING.md` for the local build, verification, and publication checklist.
 CI tests supported Python versions on Ubuntu, macOS, and Windows and builds both
-distribution formats; it does not publish them automatically. The root
-`Containerfile` builds the current source into a small non-root runtime image.
+distribution formats. PyPI publishing is a separate release-gated workflow: it
+can start only after a GitHub Release is published, re-runs the release gates,
+and uses Trusted Publishing without a stored PyPI token. The root `Containerfile`
+builds the current source into a small non-root runtime image.

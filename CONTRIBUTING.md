@@ -120,7 +120,9 @@ The wheel must contain the starter workspace, domain packs, and orchestrator
 guide. The source distribution additionally carries tests and development
 tools. Neither artifact should contain reports, caches, virtual environments,
 scratch workspaces, or build output. See `RELEASING.md` for the maintainer
-checklist.
+checklist. PyPI uploads are intentionally unavailable from pull requests, tag
+pushes, and manual workflow dispatches; only a published GitHub Release can
+start the verified publishing workflow.
 
 ## Documentation
 
