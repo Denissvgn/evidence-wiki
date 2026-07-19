@@ -135,7 +135,7 @@ belongs in candidate, coverage, question, and source artifacts.
 | State | Allowed next states |
 |-------|---------------------|
 | `initialized` | `planned`, `failed` |
-| `planned` | `discovering`, `no_ship`, `failed` |
+| `planned` | `discovering`, `answering`, `no_ship`, `failed` |
 | `discovering` | `candidates_ready`, `blocked_on_sources`, `failed` |
 | `candidates_ready` | `fetch_planned`, `blocked_on_sources`, `failed` |
 | `fetch_planned` | `fetching`, `blocked_on_sources`, `failed` |
@@ -150,6 +150,13 @@ belongs in candidate, coverage, question, and source artifacts.
 
 Terminal states do not transition inside the same run. A later attempt should
 create a new `run_id` so the blocked or failed run remains auditable.
+
+The direct `planned` → `answering` edge is intentionally narrow: it lets a
+parent orchestration send an already answerable backlog to `research-run`
+without pretending discovery occurred. All other forward paths remain
+unchanged. A durable parent session under `runs/orchestrations/` may reference
+several child runs; it never reopens a terminal child. See
+[orchestration.md](orchestration.md).
 
 `finish --final-verdict complete` has an additional fail-closed gate. While
 holding the run-state lock, the controller invokes the publication-readiness

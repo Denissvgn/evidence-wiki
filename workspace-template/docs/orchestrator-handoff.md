@@ -8,11 +8,32 @@ This document is the canonical contract (schemas, error codes, artifact shapes).
 
 1. **Preflight**: check runner capabilities with `evidence-wiki doctor --format json`.
 2. **Negotiate**: check supported contract and schema versions with `evidence-wiki contract`.
-3. **Deploy**: create the workspace non-interactively from a setup profile that carries the upstream correlation IDs and seed questions.
-4. **Deliver sources**: place raw evidence under the configured `raw/` roots and run inventory plus normalization.
-5. **Inject questions**: add validated question batches to the running workspace at any point with `scripts/intake_questions.py`.
-6. **Poll status**: read one aggregate document with `scripts/workspace_status.py`, including a machine-checkable completion verdict, run budget state, and `stop_reasons` when per-run counters are supplied.
-7. **Collect results**: read structured answers with citations from `scripts/export_answers.py`, then evaluate `scripts/publication_readiness.py --format json`; no wiki Markdown parsing required.
+3. **Deploy**: create the workspace non-interactively with explicit discovery and acquisition provider allow-lists when network routes are required.
+4. **Inject questions**: add validated question batches with `evidence-wiki questions add` or `scripts/intake_questions.py`.
+5. **Orchestrate**: use `evidence-wiki orchestrate run --runner codex|claude`, or drive `start` / `next` / `submit` / `status` from another agent host. The parent may preserve several immutable child runs while discovery and acquisition close source gaps.
+6. **Poll status**: read `evidence-wiki orchestrate status` for the parent and `scripts/workspace_status.py` for the artifact-derived workspace verdict, budgets, and stop reasons.
+7. **Collect results**: after a fresh `ship` verdict, read `runs/orchestrations/<orchestration_id>/answers.json` or call `scripts/export_answers.py`; no external wiki Markdown parsing is required.
+
+Manual local-file delivery remains supported, but it is an alternative input
+path—not a prerequisite for a provider-enabled orchestration that starts with an
+empty `raw/` directory.
+
+The durable parent protocol publishes `orchestration_session`,
+`orchestration_work_order`, and `orchestration_result` schema version `1.0`
+through `evidence-wiki contract`. Work orders contain only stable IDs, a phase
+and workspace skill, one child `run_id`, bounded scope and budgets, the effective
+provider policy, workspace-relative inputs, structured postconditions, and a
+lease. Results contain exactly `schema_version`, `action_id`, `outcome`,
+`summary`, and workspace-relative `artifacts`. See
+[orchestration.md](orchestration.md) for persistence, idempotency, recovery, and
+runner safety details.
+
+`outcome` describes execution of the work order, not the child run's readiness
+verdict. When a research work order creates source requests and correctly ends
+its child run as `blocked_on_sources`, submit `outcome: completed` so the parent
+can route discovery and acquisition. Submit `blocked` only when the work order
+itself cannot progress; that outcome terminates the parent as
+`blocked_on_sources`. Submit `failed` only for a failed work order or tool.
 
 High-stakes questions can also carry facet-level answerability state in
 `sources/coverage/<slug>.yml`. The schema is documented in
@@ -66,10 +87,19 @@ Output is JSON:
   "schema_version": "1.0",
   "package": "evidence-wiki",
   "package_version": "0.1.0",
-  "starter_version": "0.4.0",
+  "starter_version": "0.5.0",
   "starter_schema_version": "0.1",
   "compatible_research_yml_contract": "0.1",
   "profile_schema_versions": ["0.1"],
+  "source_providers": {
+    "discovery": [
+      "arxiv", "openalex", "github", "search", "standards",
+      "standards:iso-open-data", "standards:eu-product-requirements",
+      "standards:uk-geospatial-register", "standards:nist"
+    ],
+    "acquisition": ["arxiv", "openalex", "github", "web"],
+    "legacy_discovery_strategy_aliases": ["legal", "authors", "companions"]
+  },
   "artifact_schemas": {
     "workspace_status": "1.0",
     "question_intake": "1.0",
@@ -78,6 +108,9 @@ Output is JSON:
     "citation_verification": "1.0",
     "publication_readiness": "1.0",
     "coverage_manifest": "1.0",
+    "orchestration_session": "1.0",
+    "orchestration_work_order": "1.0",
+    "orchestration_result": "1.0",
     "mcp_server": "1.0",
     "error_envelope": "1.0"
   },
@@ -170,13 +203,14 @@ errors that prevent the report from being built.
 | Script | JSON mode | Fatal envelope codes |
 |--------|-----------|----------------------|
 | `coverage_manifest.py` | `python3 scripts/coverage_manifest.py init\|show\|validate\|set-facet\|evaluate --format json` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `COVERAGE_MANIFEST_INVALID`, `COVERAGE_MANIFEST_EXISTS`, `COVERAGE_CLAIM_PROBE_INVALID`, `COVERAGE_FACET_UNKNOWN`, `COVERAGE_POLICY_UNKNOWN`, `COVERAGE_TEMPLATE_INVALID`, `SOURCE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_LINKED`, `VALUE_INVALID`, `SLUG_INVALID`, `SLUG_UNKNOWN`, `WORKSPACE_UNREADABLE` |
-| `discover_sources.py` | `python3 scripts/discover_sources.py --format json <command>` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `VALUE_INVALID`, `DISCOVERY_DISABLED`, `NOT_IMPLEMENTED`, `DISCOVERY_NETWORK_ERROR`, `DISCOVERY_RESPONSE_INVALID`, `SEARCH_PROVIDER_DISABLED`, `SEARCH_PROVIDER_FAILED`, `GITHUB_AUTH_REQUIRED`, `GITHUB_RATE_LIMITED`, `CANDIDATE_UNKNOWN`, `REQUEST_UNKNOWN`, `QUESTION_UNKNOWN`, `WORKSPACE_UNREADABLE` |
+| `discover_sources.py` | `python3 scripts/discover_sources.py --format json <command>` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `VALUE_INVALID`, `DISCOVERY_DISABLED`, `DISCOVERY_PROVIDER_DISABLED`, `NOT_IMPLEMENTED`, `DISCOVERY_NETWORK_ERROR`, `DISCOVERY_RESPONSE_INVALID`, `ARXIV_RATE_LIMITED`, `OPENALEX_AUTH_REQUIRED`, `OPENALEX_RATE_LIMITED`, `SEARCH_PROVIDER_DISABLED`, `SEARCH_PROVIDER_FAILED`, `GITHUB_AUTH_REQUIRED`, `GITHUB_RATE_LIMITED`, `CANDIDATE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_OPEN`, `QUESTION_UNKNOWN`, `WORKSPACE_UNREADABLE` |
 | `doctor.py` | `python3 scripts/doctor.py --format json` | `WORKSPACE_UNREADABLE` for fatal setup exceptions; missing capabilities are normal report checks. |
 | `export_answers.py` | `python3 scripts/export_answers.py --format json` or `--format jsonl` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `HANDOFF_SIGNATURE_INVALID`, `WORKSPACE_UNREADABLE` |
 | `fetch_sources.py` | `python3 scripts/fetch_sources.py --format json <provider> <command>` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `ACQUISITION_DISABLED`, `ACQUISITION_PROVIDER_DISABLED`, `ACQUISITION_LIMIT_EXCEEDED`, `ARXIV_ID_INVALID`, `ACQUISITION_NETWORK_ERROR`, `ACQUISITION_RESPONSE_INVALID`, `ACQUISITION_ARCHIVE_UNSAFE`, `ACQUISITION_TARGET_EXISTS`, `OPENALEX_ID_INVALID`, `OPENALEX_RESOLUTION_UNCERTAIN`, `OPENALEX_AUTH_REQUIRED`, `OPENALEX_RATE_LIMITED`, `OPENALEX_PDF_UNAVAILABLE`, `GITHUB_AUTH_REQUIRED`, `GITHUB_RATE_LIMITED`, `GITHUB_REPO_INVALID`, `GITHUB_NOT_FOUND`, `GITHUB_RELEASE_UNAVAILABLE`, `GITHUB_ARCHIVE_TOO_LARGE`, `NOT_IMPLEMENTED` |
 | `intake_questions.py` | `python3 scripts/intake_questions.py --format json`, or any `--dry-run` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `HANDOFF_SIGNATURE_INVALID`, `INTAKE_FIELD_TOO_LONG`, `INTAKE_TOTAL_CAP_EXCEEDED`, `INTAKE_RATE_LIMITED`, `WORKSPACE_UNREADABLE` |
 | `lint.py` | `python3 scripts/lint.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `WORKSPACE_UNREADABLE` |
 | `normalize_sources.py` | `python3 scripts/normalize_sources.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `SOURCE_UNKNOWN`, `WORKSPACE_UNREADABLE` |
+| `orchestration_controller.py` | `python3 scripts/orchestration_controller.py start\|next\|submit\|status --format json` | `CONFIG_MISSING`, `CONFIG_INVALID`, `ORCHESTRATION_ID_INVALID`, `ACTION_ID_INVALID`, `AGENT_ID_INVALID`, `ORCHESTRATION_EXISTS`, `ORCHESTRATION_UNKNOWN`, `ORCHESTRATION_STATE_INVALID`, `ORCHESTRATION_EVENTS_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`, `ORCHESTRATION_WRITE_FAILED`, `ORCHESTRATION_WORKSPACE_UNSAFE`, `ORCHESTRATION_PROVIDER_POLICY_CHANGED`, `ACTION_NOT_PENDING`, `RESULT_UNREADABLE`, `RESULT_INVALID`, `RESULT_CONFLICT`, `ORCHESTRATION_POSTCONDITION_FAILED`, `WORK_ORDER_INVALID`, `CANDIDATE_STORE_INVALID`, `SOURCE_REQUESTS_INVALID`, `WORKSPACE_UNREADABLE` |
 | `query_index.py` | `python3 scripts/query_index.py QUERY --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `QUERY_MISSING`, `WORKSPACE_UNREADABLE` |
 | `question_claim.py` | `python3 scripts/question_claim.py claim --slug SLUG --agent-id AGENT --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `CLAIM_NOT_STALE`, `STEAL_THRESHOLD_REQUIRED`, `STEAL_FLAG_REQUIRED`, `STEAL_NOT_APPLICABLE`, `STATUS_NOT_CLAIMABLE`, `STATUS_NOT_RELEASABLE`, `SLUG_INVALID`, `SLUG_UNKNOWN`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
 | `question_resolve.py` | `python3 scripts/question_resolve.py answer\|block\|defer\|reject\|reopen --slug SLUG --agent-id AGENT ... --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `STATUS_NOT_RESOLVABLE`, `STATUS_NOT_REOPENABLE`, `SOURCE_NOT_NORMALIZED`, `QUESTION_NOT_CLAIMED`, `ANSWER_SOURCE_REQUIRED`, `COVERAGE_REQUIRED`, `COVERAGE_BLOCKED`, `COVERAGE_MANIFEST_INVALID`, `ANSWER_PAGE_INVALID`, `ANSWER_PAGE_MISSING`, `SOURCE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_LINKED`, `RESOLUTION_REASON_INVALID`, `VALUE_INVALID`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
@@ -212,6 +246,17 @@ Stable error codes:
 | `RUN_STATE_INVALID` | `runs/<run_id>/run-state.json` is malformed or has the wrong schema shape. | Repair or restore the run-state snapshot before continuing. |
 | `RUN_TRANSITION_INVALID` | A requested state transition is not allowed by the run state machine. | Move only to an allowed next state, or use `finish` for terminal verdicts. |
 | `RUN_TERMINAL` | A command attempted to mutate a terminal run. | Start a new run so the old terminal result remains auditable. |
+| `ORCHESTRATION_ID_INVALID` | A parent orchestration id is empty or path-like. | Use a filename-safe id, or let `orchestrate start` generate one. |
+| `ORCHESTRATION_EXISTS` | `start` would overwrite a retained parent session. | Resume or inspect that session, or start with another id. |
+| `ORCHESTRATION_UNKNOWN` | The requested parent session does not exist. | Inspect `runs/orchestrations/` or start a session. |
+| `ORCHESTRATION_STATE_INVALID` | A retained parent session has an invalid schema or state. | Restore the session artifact before continuing. |
+| `ORCHESTRATION_OWNER_MISMATCH` | A command supplied a different agent id from the session owner. | Retry with the owning `agent_id` or start a separately owned session. |
+| `ORCHESTRATION_WORKSPACE_UNSAFE` | Workspace health or a HIGH validation finding makes the next action unsafe. | Resolve the reported health or validation findings, then request the same next action again. |
+| `ORCHESTRATION_PROVIDER_POLICY_CHANGED` | The retained session's explicit provider authority no longer matches `research.yml`. | Restore the reviewed provider policy or start a new parent session for the changed policy. |
+| `ACTION_NOT_PENDING` | `submit` named an action other than the persisted pending action. | Call `next` and submit the returned action id. |
+| `RESULT_INVALID` | A work result violates the version 1.0 schema or safe-path rules. | Return only action id, outcome, bounded summary, and workspace-relative artifact paths. |
+| `RESULT_CONFLICT` | A completed action already retains a different result. | Treat the accepted result as immutable; do not overwrite it. |
+| `ORCHESTRATION_POSTCONDITION_FAILED` | A worker reported completion but deterministic workspace artifacts do not satisfy the order. | Finish the same persisted action and resubmit it without changing the action id. |
 | `FINAL_VERDICT_REQUIRED` | `finish` omitted the terminal verdict. | Pass `--final-verdict complete`, `blocked_on_sources`, `no_ship`, or `failed`. |
 | `EVENT_DATA_INVALID` | `event --data-json` was not a JSON object. | Pass a JSON object or omit `--data-json`. |
 | `COVERAGE_REQUIRED` | `question_resolve.py answer --require-coverage` could not find the selected coverage manifest. | Initialize or select a coverage manifest under `sources.coverage_dir`, then evaluate it before answering. |
@@ -225,6 +270,7 @@ Stable error codes:
 | `QUERY_MISSING` | Retrieval query text is missing. | Provide query terms. |
 | `QUESTION_UNKNOWN` | Referenced question slug does not exist. | Use an existing `wiki/questions/` slug. |
 | `REQUEST_UNKNOWN` | Referenced source-request id is unknown. | List requests and choose an existing id. |
+| `REQUEST_NOT_OPEN` | Discovery was requested for a source request that is no longer open. | Select an open request or reopen the request deliberately before discovery. |
 | `CANDIDATE_UNKNOWN` | Referenced discovery candidate id is unknown. | List candidates with `discover_sources.py candidates list` and choose an existing id. |
 | `SOURCE_UNKNOWN` | Referenced manifest source id is unknown. | Inventory sources and choose an existing source id. |
 | `TOOLING_MISSING` | A packaged or sibling script is missing. | Restore or upgrade workspace scripts. |
@@ -234,7 +280,7 @@ Stable error codes:
 | `INTAKE_BATCH_TOO_LARGE` | An MCP intake call exceeds `run.max_mcp_intake_batch_questions`. | Submit a smaller MCP batch or raise the MCP batch cap deliberately. |
 | `HANDOFF_SIGNATURE_INVALID` | A configured handoff secret requires a valid HMAC signature, but the handoff was unsigned or changed. | Sign the handoff with the configured secret, or unset the secret to stay in unsigned compatibility mode. |
 | `ACQUISITION_DISABLED` | Optional provider-backed acquisition is disabled. | Enable acquisition explicitly or use manual source delivery. |
-| `DISCOVERY_DISABLED` | Optional source discovery is disabled. | Set `integrations.discovery.enabled: true` to opt in; discovery still performs no network I/O until a provider transport is implemented. |
+| `DISCOVERY_DISABLED` | A provider-backed source-discovery route is disabled. | Explicitly enable discovery and list the concrete provider; offline candidate review remains available. |
 | `DISCOVERY_PROVIDER_DISABLED` | A discovery provider route is not allow-listed for the workspace. | Add the provider to `integrations.discovery.providers` or choose an enabled discovery route. |
 | `DISCOVERY_NETWORK_ERROR` | A discovery provider request failed due to network or server errors. | Retry later, check network access, or lower request volume. |
 | `DISCOVERY_RESPONSE_INVALID` | A discovery provider response was malformed or missing required data. | Retry later or inspect the provider response manually. |
@@ -249,6 +295,7 @@ Stable error codes:
 | `ACQUISITION_PROVIDER_DISABLED` | Requested provider is not allow-listed for the workspace. | Add the provider to `integrations.acquisition.providers` or choose an enabled provider. |
 | `ACQUISITION_LIMIT_EXCEEDED` | Requested downloads exceed the workspace acquisition limit. | Lower the request count or raise the limit after reviewing provider constraints. |
 | `ARXIV_ID_INVALID` | arXiv identifier syntax is invalid. | Pass a versioned post-2007 arXiv id. |
+| `ARXIV_RATE_LIMITED` | arXiv refused or throttled the bounded request. | Wait for the provider window, reduce the request rate, and resume the retained action. |
 | `ACQUISITION_NETWORK_ERROR` | Provider request failed due to network or server errors. | Retry later, check network access, or lower request volume. |
 | `ACQUISITION_RESPONSE_INVALID` | Provider response was malformed or missing required data. | Retry later or inspect the provider response manually. |
 | `ACQUISITION_ARCHIVE_UNSAFE` | Downloaded archive has unsafe paths or unsupported members. | Reject the archive or inspect it outside the workspace. |
@@ -368,7 +415,8 @@ Required envelope fields:
 | `evidence_paths` | Workspace-relative raw, manifest, normalized, request, candidate, or report paths the delegate may read or update. |
 | `question_batch` | Question slugs or intake batch metadata assigned to this delegate. |
 | `budgets` | Per-run limits from `workspace_status.py` plus any remaining counters the PM is enforcing. |
-| `allowed_providers` | Provider ids the delegate may use, such as `manual`, `arxiv`, `openalex`, `github`, `web`, or `search`; an empty list means no provider-backed acquisition is allowed. |
+| `provider_policy` | Separate discovery and acquisition lists containing only concrete provider IDs already authorized by `research.yml`; an empty phase list means that network phase is unavailable. |
+| `delivery_modes` | Optional non-network delivery strategies such as `manual`; strategy and delivery labels are never provider authorization. |
 
 All child agents for one PM run use the same `run_id` and one
 `runs/<run_id>/run-state.json`. Child agents use distinct `agent_id` values only
@@ -380,10 +428,10 @@ Delegation by phase:
 
 - **Discovery** receives `run_id`, `question_batch`, open source-request paths,
   candidate paths, `domain_pack`, `budgets`, and discovery-capable
-  `allowed_providers`. It writes candidate records and selection/rejection
+  `provider_policy.discovery`. It writes candidate records and selection/rejection
   audit trails only; candidates are not evidence.
 - **Acquisition** receives selected candidates or source-request routes,
-  `evidence_paths`, `allowed_providers`, and the same `run_id`. It delivers raw
+  `evidence_paths`, `provider_policy.acquisition`, and the same `run_id`. It delivers raw
   files with provenance sidecars, inventories and normalizes them, fulfills
   source requests, and reopens blocked questions when normalized evidence exists.
 - **Research** receives `question_batch`, normalized `evidence_paths`,

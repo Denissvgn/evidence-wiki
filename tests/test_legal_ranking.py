@@ -222,6 +222,7 @@ class LegalExecuteRankingTests(unittest.TestCase):
                 FIXTURE_RESULTS.read_text(encoding="utf-8"), encoding="utf-8"
             )
             lines += [
+                "    providers: [search]",
                 "    search:",
                 "      provider: fixture",
                 "      fixture_path: sources/discovery/fixtures/results.jsonl",
@@ -312,7 +313,7 @@ class LegalExecuteRankingTests(unittest.TestCase):
             )
         self.assertEqual(2, code)
         self.assertEqual("", stdout)
-        self.assertEqual("SEARCH_PROVIDER_DISABLED", json.loads(stderr)["error_code"])
+        self.assertEqual("DISCOVERY_PROVIDER_DISABLED", json.loads(stderr)["error_code"])
 
     def test_plan_mode_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -46,6 +46,27 @@ requests and reopens blocked questions only after normalized evidence exists. Us
 that proposes and ranks candidate sources (official sources first for legal
 questions) and selects them explicitly before any acquisition.
 
+For an end-to-end agent-driven run, use the installed package from outside or
+inside this workspace:
+
+```bash
+evidence-wiki orchestrate run --target . --runner codex --agent-id research-agent
+```
+
+`--runner claude` uses the same durable work-order protocol. The parent
+orchestration session survives bounded child runs: a child that ends
+`blocked_on_sources` remains immutable while later discovery and acquisition
+work can provide evidence for a new run. Use
+`docs/orchestration.md` for the operating model and
+`docs/orchestrator-handoff.md` for the protocol and artifact schemas.
+
+Discovery and acquisition are independent permissions in `research.yml` and
+both default to disabled. Discovery proposes metadata candidates; acquisition
+retrieves only explicitly selected evidence. Domain packs may recommend
+providers, and environment variables may authenticate them, but neither action
+enables network access. Inventory and normalization only process files already
+delivered under `raw/`; they never search or download sources.
+
 Use `docs/coverage-manifest.md` when a high-stakes question needs explicit
 facet-level answerability coverage. Coverage manifests live under
 `sources/coverage/<slug>.yml`, not in `wiki/questions/`, so machine-evaluated

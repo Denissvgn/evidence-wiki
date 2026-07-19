@@ -230,6 +230,8 @@ PROVIDER_REGISTRY: dict[str, dict[str, Any]] = {
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _provider_registry import ProviderListError, validate_provider_ids
+
 _acquisition_transport = load_workspace_module(_SCRIPT_DIR, "_acquisition_transport")
 AcquisitionTransportError = _acquisition_transport.AcquisitionTransportError
 DownloadResult = _acquisition_transport.DownloadResult
@@ -505,26 +507,15 @@ def acquisition_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_provider_list(value: Any, label: str, *, require_non_empty: bool = False) -> list[str]:
-    if value is None:
-        providers: list[str] = []
-    elif isinstance(value, list):
-        providers = []
-        for item in value:
-            if not isinstance(item, str) or not item.strip():
-                raise SystemExit(f"research.yml {label} must be a list of non-empty provider identifiers")
-            providers.append(item.strip())
-    else:
-        raise SystemExit(f"research.yml {label} must be a list of provider identifiers")
-    if require_non_empty and not providers:
-        raise SystemExit(f"research.yml {label} must include at least one provider when acquisition is enabled")
-    duplicates = sorted({provider for provider in providers if providers.count(provider) > 1})
-    if duplicates:
-        raise SystemExit(f"research.yml {label} has duplicate provider(s): {', '.join(duplicates)}")
-    unknown = sorted(set(providers) - set(PROVIDER_REGISTRY))
-    if unknown:
-        allowed = ", ".join(PROVIDER_REGISTRY)
-        raise SystemExit(f"research.yml {label} has unknown provider(s): {', '.join(unknown)}. Allowed providers: {allowed}")
-    return providers
+    try:
+        providers = validate_provider_ids(
+            value,
+            phase="acquisition",
+            require_non_empty=require_non_empty,
+        )
+    except ProviderListError as exc:
+        raise SystemExit(f"research.yml {label} {exc}") from exc
+    return list(providers.providers)
 
 
 def max_downloads_per_run(acquisition: dict[str, Any]) -> int:

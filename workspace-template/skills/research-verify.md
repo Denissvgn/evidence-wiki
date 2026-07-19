@@ -9,7 +9,7 @@ Use this skill before handing final results to an orchestrator or human: at the 
 Inputs:
 
 - `research.yml` (`wiki.frontmatter_type_rules.question` defines the allowed values)
-- `scripts/question_status.py`, `scripts/query_index.py`, `scripts/lint.py`, `scripts/verify_quotes.py`, `scripts/export_answers.py`
+- `scripts/question_status.py`, `scripts/query_index.py`, `scripts/verify_citations.py`, `scripts/lint.py`, `scripts/verify_quotes.py`, `scripts/coverage_manifest.py`, `scripts/publication_readiness.py`, `scripts/export_answers.py`
 - answered question pages and their linked answer pages
 - claim pages under the configured claims directory
 
@@ -88,7 +88,18 @@ python3 scripts/verify_quotes.py --slug <slug> --write --verified-by verifier-ag
 - Reason: counter-evidence in <source_id> contradicts the recorded answer.
 ```
 
-7. Re-export after verification so downstream consumers see the confidence and grounding fields:
+7. Build the deterministic final verification bundle for the active child run. Citation verification is local by default; do not add `--live` unless the reviewed provider policy permits that network route:
+
+```bash
+python3 scripts/verify_citations.py --format json
+python3 scripts/coverage_manifest.py evaluate --slug <slug> --format json
+python3 scripts/lint.py --format json
+python3 scripts/publication_readiness.py --format json bundle --run-id <run-id>
+```
+
+   Treat a failed required coverage facet, unresolved citation, failed quote, HIGH lint finding, or non-`ship` publication verdict as a blocker. The parent orchestrator verifies these fresh artifacts itself; a worker summary is not sufficient.
+
+8. Re-export after verification so downstream consumers see the confidence and grounding fields:
 
 ```bash
 python3 scripts/export_answers.py --format json
@@ -103,4 +114,6 @@ python3 scripts/export_answers.py --format json
 - Final verifier metadata, when written, uses `verified_by` distinct from `answered_by`.
 - `confidence` and `evidence_strength` use only the configured allowed values.
 - Failed verifications were downgraded to `open`, marked `contested`, or recorded as structured discrepancies with a logged reason, never silently kept.
+- Required coverage manifests were freshly evaluated and the active run has a fresh citation, quote, lint, and publication-readiness bundle.
+- The latest deterministic publication-readiness verdict is `ship`; no agent-declared verdict substitutes for it.
 - A fresh export was produced after verification.

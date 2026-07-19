@@ -31,6 +31,47 @@ Inputs:
 - whether a fetch agent is reachable for blocked-source delivery,
 - `docs/orchestrator-handoff.md` (the contract this skill executes).
 
+## Preferred Managed Workflow
+
+When Codex or Claude Code is installed, use the package orchestrator instead of
+reproducing the lifecycle as a long prompt:
+
+```bash
+evidence-wiki orchestrate run \
+  --target /path/to/workspace \
+  --runner codex \
+  --agent-id pm-agent
+```
+
+Use `--runner claude` for Claude Code. The command creates a durable parent
+session, gives each fresh worker one bounded work order and its workspace skill,
+verifies artifact postconditions after every result, and continues across
+immutable child research runs. If a runner exits or a safety bound pauses the
+loop, resume the same action rather than starting over:
+
+```bash
+evidence-wiki orchestrate resume \
+  --target /path/to/workspace \
+  --orchestration-id ORCH_ID \
+  --runner codex \
+  --agent-id pm-agent
+```
+
+The primary run starts from workspace state. It does not require pre-seeded
+sources: an initial research worker may create a source request and finish its
+bounded child run as `blocked_on_sources`; the still-active parent then routes
+that request through discovery, explicit candidate review, acquisition,
+normalization, fulfillment, reopening, a later research run, verification, and
+export. It finishes `blocked_on_sources` only when no explicitly enabled
+provider route can make progress.
+
+For an agent harness other than the two managed runners, drive the same
+model-neutral protocol with `orchestrate start`, `next`, `submit`, and `status`.
+`next` replays the pending work order after interruption; `submit` accepts a
+small structured result but trusts only verified workspace artifacts. See
+`docs/orchestration.md` for session artifacts, result schema, limits, and
+recovery.
+
 ## Operating Rules
 
 - Treat every command as deterministic. Except `init`/`deploy`, inventory,
@@ -77,7 +118,11 @@ here.
 | Question batch / answer export schemas | `docs/question-api.md` |
 | Full machine contract and error codes | `docs/orchestrator-handoff.md` |
 
-## Workflow
+## Workflow: Manual Protocol Reference
+
+The detailed sequence below remains a troubleshooting and custom-harness
+reference. Managed runners execute these decisions through persisted work
+orders; users do not need to paste this section into an agent prompt.
 
 ### 1. Preflight And Negotiate
 
@@ -235,15 +280,17 @@ budgets:
   max_questions_per_run: 25
   max_source_requests_per_run: 10
   max_releases_per_run: 75
-allowed_providers:
-  - manual
-  - arxiv
-  - openalex
-  - github
+provider_policy:
+  discovery: [arxiv, openalex]
+  acquisition: [arxiv, openalex]
+delivery_modes: [manual]
 ```
 
 The required fields are `task_id`, `chain_run_id`, `run_id`, `domain_pack`,
-`evidence_paths`, `question_batch`, `budgets`, and `allowed_providers`. All
+`evidence_paths`, `question_batch`, `budgets`, and `provider_policy`.
+`provider_policy` contains only concrete discovery/acquisition IDs already
+authorized by `research.yml`; `manual` is a delivery mode, never a provider.
+All
 subagents for one PM run use the same `run_id` and one
 `runs/<run_id>/run-state.json`; each child uses a distinct `agent_id` only for
 attribution in claims, events, delivery, and reports. Do not put provider
@@ -447,15 +494,15 @@ It returns the same payloads as the scripts; the CLI scripts remain canonical.
 
 - `doctor` and `contract` were checked before deploy; the profile schema matched
   a supported version.
-- The workspace was deployed from a profile carrying the `handoff` block and any
-  seed questions; `init`/`deploy` ran dry-run first when decisions needed review.
-- Delivered sources were inventoried and normalized; injected question batches
-  validated cleanly.
-- The run loop was delegated to `skills/research-run.md` with a stable agent id,
-  and budgets were respected.
-- Status was polled with `--check-complete` and the verdict was handled: blocked
-  requests were routed to a fetch agent, `attention_required` was stopped on.
-- Results were collected with the structured export and correlated by `handoff`.
+- The workspace was deployed with explicit discovery/acquisition allow-lists;
+  domain packs and credentials did not implicitly enable providers.
+- The question batch validated cleanly and the managed runner used a stable
+  agent ID and bounded orchestration session.
+- `orchestrate status` reached `complete` only after fresh deterministic
+  publication readiness returned `ship`; blocked/no-ship/paused outcomes were
+  reported rather than hidden.
+- The parent `answers.json` or structured export was collected and correlated by
+  `handoff`; the first blocked child run, if any, remained immutable.
 - No wiki Markdown was hand-edited from outside the workspace; nothing installed
   hooks, started background processes, or fetched remote content implicitly.
 
@@ -464,18 +511,28 @@ It returns the same payloads as the scripts; the CLI scripts remain canonical.
 ```bash
 evidence-wiki doctor --format json
 evidence-wiki contract
-evidence-wiki init --profile workspace-init.yml
-cd my-research-workspace
-python3 scripts/doctor.py --format json
-# ... deliver files into raw/ with provenance sidecars ...
-python3 scripts/source_inventory.py --report
-python3 scripts/normalize_sources.py
-evidence-wiki questions add --target . --from-file batch.yaml
-# ... research agent works the backlog (skills/research-run.md) ...
-python3 scripts/workspace_status.py --check-complete --format json
-# blocked_on_sources -> route requests, then resume:
-python3 scripts/source_requests.py list --status open --format json
-python3 scripts/source_requests.py plan-fetch --request-id <id> --format json
-# ... fetch agent delivers per skills/research-acquire.md, then re-run the loop ...
-evidence-wiki questions export --target .
+evidence-wiki deploy \
+  --target my-research-workspace \
+  --project-name my-research-workspace \
+  --project-description "Provider-enabled research" \
+  --domain-pack general-science \
+  --discovery-provider arxiv \
+  --discovery-provider openalex \
+  --acquisition-provider arxiv \
+  --acquisition-provider openalex
+evidence-wiki questions add --target my-research-workspace --from-file batch.yaml
+evidence-wiki orchestrate run \
+  --target my-research-workspace \
+  --runner codex \
+  --agent-id research-demo
+evidence-wiki orchestrate status --target my-research-workspace --format json
+evidence-wiki export --target my-research-workspace --format json
 ```
+
+### Local-Files Troubleshooting Appendix
+
+For a deliberately provider-disabled workspace, deliver reviewed files and
+provenance sidecars under `raw/`, then run `source_inventory.py`,
+`normalize_sources.py`, and the model-neutral orchestration protocol. This is a
+local-only recovery path, not the primary autonomous demo; inventory and
+normalization never discover or download sources.

@@ -116,3 +116,31 @@ jobs:
         run: |
           .venv/bin/python -m build --wheel --sdist --no-isolation
           .venv/bin/python -m twine check --strict dist/*.whl dist/*.tar.gz
+
+      - name: Smoke-test installed wheel orchestration assets
+        shell: bash
+        run: |
+          python -m venv .wheel-venv
+          .wheel-venv/bin/python -m pip install dist/*.whl
+          smoke_root="$(mktemp -d)/provider-workspace"
+          .wheel-venv/bin/evidence-wiki contract > /tmp/evidence-wiki-contract.json
+          .wheel-venv/bin/evidence-wiki deploy \
+            --target "$smoke_root" \
+            --project-name provider-workspace \
+            --project-description "Installed wheel orchestration smoke" \
+            --discovery-provider arxiv \
+            --acquisition-provider arxiv
+          .wheel-venv/bin/evidence-wiki orchestrate start \
+            --target "$smoke_root" \
+            --orchestration-id wheel-smoke \
+            --agent-id ci-smoke \
+            --format json > /tmp/evidence-wiki-start.json
+          .wheel-venv/bin/evidence-wiki orchestrate next \
+            --target "$smoke_root" \
+            --orchestration-id wheel-smoke \
+            --agent-id ci-smoke \
+            --format json > /tmp/evidence-wiki-next.json
+          .wheel-venv/bin/evidence-wiki orchestrate status \
+            --target "$smoke_root" \
+            --orchestration-id wheel-smoke \
+            --format json > /tmp/evidence-wiki-status.json

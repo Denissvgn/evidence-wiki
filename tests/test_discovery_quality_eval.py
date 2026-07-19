@@ -103,6 +103,7 @@ class DiscoveryQualityEvalHarness(unittest.TestCase):
                 "integrations:",
                 "  discovery:",
                 "    enabled: true",
+                "    providers: [search]",
                 "    search:",
                 "      provider: fixture",
                 "      fixture_path: sources/discovery/fixtures/results.jsonl",
@@ -137,6 +138,7 @@ class DiscoveryQualityEvalHarness(unittest.TestCase):
                 "integrations:",
                 "  discovery:",
                 "    enabled: true",
+                "    providers: [github]",
             ],
         )
         payload = json.dumps({"total_count": len(scenario["items"]), "items": scenario["items"]}).encode("utf-8")
@@ -166,6 +168,7 @@ class DiscoveryQualityEvalHarness(unittest.TestCase):
                 "integrations:",
                 "  discovery:",
                 "    enabled: true",
+                "    providers: [openalex]",
             ],
         )
         paper = scenario["paper"]
@@ -239,6 +242,7 @@ class DiscoveryQualityEvalHarness(unittest.TestCase):
                 "integrations:",
                 "  discovery:",
                 "    enabled: true",
+                "    providers: [github, search]",
                 "    search:",
                 "      provider: fixture",
                 "      fixture_path: sources/discovery/fixtures/results.jsonl",

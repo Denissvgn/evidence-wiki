@@ -104,6 +104,8 @@ class GithubDiscoveryTests(unittest.TestCase):
             "integrations:",
             "  discovery:",
             f"    enabled: {'true' if enabled else 'false'}",
+            "    providers:",
+            "      - github",
         ]
         (target / "research.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
         return target

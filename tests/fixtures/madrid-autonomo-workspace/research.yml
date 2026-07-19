@@ -138,6 +138,8 @@ outputs:
 integrations:
   discovery:
     enabled: true
+    providers:
+      - openalex
     jurisdictions_path: sources/jurisdictions.yml
   acquisition:
     enabled: false

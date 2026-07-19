@@ -468,6 +468,108 @@ class InitResearchWorkspaceTests(unittest.TestCase):
             self.assertIn("acquisition.enabled: true", report)
             self.assertIn("acquisition.providers: arxiv, openalex", report)
 
+    def test_cli_provider_flags_enable_and_replace_profile_allowlists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "provider-flags-workspace"
+            profile_path = root / "profile.yml"
+            profile = self.fixture_profile(target)
+            profile["workspace_init"]["integrations"]["discovery"] = {
+                "enabled": True,
+                "providers": ["github"],
+                "candidate_store_path": "sources/custom/candidates.jsonl",
+            }
+            profile["workspace_init"]["integrations"]["acquisition"] = {
+                "enabled": True,
+                "providers": ["github"],
+                "target_root": "raw/papers",
+                "max_downloads_per_run": 3,
+                "require_license_check": True,
+            }
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False))
+
+            output = self.run_init(
+                "--profile",
+                str(profile_path),
+                "--discovery-provider",
+                "arxiv",
+                "--discovery-provider",
+                "openalex",
+                "--acquisition-provider",
+                "arxiv",
+            )
+
+            config = self.load_config(target)
+            self.assertEqual(["arxiv", "openalex"], config["integrations"]["discovery"]["providers"])
+            self.assertEqual(["arxiv"], config["integrations"]["acquisition"]["providers"])
+            self.assertEqual(
+                "sources/custom/candidates.jsonl",
+                config["integrations"]["discovery"]["candidate_store_path"],
+            )
+            self.assertTrue((target / "sources" / "custom").is_dir())
+            self.assertIn("discovery: enabled (arxiv, openalex)", output)
+            self.assertIn("acquisition: enabled (arxiv)", output)
+
+    def test_cli_provider_flags_reject_duplicate_and_unknown_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "bad-provider-flags"
+            common = (
+                "--target",
+                str(target),
+                "--project-name",
+                "bad-provider-flags",
+                "--project-description",
+                "Validate provider flag errors.",
+            )
+            with self.assertRaises(SystemExit) as duplicate:
+                self.run_init(
+                    *common,
+                    "--discovery-provider",
+                    "arxiv",
+                    "--discovery-provider",
+                    "arxiv",
+                )
+            self.assertIn("duplicate provider", str(duplicate.exception))
+            with self.assertRaises(SystemExit) as unknown:
+                self.run_init(*common, "--acquisition-provider", "unknown-provider")
+            self.assertIn("unknown provider", str(unknown.exception))
+            self.assertFalse(target.exists())
+
+    def test_enabled_discovery_requires_provider_and_safe_candidate_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "bad-discovery-profile"
+            profile_path = root / "profile.yml"
+            profile = self.fixture_profile(target)
+            profile["workspace_init"]["integrations"]["discovery"] = {
+                "enabled": True,
+                "providers": [],
+            }
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False))
+            with self.assertRaises(SystemExit) as empty:
+                self.run_init("--profile", str(profile_path))
+            self.assertIn("at least one provider", str(empty.exception))
+
+            profile["workspace_init"]["integrations"]["discovery"] = {
+                "enabled": True,
+                "providers": ["legal"],
+            }
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False))
+            with self.assertRaises(SystemExit) as strategy_only:
+                self.run_init("--profile", str(profile_path))
+            self.assertIn("concrete provider", str(strategy_only.exception))
+
+            profile["workspace_init"]["integrations"]["discovery"] = {
+                "enabled": True,
+                "providers": ["arxiv"],
+                "candidate_store_path": "../outside.jsonl",
+            }
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False))
+            with self.assertRaises(SystemExit) as unsafe:
+                self.run_init("--profile", str(profile_path))
+            self.assertIn("workspace-relative", str(unsafe.exception))
+            self.assertFalse(target.exists())
+
     def test_profile_rejects_forbidden_acquisition_automation_key(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1160,8 +1262,10 @@ class InitResearchWorkspaceTests(unittest.TestCase):
             self.assertFalse(acquisition["enabled"])
             self.assertEqual([], acquisition["providers"])
             self.assertEqual(["arxiv", "openalex"], config["domain_pack"]["recommended_acquisition"])
+            self.assertEqual(["arxiv", "openalex"], config["domain_pack"]["recommended_discovery"])
             report = (target / "docs" / "workspace-init-report.md").read_text()
             self.assertIn("Reusable domain pack: `general-science`", report)
+            self.assertIn("Recommended discovery providers: arxiv, openalex.", report)
             self.assertIn("Recommended acquisition providers: arxiv, openalex.", report)
             self.assertIn(
                 "Acquisition remains disabled unless integrations.acquisition.enabled is explicitly true.",

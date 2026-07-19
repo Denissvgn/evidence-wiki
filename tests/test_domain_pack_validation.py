@@ -69,6 +69,7 @@ class DomainPackValidationTests(unittest.TestCase):
         self.assertTrue(payload["ok"], payload)
         self.assertEqual("general-science", payload["domain_pack"]["name"])
         self.assertEqual(["arxiv", "openalex"], payload["domain_pack"]["recommended_acquisition"])
+        self.assertEqual(["arxiv", "openalex"], payload["domain_pack"]["recommended_discovery"])
         self.assertTrue(payload["smoke_validation"]["ok"], payload["smoke_validation"]["issues"])
 
     def test_general_science_pack_validates_by_path(self):
@@ -123,6 +124,7 @@ class DomainPackValidationTests(unittest.TestCase):
             payload["domain_pack"]["coverage_templates"],
         )
         self.assertEqual([], payload["domain_pack"]["recommended_acquisition"])
+        self.assertEqual([], payload["domain_pack"]["recommended_discovery"])
         self.assertTrue(payload["smoke_validation"]["ok"], payload["smoke_validation"]["issues"])
 
     def test_standards_compliance_pack_validates_by_path(self):

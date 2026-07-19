@@ -17,9 +17,10 @@ source records, or project-specific workspace content to a pack.
 
 Pack overlays may declare optional
 `domain_pack.recommended_acquisition` provider IDs to help planners choose
-fetch routes. The validator accepts only `arxiv` and `openalex` in this field
-for now. Recommendations are report-only; they do not enable
-`integrations.acquisition`.
+fetch routes. They may separately declare `domain_pack.recommended_discovery`
+provider IDs to identify useful candidate-metadata routes. Recommendations are
+report-only: they do not enable either integration and never authorize network
+access.
 
 Pack overlays may also declare optional `domain_pack.coverage_templates` as a
 mapping from stable template slug to pack-local YAML file. Coverage templates
@@ -39,8 +40,8 @@ domain_pack:
   benchmarks, datasets, and implementation availability.
 - `general-science`: guidance for broad scientific literature reviews,
   methods comparisons, dataset inventories, evidence maps, and reproducibility
-  analysis. Recommends `arxiv` and `openalex` as acquisition routes when a
-  workspace explicitly enables acquisition.
+  analysis. Recommends `arxiv` and `openalex` for both discovery and acquisition
+  when a workspace explicitly enables each phase.
 - `legal-regulatory`: guidance for official-source legal, tax, regulatory,
   administrative, and public-policy research. Includes an
   `official-current-figure` coverage template for current figures from official
@@ -71,7 +72,7 @@ stderr and return exit code `2`.
 
 Validation checks that `research.overlay.yml` parses, declares required
 `domain_pack` metadata, references existing pack-local docs and scaffolds,
-uses valid `recommended_acquisition` providers when present, validates declared
+uses valid `recommended_discovery` and `recommended_acquisition` providers when present, validates declared
 `coverage_templates`, matches the starter `research.yml` contract, deep-merges
 with the starter configuration, and smoke-validates after initialization in a
 temporary workspace under `/tmp`.

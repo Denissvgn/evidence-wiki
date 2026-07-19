@@ -363,8 +363,9 @@ def cited_source_ids(project_root: Path, config: dict[str, Any]) -> set[str]:
     return cited
 
 
-def selected_candidate_request_ids(project_root: Path) -> set[str]:
-    path = project_root / "sources" / "discovery" / "candidates.jsonl"
+def selected_candidate_request_ids(project_root: Path, config: dict[str, Any]) -> set[str]:
+    discover_sources = load_sibling_module("discover_sources")
+    path = discover_sources.candidate_store_path(project_root, config)
     if not path.is_file():
         return set()
     request_ids: set[str] = set()
@@ -403,7 +404,7 @@ def has_license_or_terms_status(provenance: dict[str, Any]) -> bool:
 def source_curation_counts(project_root: Path, config: dict[str, Any], records: list[dict[str, Any]]) -> dict[str, int]:
     counts = dict(EMPTY_CURATION_COUNTS)
     cited = cited_source_ids(project_root, config)
-    selected_request_ids = selected_candidate_request_ids(project_root)
+    selected_request_ids = selected_candidate_request_ids(project_root, config)
     for record in records:
         provenance = record.get("provenance")
         if not isinstance(provenance, dict):
@@ -802,10 +803,10 @@ def sorted_nonzero_counts(counts: dict[str, int]) -> dict[str, int]:
     return {key: value for key, value in sorted(counts.items()) if value}
 
 
-def candidate_section(project_root: Path) -> dict[str, Any]:
+def candidate_section(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
     discover_sources = load_sibling_module("discover_sources")
     statuses = tuple(discover_sources.CANDIDATE_STATUSES)
-    path = discover_sources.candidate_store_path(project_root)
+    path = discover_sources.candidate_store_path(project_root, config)
     section: dict[str, Any] = {
         "store_exists": False,
         "candidates_path": relative_workspace_path(project_root, path),
@@ -1468,7 +1469,8 @@ def artifact_budget_counters(
         retained_request_keys.add(identity)
     counters["source_requests_opened_this_run"] = len(retained_request_keys)
 
-    candidates_path = project_root / "sources" / "discovery" / "candidates.jsonl"
+    discover_sources = load_sibling_module("discover_sources")
+    candidates_path = discover_sources.candidate_store_path(project_root, config)
     retained_candidate_keys: set[str] = set()
     if candidates_path.is_file():
         for line in candidates_path.read_text(encoding="utf-8").splitlines():
@@ -1702,6 +1704,76 @@ def run_controller_section(project_root: Path, run_id: str | None, stale_thresho
     )
 
 
+def summarize_orchestration_session(
+    project_root: Path,
+    document: dict[str, Any],
+    *,
+    selection: str,
+) -> dict[str, Any]:
+    """Return the bounded read-only parent-session summary exposed to agents."""
+    orchestration_id = document.get("orchestration_id")
+    status = document.get("status")
+    terminal = status in {"complete", "blocked_on_sources", "no_ship", "failed"}
+    session_file = (
+        project_root / "runs" / "orchestrations" / orchestration_id / "session.json"
+        if isinstance(orchestration_id, str)
+        else None
+    )
+    return {
+        "present": True,
+        "selection": selection,
+        "orchestration_id": orchestration_id,
+        "status": status,
+        "phase": document.get("phase"),
+        "terminal": terminal,
+        "verdict": document.get("verdict"),
+        "pause_reason": document.get("pause_reason"),
+        "pending_action_id": document.get("pending_action_id"),
+        "active_run_id": document.get("active_run_id"),
+        "child_run_ids": list(document.get("child_run_ids") or []),
+        "action_count": int(document.get("action_count", 0) or 0),
+        "completed_action_count": int(document.get("completed_action_count", 0) or 0),
+        "started_at": document.get("started_at"),
+        "updated_at": document.get("updated_at"),
+        "completed_at": document.get("completed_at"),
+        "session_path": relative_workspace_path(project_root, session_file) if session_file is not None else None,
+    }
+
+
+def orchestration_section(project_root: Path) -> dict[str, Any]:
+    """Select the newest non-terminal orchestration, otherwise newest terminal."""
+    root = project_root / "runs" / "orchestrations"
+    if not root.is_dir():
+        return {"present": False, "selection": "none"}
+    documents: list[dict[str, Any]] = []
+    for child in sorted(root.iterdir()):
+        path = child / "session.json"
+        if not child.is_dir() or not path.is_file():
+            continue
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(document, dict)
+            and document.get("schema_version") == "1.0"
+            and document.get("artifact_type") == "orchestration_session"
+            and document.get("orchestration_id") == child.name
+        ):
+            documents.append(document)
+    if not documents:
+        return {"present": False, "selection": "none"}
+    documents.sort(
+        key=lambda item: (str(item.get("updated_at") or ""), str(item.get("orchestration_id") or "")),
+        reverse=True,
+    )
+    terminal_statuses = {"complete", "blocked_on_sources", "no_ship", "failed"}
+    active = [item for item in documents if item.get("status") not in terminal_statuses]
+    if active:
+        return summarize_orchestration_session(project_root, active[0], selection="newest_active")
+    return summarize_orchestration_session(project_root, documents[0], selection="newest_terminal")
+
+
 def build_status_document(
     project_root: Path,
     *,
@@ -1735,6 +1807,7 @@ def build_status_document(
             "contract": {field: None for field in CONTRACT_FIELDS},
             "run": run_section({}),
             "run_controller": {"present": False, "selection": "none"},
+            "orchestration": {"present": False, "selection": "none"},
             "smoke": {
                 "ok": False,
                 "issues": len(reasons),
@@ -1766,7 +1839,7 @@ def build_status_document(
     questions = questions_section(project_root, config)
     coverage = coverage_section(project_root, config)
     intake = intake_section(project_root, questions)
-    candidates = candidate_section(project_root)
+    candidates = candidate_section(project_root, config)
     sources = sources_section(project_root, config)
     lint = lint_section(project_root, config)
     operational_debt = operational_debt_section(questions, candidates, sources, lint)
@@ -1801,6 +1874,7 @@ def build_status_document(
         "contract": contract_section(metadata),
         "run": run,
         "run_controller": run_controller,
+        "orchestration": orchestration_section(project_root),
         "smoke": smoke,
         "questions": public_questions,
         "coverage": coverage,
@@ -1831,6 +1905,7 @@ def render_text(document: dict[str, Any]) -> str:
     project = document["project"]
     contract = document["contract"]
     run_controller = document["run_controller"]
+    orchestration = document.get("orchestration") if isinstance(document.get("orchestration"), dict) else {}
     smoke = document["smoke"]
     questions = document["questions"]
     coverage = document["coverage"]
@@ -1872,6 +1947,12 @@ def render_text(document: dict[str, Any]) -> str:
         lines.append(
             f"Run controller: {run_controller.get('run_id')} {run_controller.get('state')}"
             f"{terminal_suffix} ({run_controller.get('selection')})"
+        )
+    if orchestration.get("present"):
+        terminal_suffix = " terminal" if orchestration.get("terminal") else ""
+        lines.append(
+            f"Orchestration: {orchestration.get('orchestration_id')} {orchestration.get('status')}"
+            f"/{orchestration.get('phase')}{terminal_suffix} ({orchestration.get('selection')})"
         )
     if smoke.get("error"):
         lines.append(f"Smoke validation: error ({smoke['error']})")

@@ -75,6 +75,7 @@ class AutonomousWorkflowFixtureTests(unittest.TestCase):
         config.setdefault("integrations", {})
         config["integrations"]["discovery"] = {
             "enabled": True,
+            "providers": ["openalex"],
             "jurisdictions_path": "sources/jurisdictions.yml",
         }
         config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")

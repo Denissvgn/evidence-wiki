@@ -98,6 +98,23 @@ jobs:
           python -m venv .wheel-venv
           .wheel-venv/bin/python -m pip install dist/*.whl
           .wheel-venv/bin/evidence-wiki --version
+          smoke_root="$(mktemp -d)/provider-workspace"
+          .wheel-venv/bin/evidence-wiki contract > /tmp/evidence-wiki-contract.json
+          .wheel-venv/bin/evidence-wiki deploy \
+            --target "$smoke_root" \
+            --project-name provider-workspace \
+            --project-description "Release wheel orchestration smoke" \
+            --discovery-provider arxiv \
+            --acquisition-provider arxiv
+          .wheel-venv/bin/evidence-wiki orchestrate start \
+            --target "$smoke_root" --orchestration-id wheel-smoke \
+            --agent-id release-smoke --format json > /tmp/evidence-wiki-start.json
+          .wheel-venv/bin/evidence-wiki orchestrate next \
+            --target "$smoke_root" --orchestration-id wheel-smoke \
+            --agent-id release-smoke --format json > /tmp/evidence-wiki-next.json
+          .wheel-venv/bin/evidence-wiki orchestrate status \
+            --target "$smoke_root" --orchestration-id wheel-smoke \
+            --format json > /tmp/evidence-wiki-status.json
           .wheel-venv/bin/python - <<'PY'
           import os
           import evidence_wiki

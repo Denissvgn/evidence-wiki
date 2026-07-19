@@ -41,11 +41,17 @@ separate step (see [acquisition.md](acquisition.md) and
 
 Discovery artifacts live under `sources/discovery/`, never directly under
 `raw/`, so the workspace can audit why a source was proposed before it becomes
-evidence. The durable candidate store is a JSON Lines file:
+evidence. The durable candidate store is a JSON Lines file. Its default
+location is:
 
 ```text
 sources/discovery/candidates.jsonl
 ```
+
+`integrations.discovery.candidate_store_path` may replace that default with
+another workspace-relative `.jsonl` path below `sources/`. Discovery, review,
+source-request planning, status, and orchestration all read the configured path;
+none silently falls back to the default when an override is present.
 
 Each line is one complete `source_candidate` record. The file is append-oriented
 and machine-readable; the candidate review and selection commands (see
@@ -54,8 +60,8 @@ update records by `candidate_id`.
 
 ## `source_candidate` Schema
 
-Every candidate record is a single JSON object on its own line in
-`sources/discovery/candidates.jsonl`. The current `schema_version` is `1.0`.
+Every candidate record is a single JSON object on its own line in the configured
+candidate store. The current `schema_version` is `1.0`.
 
 ```json
 {
@@ -111,7 +117,7 @@ Every candidate record is a single JSON object on its own line in
 | `discovery_run_id` | string or null | Deterministic origin id for exploratory discovery that is not tied to a source request or seed source (for example `disc-1a2b3c4d5e`); otherwise `null`. Exactly one origin field must be non-null. |
 | `discovered_at` | string | ISO 8601 UTC timestamp when the candidate was proposed (`YYYY-MM-DDTHH:MM:SSZ`). |
 | `discovered_by` | string | Discovery agent or tool identifier, for example `discover_sources.py/search`. Marks which provider path produced the record. |
-| `provider` | string | Discovery provider ID, for example `search`, `github`, `legal`, `openalex`, or `fixture`. |
+| `provider` | string | Candidate provenance/route attribution. Direct routes use a concrete provider such as `arxiv`, `openalex`, `github`, `search`, or scoped `standards:*`; compatibility records produced by composite routes may say `legal`, `authors`, or `companions`. Only the concrete IDs in `integrations.discovery.providers` authorize network access. |
 | `url` | string | The candidate source URL (HTTP/HTTPS). This is a pointer for review, not a fetched artifact. |
 | `title` | string | Human-readable title or name of the candidate source. |
 | `source_type` | string | Kind of source, for example `paper`, `code_repository`, `dataset`, `project_page`, `supplemental_material`, `publisher_page`, `official_legal`, `standards_registry_entry`, `harmonised_standard_reference`, `product_requirement_guidance`, `geospatial_standard_register_entry`, or `web_page`. |
@@ -309,16 +315,18 @@ first, with a recorded reason it beat the generic result. Canonical machine-
 readable examples for each tier, including this legal-versus-generic pair, are
 exercised by the discovery contract tests.
 
-## Read-Only Discovery Command Surface
+## Discovery Command Surface
 
 Discovery is driven by `scripts/discover_sources.py`. The command surface exists
-so skills and orchestrators can reference it safely before any provider-specific
-network implementation lands. Every command is read-only: it proposes
-candidates and never downloads, scrapes, clones, or ingests them.
+so skills and orchestrators can issue bounded provider work consistently.
+Discovery routes may append candidate metadata, and candidate lifecycle commands
+may review or select those records, but no discovery command downloads, scrapes,
+clones, or ingests candidate contents as evidence.
 
-Six read-only subcommands cover the discovery providers:
+Seven read-only subcommands cover discovery providers and strategies:
 
 ```bash
+python3 scripts/discover_sources.py academic   --request-id ID --provider arxiv [--provider openalex] [--query TEXT] --max-results N --format json
 python3 scripts/discover_sources.py search     --query TEXT [--intent paper|code|dataset|legal|web] [--request-id ID] [--domain-allow DOMAIN] [--domain-block DOMAIN] [--jurisdiction TEXT] [--execute] --max-results N
 python3 scripts/discover_sources.py legal      --jurisdiction TEXT --topic TEXT --max-results N
 python3 scripts/discover_sources.py github     --query TEXT --max-results N
@@ -328,8 +336,12 @@ python3 scripts/discover_sources.py standards  iso-open-data | eu-product-requir
 python3 scripts/discover_sources.py jurisdictions  validate | list | show --jurisdiction ID
 ```
 
-The `search`, `legal`, `github`, `authors`, `companions`, and `standards`
-subcommands cover the discovery providers. `jurisdictions` (see
+The `academic`, `search`, `github`, and `standards` routes use concrete provider
+permissions. `legal`, `authors`, and `companions` are strategies: legal execution
+requires `search`, author publication expansion requires `openalex`, and companion
+network phases run only when `github` and/or `search` is enabled. The legacy
+strategy IDs remain readable for one compatibility release but never authorize
+network access. `jurisdictions` (see
 [Jurisdiction Profiles](#jurisdiction-profiles))
 and `candidates` (see [Candidate Review and Selection](#candidate-review-and-selection))
 are offline subcommands: they validate profiles or review existing candidates and
@@ -350,15 +362,20 @@ integrations:
   discovery:
     enabled: true
     providers:
-      - standards
+      - arxiv
+      - openalex
+    candidate_store_path: sources/discovery/candidates.jsonl
 ```
 
 A missing `integrations.discovery` block, or `enabled` left `false`, is the safe
-default. In that state every command refuses with the `DISCOVERY_DISABLED` error
-code and exits `2` without touching the network.
+default. In that state provider-backed discovery routes refuse with the
+`DISCOVERY_DISABLED` error code and exit `2` without touching the network.
+Offline `candidates` and `jurisdictions` commands remain available.
 
-New provider families also require explicit entries in
-`integrations.discovery.providers`. Standards discovery accepts either `standards`
+Every provider-backed route also requires an explicit entry in
+`integrations.discovery.providers`; `enabled: true` with an empty list is invalid.
+The candidate store is a workspace-relative JSONL path under `sources/` and all
+discovery and candidate-lifecycle commands honor the configured value. Standards discovery accepts either `standards`
 for all fixture-backed standards routes or a route-specific value such as
 `standards:iso-open-data`. If the route is not listed, the command refuses with
 `DISCOVERY_PROVIDER_DISABLED` before reading provider fixtures or touching the
@@ -366,7 +383,10 @@ network.
 
 ### Provider Transport Status
 
-Every provider subcommand is implemented. The `github` subcommand performs
+Every provider subcommand is implemented. The `academic` subcommand searches a
+source request through explicitly enabled arXiv and/or OpenAlex providers,
+deduplicates their metadata into provider-neutral paper candidates, and never
+downloads evidence. The `github` subcommand performs
 bounded GitHub repository search (see [GitHub Repository
 Discovery](#github-repository-discovery) below) and records `network_io_executed:
 true`. The `search` subcommand normalizes a configured backend's results into
@@ -381,18 +401,42 @@ composes inline links, GitHub, and search into companion-artifact candidates (se
 `standards` subcommand proposes fixture-backed standards registry, product
 requirement, and harmonised-standard candidates for ISO Open Data, EU product
 requirements, UK geospatial register entries, and NIST publication references.
-When
-discovery is disabled, every command refuses with `DISCOVERY_DISABLED` before any
-network access. In all cases the candidate a command would propose is never
-fetched during discovery.
+When discovery is disabled, provider-backed routes refuse with
+`DISCOVERY_DISABLED` before any network access. In all cases the candidate a
+command would propose is never fetched during discovery.
 
 Fatal error codes for this command surface are `DEPENDENCY_MISSING`,
 `CONFIG_MISSING`, `CONFIG_INVALID`, `VALUE_INVALID`, `DISCOVERY_DISABLED`,
 `DISCOVERY_PROVIDER_DISABLED`, `NOT_IMPLEMENTED`, `DISCOVERY_NETWORK_ERROR`,
 `DISCOVERY_RESPONSE_INVALID`, `SEARCH_PROVIDER_DISABLED`,
 `SEARCH_PROVIDER_FAILED`, `GITHUB_AUTH_REQUIRED`, `GITHUB_RATE_LIMITED`,
-`JURISDICTION_INVALID`, `JURISDICTION_UNKNOWN`, `SOURCE_UNKNOWN`, and
-`WORKSPACE_UNREADABLE`.
+`JURISDICTION_INVALID`, `JURISDICTION_UNKNOWN`, `REQUEST_UNKNOWN`,
+`REQUEST_NOT_OPEN`, `SOURCE_UNKNOWN`, and `WORKSPACE_UNREADABLE`.
+
+## Request-Backed Academic Discovery
+
+`academic` closes the gap between an open paper request and candidate review:
+
+```bash
+python3 scripts/discover_sources.py academic \
+  --request-id req-paper-1234567890 \
+  --provider arxiv \
+  --provider openalex \
+  --max-results 15 \
+  --format json
+```
+
+The query defaults to the request's `query_or_identifier`; `--query` records an
+explicit refinement. arXiv and OpenAlex are searched independently with bounded
+limits. Matches are deduplicated by DOI, arXiv identity, OpenAlex identity, and
+title/year fallback, and each candidate carries a provider-neutral `paper`
+mapping consumed by `source_requests.py plan-fetch`. arXiv results are preprints
+and OpenAlex results are index records; neither provider proves peer-review
+status. `OPENALEX_API_KEY`, when used, is read only from the process environment
+and is never written into candidates, reports, or URLs returned by the command.
+
+Discovery ends after writing reviewable candidates. An agent must still review
+and select candidates before acquisition can retrieve evidence.
 
 ## General Search Discovery
 
@@ -468,6 +512,7 @@ an HTTP backend requires an explicit endpoint.
 integrations:
   discovery:
     enabled: true
+    providers: [search]
     search:
       provider: http
       endpoint: https://search.example.internal/api   # explicit; never a default vendor
@@ -539,6 +584,7 @@ the official source it merely describes.
 integrations:
   discovery:
     enabled: true
+    providers: [search]
     search:
       provider: http
       endpoint: https://search.example.internal/api
@@ -727,7 +773,9 @@ With `--execute`, each planned query runs through the configured search provider
 `--execute` with no provider configured refuses with `SEARCH_PROVIDER_DISABLED`).
 Results are normalized to `source_candidate` records, aggregated, deduplicated, and
 ranked with the [trust-tier policy](#trust-ranking-e33-t03) plus legal-specific
-rules. Candidates are attributed to legal discovery (`provider: legal`) and written
+rules. Candidates retain strategy attribution (`provider: legal`) and record the
+concrete search transport in their search metadata; `legal` itself is never network
+authorization. They are written
 to `sources/discovery/candidates.jsonl`; nothing is fetched.
 
 A key difference from the general planner: the profile's official domains are used

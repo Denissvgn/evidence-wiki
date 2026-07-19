@@ -22,6 +22,9 @@ domain_pack:
   recommended_acquisition:
     - arxiv
     - openalex
+  recommended_discovery:
+    - arxiv
+    - openalex
   policy_vocabularies:
     freshness_policy:
       pack:general-science/study-recency: Require a reviewer to confirm that study dates, dataset releases, and follow-up literature are recent enough for the scientific question.

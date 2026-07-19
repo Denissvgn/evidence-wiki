@@ -157,11 +157,11 @@ Use `domain_guidance.mode` to make the domain decision explicit:
 - `deferred`: domain guidance was considered and intentionally deferred.
 
 When `domain_pack.enabled` is `false`, do not set `name` or `path`. When a pack is enabled, choose exactly one of `name` or `path`.
-If the selected pack declares `domain_pack.recommended_acquisition`, the init
-report names those provider IDs for planner/fetch-agent routing. This is
-advisory only; acquisition remains disabled unless
-`integrations.acquisition.enabled` is explicitly true in the setup profile or
-`research_yml` overrides.
+If the selected pack declares `domain_pack.recommended_discovery` or
+`domain_pack.recommended_acquisition`, the init report names those provider IDs
+for orchestrator routing. These fields are advisory only; both integrations
+remain disabled unless the profile, `research_yml` overrides, or explicit
+phase-specific CLI provider flags enable them.
 
 Example reusable pack selection:
 
@@ -200,6 +200,10 @@ workspace_init:
       target_root: raw/papers
       max_downloads_per_run: 10
       require_license_check: true
+    discovery:
+      enabled: false
+      providers: []
+      candidate_store_path: sources/discovery/candidates.jsonl
   assumptions:
     - Papers and curated links are enough for the first ingest cycle.
   skipped_decisions:
@@ -292,7 +296,21 @@ the nested contract before use.
 `max_downloads_per_run` must be a positive integer, and
 `require_license_check` must be boolean. Initialization rejects hook,
 auto-fetch, auto-download, auto-commit, auto-add, background-agent, and
-background-sync keys.
+background-sync keys. Enabling `web` also requires a `web` mapping with a
+non-empty reviewed `allowed_domains` list.
+
+`integrations.discovery` is also optional and default-disabled. When enabled,
+its provider list must be non-empty and use concrete IDs: `arxiv`, `openalex`,
+`github`, `search`, `standards`, or a documented scoped standards ID.
+`candidate_store_path` must be a `.jsonl` path below `sources/`. Enabling
+`search` additionally requires a fixture, command, or HTTP backend. The legacy
+strategy values `legal`, `authors`, and `companions` remain parseable for one
+compatibility release but never authorize their underlying network providers.
+
+Repeated `--discovery-provider` or `--acquisition-provider` initializer flags
+are explicit CLI overrides: when present, they replace the corresponding
+profile list and set that phase to enabled. The initializer validates and
+records the effective policy but never contacts a provider.
 
 The `run` section carries per-run budgets for unattended loops, run liveness, and intake containment (`max_questions_per_run`, `max_source_requests_per_run`, `max_releases_per_run`, `max_open_questions_total`, `max_intake_per_hour`, `max_mcp_intake_batch_questions`, `claim_staleness_hours`, `stale_run_threshold_hours`); each value must be a positive integer when present. If a setup profile overrides `max_questions_per_run` without `max_releases_per_run`, initialization derives the release cap as 3 x `max_questions_per_run`. Wall-clock and token budgets belong to the orchestrator, not the workspace.
 

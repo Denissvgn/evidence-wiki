@@ -28,6 +28,8 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/doctor.py",
     "scripts/init_research_workspace.py",
     "scripts/lint.py",
+    "scripts/_provider_registry.py",
+    "scripts/orchestration_controller.py",
     "scripts/smoke_validate_workspace.py",
     "scripts/workspace_status.py",
 )

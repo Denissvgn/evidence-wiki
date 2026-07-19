@@ -42,17 +42,29 @@ happened to retrieve. This system takes the opposite bet:
 
 ## Five-Minute Tour
 
-The goal: a cited, exportable answer with provenance, end to end. Install the
-package and create a workspace:
+The goal: start with an empty source directory and let an agent produce a cited,
+exportable answer from evidence that it discovers and acquires during the run.
+Install the package and create a provider-enabled scientific workspace:
 
 ```bash
 python3 -m pip install evidence-wiki
 evidence-wiki deploy \
   --target solid-state-batteries \
   --project-name solid-state-batteries \
-  --project-description "Survey of solid-state battery electrolyte research"
+  --project-description "Survey of solid-state battery electrolyte research" \
+  --domain-pack general-science \
+  --discovery-provider arxiv \
+  --discovery-provider openalex \
+  --acquisition-provider arxiv \
+  --acquisition-provider openalex
 cd solid-state-batteries
 ```
+
+The repeated provider flags are explicit network authorization. The
+`general-science` pack recommends these providers but does not enable them by
+itself. arXiv needs no credential; OpenAlex can use `OPENALEX_API_KEY` from the
+process environment for authenticated quotas. Never put credentials in
+`research.yml`.
 
 Seed the backlog with a question (schema in
 `workspace-template/docs/question-api.md`):
@@ -65,66 +77,57 @@ questions:
     id: electrolyte-conductivity
     priority: high
 EOF
-python3 scripts/intake_questions.py --from-file batch.yaml --format json
+evidence-wiki questions add --target . --from-file batch.yaml
 ```
 
-Deliver evidence (here: an HTML page saved next to its provenance sidecar, the
-same contract fetch agents use), then inventory and normalize it:
+Run the managed orchestrator with an installed agent CLI:
+
+```bash
+evidence-wiki orchestrate run \
+  --target . \
+  --runner codex \
+  --agent-id battery-demo
+```
+
+Use `--runner claude` to run the same work-order protocol through Claude Code.
+Pass `--model MODEL_ID` only when an explicit runner-specific model override is
+needed; otherwise the runner's safe configured default is used.
+The orchestrator does not contain a battery-specific workflow. It first gives
+the research agent the empty workspace; when the question blocks, it retains
+that immutable run, discovers request-linked academic candidates, asks the
+agent to select them, acquires the selected evidence, inventories and
+normalizes it, fulfills the request, reopens the question, and starts a later
+bounded research run. It declares completion only after deterministic
+verification passes.
+
+Inspect the durable parent session and export the answer:
+
+```bash
+evidence-wiki orchestrate status --target . --format json
+evidence-wiki export --target . --format json
+```
+
+The export contains question state, the answer summary and page, confidence,
+evidence strength, and citations resolved to provenance-tracked manifest and
+normalized records. If no allowed provider can satisfy a request, orchestration
+stops as `blocked_on_sources` with machine-readable remediation instead of
+inventing an answer.
+
+### Local-Files-Only Alternative
+
+Discovery and acquisition are optional. For a local-only workspace, omit all
+provider flags, deliver reviewed files with provenance sidecars under the
+configured `raw/` roots, then run:
 
 ```bash
 python3 scripts/source_inventory.py --report
-python3 scripts/normalize_sources.py
+python3 scripts/normalize_sources.py --all
 ```
 
-Now let an agent work the backlog — point it at `skills/research-run.md` in
-the workspace (see [Drive It With An Agent](#drive-it-with-an-agent)). The
-agent claims the question, retrieves evidence from the normalized records,
-writes a cited answer page, and resolves the question through the same
-deterministic lifecycle scripts a human would use:
-
-```bash
-python3 scripts/question_claim.py claim --slug electrolyte-conductivity --agent demo-agent
-python3 scripts/question_resolve.py answer --slug electrolyte-conductivity \
-  --agent-id demo-agent --answer-page wiki/synthesis/electrolyte-conductivity.md \
-  --source-id raw:raw-web-sulfide-electrolyte-review-a3a566db55
-```
-
-Export structured answers with citations:
-
-```bash
-python3 scripts/export_answers.py --format json
-```
-
-Abridged real output — every citation resolves to a raw file and a normalized
-record inside the workspace:
-
-```json
-{
-  "questions": [
-    {
-      "slug": "electrolyte-conductivity",
-      "question": "Which solid electrolyte families report room-temperature ionic conductivity above 1 mS/cm?",
-      "status": "answered",
-      "answer_page": "wiki/synthesis/electrolyte-conductivity.md",
-      "answer_summary": "Sulfide families (argyrodite Li6PS5Cl, LGPS) exceed 1 mS/cm at room temperature; garnet oxides typically do not.",
-      "citations": [
-        {
-          "source_id": "raw:raw-web-sulfide-electrolyte-review-a3a566db55",
-          "raw_paths": ["raw/web/sulfide-electrolyte-review.html"],
-          "normalized_record": "sources/normalized/raw--raw-web-sulfide-electrolyte-review-a3a566db55.md",
-          "title": "Sulfide Solid Electrolytes: A Review"
-        }
-      ],
-      "confidence": "high",
-      "evidence_strength": "single_source"
-    }
-  ]
-}
-```
-
-When required evidence is missing, the same export shows the question as
-`blocked` with machine-readable `blocking_requests` describing exactly what a
-fetch agent or human must deliver — that is the system refusing to guess.
+Inventory and normalization process files that are already present. They never
+search the internet or download evidence. Point an agent at
+`skills/research-run.md` after normalization, or use the model-neutral
+`orchestrate start` / `next` / `submit` protocol from an external harness.
 
 ## Drive It With An Agent
 
@@ -151,20 +154,14 @@ Most of the work was done with OpenAI Codex using GPT-5.5 and GPT-5.6, with
 Anthropic Claude also used for parts of the project. No code in this repository
 was manually authored by a human.
 
-A concrete end-to-end pairing with Claude Code, matching the tour above:
+A concrete end-to-end pairing, matching the tour above:
 
-1. `python3 -m pip install evidence-wiki`, then ask the agent:
-   *"Create a research workspace for solid-state battery electrolytes using
-   the research-init skill from EvidenceWiki."* The agent asks at
-   most three setup questions and runs the initializer with a reviewable
-   profile.
-2. Seed questions yourself (as above) or let the agent intake them.
-3. Ask: *"Work the backlog: follow skills/research-run.md with agent id
-   claude-demo."* The agent claims, researches, cites, and resolves inside
-   the deterministic lifecycle — or blocks with source requests it cannot
-   satisfy.
-4. Collect `python3 scripts/export_answers.py --format json` (or
-   `evidence-wiki export --target PATH` from outside the workspace).
+1. Deploy with reviewed discovery and acquisition provider allow-lists.
+2. Seed questions yourself or let an agent submit the validated batch.
+3. Run `evidence-wiki orchestrate run --runner codex|claude`. Each worker gets
+   one persisted, bounded work order and the relevant workspace skill.
+4. Inspect `evidence-wiki orchestrate status` and collect
+   `evidence-wiki export --target PATH`.
 
 ### Agent-Assisted Setup
 
@@ -191,13 +188,25 @@ Profile schema details are in `workspace-template/docs/workspace-init-profile.md
 
 ### Orchestrating From a Parent Agent
 
-A PM, planner, or parent agent that creates and manages workspaces from the
-outside has a dedicated executable playbook: the `research-orchestrate` skill in
-`orchestrator/skills/`. It walks the full lifecycle — preflight and contract
-negotiation, profile-driven deploy with handoff correlation, question intake,
-driving or delegating the unattended run loop, routing blocked sources to a fetch
-agent, and collecting cited results — and delegates inside-workspace work to the
-workspace's own `skills/research-*.md`. The machine contract it executes is
+A PM, planner, or parent agent can use the persisted orchestration protocol
+without depending on either built-in runner:
+
+```bash
+evidence-wiki orchestrate start --target PATH --agent-id parent-agent --format json
+evidence-wiki orchestrate next --target PATH --orchestration-id ORCH_ID --format json
+evidence-wiki orchestrate submit --target PATH --orchestration-id ORCH_ID \
+  --action-id ACTION_ID --result-file result.json --format json
+evidence-wiki orchestrate status --target PATH --orchestration-id ORCH_ID --format json
+```
+
+`next` is idempotent: after a crash it returns the same unfinished work order.
+`submit` treats the worker result as a claim and verifies the actual workspace
+artifacts before advancing. A terminal `blocked_on_sources` child run is never
+reopened; the parent session can retain it and start a later run after evidence
+acquisition.
+
+The `research-orchestrate` skill in `orchestrator/skills/` documents this
+protocol for external agents. The machine contract remains
 `workspace-template/docs/orchestrator-handoff.md`.
 
 These orchestrator skills ship with the package but are never copied into a
@@ -233,6 +242,9 @@ Required:
 Optional:
 
 - Poppler `pdftotext` for PDF-only normalization.
+- Codex CLI or Claude Code for `evidence-wiki orchestrate run`; the
+  model-neutral `start` / `next` / `submit` / `status` protocol does not require
+  either built-in runner.
 - `agent-wiki-cli` / `llm-wiki` for manually generated codebase-analysis artifacts. The repository does not install or run this adapter automatically.
 - Git, for normal version-control workflows and optional user-edit snapshots.
 
@@ -403,6 +415,81 @@ python3 scripts/source_inventory.py --dry-run --report
 
 ## Add Sources
 
+### Enable Source Providers
+
+Discovery and acquisition are separate permissions:
+
+| Phase | Provider | Purpose | Runtime configuration |
+|---|---|---|---|
+| Discovery | `arxiv` | Search arXiv metadata and propose paper candidates. | No credential. Metadata only; no download. |
+| Discovery | `openalex` | Search the OpenAlex scholarly index and propose paper candidates. | Optional `OPENALEX_API_KEY` in the environment. Index metadata is not itself evidence. |
+| Discovery | `github` | Search repository metadata and propose code candidates. | Optional `GITHUB_TOKEN` in the environment. Never clones during discovery. |
+| Discovery | `search` | Run a configured general-search backend. | A reviewed fixture, argv command, or HTTP backend in the setup profile; backend secrets stay in its environment. |
+| Discovery | `standards` | Propose bounded registry candidates. | Registry-specific configuration; it does not grant rights to standards text. |
+| Acquisition | `arxiv` | Download selected PDF and source-bundle evidence. | No credential; per-paper copyright and license still apply. |
+| Acquisition | `openalex` | Resolve works, enrich records, and download selected open-access PDFs. | Optional `OPENALEX_API_KEY`; unavailable or uncertain OA routes fail closed. |
+| Acquisition | `github` | Capture selected metadata, releases, or bounded source archives. | Optional `GITHUB_TOKEN`; repository license remains authoritative. |
+| Acquisition | `web` | Capture one explicitly selected HTTPS resource. | A non-empty domain allow-list and byte limit; license cannot be inferred. |
+
+The three controls are independent:
+
+1. `integrations.discovery` authorizes candidate metadata lookup.
+2. `integrations.acquisition` authorizes retrieval of selected evidence.
+3. Environment credentials authenticate an already-authorized provider.
+
+A token, installed runner, domain-pack recommendation, or discovered URL never
+grants provider permission. The orchestrator uses only the configured
+allow-lists and never edits them during a run. arXiv is primarily a preprint
+host and OpenAlex is a scholarly index; neither provider alone establishes that
+a work was peer reviewed.
+
+Repeated initializer flags are the concise opt-in. When a flag is present for a
+phase, it replaces that phase's profile allow-list and sets `enabled: true`:
+
+```bash
+evidence-wiki deploy \
+  --target literature-workspace \
+  --project-name literature-workspace \
+  --project-description "Agent-acquired literature review" \
+  --discovery-provider arxiv \
+  --discovery-provider openalex \
+  --acquisition-provider arxiv \
+  --acquisition-provider openalex \
+  --dry-run
+```
+
+Use a setup profile for providers with additional policy. For example, this
+`workspace_init.integrations` excerpt configures general search and reviewed
+web domains (the rest of the required profile is unchanged):
+
+```yaml
+integrations:
+  git:
+    snapshot_user_edits: explicit
+  discovery:
+    enabled: true
+    providers: [search]
+    search:
+      provider: command
+      command: [my-search-adapter, --json]
+  acquisition:
+    enabled: true
+    providers: [web]
+    target_root: raw/papers
+    max_downloads_per_run: 10
+    require_license_check: true
+    web:
+      target_root: raw/web
+      allowed_domains: [official.example]
+      max_download_bytes: 10485760
+```
+
+See `workspace-template/docs/source-discovery.md`,
+`workspace-template/docs/acquisition.md`, and
+`workspace-template/docs/workspace-init-profile.md` for the complete contracts.
+
+### Deliver Local Evidence
+
 Use `research.yml` to configure source roots. Common roots are:
 
 - `raw/papers/` for papers, PDFs, arXiv bundles, and reports.
@@ -417,9 +504,7 @@ Automated deliveries (fetch agents, orchestrators) follow the delivery contract 
 `workspace-template/docs/source-delivery.md`: provenance sidecars next to delivered
 files, atomic delivery, and the structured source-request artifact
 (`scripts/source_requests.py`) that routes evidence gaps back to fetch agents.
-Optional workspace-side acquisition is disabled by default; when explicitly
-enabled, provider terms, the `arxiv`/`openalex`/`github` registry, and provenance rules
-are documented in `workspace-template/docs/acquisition.md`.
+Optional workspace-side discovery and acquisition are disabled by default.
 Prompt-injection hardening guidance is in
 `workspace-template/docs/prompt-injection-hardening.md`: source content is evidence
 data, provenance URLs are metadata, and the default-on lint heuristic is a weak
@@ -508,6 +593,7 @@ files do not land in the repository root.
 - `workspace-template/docs/workspace-initialization.md`: initialization CLI and setup profile workflow.
 - `workspace-template/docs/workspace-init-profile.md`: setup profile schema.
 - `workspace-template/docs/orchestrator-handoff.md`: machine contract for external orchestrators and parent agents.
+- `workspace-template/docs/orchestration.md`: durable parent sessions, work orders, managed runners, and recovery.
 - `workspace-template/docs/workspace-status.md`: aggregate status document schema and completion verdict.
 - `workspace-template/docs/research-yml.md`: public configuration contract.
 - `workspace-template/docs/source-manifest.md`: source inventory format.

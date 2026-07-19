@@ -28,6 +28,13 @@ if str(_SCRIPT_DIR) not in sys.path:
 # resolved path to stay inside an already-resolved root. Reused here for the
 # init/upgrade *writer* paths so the readers and writers cannot drift (SEC-E1-T04).
 from _handoff_signature import handoff_secret, sign_handoff
+from _provider_registry import (
+    ACQUISITION_PROVIDER_IDS,
+    DISCOVERY_ACCEPTED_IDS,
+    DISCOVERY_PROVIDER_IDS,
+    ProviderListError,
+    validate_provider_ids,
+)
 from _script_errors import error_envelope
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_inventory import is_contained_nonsymlink
@@ -171,7 +178,8 @@ DEFAULT_VALIDATION_COMMANDS = (
     "python3 scripts/lint.py --format text",
 )
 CODEBASE_ANALYSIS_DEFAULT_OUTPUT_DIR = "sources/code_wikis"
-ACQUISITION_ALLOWED_PROVIDERS = ("arxiv", "openalex", "github", "web")
+ACQUISITION_ALLOWED_PROVIDERS = ACQUISITION_PROVIDER_IDS
+DISCOVERY_ALLOWED_PROVIDERS = DISCOVERY_ACCEPTED_IDS
 ACQUISITION_DEFAULT_TARGET_ROOT = "raw/papers"
 OUTPUT_SUPPORTED_FORMATS = ("markdown", "marp", "csv", "json", "presentation_outline")
 SOURCE_LIFECYCLE_STATUSES = (
@@ -257,6 +265,8 @@ class InitOptions:
     dry_run: bool
     force: bool
     scope_root: Path | None = None
+    discovery_providers: tuple[str, ...] | None = None
+    acquisition_providers: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -276,6 +286,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--domain-pack",
         help="Optional domain pack name or path. Example: llm-research or /path/to/domain-pack.",
+    )
+    parser.add_argument(
+        "--discovery-provider",
+        action="append",
+        dest="discovery_providers",
+        metavar="ID",
+        help=(
+            "Explicitly enable a discovery provider. Repeatable; replaces any profile provider list. "
+            f"Supported providers: {', '.join(DISCOVERY_PROVIDER_IDS)}."
+        ),
+    )
+    parser.add_argument(
+        "--acquisition-provider",
+        action="append",
+        dest="acquisition_providers",
+        metavar="ID",
+        help=(
+            "Explicitly enable an acquisition provider. Repeatable; replaces any profile provider list. "
+            f"Supported providers: {', '.join(ACQUISITION_PROVIDER_IDS)}."
+        ),
     )
     parser.add_argument(
         "--profile",
@@ -551,6 +581,7 @@ def validate_git_integration(profile: dict[str, Any]) -> None:
             raise SystemExit(f"setup profile integrations.git.{key} is not allowed during initialization")
     validate_codebase_analysis_integration(integrations, "setup profile integrations.codebase_analysis")
     validate_acquisition_integration(integrations, "setup profile integrations.acquisition")
+    validate_discovery_integration(integrations, "setup profile integrations.discovery")
 
 
 def validate_generated_sources_path(value: str, label: str) -> None:
@@ -567,28 +598,22 @@ def validate_raw_target_path(value: str, label: str) -> None:
         raise SystemExit(f"{label} must be under the raw/ evidence directory: {value}")
 
 
-def validate_provider_list(value: Any, label: str, *, require_non_empty: bool = False) -> list[str]:
-    if value is None:
-        providers: list[str] = []
-    elif isinstance(value, list):
-        providers = []
-        for item in value:
-            provider = string_value(item, f"{label}[]")
-            if provider is None:
-                raise SystemExit(f"{label} must be a list of non-empty provider identifiers")
-            providers.append(provider)
-    else:
-        raise SystemExit(f"{label} must be a list of provider identifiers")
-    if require_non_empty and not providers:
-        raise SystemExit(f"{label} must include at least one provider when acquisition is enabled")
-    duplicates = sorted({provider for provider in providers if providers.count(provider) > 1})
-    if duplicates:
-        raise SystemExit(f"{label} has duplicate provider(s): {', '.join(duplicates)}")
-    unknown = sorted(set(providers) - set(ACQUISITION_ALLOWED_PROVIDERS))
-    if unknown:
-        allowed = ", ".join(ACQUISITION_ALLOWED_PROVIDERS)
-        raise SystemExit(f"{label} has unknown provider(s): {', '.join(unknown)}. Allowed providers: {allowed}")
-    return providers
+def validate_provider_list(
+    value: Any,
+    label: str,
+    *,
+    phase: str = "acquisition",
+    require_non_empty: bool = False,
+) -> list[str]:
+    try:
+        validated = validate_provider_ids(
+            value,
+            phase=phase,
+            require_non_empty=require_non_empty,
+        )
+    except ProviderListError as exc:
+        raise SystemExit(f"{label} {exc}") from exc
+    return list(validated.providers)
 
 
 def validate_command_value(value: Any, label: str) -> None:
@@ -634,7 +659,11 @@ def validate_acquisition_integration(integrations: dict[str, Any], label: str) -
     enabled = acquisition.get("enabled", False)
     if not isinstance(enabled, bool):
         raise SystemExit(f"{label}.enabled must be a boolean")
-    validate_provider_list(acquisition.get("providers", []), f"{label}.providers", require_non_empty=enabled)
+    providers = validate_provider_list(
+        acquisition.get("providers", []),
+        f"{label}.providers",
+        require_non_empty=enabled,
+    )
     target_root = string_value(acquisition.get("target_root"), f"{label}.target_root") or ACQUISITION_DEFAULT_TARGET_ROOT
     validate_raw_target_path(target_root, f"{label}.target_root")
     max_downloads = acquisition.get("max_downloads_per_run", 10)
@@ -643,9 +672,59 @@ def validate_acquisition_integration(integrations: dict[str, Any], label: str) -
     require_license_check = acquisition.get("require_license_check", True)
     if not isinstance(require_license_check, bool):
         raise SystemExit(f"{label}.require_license_check must be a boolean")
+    if "web" in providers:
+        validate_web_provider_configuration(acquisition, label)
     for key in FORBIDDEN_ACQUISITION_AUTOMATION_KEYS:
         if acquisition.get(key):
             raise SystemExit(f"{label}.{key} is not allowed during initialization")
+
+
+def validate_discovery_integration(integrations: dict[str, Any], label: str) -> None:
+    discovery = integrations.get("discovery")
+    if discovery is None:
+        return
+    if not isinstance(discovery, dict):
+        raise SystemExit(f"{label} must be a mapping")
+    enabled = discovery.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise SystemExit(f"{label}.enabled must be a boolean")
+    providers = validate_provider_list(
+        discovery.get("providers", []),
+        f"{label}.providers",
+        phase="discovery",
+        require_non_empty=enabled,
+    )
+    candidate_store = string_value(
+        discovery.get("candidate_store_path"),
+        f"{label}.candidate_store_path",
+    ) or "sources/discovery/candidates.jsonl"
+    validate_generated_sources_path(candidate_store, f"{label}.candidate_store_path")
+    if not candidate_store.lower().endswith(".jsonl"):
+        raise SystemExit(f"{label}.candidate_store_path must use the .jsonl extension: {candidate_store}")
+
+    # ``search`` is an authorization entry, not a backend choice.  Selecting it
+    # therefore requires the profile to declare the concrete fixture, command,
+    # or HTTP adapter; initialization never invents one.
+    if "search" in providers:
+        search = discovery.get("search")
+        if not isinstance(search, dict):
+            raise SystemExit(f"{label}.search must be a mapping when the search provider is enabled")
+        search_provider = string_value(search.get("provider"), f"{label}.search.provider")
+        if search_provider not in {"fixture", "command", "http"}:
+            raise SystemExit(
+                f"{label}.search.provider must be one of fixture, command, or http when search is enabled"
+            )
+
+
+def validate_web_provider_configuration(acquisition: dict[str, Any], label: str) -> None:
+    web = acquisition.get("web")
+    if not isinstance(web, dict):
+        raise SystemExit(f"{label}.web must be a mapping when the web provider is enabled")
+    allowed_domains = web.get("allowed_domains")
+    if not isinstance(allowed_domains, list) or not allowed_domains:
+        raise SystemExit(f"{label}.web.allowed_domains must contain at least one reviewed domain")
+    if any(not isinstance(domain, str) or not domain.strip() for domain in allowed_domains):
+        raise SystemExit(f"{label}.web.allowed_domains must be a list of non-empty domains")
 
 
 def validate_handoff(profile: dict[str, Any]) -> None:
@@ -916,6 +995,21 @@ def validate_path_under_scope(path: Path, scope_root: Path | None, label: str) -
         raise SystemExit(f"{label} must be under --scope-root: {path} (scope root: {scope_root})")
 
 
+def normalize_cli_provider_flags(values: Any, *, phase: str, label: str) -> tuple[str, ...] | None:
+    if values is None:
+        return None
+    try:
+        validated = validate_provider_ids(values, phase=phase, require_non_empty=True)
+    except ProviderListError as exc:
+        raise SystemExit(f"{label} {exc}") from exc
+    if validated.legacy_strategies:
+        raise SystemExit(
+            f"{label} accepts concrete providers only; strategy id(s) are not provider authority: "
+            f"{', '.join(validated.legacy_strategies)}"
+        )
+    return validated.providers
+
+
 def resolve_options(args: argparse.Namespace) -> InitOptions:
     starter_root = Path(args.starter_root).expanduser().resolve() if args.starter_root else default_starter_root()
     scope_root = resolve_scope_root(args.scope_root)
@@ -948,6 +1042,16 @@ def resolve_options(args: argparse.Namespace) -> InitOptions:
     )
     language = string_value(args.language, "--language") or string_value(project_profile.get("language"), "project.language") or "en"
     domain_pack = string_value(args.domain_pack, "--domain-pack") or domain_pack_from_profile(profile)
+    discovery_providers = normalize_cli_provider_flags(
+        args.discovery_providers,
+        phase="discovery",
+        label="--discovery-provider",
+    )
+    acquisition_providers = normalize_cli_provider_flags(
+        args.acquisition_providers,
+        phase="acquisition",
+        label="--acquisition-provider",
+    )
 
     return InitOptions(
         starter_root=starter_root,
@@ -962,6 +1066,8 @@ def resolve_options(args: argparse.Namespace) -> InitOptions:
         profile=profile,
         dry_run=bool(args.dry_run),
         force=bool(args.force),
+        discovery_providers=discovery_providers,
+        acquisition_providers=acquisition_providers,
     )
 
 
@@ -1272,12 +1378,49 @@ def normalize_domain_pack_paths(config: dict[str, Any], pack_relative: str) -> d
     return config
 
 
+def apply_cli_provider_overrides(config: dict[str, Any], options: InitOptions) -> dict[str, Any]:
+    """Apply explicit CLI allow-lists after pack/profile merging.
+
+    A supplied phase flag is authoritative for that phase: it enables the
+    integration and replaces, rather than extends, the profile allow-list.
+    Nested provider configuration is preserved so profiles can supply the
+    reviewed search backend or web domain allow-list.
+    """
+
+    integrations = config.get("integrations")
+    if integrations is None:
+        integrations = {}
+    if not isinstance(integrations, dict):
+        raise SystemExit("research.yml integrations must be a mapping")
+    integrations = copy.deepcopy(integrations)
+
+    for phase, selected in (
+        ("discovery", options.discovery_providers),
+        ("acquisition", options.acquisition_providers),
+    ):
+        if selected is None:
+            continue
+        phase_config = integrations.get(phase)
+        if phase_config is None:
+            phase_config = {}
+        if not isinstance(phase_config, dict):
+            raise SystemExit(f"research.yml integrations.{phase} must be a mapping")
+        phase_config = copy.deepcopy(phase_config)
+        phase_config["enabled"] = True
+        phase_config["providers"] = list(selected)
+        integrations[phase] = phase_config
+
+    config["integrations"] = integrations
+    return config
+
+
 def build_config(options: InitOptions, domain_pack: DomainPackSelection | None) -> dict[str, Any]:
     config = load_yaml(options.starter_root / "research.yml", "starter research.yml")
     if domain_pack is not None:
         overlay = load_yaml(domain_pack.source_path / "research.overlay.yml", "domain pack overlay")
         config = deep_merge(config, overlay)
     config = deep_merge(config, profile_config_overrides(options.profile))
+    config = apply_cli_provider_overrides(config, options)
 
     project_config = config.get("project") or {}
     if not isinstance(project_config, dict):
@@ -1377,6 +1520,7 @@ def validate_config_paths(config: dict[str, Any]) -> None:
         )
     validate_codebase_analysis_integration(integrations_config, "research.yml integrations.codebase_analysis")
     validate_acquisition_integration(integrations_config, "research.yml integrations.acquisition")
+    validate_discovery_integration(integrations_config, "research.yml integrations.discovery")
 
 
 def domain_guidance_config(profile: dict[str, Any]) -> dict[str, Any]:
@@ -1555,6 +1699,16 @@ def recommended_acquisition_from_config(config: dict[str, Any]) -> list[str]:
     return [value.strip() for value in values if isinstance(value, str) and value.strip()]
 
 
+def recommended_discovery_from_config(config: dict[str, Any]) -> list[str]:
+    domain_pack = config.get("domain_pack")
+    if not isinstance(domain_pack, dict):
+        return []
+    values = domain_pack.get("recommended_discovery")
+    if not isinstance(values, list):
+        return []
+    return [value.strip() for value in values if isinstance(value, str) and value.strip()]
+
+
 def render_domain_report_lines(
     profile: dict[str, Any],
     config: dict[str, Any],
@@ -1567,6 +1721,10 @@ def render_domain_report_lines(
     if domain_pack is not None:
         lines.append(f"- Reusable domain pack: `{domain_pack.name}`.")
     recommended_acquisition = recommended_acquisition_from_config(config)
+    recommended_discovery = recommended_discovery_from_config(config)
+    if recommended_discovery:
+        lines.append(f"- Recommended discovery providers: {', '.join(recommended_discovery)}.")
+        lines.append("- Discovery remains disabled unless integrations.discovery.enabled is explicitly true.")
     if recommended_acquisition:
         lines.append(f"- Recommended acquisition providers: {', '.join(recommended_acquisition)}.")
         lines.append("- Acquisition remains disabled unless integrations.acquisition.enabled is explicitly true.")
@@ -1675,6 +1833,13 @@ def ensure_configured_directories(target: Path, config: dict[str, Any]) -> None:
     if isinstance(acquisition, dict) and acquisition.get("enabled") is True:
         target_root = string_value(acquisition.get("target_root"), "research.yml integrations.acquisition.target_root")
         ensure_private_dir(target / (target_root or ACQUISITION_DEFAULT_TARGET_ROOT), target)
+    discovery = integrations_config.get("discovery")
+    if isinstance(discovery, dict) and discovery.get("enabled") is True:
+        candidate_store = string_value(
+            discovery.get("candidate_store_path"),
+            "research.yml integrations.discovery.candidate_store_path",
+        ) or "sources/discovery/candidates.jsonl"
+        ensure_private_dir((target / candidate_store).parent, target)
 
 
 def titleize_directory(value: str) -> str:
@@ -1890,7 +2055,11 @@ def write_workspace_files(target: Path, config: dict[str, Any], options: InitOpt
     write_init_report(target, config, options, domain_pack)
 
 
-def print_plan(options: InitOptions, domain_pack: DomainPackSelection | None) -> None:
+def print_plan(
+    options: InitOptions,
+    domain_pack: DomainPackSelection | None,
+    config: dict[str, Any],
+) -> None:
     domain_pack_label = domain_pack.name if domain_pack is not None else "none"
     guidance_path = project_domain_guidance_path(options.profile)
     report_path = init_report_path(options.profile)
@@ -1905,6 +2074,14 @@ def print_plan(options: InitOptions, domain_pack: DomainPackSelection | None) ->
     print(f"- project description: {options.project_description}")
     print(f"- language: {options.language}")
     print(f"- domain pack: {domain_pack_label}")
+    integrations = config_mapping(config, "integrations")
+    for phase in ("discovery", "acquisition"):
+        phase_config = integrations.get(phase)
+        phase_config = phase_config if isinstance(phase_config, dict) else {}
+        enabled = bool(phase_config.get("enabled", False))
+        providers = phase_config.get("providers")
+        provider_text = ", ".join(providers) if isinstance(providers, list) and providers else "none"
+        print(f"- {phase}: {'enabled' if enabled else 'disabled'} ({provider_text})")
     if guidance_path is not None:
         print(f"- project-local domain guidance: {guidance_path}")
     if report_path is not None:
@@ -1923,7 +2100,7 @@ def initialize_workspace(options: InitOptions) -> None:
     validate_target(options)
     domain_pack = resolve_domain_pack(options.domain_pack, options.starter_root)
     config = build_config(options, domain_pack)
-    print_plan(options, domain_pack)
+    print_plan(options, domain_pack, config)
     if options.dry_run:
         return
 
