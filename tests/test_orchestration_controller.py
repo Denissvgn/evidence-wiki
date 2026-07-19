@@ -739,13 +739,14 @@ class OrchestrationControllerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             real_write = CONTROLLER.write_json_atomic
+            expected_session_path = CONTROLLER.session_path(target.resolve(), "orch-test")
             crashed = False
 
             def crash_before_session_commit(path: Path, document: dict) -> None:
                 nonlocal crashed
                 if (
                     not crashed
-                    and path == CONTROLLER.session_path(target, "orch-test")
+                    and path == expected_session_path
                     and document.get("last_completed_action_id") == order["action_id"]
                 ):
                     crashed = True
@@ -766,6 +767,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                     "--result-file",
                     str(result_path),
                 )
+            self.assertTrue(crashed, "fault injection must match the controller's canonical session path")
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
             self.assertEqual("INJECTED_CRASH", error["error_code"])
             self.assertTrue(
