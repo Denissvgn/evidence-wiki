@@ -82,6 +82,8 @@ TIER_RANK.update(
 # The durable candidate store (see docs/source-discovery.md). Candidates live
 # under sources/discovery/, never directly under raw/.
 CANDIDATE_STORE_RELATIVE = ("sources", "discovery", "candidates.jsonl")
+WINDOWS_REPLACE_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.04, 0.08, 0.16, 0.25, 0.25, 0.25, 0.25)
+WINDOWS_TRANSIENT_REPLACE_ERRORS = frozenset({5, 32, 33})
 
 # --- Candidate lifecycle -----------------------------------------------------
 # ``status`` remains the coarse legacy compatibility field consumed by older
@@ -1455,13 +1457,34 @@ def load_all_candidates(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def replace_candidate_store(tmp_path: Path, path: Path) -> None:
+    """Atomically replace the store, retrying transient Windows sharing holds."""
+    for attempt in range(len(WINDOWS_REPLACE_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            tmp_path.replace(path)
+            return
+        except OSError as exc:
+            winerror = getattr(exc, "winerror", None)
+            if winerror not in WINDOWS_TRANSIENT_REPLACE_ERRORS or attempt >= len(
+                WINDOWS_REPLACE_RETRY_DELAYS_SECONDS
+            ):
+                raise
+            time.sleep(WINDOWS_REPLACE_RETRY_DELAYS_SECONDS[attempt])
+
+
 def rewrite_candidates(path: Path, records: list[dict[str, Any]]) -> None:
     """Rewrite the candidate store atomically (write-temp-rename)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "".join(compact_json(apply_candidate_schema_defaults(record)) + "\n" for record in records)
     tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     tmp_path.write_text(content, encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        replace_candidate_store(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def append_audit_event(audit_path: Path, event: dict[str, Any]) -> None:
