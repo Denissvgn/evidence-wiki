@@ -86,7 +86,7 @@ Output is JSON:
 {
   "schema_version": "1.0",
   "package": "evidence-wiki",
-  "package_version": "0.1.0",
+  "package_version": "0.2.0",
   "starter_version": "0.5.0",
   "starter_schema_version": "0.1",
   "compatible_research_yml_contract": "0.1",

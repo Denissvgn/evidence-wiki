@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-20
+
 - Bump the managed workspace starter to `0.5.0` and package the orchestration
   controller and shared provider registry as upgrade-managed scripts.
 - Add durable parent orchestration sessions with model-neutral work orders,
