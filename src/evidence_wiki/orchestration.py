@@ -575,6 +575,21 @@ def _remove_path_without_following(path: Path) -> None:
     path.unlink()
 
 
+def _set_mtime_without_following(path: Path, mtime_ns: int) -> None:
+    timestamps = (mtime_ns, mtime_ns)
+    if os.utime in os.supports_follow_symlinks:
+        os.utime(path, ns=timestamps, follow_symlinks=False)
+        return
+
+    # Windows cannot request no-follow timestamp updates. The restore tree is
+    # private and host-created after the runner exits, but still fail closed if
+    # an unexpected link appears before using the platform fallback.
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode):
+        raise RuntimeError(f"refusing to restore a timestamp through a symbolic link: {path}")
+    os.utime(path, ns=timestamps)
+
+
 def _restore_parent_orchestration(root: Path, snapshot: ControlArtifactSnapshot) -> None:
     parent = root / "runs" / "orchestrations"
     target = parent / snapshot.orchestration_id
@@ -610,11 +625,11 @@ def _restore_parent_orchestration(root: Path, snapshot: ControlArtifactSnapshot)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(entry.content)
             destination.chmod(entry.mode)
-            os.utime(destination, ns=(entry.mtime_ns, entry.mtime_ns), follow_symlinks=False)
+            _set_mtime_without_following(destination, entry.mtime_ns)
         for relative, entry in reversed(directories):
             destination = temporary if not relative else temporary.joinpath(*PurePosixPath(relative).parts)
             destination.chmod(entry.mode)
-            os.utime(destination, ns=(entry.mtime_ns, entry.mtime_ns), follow_symlinks=False)
+            _set_mtime_without_following(destination, entry.mtime_ns)
         _remove_path_without_following(target)
         os.replace(temporary, target)
     finally:

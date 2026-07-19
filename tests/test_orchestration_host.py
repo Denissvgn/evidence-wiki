@@ -64,7 +64,14 @@ def control_workspace(root: Path) -> Path:
     (orchestration_root / "work-orders").mkdir(parents=True)
     (orchestration_root / "work-results").mkdir()
     (root / "research.yml").write_text("project: {name: test}\n", encoding="utf-8")
-    (root / "workspace-system.yml").write_text("starter_version: 0.5.0\n", encoding="utf-8")
+    (root / "workspace-system.yml").write_text(
+        "workspace_system:\n"
+        '  starter_version: "0.5.0"\n'
+        '  schema_version: "0.1"\n'
+        '  created: "2026-05-10"\n'
+        '  compatible_research_yml_contract: "0.1"\n',
+        encoding="utf-8",
+    )
     (root / "AGENTS.md").write_text("# Trusted agent instructions\n", encoding="utf-8")
     (root / "scripts" / "trusted.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "skills" / "research-run.md").write_text("# Trusted skill\n", encoding="utf-8")
@@ -680,6 +687,23 @@ class OrchestrationHostTests(unittest.TestCase):
                 self.assertEqual(before_parent, file_tree(parent))
                 if mutation_name == "config":
                     self.assertIn("attacker", (root / "research.yml").read_text(encoding="utf-8"))
+
+    def test_parent_restore_supports_platforms_without_no_follow_utime(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent = control_workspace(root)
+            before_parent = file_tree(parent)
+            snapshot = orchestration._capture_control_artifacts(root, "orch-1")
+            (parent / "session.json").write_text('{"status":"tampered"}\n', encoding="utf-8")
+
+            with mock.patch.object(orchestration.os, "supports_follow_symlinks", set()):
+                with self.assertRaisesRegex(
+                    orchestration.OrchestrationHostError,
+                    "CONTROL_ARTIFACT_TAMPERED.*remains resumable",
+                ):
+                    orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+            self.assertEqual(before_parent, file_tree(parent))
 
     def test_control_snapshot_rejects_symlinks_special_files_and_excess_bytes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
