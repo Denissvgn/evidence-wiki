@@ -63,6 +63,17 @@ hooks, background sync, auto-fetch, auto-download, auto-add, and auto-commit.
 Domain packs may recommend providers through `domain_pack.recommended_acquisition`,
 but recommendations never enable acquisition by themselves.
 
+Discovery and acquisition are independent permissions. Discovery produces
+metadata candidates; acquisition retrieves only an explicitly selected
+candidate. Allowing `arxiv` or `openalex` in one phase does not allow it in the
+other. arXiv is primarily a preprint host and OpenAlex is an index; neither
+proves peer review. A successful transport also does not infer reuse rights:
+the selected artifact's license and provenance remain publication gates.
+
+`source_inventory.py` and `normalize_sources.py` operate only on files already
+delivered below configured `raw/` roots. They never search, resolve provider
+metadata, or download a candidate.
+
 ## Provider Secrets And Rotation
 
 Provider credentials are operator-managed runtime secrets. Inject

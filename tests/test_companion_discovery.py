@@ -115,6 +115,9 @@ class CompanionDiscoveryTests(unittest.TestCase):
             "integrations:",
             "  discovery:",
             f"    enabled: {'true' if enabled else 'false'}",
+            "    providers:",
+            "      - github",
+            "      - search",
         ]
         if search_provider:
             lines += [

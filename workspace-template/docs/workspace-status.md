@@ -36,6 +36,7 @@ The JSON document has a fixed top-level shape. The current `schema_version` is `
 | `contract` | mapping | Starter and contract versions from `workspace-system.yml`. |
 | `run` | mapping | Per-run budgets for unattended loops. |
 | `run_controller` | mapping | PM run-controller summary when `runs/<run_id>/run-state.json` exists or `--run-id` is supplied. |
+| `orchestration` | mapping | Read-only summary of the newest active parent orchestration, or newest terminal parent when none is active. |
 | `smoke` | mapping | Smoke validation summary. |
 | `questions` | mapping | Question backlog counts. |
 | `intake` | mapping | Question-intake cap and recent-rate signals. |
@@ -140,6 +141,23 @@ Malformed discovered run-state files are fatal and return the stable
 | `candidate_counts`, `coverage_counts`, `budget_state`, `budget_overrides` | mapping | Snapshot counters and explicit budget overrides copied from `run-state.json`. |
 | `failure_count` | integer | Count of recorded failure records. |
 | `run_state_path` | string | Workspace-relative path to the selected run-state file. |
+
+### `orchestration`
+
+`orchestration` is an additive, read-only view of durable parent state under
+`runs/orchestrations/`. Status selects the newest non-terminal session by
+`updated_at`, otherwise the newest terminal session. It never issues, leases, or
+submits work. With no readable session it returns:
+
+```json
+{"present": false, "selection": "none"}
+```
+
+When present, the block includes `orchestration_id`, `status`, `phase`,
+`terminal`, `verdict`, `pause_reason`, `pending_action_id`, `active_run_id`,
+`child_run_ids`, action counters, lifecycle timestamps, and the
+workspace-relative `session_path`. Use `evidence-wiki orchestrate status` for the
+complete version 1.0 session artifact.
 
 ### `smoke`
 

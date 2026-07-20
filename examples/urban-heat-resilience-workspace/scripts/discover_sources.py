@@ -1,29 +1,17 @@
 #!/usr/bin/env python3
-"""Read-only source-discovery command surface (E31-T03 skeleton).
+"""Bounded source discovery and candidate lifecycle command surface.
 
-This script defines the discovery CLI boundary before any provider-specific
-network implementation lands. Discovery proposes *candidate* sources; it never
-downloads, scrapes, clones, or ingests anything (see docs/source-discovery.md).
+Discovery proposes *candidate* sources; it never downloads, scrapes, clones, or
+ingests the candidate contents (see docs/source-discovery.md). Provider-backed
+routes enforce the disabled-by-default discovery gate and an explicit concrete
+provider allow-list before transport. Offline candidate review and jurisdiction
+inspection remain available without network authorization.
 
-The first implementation is deliberately inert. Every command:
-
-- validates its arguments,
-- loads `research.yml`,
-- enforces the disabled-by-default discovery gate
-  (`integrations.discovery.enabled`), and
-- emits a structured error envelope.
-
-When discovery is disabled, every command returns `DISCOVERY_DISABLED`. When it
-is enabled, `search` and `github` discover real candidates, `legal` plans
-official-source-first legal queries, `authors` extracts a bounded author seed
-list from a normalized paper source (read-only preparation), and `companions`
-finds a paper's companion repositories, datasets, project pages, supplemental
-material, and publisher pages (preferring links already in the paper/provider
-metadata, then GitHub and search). With `authors --discover-publications`, the
-author seeds are resolved to OpenAlex identities and each author's works are
-proposed as related-publication candidates. Discovery proposes candidates but
-never fetches them: a discovered candidate is not evidence until explicitly
-acquired into `raw/` with provenance.
+Implemented routes include request-backed arXiv/OpenAlex paper discovery,
+general search, GitHub repository search, legal query planning/ranking, author
+publication expansion, companion discovery, and fixture-backed standards
+metadata. A discovered candidate is not evidence until it is explicitly
+selected and acquired into ``raw/`` with provenance.
 """
 
 from __future__ import annotations
@@ -39,6 +27,7 @@ import subprocess
 import sys
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -56,17 +45,7 @@ from urllib.request import Request, urlopen
 SCHEMA_VERSION = "1.0"
 EXIT_OK = 0
 EXIT_INVALID = 2
-DISCOVERY_COMMANDS = ("search", "legal", "github", "authors", "companions", "standards")
-STANDARDS_PROVIDER_IDS = ("iso-open-data", "eu-product-requirements", "uk-geospatial-register", "nist")
-DISCOVERY_PROVIDER_REGISTRY = (
-    "github",
-    "search",
-    "legal",
-    "authors",
-    "companions",
-    "standards",
-    *(f"standards:{provider}" for provider in STANDARDS_PROVIDER_IDS),
-)
+DISCOVERY_COMMANDS = ("academic", "search", "legal", "github", "authors", "companions", "standards")
 
 # Trust tiers, ordered best (rank 0) to worst, from docs/source-discovery.md. The
 # ordering is the policy authority for "outranks": a lower rank is more trusted.
@@ -103,6 +82,8 @@ TIER_RANK.update(
 # The durable candidate store (see docs/source-discovery.md). Candidates live
 # under sources/discovery/, never directly under raw/.
 CANDIDATE_STORE_RELATIVE = ("sources", "discovery", "candidates.jsonl")
+WINDOWS_REPLACE_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.04, 0.08, 0.16, 0.25, 0.25, 0.25, 0.25)
+WINDOWS_TRANSIENT_REPLACE_ERRORS = frozenset({5, 32, 33})
 
 # --- Candidate lifecycle -----------------------------------------------------
 # ``status`` remains the coarse legacy compatibility field consumed by older
@@ -436,6 +417,31 @@ ORCID_RE = re.compile(r"(\d{4}-\d{4}-\d{4}-\d{3}[\dX])")
 # scholarly index; no commercial API is enabled by default. OPENALEX_API_KEY is
 # read from the environment only and is never written to output, the candidate
 # store, or logs (only whether a key was used is reported).
+# Request-backed academic discovery uses the same bounded scholarly APIs as
+# author expansion, but starts from an open source request rather than an
+# already-normalized seed paper.
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
+ARXIV_ABS_URL = "https://arxiv.org/abs/{id}"
+ARXIV_PDF_URL = "https://arxiv.org/pdf/{id}"
+ARXIV_TERMS_URL = "https://info.arxiv.org/help/api/tou.html"
+ARXIV_TIMEOUT_SECONDS = 30.0
+ARXIV_MAX_ATTEMPTS = 3
+ARXIV_REQUEST_INTERVAL_SECONDS = 3.0
+# Metadata responses are intentionally small and bounded.  The default
+# transport reads at most limit + 1 bytes so an oversized response can be
+# rejected without buffering the remainder; the post-transport check applies
+# the same contract to injected/test transports.
+ARXIV_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+ARXIV_USER_AGENT = "evidence-wiki discover_sources.py/1.0; request-backed academic discovery"
+ARXIV_TRANSPORT = None
+ARXIV_SLEEP = time.sleep
+ARXIV_CLOCK = time.monotonic
+ARXIV_LAST_REQUEST_AT: float | None = None
+ARXIV_ATOM_NS = {
+    "atom": "http://www.w3.org/2005/Atom",
+    "arxiv": "http://arxiv.org/schemas/atom",
+}
+
 OPENALEX_API_URL = "https://api.openalex.org"
 OPENALEX_WORKS_PATH = "/works"
 OPENALEX_AUTHORS_PATH = "/authors"
@@ -443,6 +449,7 @@ OPENALEX_TERMS_URL = "https://developers.openalex.org/api-reference/works"
 OPENALEX_TIMEOUT_SECONDS = 30.0
 OPENALEX_MAX_ATTEMPTS = 3
 OPENALEX_REQUEST_INTERVAL_SECONDS = 1.0
+OPENALEX_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 OPENALEX_USER_AGENT = (
     "evidence-wiki discover_sources.py/1.0; "
     "OpenAlex author-publication discovery; set OPENALEX_API_KEY for higher usage limits"
@@ -596,8 +603,18 @@ _QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _provider_registry import (
+    DISCOVERY_ACCEPTED_IDS,
+    STANDARDS_DISCOVERY_PROVIDER_IDS,
+    ProviderListError,
+    provider_is_allowed,
+    validate_provider_ids,
+)
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
+
+STANDARDS_PROVIDER_IDS = STANDARDS_DISCOVERY_PROVIDER_IDS
+DISCOVERY_PROVIDER_REGISTRY = DISCOVERY_ACCEPTED_IDS
 
 
 class DiscoverSourcesError(Exception):
@@ -635,8 +652,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=(
             "Propose candidate sources (read-only). Discovery emits ranked, "
             "explained candidates and never downloads, scrapes, clones, or "
-            "ingests them. Performs no network I/O until a provider transport "
-            "is implemented."
+            "ingests them. Provider-backed commands perform bounded network I/O "
+            "only when their concrete provider is explicitly enabled."
         ),
     )
     parser.add_argument(
@@ -652,6 +669,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Report format for command output and fatal errors. Defaults to text.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+
+    academic = commands.add_parser(
+        "academic",
+        help="Search explicitly enabled scholarly providers for one source request; never fetch evidence.",
+    )
+    academic.add_argument("--request-id", required=True, help="Open source-request id that defines the research need.")
+    academic.add_argument(
+        "--provider",
+        action="append",
+        choices=("arxiv", "openalex"),
+        required=True,
+        help="Scholarly discovery provider. Repeat to search both arxiv and openalex.",
+    )
+    academic.add_argument(
+        "--query",
+        help="Optional refined query. Defaults to the source request query_or_identifier value.",
+    )
+    academic.add_argument("--max-results", type=positive_int, default=15, help="Maximum deduplicated candidates.")
+    academic.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("text", "json"),
+        default=argparse.SUPPRESS,
+        help="Report format; accepted here as well as before the subcommand for copy-paste workflows.",
+    )
 
     search = commands.add_parser(
         "search",
@@ -939,7 +981,19 @@ def require_non_empty(value: Any, label: str) -> str:
 
 
 def validate_command_arguments(args: argparse.Namespace) -> None:
-    if args.command == "search":
+    if args.command == "academic":
+        require_non_empty(args.request_id, "--request-id")
+        if args.query is not None:
+            require_non_empty(args.query, "--query")
+        duplicates = sorted({provider for provider in args.provider if args.provider.count(provider) > 1})
+        if duplicates:
+            raise DiscoverSourcesError(
+                "VALUE_INVALID",
+                f"--provider has duplicate provider(s): {', '.join(duplicates)}.",
+                remediation="Pass each academic provider at most once.",
+                details={"command": "academic", "network_io_executed": False},
+            )
+    elif args.command == "search":
         require_non_empty(args.query, "--query")
         if getattr(args, "request_id", None) is not None:
             require_non_empty(args.request_id, "--request-id")
@@ -1033,8 +1087,8 @@ def discovery_disabled(command: str, message: str) -> DiscoverSourcesError:
         "DISCOVERY_DISABLED",
         message,
         remediation=(
-            "Set integrations.discovery.enabled: true in research.yml to opt in. "
-            "Discovery still performs no network I/O until a provider transport is implemented."
+            "Set integrations.discovery.enabled: true and list the concrete provider in "
+            "integrations.discovery.providers before retrying."
         ),
         details={"command": command, "network_io_executed": False},
     )
@@ -1068,29 +1122,19 @@ def require_discovery_enabled(config: dict[str, Any], command: str) -> dict[str,
 
 
 def validate_discovery_provider_list(value: Any, label: str) -> list[str]:
-    if value is None:
-        providers: list[str] = []
-    elif isinstance(value, list):
-        providers = []
-        for item in value:
-            if not isinstance(item, str) or not item.strip():
-                raise SystemExit(f"research.yml {label} must be a list of non-empty provider identifiers")
-            providers.append(item.strip())
-    else:
-        raise SystemExit(f"research.yml {label} must be a list of provider identifiers")
-    duplicates = sorted({provider for provider in providers if providers.count(provider) > 1})
-    if duplicates:
-        raise SystemExit(f"research.yml {label} has duplicate provider(s): {', '.join(duplicates)}")
-    unknown = sorted(set(providers) - set(DISCOVERY_PROVIDER_REGISTRY))
-    if unknown:
-        allowed = ", ".join(DISCOVERY_PROVIDER_REGISTRY)
-        raise SystemExit(f"research.yml {label} has unknown provider(s): {', '.join(unknown)}. Allowed providers: {allowed}")
-    return providers
+    try:
+        validated = validate_provider_ids(value, phase="discovery")
+    except ProviderListError as exc:
+        raise SystemExit(f"research.yml {label} {exc}") from exc
+    return list(validated.configured)
 
 
 def require_discovery_provider_allowed(command: str, discovery: dict[str, Any], provider_ids: tuple[str, ...]) -> None:
-    providers = validate_discovery_provider_list(discovery.get("providers", []), "integrations.discovery.providers")
-    if any(provider_id in providers for provider_id in provider_ids):
+    try:
+        providers = validate_provider_ids(discovery.get("providers", []), phase="discovery")
+    except ProviderListError as exc:
+        raise SystemExit(f"research.yml integrations.discovery.providers {exc}") from exc
+    if any(provider_is_allowed(providers, provider_id) for provider_id in provider_ids):
         return
     expected = " or ".join(provider_ids)
     raise DiscoverSourcesError(
@@ -1116,8 +1160,44 @@ def relative_label(project_root: Path, path: Path) -> str:
         return path.as_posix()
 
 
-def candidate_store_path(project_root: Path) -> Path:
-    return project_root.joinpath(*CANDIDATE_STORE_RELATIVE)
+def configured_candidate_store_relative(config: dict[str, Any] | None) -> str:
+    default = "/".join(CANDIDATE_STORE_RELATIVE)
+    if not isinstance(config, dict):
+        return default
+    discovery = integrations_config(config).get("discovery")
+    if not isinstance(discovery, dict):
+        return default
+    value = discovery.get("candidate_store_path", default)
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit("research.yml integrations.discovery.candidate_store_path must be a non-empty path")
+    text = value.strip()
+    if "\\" in text or "://" in text or text.startswith("~"):
+        raise SystemExit(
+            "research.yml integrations.discovery.candidate_store_path must be a portable workspace-relative path"
+        )
+    relative = PurePosixPath(text)
+    if relative.is_absolute() or ".." in relative.parts or "." in relative.parts:
+        raise SystemExit(
+            "research.yml integrations.discovery.candidate_store_path must be a workspace-relative path without '..'"
+        )
+    if len(relative.parts) < 2 or relative.parts[0] != "sources":
+        raise SystemExit("research.yml integrations.discovery.candidate_store_path must stay under sources/")
+    if relative.suffix.lower() != ".jsonl":
+        raise SystemExit("research.yml integrations.discovery.candidate_store_path must use the .jsonl extension")
+    return relative.as_posix()
+
+
+def candidate_store_path(project_root: Path, config: dict[str, Any] | None = None) -> Path:
+    relative = configured_candidate_store_relative(config)
+    path = project_root.joinpath(*PurePosixPath(relative).parts)
+    resolved_root = project_root.resolve()
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        raise SystemExit(f"Cannot resolve integrations.discovery.candidate_store_path: {exc}") from exc
+    if not resolved.is_relative_to(resolved_root):
+        raise SystemExit("research.yml integrations.discovery.candidate_store_path escapes the workspace")
+    return path
 
 
 def selected_request_id(candidate: dict[str, Any]) -> str | None:
@@ -1308,8 +1388,8 @@ def append_candidates(path: Path, candidates: list[dict[str, Any]]) -> list[str]
     not duplicate candidates. The same stable store lock used by lifecycle
     transitions prevents discovery appends from racing a state rewrite.
     """
-    project_root = path.parents[2]
-    with candidate_store_lock(project_root):
+    lock_path = path.parent / ".locks" / f"{path.stem}.lock"
+    with workspace_lock(lock_path, purpose="discovery candidate store"):
         existing = existing_candidate_ids(path)
         written: list[str] = []
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1328,22 +1408,23 @@ def append_candidates(path: Path, candidates: list[dict[str, Any]]) -> list[str]
 # --- Candidate lifecycle: review and selection -------------------------------
 
 
-def candidate_audit_path(project_root: Path) -> Path:
-    return project_root.joinpath(*CANDIDATE_AUDIT_RELATIVE)
+def candidate_audit_path(project_root: Path, config: dict[str, Any] | None = None) -> Path:
+    return candidate_store_path(project_root, config).with_name("audit.jsonl")
 
 
-def candidate_lock_path(project_root: Path) -> Path:
-    return project_root.joinpath(*CANDIDATE_LOCK_RELATIVE)
+def candidate_lock_path(project_root: Path, config: dict[str, Any] | None = None) -> Path:
+    store = candidate_store_path(project_root, config)
+    return store.parent / ".locks" / f"{store.stem}.lock"
 
 
-def candidate_store_lock(project_root: Path):
+def candidate_store_lock(project_root: Path, config: dict[str, Any] | None = None):
     """Hold a stable lock for candidate-store read-modify-write.
 
     The lock file is never renamed, so concurrent select/reject writers serialize
     on it even though each write replaces candidates.jsonl via temp-file rename
     (the stale-inode-safe pattern from question_claim.py).
     """
-    return workspace_lock(candidate_lock_path(project_root), purpose="discovery candidate store")
+    return workspace_lock(candidate_lock_path(project_root, config), purpose="discovery candidate store")
 
 
 def load_all_candidates(path: Path) -> list[dict[str, Any]]:
@@ -1361,19 +1442,34 @@ def load_all_candidates(path: Path) -> list[dict[str, Any]]:
         except json.JSONDecodeError as exc:
             raise DiscoverSourcesError(
                 "WORKSPACE_UNREADABLE",
-                f"Invalid JSONL in sources/discovery/candidates.jsonl:{line_number}: {exc}",
+                f"Invalid JSONL in the configured candidate store at line {line_number}: {exc}",
                 recoverable=False,
-                remediation="Repair or restore sources/discovery/candidates.jsonl before review.",
+                remediation="Repair or restore the configured discovery candidate store before review.",
             ) from exc
         if not isinstance(record, dict):
             raise DiscoverSourcesError(
                 "WORKSPACE_UNREADABLE",
                 f"Candidate record on line {line_number} is not a JSON object.",
                 recoverable=False,
-                remediation="Repair or restore sources/discovery/candidates.jsonl before review.",
+                remediation="Repair or restore the configured discovery candidate store before review.",
             )
         records.append(apply_candidate_schema_defaults(record))
     return records
+
+
+def replace_candidate_store(tmp_path: Path, path: Path) -> None:
+    """Atomically replace the store, retrying transient Windows sharing holds."""
+    for attempt in range(len(WINDOWS_REPLACE_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            tmp_path.replace(path)
+            return
+        except OSError as exc:
+            winerror = getattr(exc, "winerror", None)
+            if winerror not in WINDOWS_TRANSIENT_REPLACE_ERRORS or attempt >= len(
+                WINDOWS_REPLACE_RETRY_DELAYS_SECONDS
+            ):
+                raise
+            time.sleep(WINDOWS_REPLACE_RETRY_DELAYS_SECONDS[attempt])
 
 
 def rewrite_candidates(path: Path, records: list[dict[str, Any]]) -> None:
@@ -1382,7 +1478,13 @@ def rewrite_candidates(path: Path, records: list[dict[str, Any]]) -> None:
     content = "".join(compact_json(apply_candidate_schema_defaults(record)) + "\n" for record in records)
     tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     tmp_path.write_text(content, encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        replace_candidate_store(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def append_audit_event(audit_path: Path, event: dict[str, Any]) -> None:
@@ -1692,8 +1794,8 @@ def create_source_request_from_candidate(
     return {"request_id": record["request_id"], "created": True}
 
 
-def run_candidates_list(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
-    store_path = candidate_store_path(project_root)
+def run_candidates_list(project_root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    store_path = candidate_store_path(project_root, config)
     records = load_all_candidates(store_path)
     statuses = list(dict.fromkeys(args.status)) if args.status else None
     states = list(dict.fromkeys(args.state)) if args.state else None
@@ -1732,8 +1834,8 @@ def run_candidates_select(project_root: Path, config: dict[str, Any], args: argp
     candidate_id = require_non_empty(args.candidate_id, "--candidate-id")
     reason = args.reason.strip() if isinstance(args.reason, str) and args.reason.strip() else "candidate selected"
     actor = require_non_empty(args.actor, "--actor")
-    store_path = candidate_store_path(project_root)
-    with candidate_store_lock(project_root):
+    store_path = candidate_store_path(project_root, config)
+    with candidate_store_lock(project_root, config):
         records = load_all_candidates(store_path)
         target = find_candidate(records, candidate_id)
         prior_state = require_candidate_transition(target, "selected", args.expected_state)
@@ -1778,7 +1880,7 @@ def run_candidates_select(project_root: Path, config: dict[str, Any], args: argp
             target["lifecycle_run_id"] = run_id
             rewrite_candidates(store_path, records)
             append_audit_event(
-                candidate_audit_path(project_root),
+                candidate_audit_path(project_root, config),
                 candidate_audit_event(
                     target,
                     action="select",
@@ -1805,17 +1907,17 @@ def run_candidates_select(project_root: Path, config: dict[str, Any], args: argp
             "reason": reason,
             "candidate": target,
             "candidates_path": relative_label(project_root, store_path),
-            "audit_path": relative_label(project_root, candidate_audit_path(project_root)),
+            "audit_path": relative_label(project_root, candidate_audit_path(project_root, config)),
             "network_io_executed": False,
         }
 
 
-def run_candidates_reject(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+def run_candidates_reject(project_root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     candidate_id = require_non_empty(args.candidate_id, "--candidate-id")
     reason = require_non_empty(args.reason, "--reason")
     actor = require_non_empty(args.actor, "--actor")
-    store_path = candidate_store_path(project_root)
-    with candidate_store_lock(project_root):
+    store_path = candidate_store_path(project_root, config)
+    with candidate_store_lock(project_root, config):
         records = load_all_candidates(store_path)
         target = find_candidate(records, candidate_id)
         prior_state = require_candidate_transition(target, "rejected", args.expected_state)
@@ -1839,7 +1941,7 @@ def run_candidates_reject(project_root: Path, args: argparse.Namespace) -> dict[
             target["lifecycle_run_id"] = run_id
             rewrite_candidates(store_path, records)
             append_audit_event(
-                candidate_audit_path(project_root),
+                candidate_audit_path(project_root, config),
                 candidate_audit_event(
                     target,
                     action="reject",
@@ -1863,7 +1965,7 @@ def run_candidates_reject(project_root: Path, args: argparse.Namespace) -> dict[
             "lifecycle_state": "rejected",
             "candidate": target,
             "candidates_path": relative_label(project_root, store_path),
-            "audit_path": relative_label(project_root, candidate_audit_path(project_root)),
+            "audit_path": relative_label(project_root, candidate_audit_path(project_root, config)),
             "network_io_executed": False,
         }
 
@@ -1877,8 +1979,8 @@ def run_candidates_transition(
     reason = require_non_empty(args.reason, "--reason")
     actor = require_non_empty(args.actor, "--actor")
     new_state = args.to_state
-    store_path = candidate_store_path(project_root)
-    with candidate_store_lock(project_root):
+    store_path = candidate_store_path(project_root, config)
+    with candidate_store_lock(project_root, config):
         records = load_all_candidates(store_path)
         target = find_candidate(records, candidate_id)
         prior_state = require_candidate_transition(target, new_state, args.expected_state)
@@ -1960,7 +2062,7 @@ def run_candidates_transition(
             target["lifecycle_run_id"] = run_id
             rewrite_candidates(store_path, records)
             append_audit_event(
-                candidate_audit_path(project_root),
+                candidate_audit_path(project_root, config),
                 candidate_audit_event(
                     target,
                     action="transition",
@@ -1986,18 +2088,18 @@ def run_candidates_transition(
             "updated": not already_applied,
             "candidate": target,
             "candidates_path": relative_label(project_root, store_path),
-            "audit_path": relative_label(project_root, candidate_audit_path(project_root)),
+            "audit_path": relative_label(project_root, candidate_audit_path(project_root, config)),
             "network_io_executed": False,
         }
 
 
 def run_candidates_command(project_root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     if args.candidates_command == "list":
-        return run_candidates_list(project_root, args)
+        return run_candidates_list(project_root, config, args)
     if args.candidates_command == "select":
         return run_candidates_select(project_root, config, args)
     if args.candidates_command == "reject":
-        return run_candidates_reject(project_root, args)
+        return run_candidates_reject(project_root, config, args)
     if args.candidates_command == "transition":
         return run_candidates_transition(project_root, config, args)
     raise DiscoverSourcesError(
@@ -2525,7 +2627,12 @@ def build_nist_candidates(project_root: Path, args: argparse.Namespace, discover
     return candidates[: args.max_results]
 
 
-def run_standards_discovery(project_root: Path, discovery: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+def run_standards_discovery(
+    project_root: Path,
+    config: dict[str, Any],
+    discovery: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
     discovered_at = timestamp_utc()
     provider = args.standards_provider
     require_discovery_provider_allowed("standards", discovery, ("standards", f"standards:{provider}"))
@@ -2551,7 +2658,7 @@ def run_standards_discovery(project_root: Path, discovery: dict[str, Any], args:
             str(item.get("title", "")),
         )
     )
-    store_path = candidate_store_path(project_root)
+    store_path = candidate_store_path(project_root, config)
     written = append_candidates(store_path, candidates)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2927,7 +3034,7 @@ def github_search_url(query: str, per_page: int) -> str:
     return f"{GITHUB_API_URL}{GITHUB_SEARCH_REPOSITORIES_PATH}?{urlencode(params)}"
 
 
-def run_github_discovery(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+def run_github_discovery(project_root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     query = require_non_empty(args.query, "--query")
     request_id_arg = getattr(args, "request_id", None)
     request_id = request_id_arg.strip() if isinstance(request_id_arg, str) else None
@@ -2964,7 +3071,7 @@ def run_github_discovery(project_root: Path, args: argparse.Namespace) -> dict[s
             break
 
     candidates.sort(key=github_candidate_sort_key)
-    store_path = candidate_store_path(project_root)
+    store_path = candidate_store_path(project_root, config)
     written = append_candidates(store_path, candidates)
 
     return {
@@ -3935,6 +4042,7 @@ def build_search_query_plan(
 
 def execute_query_plan(
     project_root: Path,
+    config: dict[str, Any],
     discovery: dict[str, Any],
     planned_queries: list[dict[str, Any]],
     *,
@@ -3998,7 +4106,7 @@ def execute_query_plan(
     candidates = refine(candidates) if refine is not None else apply_search_trust_rejection(candidates)
     candidates.sort(key=search_candidate_sort_key)
     candidates = candidates[: base_request["max_results"]]
-    store_path = candidate_store_path(project_root)
+    store_path = candidate_store_path(project_root, config)
     written = append_candidates(store_path, candidates)
     return {
         "search_provider": provider,
@@ -4062,6 +4170,7 @@ def run_search_discovery(
     report.update(
         execute_query_plan(
             project_root,
+            config,
             discovery,
             planned_queries,
             base_request=base_request,
@@ -4481,6 +4590,7 @@ def run_legal_discovery(
     report.update(
         execute_query_plan(
             project_root,
+            config,
             discovery,
             planned_queries,
             base_request=base_request,
@@ -4718,10 +4828,32 @@ def openalex_headers() -> dict[str, str]:
     return {"Accept": "application/json", "User-Agent": OPENALEX_USER_AGENT}
 
 
+def redact_openalex_diagnostic(value: Any) -> str:
+    """Remove OpenAlex credentials from URLs and exception diagnostics.
+
+    OpenAlex accepts its API key as a query parameter, so HTTPError URLs and
+    transport exception strings can otherwise echo the operator credential.
+    Redact both the configured key (raw or URL encoded) and any ``api_key``
+    query value, including diagnostics produced by custom transports.
+    """
+    text = str(value)
+    api_key = openalex_api_key()
+    if api_key:
+        encoded_key = urlencode({"api_key": api_key}).partition("=")[2]
+        for secret in sorted({api_key, encoded_key}, key=len, reverse=True):
+            if secret:
+                text = text.replace(secret, "[REDACTED]")
+    return re.sub(
+        r"(?i)(\bapi_key=)[^&#\s]+",
+        r"\1[REDACTED]",
+        text,
+    )
+
+
 def urllib_openalex_transport(url: str, timeout: float, headers: dict[str, str]) -> bytes:
     request = Request(url, headers=headers)  # noqa: S310 - URL is built by OpenAlex provider helpers
     with urlopen(request, timeout=timeout) as response:  # noqa: S310 - provider transport is HTTPS-only upstream
-        return response.read()
+        return response.read(OPENALEX_MAX_RESPONSE_BYTES + 1)
 
 
 def active_openalex_transport():
@@ -4739,9 +4871,9 @@ def openalex_wait_for_rate_limit() -> None:
     OPENALEX_LAST_REQUEST_AT = now
 
 
-def openalex_error_details() -> dict[str, Any]:
+def openalex_error_details(command: str = "authors") -> dict[str, Any]:
     # A network attempt was made before this error surfaced, so record it.
-    return {"command": "authors", "network_io_executed": True}
+    return {"command": command, "provider": "openalex", "network_io_executed": True}
 
 
 def openalex_build_url(path: str, params: dict[str, Any] | None = None) -> str:
@@ -4755,9 +4887,10 @@ def openalex_build_url(path: str, params: dict[str, Any] | None = None) -> str:
     return f"{OPENALEX_API_URL}{path}" + (f"?{encoded}" if encoded else "")
 
 
-def openalex_fetch_url(url: str) -> bytes:
+def openalex_fetch_url(url: str, *, command: str = "authors") -> bytes:
     transport = active_openalex_transport()
     last_error: BaseException | None = None
+    safe_url = redact_openalex_diagnostic(url)
     for attempt in range(1, OPENALEX_MAX_ATTEMPTS + 1):
         openalex_wait_for_rate_limit()
         try:
@@ -4767,14 +4900,27 @@ def openalex_fetch_url(url: str) -> bytes:
                     "DISCOVERY_RESPONSE_INVALID",
                     "OpenAlex transport returned a non-byte response.",
                     remediation="Fix the discovery transport adapter and retry.",
-                    details=openalex_error_details(),
+                    details=openalex_error_details(command),
                 )
             if not payload:
                 raise DiscoverSourcesError(
                     "DISCOVERY_RESPONSE_INVALID",
-                    f"OpenAlex returned an empty response for {url}.",
+                    f"OpenAlex returned an empty response for {safe_url}.",
                     remediation="Retry later or inspect the provider response outside the workspace.",
-                    details=openalex_error_details(),
+                    details=openalex_error_details(command),
+                )
+            if len(payload) > OPENALEX_MAX_RESPONSE_BYTES:
+                raise DiscoverSourcesError(
+                    "DISCOVERY_RESPONSE_INVALID",
+                    (
+                        "OpenAlex response exceeded the fixed "
+                        f"{OPENALEX_MAX_RESPONSE_BYTES}-byte limit."
+                    ),
+                    remediation="Narrow the query or retry after the provider response is within the limit.",
+                    details={
+                        **openalex_error_details(command),
+                        "response_limit_bytes": OPENALEX_MAX_RESPONSE_BYTES,
+                    },
                 )
             return payload
         except DiscoverSourcesError:
@@ -4786,27 +4932,27 @@ def openalex_fetch_url(url: str) -> bytes:
             if status in {401, 403}:
                 raise DiscoverSourcesError(
                     "OPENALEX_AUTH_REQUIRED",
-                    f"OpenAlex request failed with HTTP {status}: {url}",
+                    f"OpenAlex request failed with HTTP {status}: {safe_url}",
                     remediation=(
                         "Set OPENALEX_API_KEY in the process environment, verify the key, "
                         "and rerun the discovery command."
                     ),
-                    details=openalex_error_details(),
+                    details=openalex_error_details(command),
                 ) from exc
             if status == 429:
                 raise DiscoverSourcesError(
                     "OPENALEX_RATE_LIMITED",
-                    f"OpenAlex request was rate limited with HTTP 429: {url}",
+                    f"OpenAlex request was rate limited with HTTP 429: {safe_url}",
                     remediation="Retry later, reduce request volume, or set OPENALEX_API_KEY for a larger usage budget.",
-                    details=openalex_error_details(),
+                    details=openalex_error_details(command),
                 ) from exc
             if attempt < OPENALEX_MAX_ATTEMPTS and is_retryable_http_status(status):
                 continue
             raise DiscoverSourcesError(
                 "DISCOVERY_NETWORK_ERROR",
-                f"OpenAlex request failed with HTTP {status}: {url}",
+                f"OpenAlex request failed with HTTP {status}: {safe_url}",
                 remediation="Retry later, check network access, or lower request volume.",
-                details=openalex_error_details(),
+                details=openalex_error_details(command),
             ) from exc
         except (TimeoutError, URLError, OSError) as exc:
             last_error = exc
@@ -4814,13 +4960,16 @@ def openalex_fetch_url(url: str) -> bytes:
                 continue
     raise DiscoverSourcesError(
         "DISCOVERY_NETWORK_ERROR",
-        f"OpenAlex request failed after {OPENALEX_MAX_ATTEMPTS} attempt(s): {last_error}",
+        (
+            f"OpenAlex request failed after {OPENALEX_MAX_ATTEMPTS} attempt(s): "
+            f"{redact_openalex_diagnostic(last_error)}"
+        ),
         remediation="Retry later, check network access, or lower request volume.",
-        details=openalex_error_details(),
+        details=openalex_error_details(command),
     )
 
 
-def openalex_json_response(payload: bytes) -> dict[str, Any]:
+def openalex_json_response(payload: bytes, *, command: str = "authors") -> dict[str, Any]:
     try:
         document = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -4828,26 +4977,31 @@ def openalex_json_response(payload: bytes) -> dict[str, Any]:
             "DISCOVERY_RESPONSE_INVALID",
             f"OpenAlex returned invalid JSON: {exc}",
             remediation="Retry later or inspect the provider response outside the workspace.",
-            details=openalex_error_details(),
+            details=openalex_error_details(command),
         ) from exc
     if not isinstance(document, dict):
         raise DiscoverSourcesError(
             "DISCOVERY_RESPONSE_INVALID",
             "OpenAlex returned JSON that was not an object.",
             remediation="Retry later or inspect the provider response outside the workspace.",
-            details=openalex_error_details(),
+            details=openalex_error_details(command),
         )
     return document
 
 
-def openalex_results_list(document: dict[str, Any], *, endpoint: str) -> list[dict[str, Any]]:
+def openalex_results_list(
+    document: dict[str, Any],
+    *,
+    endpoint: str,
+    command: str = "authors",
+) -> list[dict[str, Any]]:
     results = document.get("results")
     if not isinstance(results, list):
         raise DiscoverSourcesError(
             "DISCOVERY_RESPONSE_INVALID",
             f"OpenAlex {endpoint} response did not contain a results list.",
             remediation="Retry later or inspect the provider response outside the workspace.",
-            details=openalex_error_details(),
+            details=openalex_error_details(command),
         )
     return [item for item in results if isinstance(item, dict)]
 
@@ -5048,6 +5202,512 @@ def openalex_paper_metadata(work: dict[str, Any], title: str) -> dict[str, Any]:
         "landing_page_url": landing_url,
         "pdf_url": pdf_url,
         "resolution_status": resolution_status,
+    }
+
+
+# --- Request-backed academic discovery --------------------------------------
+
+
+def _academic_request(project_root: Path, config: dict[str, Any], request_id: str) -> dict[str, Any]:
+    import source_requests
+
+    path = source_requests.requests_path(project_root, config)
+    records = source_requests.load_requests(path)
+    request_record = next((record for record in records if record.get("request_id") == request_id), None)
+    if request_record is None:
+        raise DiscoverSourcesError(
+            "REQUEST_UNKNOWN",
+            f"Unknown request id: {request_id} (no record in {relative_label(project_root, path)}).",
+            remediation="List source requests and pass an existing request id.",
+            details={"command": "academic", "request_id": request_id, "network_io_executed": False},
+        )
+    status = request_record.get("status")
+    if status != "open":
+        raise DiscoverSourcesError(
+            "REQUEST_NOT_OPEN",
+            f"Source request {request_id} is not open (status: {status!r}).",
+            remediation="Pass an open source request, or create a new request for the remaining evidence gap.",
+            details={
+                "command": "academic",
+                "request_id": request_id,
+                "request_status": status,
+                "network_io_executed": False,
+            },
+        )
+    return request_record
+
+
+def _arxiv_headers() -> dict[str, str]:
+    return {"Accept": "application/atom+xml", "User-Agent": ARXIV_USER_AGENT}
+
+
+def _urllib_arxiv_transport(url: str, timeout: float, headers: dict[str, str]) -> bytes:
+    request = Request(url, headers=headers)  # noqa: S310 - fixed HTTPS arXiv endpoint
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - fixed provider endpoint
+        return response.read(ARXIV_MAX_RESPONSE_BYTES + 1)
+
+
+def _arxiv_wait_for_rate_limit() -> None:
+    global ARXIV_LAST_REQUEST_AT
+    now = float(ARXIV_CLOCK())
+    if ARXIV_LAST_REQUEST_AT is not None:
+        elapsed = now - ARXIV_LAST_REQUEST_AT
+        if elapsed < ARXIV_REQUEST_INTERVAL_SECONDS:
+            ARXIV_SLEEP(ARXIV_REQUEST_INTERVAL_SECONDS - elapsed)
+            now = float(ARXIV_CLOCK())
+    ARXIV_LAST_REQUEST_AT = now
+
+
+def _arxiv_fetch_url(url: str) -> bytes:
+    transport = ARXIV_TRANSPORT or _urllib_arxiv_transport
+    last_error: BaseException | None = None
+    details = {"command": "academic", "provider": "arxiv", "network_io_executed": True}
+    for attempt in range(1, ARXIV_MAX_ATTEMPTS + 1):
+        _arxiv_wait_for_rate_limit()
+        try:
+            payload = transport(url, ARXIV_TIMEOUT_SECONDS, _arxiv_headers())
+            if not isinstance(payload, bytes) or not payload:
+                raise DiscoverSourcesError(
+                    "DISCOVERY_RESPONSE_INVALID",
+                    "arXiv returned an empty or non-byte response.",
+                    remediation="Retry later or fix the injected provider transport.",
+                    details=details,
+                )
+            if len(payload) > ARXIV_MAX_RESPONSE_BYTES:
+                raise DiscoverSourcesError(
+                    "DISCOVERY_RESPONSE_INVALID",
+                    f"arXiv response exceeded the fixed {ARXIV_MAX_RESPONSE_BYTES}-byte limit.",
+                    remediation="Narrow the query or retry after the provider response is within the limit.",
+                    details={
+                        **details,
+                        "response_limit_bytes": ARXIV_MAX_RESPONSE_BYTES,
+                    },
+                )
+            return payload
+        except DiscoverSourcesError:
+            raise
+        except HTTPError as exc:
+            last_error = exc
+            status = exc.code
+            close_http_error(exc)
+            if status == 429:
+                raise DiscoverSourcesError(
+                    "ARXIV_RATE_LIMITED",
+                    "arXiv academic discovery was rate limited with HTTP 429.",
+                    remediation="Retry later or lower --max-results.",
+                    details=details,
+                ) from exc
+            if attempt < ARXIV_MAX_ATTEMPTS and is_retryable_http_status(status):
+                continue
+            raise DiscoverSourcesError(
+                "DISCOVERY_NETWORK_ERROR",
+                f"arXiv academic discovery failed with HTTP {status}.",
+                remediation="Retry later or check network access.",
+                details=details,
+            ) from exc
+        except (TimeoutError, URLError, OSError) as exc:
+            last_error = exc
+            if attempt < ARXIV_MAX_ATTEMPTS:
+                continue
+    raise DiscoverSourcesError(
+        "DISCOVERY_NETWORK_ERROR",
+        f"arXiv academic discovery failed after {ARXIV_MAX_ATTEMPTS} attempt(s): {last_error}",
+        remediation="Retry later or check network access.",
+        details=details,
+    )
+
+
+def _arxiv_text(element: ET.Element, path: str) -> str | None:
+    found = element.find(path, ARXIV_ATOM_NS)
+    if found is None or found.text is None:
+        return None
+    text = " ".join(found.text.split())
+    return text or None
+
+
+def _arxiv_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    path = urlparse(value).path
+    candidate = (path.rsplit("/", 1)[-1] if path else value.rsplit("/", 1)[-1]).removesuffix(".pdf")
+    candidate = candidate.strip()
+    return candidate or None
+
+
+def _parse_arxiv_results(payload: bytes) -> list[dict[str, Any]]:
+    try:
+        root = ET.fromstring(payload)  # noqa: S314 - stdlib Atom parser; no external entities
+    except ET.ParseError as exc:
+        raise DiscoverSourcesError(
+            "DISCOVERY_RESPONSE_INVALID",
+            f"arXiv returned invalid Atom XML: {exc}",
+            remediation="Retry later or inspect the provider response outside the workspace.",
+            details={"command": "academic", "provider": "arxiv", "network_io_executed": True},
+        ) from exc
+    results: list[dict[str, Any]] = []
+    for entry in root.findall("atom:entry", ARXIV_ATOM_NS):
+        identifier = _arxiv_id(_arxiv_text(entry, "atom:id"))
+        if identifier is None:
+            continue
+        links = entry.findall("atom:link", ARXIV_ATOM_NS)
+        abs_url = next(
+            (
+                link.get("href")
+                for link in links
+                if link.get("rel") == "alternate" and isinstance(link.get("href"), str)
+            ),
+            ARXIV_ABS_URL.format(id=identifier),
+        )
+        pdf_url = next(
+            (
+                link.get("href")
+                for link in links
+                if link.get("title") == "pdf" and isinstance(link.get("href"), str)
+            ),
+            ARXIV_PDF_URL.format(id=identifier),
+        )
+        results.append(
+            {
+                "id": identifier,
+                "title": _arxiv_text(entry, "atom:title") or "(untitled arXiv paper)",
+                "summary": _arxiv_text(entry, "atom:summary"),
+                "authors": [
+                    name
+                    for author in entry.findall("atom:author", ARXIV_ATOM_NS)
+                    for name in [_arxiv_text(author, "atom:name")]
+                    if name
+                ],
+                "published": _arxiv_text(entry, "atom:published"),
+                "updated": _arxiv_text(entry, "atom:updated"),
+                "doi": _clean_doi(_arxiv_text(entry, "arxiv:doi")),
+                "abs_url": abs_url,
+                "pdf_url": pdf_url,
+            }
+        )
+    return results
+
+
+def _academic_candidate_id(paper: dict[str, Any]) -> str:
+    provider_ids = paper.get("provider_ids") if isinstance(paper.get("provider_ids"), dict) else {}
+    doi = _clean_doi(provider_ids.get("doi") or paper.get("doi"))
+    arxiv_id = provider_ids.get("arxiv") or paper.get("arxiv_id")
+    openalex_id = provider_ids.get("openalex")
+    title = clean_author_text(paper.get("title")) or "untitled"
+    year = paper.get("publication_year")
+    identity = doi or arxiv_id or openalex_id or f"{title.casefold()}:{year or ''}"
+    digest = hashlib.sha1(f"academic:{identity}".encode(), usedforsecurity=False).hexdigest()[:10]
+    return f"cand-{digest}"
+
+
+def _academic_reasoning(query: str, title: str, *, authority: str) -> dict[str, Any]:
+    matched = sorted(set(query_tokens(query)) & set(query_tokens(title)))
+    if not matched:
+        matched = query_tokens(query)[:1] or ["academic"]
+    return {
+        "matched_query_terms": matched,
+        "authority_reason": authority,
+        "freshness_reason": "Publication date is provider metadata and must be reviewed for the research question.",
+        "scope_reason": "Returned by a bounded scholarly-provider search for the linked source request.",
+        "risk_flags": ["license_uncertain"],
+    }
+
+
+def _arxiv_academic_candidate(
+    record: dict[str, Any],
+    *,
+    request_id: str,
+    query: str,
+    discovered_at: str,
+    max_results: int,
+) -> dict[str, Any]:
+    identifier = record["id"]
+    published = record.get("published")
+    year = _published_year(published if isinstance(published, str) else None)
+    paper = {
+        "provider_ids": {"arxiv": identifier, "openalex": None, "doi": record.get("doi")},
+        "title": record["title"],
+        "authors": record.get("authors", []),
+        "publication_year": year,
+        "doi": record.get("doi"),
+        "arxiv_id": identifier,
+        "open_access": True,
+        "oa_status": "preprint",
+        "license": None,
+        "landing_page_url": record["abs_url"],
+        "pdf_url": record["pdf_url"],
+        "resolution_status": "resolved",
+    }
+    overlap = len(set(query_tokens(query)) & set(query_tokens(record["title"])))
+    candidate = {
+        "schema_version": SCHEMA_VERSION,
+        "candidate_id": _academic_candidate_id(paper),
+        "request_id": request_id,
+        "seed_source_id": None,
+        "discovery_run_id": None,
+        "discovered_at": discovered_at,
+        "discovered_by": "discover_sources.py/academic",
+        "provider": "arxiv",
+        "discovery_providers": ["arxiv"],
+        "url": record["abs_url"],
+        "title": record["title"],
+        "source_type": "paper",
+        "trust_tier": "academic_primary",
+        "relevance_score": clamp_unit(0.55 + min(0.35, overlap * 0.08)),
+        "trust_score": 0.8,
+        "official_source": None,
+        "jurisdiction": None,
+        "license": None,
+        "terms_url": ARXIV_TERMS_URL,
+        "rationale": "arXiv preprint candidate linked to the source request; review scope and publication status before selection.",
+        "recommended_action": "review",
+        "network_io_executed": True,
+        "paper": paper,
+        "provider_budget": {
+            "provider": "arxiv",
+            "network_io_executed": True,
+            "max_results": max_results,
+            "max_results_cap": OPENALEX_DISCOVERY_MAX_RESULTS_CAP,
+        },
+        "reasoning": _academic_reasoning(
+            query,
+            record["title"],
+            authority="arXiv hosts the identified preprint; peer review is not inferred.",
+        ),
+        "provider_records": {"arxiv": record},
+    }
+    return candidate
+
+
+def _openalex_arxiv_id(work: dict[str, Any]) -> str | None:
+    for key in ("best_oa_location", "primary_location"):
+        location = work.get(key)
+        if not isinstance(location, dict):
+            continue
+        for field in ("landing_page_url", "pdf_url"):
+            value = location.get(field)
+            if isinstance(value, str) and result_host(value) == "arxiv.org":
+                return _arxiv_id(value)
+    return None
+
+
+def _openalex_academic_candidate(
+    work: dict[str, Any],
+    *,
+    request_id: str,
+    query: str,
+    discovered_at: str,
+    max_results: int,
+) -> dict[str, Any]:
+    title = clean_author_text(work.get("display_name")) or "(untitled OpenAlex work)"
+    paper = openalex_paper_metadata(work, title)
+    arxiv_id = _openalex_arxiv_id(work)
+    paper["arxiv_id"] = arxiv_id
+    paper["provider_ids"]["arxiv"] = arxiv_id
+    url = paper.get("landing_page_url") or (
+        f"https://doi.org/{paper['doi']}" if paper.get("doi") else work.get("id")
+    )
+    cited_by = work.get("cited_by_count") if isinstance(work.get("cited_by_count"), int) else 0
+    overlap = len(set(query_tokens(query)) & set(query_tokens(title)))
+    candidate = {
+        "schema_version": SCHEMA_VERSION,
+        "candidate_id": _academic_candidate_id(paper),
+        "request_id": request_id,
+        "seed_source_id": None,
+        "discovery_run_id": None,
+        "discovered_at": discovered_at,
+        "discovered_by": "discover_sources.py/academic",
+        "provider": "openalex",
+        "discovery_providers": ["openalex"],
+        "url": url,
+        "title": title,
+        "source_type": "paper",
+        "trust_tier": "academic_primary",
+        "relevance_score": clamp_unit(0.55 + min(0.3, overlap * 0.08) + min(0.1, cited_by / 1000)),
+        "trust_score": 0.75,
+        "official_source": None,
+        "jurisdiction": None,
+        "license": paper.get("license"),
+        "terms_url": OPENALEX_TERMS_URL,
+        "rationale": "OpenAlex-indexed paper candidate linked to the source request; index inclusion does not prove peer review.",
+        "recommended_action": "review",
+        "network_io_executed": True,
+        "paper": paper,
+        "provider_budget": {
+            "provider": "openalex",
+            "network_io_executed": True,
+            "token_used": openalex_api_key() is not None,
+            "max_results": max_results,
+            "max_results_cap": OPENALEX_DISCOVERY_MAX_RESULTS_CAP,
+        },
+        "reasoning": _academic_reasoning(
+            query,
+            title,
+            authority="OpenAlex supplies scholarly index metadata; publisher authority and peer review are not inferred.",
+        ),
+        "provider_records": {"openalex": work},
+    }
+    if paper.get("license"):
+        candidate["reasoning"]["risk_flags"] = []
+    return candidate
+
+
+def _academic_identity_keys(candidate: dict[str, Any]) -> list[str]:
+    paper = candidate.get("paper") if isinstance(candidate.get("paper"), dict) else {}
+    provider_ids = paper.get("provider_ids") if isinstance(paper.get("provider_ids"), dict) else {}
+    keys: list[str] = []
+    doi = _clean_doi(provider_ids.get("doi") or paper.get("doi"))
+    if doi:
+        keys.append(f"doi:{doi}")
+    arxiv_id = provider_ids.get("arxiv") or paper.get("arxiv_id")
+    if isinstance(arxiv_id, str) and arxiv_id.strip():
+        normalized_arxiv_id = re.sub(r"v\d+$", "", arxiv_id.strip(), flags=re.IGNORECASE).lower()
+        keys.append(f"arxiv:{normalized_arxiv_id}")
+    openalex_id = provider_ids.get("openalex")
+    if isinstance(openalex_id, str) and openalex_id.strip():
+        keys.append(f"openalex:{openalex_id.strip().upper()}")
+    title = clean_author_text(paper.get("title") or candidate.get("title"))
+    if title:
+        keys.append(f"title:{title.casefold()}:{paper.get('publication_year') or ''}")
+    return keys
+
+
+def _merge_academic_candidate(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    # Prefer arXiv as the acquisition-facing record when available, while
+    # retaining OpenAlex identity and open-access metadata in the paper object.
+    if incoming.get("provider") == "arxiv" and existing.get("provider") != "arxiv":
+        primary, secondary = incoming, existing
+    else:
+        primary, secondary = existing, incoming
+    merged = dict(primary)
+    primary_paper = dict(primary.get("paper") or {})
+    secondary_paper = secondary.get("paper") if isinstance(secondary.get("paper"), dict) else {}
+    primary_ids = dict(primary_paper.get("provider_ids") or {})
+    secondary_ids = secondary_paper.get("provider_ids") if isinstance(secondary_paper.get("provider_ids"), dict) else {}
+    for key in ("arxiv", "openalex", "doi"):
+        if not primary_ids.get(key) and secondary_ids.get(key):
+            primary_ids[key] = secondary_ids[key]
+    primary_paper["provider_ids"] = primary_ids
+    for key, value in secondary_paper.items():
+        if key == "provider_ids":
+            continue
+        if primary_paper.get(key) is None or primary_paper.get(key) == []:
+            primary_paper[key] = value
+    merged["paper"] = primary_paper
+    merged["candidate_id"] = _academic_candidate_id(primary_paper)
+    merged["discovery_providers"] = list(
+        dict.fromkeys([*(primary.get("discovery_providers") or []), *(secondary.get("discovery_providers") or [])])
+    )
+    merged["provider_records"] = {
+        **(secondary.get("provider_records") or {}),
+        **(primary.get("provider_records") or {}),
+    }
+    merged["relevance_score"] = max(float(primary.get("relevance_score", 0)), float(secondary.get("relevance_score", 0)))
+    merged["trust_score"] = max(float(primary.get("trust_score", 0)), float(secondary.get("trust_score", 0)))
+    return merged
+
+
+def _dedupe_academic_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    key_to_index: dict[str, int] = {}
+    for candidate in candidates:
+        keys = _academic_identity_keys(candidate)
+        matched = next((key_to_index[key] for key in keys if key in key_to_index), None)
+        if matched is None:
+            matched = len(deduped)
+            deduped.append(candidate)
+        else:
+            deduped[matched] = _merge_academic_candidate(deduped[matched], candidate)
+        for key in _academic_identity_keys(deduped[matched]):
+            key_to_index[key] = matched
+    deduped.sort(
+        key=lambda item: (
+            -float(item.get("relevance_score", 0)),
+            -float(item.get("trust_score", 0)),
+            str(item.get("title", "")).casefold(),
+        )
+    )
+    return deduped
+
+
+def run_academic_discovery(
+    project_root: Path,
+    config: dict[str, Any],
+    discovery: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    del discovery  # authorization is enforced before this function is called
+    request_id = require_non_empty(args.request_id, "--request-id")
+    request_record = _academic_request(project_root, config, request_id)
+    query_value = args.query if isinstance(args.query, str) and args.query.strip() else request_record.get("query_or_identifier")
+    query = require_non_empty(query_value, "source request query_or_identifier")
+    cap = min(args.max_results, OPENALEX_DISCOVERY_MAX_RESULTS_CAP)
+    discovered_at = timestamp_utc()
+    candidates: list[dict[str, Any]] = []
+    provider_counts: dict[str, int] = {}
+
+    for provider in args.provider:
+        if provider == "arxiv":
+            url = f"{ARXIV_API_URL}?{urlencode({'search_query': f'all:{query}', 'start': 0, 'max_results': cap, 'sortBy': 'relevance', 'sortOrder': 'descending'})}"
+            records = _parse_arxiv_results(_arxiv_fetch_url(url))
+            provider_candidates = [
+                _arxiv_academic_candidate(
+                    record,
+                    request_id=request_id,
+                    query=query,
+                    discovered_at=discovered_at,
+                    max_results=cap,
+                )
+                for record in records[:cap]
+            ]
+        else:
+            url = openalex_build_url(OPENALEX_WORKS_PATH, {"search": query, "per_page": cap})
+            document = openalex_json_response(openalex_fetch_url(url, command="academic"), command="academic")
+            works = openalex_results_list(document, endpoint="works", command="academic")
+            provider_candidates = [
+                _openalex_academic_candidate(
+                    work,
+                    request_id=request_id,
+                    query=query,
+                    discovered_at=discovered_at,
+                    max_results=cap,
+                )
+                for work in works[:cap]
+            ]
+        provider_counts[provider] = len(provider_candidates)
+        candidates.extend(provider_candidates)
+
+    deduped = _dedupe_academic_candidates(candidates)[:cap]
+    store_path = candidate_store_path(project_root, config)
+    written = append_candidates(store_path, deduped)
+    warnings = []
+    for provider, count in provider_counts.items():
+        if count == 0:
+            warnings.append(
+                {
+                    "code": "no_provider_results",
+                    "provider": provider,
+                    "message": f"{provider} returned no candidates for this bounded query.",
+                }
+            )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "provider": "academic",
+        "command": "academic",
+        "generated_at": discovered_at,
+        "request_id": request_id,
+        "request_kind": request_record.get("kind"),
+        "query": query,
+        "query_source": "argument" if args.query else "source_request",
+        "providers": list(args.provider),
+        "provider_counts": provider_counts,
+        "max_results": cap,
+        "count": len(deduped),
+        "candidates": deduped,
+        "candidates_path": relative_label(project_root, store_path),
+        "written": len(written),
+        "warnings": warnings,
+        "token_used": openalex_api_key() is not None if "openalex" in args.provider else False,
+        "network_io_executed": True,
     }
 
 
@@ -5401,6 +6061,7 @@ def publication_candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int,
 def discover_author_publications(
     *,
     project_root: Path,
+    config: dict[str, Any],
     source_id: str,
     seeds: list[dict[str, Any]],
     seed_context: dict[str, Any],
@@ -5471,7 +6132,7 @@ def discover_author_publications(
 
     candidates.sort(key=publication_candidate_sort_key)
     candidates = candidates[:cap]
-    store_path = candidate_store_path(project_root)
+    store_path = candidate_store_path(project_root, config)
     written = append_candidates(store_path, candidates)
 
     return {
@@ -5581,6 +6242,7 @@ def run_authors_discovery(project_root: Path, config: dict[str, Any], args: argp
     report.update(
         discover_author_publications(
             project_root=project_root,
+            config=config,
             source_id=source_id,
             seeds=seeds,
             seed_context=seed_context,
@@ -6098,8 +6760,14 @@ def run_companions_discovery(
     source_id = require_non_empty(args.source_id, "--source-id")
     request_id_arg = getattr(args, "request_id", None)
     request_id = request_id_arg.strip() if isinstance(request_id_arg, str) and request_id_arg.strip() else None
-    use_github = not bool(getattr(args, "no_github", False))
-    use_search = not bool(getattr(args, "no_search", False))
+    configured_providers = validate_provider_ids(
+        discovery.get("providers", []),
+        phase="discovery",
+    )
+    github_requested = not bool(getattr(args, "no_github", False))
+    search_requested = not bool(getattr(args, "no_search", False))
+    use_github = github_requested and provider_is_allowed(configured_providers, "github")
+    use_search = search_requested and provider_is_allowed(configured_providers, "search")
 
     manifest_rel, normalized_rel = normalize_sources.source_paths(config)
     manifest_path = project_root / manifest_rel
@@ -6152,6 +6820,26 @@ def run_companions_discovery(
     discovered_at = timestamp_utc()
     discovery_id = discovery_run_id("companions", [source_id])
     warnings: list[dict[str, str]] = []
+    if github_requested and not use_github:
+        warnings.append(
+            {
+                "code": "github_provider_disabled",
+                "message": (
+                    "Skipped the GitHub companion phase because github is not explicitly listed in "
+                    "integrations.discovery.providers."
+                ),
+            }
+        )
+    if search_requested and not use_search:
+        warnings.append(
+            {
+                "code": "search_provider_disabled",
+                "message": (
+                    "Skipped the search companion phase because search is not explicitly listed in "
+                    "integrations.discovery.providers."
+                ),
+            }
+        )
     candidates: list[dict[str, Any]] = []
     phases: list[dict[str, Any]] = []
 
@@ -6310,7 +6998,7 @@ def run_companions_discovery(
     deduped = dedupe_companion_candidates(candidates)
     cap = min(args.max_results, COMPANION_DISCOVERY_MAX_RESULTS_CAP)
     deduped = deduped[:cap]
-    store_path = candidate_store_path(project_root)
+    store_path = candidate_store_path(project_root, config)
     written = append_candidates(store_path, deduped)
     network_io = any(phase.get("network_io_executed") for phase in phases)
 
@@ -6364,26 +7052,37 @@ def run_discovery_command(args: argparse.Namespace) -> dict[str, Any]:
         # before the discovery gate (profiles can be curated with discovery off).
         return run_jurisdictions_command(project_root, config, args)
     discovery = require_discovery_enabled(config, args.command)
+    if args.command == "academic":
+        for provider in args.provider:
+            require_discovery_provider_allowed("academic", discovery, (provider,))
+        return run_academic_discovery(project_root, config, discovery, args)
     if args.command == "github":
-        return run_github_discovery(project_root, args)
+        require_discovery_provider_allowed("github", discovery, ("github",))
+        return run_github_discovery(project_root, config, args)
     if args.command == "search":
+        if args.execute:
+            require_discovery_provider_allowed("search", discovery, ("search",))
         return run_search_discovery(project_root, config, discovery, args)
     if args.command == "legal":
         # Legal planning is read-only by default; --execute runs the plan through
         # the configured search backend and ranks candidates by officialness
         # (E34-T03). Either way official-source reasoning is recorded per candidate.
+        if args.execute:
+            require_discovery_provider_allowed("legal", discovery, ("search",))
         return run_legal_discovery(project_root, config, discovery, args)
     if args.command == "standards":
         # Standards registry discovery is fixture-backed in this implementation
         # wave. It emits first-class candidates and never crawls or downloads
         # standards text.
-        return run_standards_discovery(project_root, discovery, args)
+        return run_standards_discovery(project_root, config, discovery, args)
     if args.command == "authors":
         # Author extraction (E35-T01) is the read-only preparation path: it reads a
         # normalized paper source and any provider author metadata and emits a
         # bounded author seed list. With --discover-publications (E35-T02) it also
         # resolves each author to an OpenAlex identity and proposes that author's
         # works as related-publication candidates.
+        if args.discover_publications:
+            require_discovery_provider_allowed("authors", discovery, ("openalex",))
         return run_authors_discovery(project_root, config, args)
     if args.command == "companions":
         # Companion artifact discovery (E35-T03): a paper-centered composite that

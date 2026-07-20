@@ -71,6 +71,8 @@ class LegalTestBase(unittest.TestCase):
             "integrations:",
             "  discovery:",
             f"    enabled: {'true' if enabled else 'false'}",
+            "    providers:",
+            "      - search",
         ]
         (workspace / "research.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
         if jurisdictions_content is not None:

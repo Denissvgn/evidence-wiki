@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -876,6 +877,32 @@ class CandidateLifecycleTests(unittest.TestCase):
             socket.socket = original
 
     # --- concurrency -----------------------------------------------------
+
+    def test_candidate_rewrite_retries_transient_windows_replace_contention(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.write_workspace(Path(tmpdir), [candidate("cand-retry00000")])
+            store = workspace / "sources" / "discovery" / "candidates.jsonl"
+            updated = canonical_candidate("cand-retry00000", "rejected", rejection_reason="not relevant")
+            real_replace = Path.replace
+            attempts = 0
+
+            def flaky_replace(source: Path, target: Path):
+                nonlocal attempts
+                if source.name.startswith(f"{store.name}.") and target == store:
+                    attempts += 1
+                    if attempts < 3:
+                        error = PermissionError(13, "synthetic Windows sharing violation", str(target))
+                        error.winerror = 5
+                        raise error
+                return real_replace(source, target)
+
+            with mock.patch.object(Path, "replace", new=flaky_replace), mock.patch.object(DISCOVER.time, "sleep") as sleep:
+                DISCOVER.rewrite_candidates(store, [updated])
+
+            self.assertEqual(3, attempts)
+            self.assertEqual(2, sleep.call_count)
+            self.assertEqual("rejected", self.store_records(workspace)[0]["lifecycle_state"])
+            self.assertEqual([], list(store.parent.glob(f"{store.name}.*.tmp")))
 
     def test_concurrent_rejects_do_not_lose_updates(self):
         if not LOCKS.multiprocess_lock_supported():

@@ -1201,7 +1201,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
                 "`evidence_paths`",
                 "`question_batch`",
                 "`budgets`",
-                "`allowed_providers`",
+                "`provider_policy`",
             ):
                 self.assertIn(field, text)
             self.assertIn("runs/<run_id>/run-state.json", text)
@@ -1867,6 +1867,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
             config = yaml.safe_load(config_path.read_text())
             config.setdefault("integrations", {})["discovery"] = {
                 "enabled": True,
+                "providers": ["search"],
                 "search": {
                     "provider": "fixture",
                     "fixture_path": "sources/discovery/fixtures/results.jsonl",

@@ -36,9 +36,12 @@ replace core workspace tools.
 The overlay is intentionally partial. A workspace must still provide the base
 configuration sections required by the reusable template.
 
-## Acquisition Guidance
+## Source-Provider Guidance
 
-This pack recommends `arxiv` and `openalex` as acquisition providers when a
-workspace has explicitly enabled acquisition. The recommendation is advisory:
-initialization reports surface it for planners and fetch agents, but
-`integrations.acquisition.enabled` remains `false` by default.
+This pack recommends `arxiv` and `openalex` independently for discovery and
+acquisition. Discovery searches provider metadata and creates reviewable paper
+candidates; acquisition retrieves only selected evidence. The recommendations
+are advisory: initialization reports surface them for orchestrators, but
+`integrations.discovery.enabled` and `integrations.acquisition.enabled` both
+remain `false` unless the operator explicitly enables their provider
+allow-lists.

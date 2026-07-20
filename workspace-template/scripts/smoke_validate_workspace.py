@@ -53,6 +53,12 @@ STARTER_LOG_EXAMPLES = (
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _provider_registry import (
+    ACQUISITION_PROVIDER_IDS,
+    DISCOVERY_PROVIDER_IDS,
+    ProviderListError,
+    validate_provider_ids,
+)
 from _script_errors import handle_system_exit, json_mode_requested
 from _workspace_health import evaluate_workspace_health
 
@@ -69,7 +75,7 @@ FORBIDDEN_CODEBASE_AUTOMATION_KEYS = (
     "background_sync",
     "auto_sync",
 )
-ACQUISITION_ALLOWED_PROVIDERS = ("arxiv", "openalex", "github", "web")
+ACQUISITION_ALLOWED_PROVIDERS = ACQUISITION_PROVIDER_IDS
 ACQUISITION_DEFAULT_TARGET_ROOT = "raw/papers"
 FORBIDDEN_ACQUISITION_AUTOMATION_KEYS = (
     "hooks",
@@ -312,25 +318,12 @@ def is_raw_target_path(relative_path: str) -> bool:
     return not path.is_absolute() and ".." not in parts and len(parts) >= 2 and parts[0] == "raw"
 
 
-def validate_provider_list(value: Any) -> tuple[list[str], str | None]:
-    if value is None:
-        providers: list[str] = []
-    elif isinstance(value, list):
-        providers = []
-        for item in value:
-            if not isinstance(item, str) or not item.strip():
-                return [], "must be a list of non-empty provider identifiers"
-            providers.append(item.strip())
-    else:
-        return [], "must be a list of provider identifiers"
-    duplicates = sorted({provider for provider in providers if providers.count(provider) > 1})
-    if duplicates:
-        return providers, f"has duplicate provider(s): {', '.join(duplicates)}"
-    unknown = sorted(set(providers) - set(ACQUISITION_ALLOWED_PROVIDERS))
-    if unknown:
-        allowed = ", ".join(ACQUISITION_ALLOWED_PROVIDERS)
-        return providers, f"has unknown provider(s): {', '.join(unknown)}. Allowed providers: {allowed}"
-    return providers, None
+def validate_provider_list(value: Any, *, phase: str = "acquisition") -> tuple[list[str], str | None, list[str]]:
+    try:
+        validated = validate_provider_ids(value, phase=phase)
+    except ProviderListError as exc:
+        return [], str(exc), []
+    return list(validated.providers), None, list(validated.legacy_strategies)
 
 
 def check_codebase_analysis(project_root: Path, integrations_config: dict[str, Any], results: dict[str, Any]) -> None:
@@ -458,7 +451,7 @@ def check_acquisition(project_root: Path, integrations_config: dict[str, Any], r
             actual=type(enabled).__name__,
         )
         return
-    providers, provider_error = validate_provider_list(acquisition.get("providers", []))
+    providers, provider_error, _legacy = validate_provider_list(acquisition.get("providers", []))
     if provider_error is not None:
         issue(
             results,
@@ -542,6 +535,130 @@ def check_acquisition(project_root: Path, integrations_config: dict[str, Any], r
                 field=f"integrations.acquisition.{key}",
                 expected="false or unset",
                 actual=acquisition.get(key),
+            )
+
+
+def check_discovery(project_root: Path, integrations_config: dict[str, Any], results: dict[str, Any]) -> None:
+    discovery = integrations_config.get("discovery")
+    if discovery is None:
+        return
+    if not isinstance(discovery, dict):
+        issue(
+            results,
+            "HIGH",
+            "config_shape",
+            "research.yml integrations.discovery must be a mapping",
+            ["research.yml"],
+            "Set integrations.discovery to a mapping or remove it.",
+            field="integrations.discovery",
+            expected="mapping",
+            actual=type(discovery).__name__,
+        )
+        return
+    enabled = discovery.get("enabled", False)
+    if not isinstance(enabled, bool):
+        issue(
+            results,
+            "HIGH",
+            "config_shape",
+            "research.yml integrations.discovery.enabled must be a boolean",
+            ["research.yml"],
+            "Set integrations.discovery.enabled to true or false.",
+            field="integrations.discovery.enabled",
+            expected="boolean",
+            actual=type(enabled).__name__,
+        )
+        return
+
+    providers, provider_error, legacy = validate_provider_list(
+        discovery.get("providers", []),
+        phase="discovery",
+    )
+    if provider_error is not None:
+        issue(
+            results,
+            "HIGH",
+            "config_shape",
+            f"research.yml integrations.discovery.providers {provider_error}",
+            ["research.yml"],
+            f"Use only supported discovery providers: {', '.join(DISCOVERY_PROVIDER_IDS)}.",
+            field="integrations.discovery.providers",
+            expected="list of supported provider identifiers",
+            actual=discovery.get("providers"),
+        )
+    elif enabled and not providers:
+        issue(
+            results,
+            "HIGH",
+            "config_shape",
+            "enabled discovery must list at least one provider",
+            ["research.yml"],
+            "Set integrations.discovery.providers to one or more explicitly authorized providers.",
+            field="integrations.discovery.providers",
+            expected="non-empty provider list",
+            actual=providers,
+        )
+    for strategy in legacy:
+        issue(
+            results,
+            "LOW",
+            "deprecated_config",
+            f"integrations.discovery.providers contains legacy strategy id {strategy!r}",
+            ["research.yml"],
+            (
+                "Remove the strategy id and authorize its concrete provider instead: legal requires search, "
+                "author publication expansion requires openalex, and companions uses github and/or search."
+            ),
+            field="integrations.discovery.providers",
+            expected="concrete provider identifiers",
+            actual=strategy,
+        )
+
+    candidate_store = discovery.get("candidate_store_path", "sources/discovery/candidates.jsonl")
+    safe_store = validate_workspace_relative_path(
+        candidate_store,
+        results,
+        "integrations.discovery.candidate_store_path",
+        under_sources=True,
+    )
+    if safe_store is not None:
+        if not safe_store.lower().endswith(".jsonl"):
+            issue(
+                results,
+                "HIGH",
+                "config_path",
+                "research.yml integrations.discovery.candidate_store_path must use the .jsonl extension",
+                ["research.yml"],
+                "Set candidate_store_path to a JSONL file under sources/.",
+                field="integrations.discovery.candidate_store_path",
+                expected="workspace-relative .jsonl path under sources/",
+                actual=candidate_store,
+            )
+        elif enabled:
+            parent = PurePosixPath(safe_store).parent.as_posix()
+            require_relative_dir(
+                project_root,
+                parent,
+                results,
+                "configured_directory",
+                "integrations.discovery.candidate_store_path parent",
+                under_sources=True,
+            )
+
+    if "search" in providers:
+        search = discovery.get("search")
+        provider = search.get("provider") if isinstance(search, dict) else None
+        if provider not in {"fixture", "command", "http"}:
+            issue(
+                results,
+                "HIGH",
+                "config_shape",
+                "enabled search discovery must configure a fixture, command, or http backend",
+                ["research.yml"],
+                "Set integrations.discovery.search.provider and its provider-specific options.",
+                field="integrations.discovery.search.provider",
+                expected="fixture, command, or http",
+                actual=provider,
             )
 
 
@@ -785,6 +902,7 @@ def check_research_config(project_root: Path, config: dict[str, Any] | None, res
     if integrations_config is not None:
         check_codebase_analysis(project_root, integrations_config, results)
         check_acquisition(project_root, integrations_config, results)
+        check_discovery(project_root, integrations_config, results)
     check_domain_pack(project_root, config, results)
 
 

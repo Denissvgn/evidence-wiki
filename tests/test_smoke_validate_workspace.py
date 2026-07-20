@@ -99,6 +99,60 @@ class SmokeValidateWorkspaceTests(unittest.TestCase):
                 results["issues"],
             )
 
+    def test_enabled_discovery_requires_concrete_provider(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.create_workspace(Path(tmpdir))
+            config = self.load_config(target)
+            config["integrations"]["discovery"] = {
+                "enabled": True,
+                "providers": [],
+                "candidate_store_path": "sources/discovery/candidates.jsonl",
+            }
+            self.write_config(target, config)
+
+            results = SMOKE.run_checks(target)
+
+            self.assertFalse(results["ok"])
+            self.assertTrue(
+                any(
+                    issue.get("field") == "integrations.discovery.providers"
+                    and issue["severity"] == "HIGH"
+                    for issue in results["issues"]
+                ),
+                results["issues"],
+            )
+
+    def test_legacy_discovery_strategy_is_low_and_does_not_satisfy_provider_authority(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.create_workspace(Path(tmpdir))
+            (target / "sources" / "discovery").mkdir()
+            config = self.load_config(target)
+            config["integrations"]["discovery"] = {
+                "enabled": True,
+                "providers": ["legal"],
+                "candidate_store_path": "sources/discovery/candidates.jsonl",
+            }
+            self.write_config(target, config)
+
+            results = SMOKE.run_checks(target)
+
+            legacy = [
+                issue
+                for issue in results["issues"]
+                if issue.get("category") == "deprecated_config"
+            ]
+            self.assertEqual(1, len(legacy), results["issues"])
+            self.assertEqual("LOW", legacy[0]["severity"])
+            self.assertFalse(results["ok"], results["issues"])
+            self.assertTrue(
+                any(
+                    issue.get("field") == "integrations.discovery.providers"
+                    and issue["severity"] == "HIGH"
+                    for issue in results["issues"]
+                ),
+                results["issues"],
+            )
+
     def test_missing_required_wiki_directory_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.create_workspace(Path(tmpdir))

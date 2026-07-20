@@ -22,6 +22,7 @@ from .resources import STARTER_DIR, assets_root
 
 SCHEMA_VERSION = "1.0"
 ALLOWED_RECOMMENDED_ACQUISITION = ("arxiv", "openalex")
+ALLOWED_RECOMMENDED_DISCOVERY = ("arxiv", "openalex")
 COVERAGE_TEMPLATE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 ALLOWED_PACK_FILE_SUFFIXES = {".csv", ".json", ".md", ".txt", ".yaml", ".yml"}
 WINDOWS_RESERVED_PACK_NAMES = {
@@ -138,6 +139,7 @@ def metadata_check(domain_pack: Any, expected_contract: str) -> tuple[dict[str, 
                 "version": None,
                 "compatible_research_yml_contract": None,
                 "recommended_acquisition": [],
+                "recommended_discovery": [],
                 "coverage_templates": {},
             },
             [
@@ -161,6 +163,7 @@ def metadata_check(domain_pack: Any, expected_contract: str) -> tuple[dict[str, 
         "version": string_field(domain_pack, "version"),
         "compatible_research_yml_contract": string_field(domain_pack, "compatible_research_yml_contract"),
         "recommended_acquisition": [],
+        "recommended_discovery": [],
         "coverage_templates": {},
     }
     missing = [key for key, value in info.items() if value is None]
@@ -263,6 +266,66 @@ def recommended_acquisition_check(domain_pack: Any) -> tuple[list[str], dict[str
         "recommended_acquisition",
         "pass",
         f"Recommended acquisition providers are valid: {', '.join(providers) or 'none'}.",
+        ["research.overlay.yml"],
+    )
+
+
+def recommended_discovery_check(domain_pack: Any) -> tuple[list[str], dict[str, Any]]:
+    if not isinstance(domain_pack, dict):
+        return [], check(
+            "recommended_discovery",
+            "pass",
+            "No domain-pack discovery recommendations declared.",
+            ["research.overlay.yml"],
+        )
+    value = domain_pack.get("recommended_discovery")
+    if value is None:
+        return [], check(
+            "recommended_discovery",
+            "pass",
+            "No domain-pack discovery recommendations declared.",
+            ["research.overlay.yml"],
+        )
+    if not isinstance(value, list):
+        return [], check(
+            "recommended_discovery",
+            "fail",
+            "domain_pack.recommended_discovery must be a list of provider identifiers.",
+            ["research.overlay.yml"],
+        )
+    providers: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return [], check(
+                "recommended_discovery",
+                "fail",
+                "domain_pack.recommended_discovery must contain only non-empty provider identifiers.",
+                ["research.overlay.yml"],
+            )
+        providers.append(item.strip())
+    duplicates = sorted({provider for provider in providers if providers.count(provider) > 1})
+    if duplicates:
+        return providers, check(
+            "recommended_discovery",
+            "fail",
+            f"domain_pack.recommended_discovery contains duplicate provider(s): {', '.join(duplicates)}.",
+            ["research.overlay.yml"],
+        )
+    unknown = sorted(set(providers) - set(ALLOWED_RECOMMENDED_DISCOVERY))
+    if unknown:
+        return providers, check(
+            "recommended_discovery",
+            "fail",
+            (
+                "domain_pack.recommended_discovery contains unknown provider(s): "
+                f"{', '.join(unknown)}. Allowed providers: {', '.join(ALLOWED_RECOMMENDED_DISCOVERY)}."
+            ),
+            ["research.overlay.yml"],
+        )
+    return providers, check(
+        "recommended_discovery",
+        "pass",
+        f"Recommended discovery providers are valid: {', '.join(providers) or 'none'}.",
         ["research.overlay.yml"],
     )
 
@@ -667,6 +730,7 @@ def unsafe_pack_payload(pack_path: Path, tree_safety: dict[str, Any]) -> dict[st
             "version": None,
             "compatible_research_yml_contract": None,
             "recommended_acquisition": [],
+            "recommended_discovery": [],
             "coverage_templates": {},
             "human_gated": False,
             "policy_vocabularies": {},
@@ -781,6 +845,9 @@ def validate_domain_pack(selection: str, *, root: Path | None = None) -> dict[st
     recommended_acquisition, acquisition_check = recommended_acquisition_check(domain_pack)
     domain_pack_info["recommended_acquisition"] = recommended_acquisition
     checks.append(acquisition_check)
+    recommended_discovery, discovery_check = recommended_discovery_check(domain_pack)
+    domain_pack_info["recommended_discovery"] = recommended_discovery
+    checks.append(discovery_check)
     human_gated, human_gated_result = human_gated_check(domain_pack)
     domain_pack_info["human_gated"] = human_gated
     checks.append(human_gated_result)

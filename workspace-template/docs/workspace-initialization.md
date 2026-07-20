@@ -26,6 +26,29 @@ evidence-wiki init \
   --domain-pack llm-research
 ```
 
+Explicitly enable provider allow-lists at creation time with repeatable,
+phase-specific flags:
+
+```bash
+evidence-wiki deploy \
+  --target ../science-workspace \
+  --project-name science-workspace \
+  --project-description "Provider-backed scientific literature review" \
+  --domain-pack general-science \
+  --discovery-provider arxiv \
+  --discovery-provider openalex \
+  --acquisition-provider arxiv \
+  --acquisition-provider openalex \
+  --dry-run
+```
+
+Supplying at least one flag for a phase is an explicit authorization: it sets
+that phase to `enabled: true` and replaces the corresponding provider list from
+the profile or starter. Without the flags, provider configuration is unchanged.
+The initializer records policy only and performs no network I/O. Providers with
+additional configuration, notably general `search` and allow-listed `web`
+capture, must be configured in a complete setup profile.
+
 Preview without writing files:
 
 ```bash
@@ -97,6 +120,10 @@ workspace_init:
       target_root: raw/papers
       max_downloads_per_run: 10
       require_license_check: true
+    discovery:
+      enabled: false
+      providers: []
+      candidate_store_path: sources/discovery/candidates.jsonl
   assumptions:
     - Generic wiki taxonomy is sufficient for the first setup pass.
   skipped_decisions:
@@ -108,10 +135,11 @@ When a setup profile is used, the created workspace includes
 asked, inferred answers, domain guidance, source roots, supplied sources,
 output formats, claim strictness, integrations, validation commands and
 results, assumptions, skipped decisions, and next actions. If a selected domain
-pack declares `domain_pack.recommended_acquisition`, the report names those
-providers while acquisition remains disabled unless the profile explicitly sets
-`integrations.acquisition.enabled: true`. Set `init_report.path` in the profile
-to choose a different workspace-relative report path.
+pack declares `domain_pack.recommended_discovery` or
+`domain_pack.recommended_acquisition`, the report names those providers while
+both phases remain disabled unless the profile or explicit CLI provider flags
+enable them. Set `init_report.path` in the profile to choose a different
+workspace-relative report path.
 
 Preview a profile before writing files:
 
@@ -136,11 +164,21 @@ directory and records the adapter command, but it never executes
 codebase-analysis commands, clones repositories, installs hooks, or starts
 background sync.
 
+When source discovery is explicitly enabled, set
+`integrations.discovery.enabled: true`, provide at least one concrete provider
+(`arxiv`, `openalex`, `github`, `search`, or `standards`), and keep
+`candidate_store_path` as a `.jsonl` file below `sources/`. A `search` provider
+also requires a reviewed fixture, command, or HTTP backend. Legacy `legal`,
+`authors`, and `companions` values remain parseable for one compatibility
+release but do not authorize network I/O.
+
 When source acquisition is explicitly enabled, set
 `integrations.acquisition.enabled: true`, list supported providers (`arxiv`,
-`openalex`), and keep `target_root` under `raw/`. The initializer validates and
-records this block; it does not fetch network resources. Hook, auto-fetch,
-auto-commit, auto-add, and background-sync keys are rejected.
+`openalex`, `github`, or `web`), and keep target roots under `raw/`. The `web`
+provider additionally requires a non-empty reviewed domain allow-list. The
+initializer validates and records these blocks; it does not fetch network
+resources. Hook, auto-fetch, auto-commit, auto-add, and background-sync keys are
+rejected.
 
 Supported top-level profile config sections are merged into `research.yml`:
 
@@ -165,8 +203,9 @@ When a domain pack is requested, the script:
 2. deep-merges `research.overlay.yml` into `research.yml`,
 3. rewrites known domain-pack document paths so they are workspace-relative,
 4. keeps explicit CLI and profile project identity values as the final source of truth.
-5. surfaces any `domain_pack.recommended_acquisition` provider IDs in the init
-   report without enabling acquisition.
+5. surfaces any `domain_pack.recommended_discovery` and
+   `domain_pack.recommended_acquisition` IDs in the init report without enabling
+   either phase.
 
 If no domain pack is requested, no domain-pack directory is created.
 

@@ -158,6 +158,8 @@ def _run_upgrader(forwarded_args: list[str]) -> int:
 def _contract_payload() -> dict:
     import yaml
 
+    from . import orchestration
+
     with assets_root() as root:
         starter_root = root / STARTER_DIR
         metadata = yaml.safe_load((starter_root / "workspace-system.yml").read_text()) or {}
@@ -204,6 +206,10 @@ def _contract_payload() -> dict:
         script_errors_module = _load_script(
             starter_root / "scripts" / "_script_errors.py",
             "evidence_wiki_script_errors",
+        )
+        provider_registry_module = _load_script(
+            starter_root / "scripts" / "_provider_registry.py",
+            "evidence_wiki_provider_registry",
         )
         question_claim_module = _load_script(
             starter_root / "scripts" / "question_claim.py",
@@ -253,6 +259,13 @@ def _contract_payload() -> dict:
                 "research_yml_contract_versions": list(initializer.SUPPORTED_RESEARCH_YML_CONTRACTS),
             },
             "required_asset_manifest": required_asset_manifest(),
+            "source_providers": {
+                "discovery": list(provider_registry_module.DISCOVERY_PROVIDER_IDS),
+                "acquisition": list(provider_registry_module.ACQUISITION_PROVIDER_IDS),
+                "legacy_discovery_strategy_aliases": list(
+                    provider_registry_module.LEGACY_DISCOVERY_STRATEGY_IDS
+                ),
+            },
             "artifact_schemas": {
                 "workspace_status": status_module.SCHEMA_VERSION,
                 "question_intake": intake_module.SCHEMA_VERSION,
@@ -266,6 +279,9 @@ def _contract_payload() -> dict:
                 "question_claim": question_claim_module.SCHEMA_VERSION,
                 "question_resolve": question_resolve_module.SCHEMA_VERSION,
                 "run_state": "1.0",
+                "orchestration_session": orchestration.ORCHESTRATION_SESSION_SCHEMA_VERSION,
+                "orchestration_work_order": orchestration.ORCHESTRATION_WORK_ORDER_SCHEMA_VERSION,
+                "orchestration_result": orchestration.ORCHESTRATION_RESULT_SCHEMA_VERSION,
                 "run_report": run_report_module.SCHEMA_VERSION,
                 "coverage_manifest": coverage_manifest_module.SCHEMA_VERSION,
                 "publication_readiness": publication_readiness_module.SCHEMA_VERSION,
@@ -284,6 +300,12 @@ def _contract_payload() -> dict:
 def _run_contract() -> int:
     print(json.dumps(_contract_payload(), indent=2, sort_keys=False))
     return 0
+
+
+def _run_orchestrate(args: list[str]) -> int:
+    from . import orchestration
+
+    return int(orchestration.main(args) or 0)
 
 
 def _print_orchestrator_guide_help() -> None:
@@ -511,6 +533,8 @@ def _print_help() -> None:
         "  evidence-wiki doctor [--target PATH] [--format text|json]\n"
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
+        "  evidence-wiki orchestrate start|next|submit|status [options]\n"
+        "  evidence-wiki orchestrate run|resume --runner codex|claude [options]\n"
         "  evidence-wiki contract\n"
         "  evidence-wiki orchestrator-guide [--print] [--format json]\n\n"
         "Common initializer options:\n"
@@ -521,6 +545,8 @@ def _print_help() -> None:
         "  --profile PATH\n"
         "  --scope-root PATH\n"
         "  --domain-pack NAME_OR_PATH\n"
+        "  --discovery-provider ID (repeatable)\n"
+        "  --acquisition-provider ID (repeatable)\n"
         "  --dry-run\n\n"
         "Upgrade refreshes starter-managed tooling (scripts/) in an existing\n"
         "workspace from the installed package. It never touches research.yml,\n"
@@ -545,6 +571,9 @@ def _print_help() -> None:
         "used during deployment.\n\n"
         "Serve-mcp starts an optional stdio MCP server exposing read/append-only\n"
         "workspace tools while preserving the CLI scripts as the canonical contract.\n\n"
+        "Orchestrate creates a durable parent session. Protocol subcommands let\n"
+        "any external agent obtain and submit bounded work orders; run and resume\n"
+        "can launch a fresh Codex or Claude process for each action.\n\n"
         "Orchestrator-guide locates the PM/orchestrator playbook skill that drives\n"
         "deploy, question intake, the run loop, blocked-source routing, and result\n"
         "collection for a parent agent managing workspaces.\n\n"
@@ -580,6 +609,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_export(args)
     if command == "serve-mcp":
         return _run_serve_mcp(args)
+    if command == "orchestrate":
+        return _run_orchestrate(args)
     if command == "contract":
         return _run_contract()
     if command == "orchestrator-guide":

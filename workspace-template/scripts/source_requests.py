@@ -539,6 +539,20 @@ TRUST_TIERS = (
     "unsafe_or_unusable",
 )
 TRUST_TIER_RANK = {tier: index for index, tier in enumerate(TRUST_TIERS)}
+# Current discovery records may use the finer OEH vocabulary documented in
+# source-discovery.md. Map it onto the same policy ordering so plan-fetch does
+# not misclassify an academic-primary record as an unknown/worst tier.
+TRUST_TIER_RANK.update(
+    {
+        "official_secondary": 1,
+        "academic_primary": 1,
+        "vendor_primary": 1,
+        "implementation_primary": 1,
+        "aggregator": 2,
+        "unknown": 3,
+        "rejected": 4,
+    }
+)
 # A selected candidate at a worse tier than this triggers a review warning. A
 # request may override it with an optional `min_trust_tier` field.
 DEFAULT_MIN_TRUST_TIER = "secondary_reputable"
@@ -663,8 +677,17 @@ WEB_FETCH_SOURCE_TYPES = {
 }
 
 
-def candidate_store_path(project_root: Path) -> Path:
-    return project_root.joinpath(*CANDIDATE_STORE_RELATIVE)
+def candidate_store_path(project_root: Path, config: dict[str, Any] | None = None) -> Path:
+    default = "/".join(CANDIDATE_STORE_RELATIVE)
+    integrations = config.get("integrations") if isinstance(config, dict) else {}
+    integrations = integrations if isinstance(integrations, dict) else {}
+    discovery = integrations.get("discovery")
+    discovery = discovery if isinstance(discovery, dict) else {}
+    value = discovery.get("candidate_store_path", default)
+    relative = validate_generated_sources_path(value, "integrations.discovery.candidate_store_path")
+    if not relative.lower().endswith(".jsonl"):
+        raise SystemExit("integrations.discovery.candidate_store_path must use the .jsonl extension")
+    return project_root / relative
 
 
 def coverage_dir_path(project_root: Path, config: dict[str, Any]) -> Path:
@@ -696,12 +719,16 @@ def candidate_policy_fields(candidate: dict[str, Any]) -> dict[str, str]:
     return fields
 
 
-def load_selected_candidates(project_root: Path, request_id: str) -> list[dict[str, Any]]:
+def load_selected_candidates(
+    project_root: Path,
+    config: dict[str, Any],
+    request_id: str,
+) -> list[dict[str, Any]]:
     """Return discovery candidates selected for this request (status "selected"
     and selected_for_request_id == request_id, accepting legacy selected_request_id).
     Read-only and lenient: plan-fetch never rewrites the store, so a malformed
     line is skipped rather than fatal."""
-    path = candidate_store_path(project_root)
+    path = candidate_store_path(project_root, config)
     if not path.exists():
         return []
     selected: list[dict[str, Any]] = []
@@ -1516,7 +1543,7 @@ def run_plan_fetch(args: argparse.Namespace) -> dict[str, Any]:
     # Fold in explicitly selected discovery candidates (E36-T02). These are
     # authoritative — a reviewer picked them — so when present they supersede the
     # heuristic query routing for an unsupported/ambiguous request.
-    selected = load_selected_candidates(project_root, request_id)
+    selected = load_selected_candidates(project_root, config, request_id)
     candidate_routes = [
         candidate_acquisition_route(candidate, acquisition, request_id) for candidate in selected
     ]

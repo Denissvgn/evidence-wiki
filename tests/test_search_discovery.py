@@ -89,6 +89,8 @@ class SearchTestBase(unittest.TestCase):
             "integrations:",
             "  discovery:",
             f"    enabled: {'true' if enabled else 'false'}",
+            "    providers:",
+            "      - search",
         ]
         if search_block is not None:
             lines.append("    search:")

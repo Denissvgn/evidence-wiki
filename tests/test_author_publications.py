@@ -136,6 +136,8 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
             "integrations:",
             "  discovery:",
             f"    enabled: {'true' if enabled else 'false'}",
+            "    providers:",
+            "      - openalex",
         ]
         (workspace / "research.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
         (workspace / "sources" / "manifest.jsonl").write_text(

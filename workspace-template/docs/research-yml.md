@@ -201,9 +201,10 @@ Defines optional external tooling behavior.
 - `acquisition.web.target_root` (optional): raw evidence directory for contracted web downloads. Must stay under `raw/`. Defaults to `raw/web`.
 - `acquisition.web.allowed_domains`: required non-empty domain allow-list for `web get` when the `web` provider is enabled.
 - `acquisition.web.max_download_bytes` (optional): positive byte ceiling for one web response. Defaults to 10485760 (10 MiB).
-- `discovery.enabled`: whether optional source discovery is active.
-- `discovery.providers`: enabled discovery provider families. Standards routes require `standards` or a route-specific value such as `standards:iso-open-data`.
+- `discovery.enabled`: whether optional source discovery is active. `true` requires a non-empty concrete provider allow-list.
+- `discovery.providers`: explicit network authorization. Supported IDs are `arxiv`, `openalex`, `github`, `search`, `standards`, `standards:iso-open-data`, `standards:eu-product-requirements`, `standards:uk-geospatial-register`, and `standards:nist`.
 - `discovery.candidate_store_path`: workspace-relative JSONL path for proposed source candidates. Defaults to `sources/discovery/candidates.jsonl`.
+- `discovery.search`: required backend configuration when `search` is allowed. Its `provider` is `fixture`, `command`, or `http`; provider-specific command, fixture, endpoint, and environment-secret settings stay in this nested block.
 - `retrieval.provider`: retrieval engine name; `lexical` uses the bundled local engine.
 - `retrieval.command`: optional external provider command. Use list form for safest argument handling.
 - `retrieval.timeout_seconds`: provider timeout before `query_index.py` falls back to lexical retrieval.
@@ -219,7 +220,25 @@ providers through `domain_pack.recommended_acquisition`, but initialization only
 surfaces that recommendation in the init report; it never enables fetching.
 Discovery is optional and disabled by default. New discovery families must be
 explicitly listed in `integrations.discovery.providers` before their routes run;
-domain-pack recommendations are advisory and do not enable discovery.
+domain-pack `recommended_discovery` values are advisory and do not enable
+discovery. `legal`, `authors`, and `companions` are strategies rather than
+network permissions: legal execution requires `search`, publication expansion
+requires `openalex`, and companion network phases require `github` and/or
+`search`. Those three old strategy IDs remain readable for one compatibility
+release with LOW deprecation findings, but never authorize transport.
+
+Legacy discovery migration is manual because `evidence-wiki upgrade` preserves
+the existing `research.yml`:
+
+- replace `legal` with `search`, and configure `integrations.discovery.search`;
+- replace `authors` with `openalex`;
+- replace `companions` with `github`, `search`, or both, configuring search when
+  selected.
+
+Keep `enabled: true` only when at least one concrete provider remains, then run
+`python3 scripts/smoke_validate_workspace.py --format json`. A legacy strategy
+may still be read for compatibility, but it does not satisfy the non-empty
+provider gate and cannot authorize network I/O.
 
 Default disabled shape:
 
@@ -274,6 +293,14 @@ background agents, and background sync. This repository records the contract
 only; adding a provider recommendation to a domain pack does not add network
 behavior. Provider terms, provenance requirements, and the acquisition safety
 model are documented in [acquisition.md](acquisition.md).
+
+When discovery is enabled, its provider list must also be non-empty. Unknown or
+duplicate IDs are invalid. The repeated initializer flags
+`--discovery-provider` and `--acquisition-provider` each replace that phase's
+profile allow-list and set only that phase to `enabled: true`; one phase never
+implicitly enables the other. The configured candidate-store path is shared by
+discovery, candidate review, source-request planning, workspace status, and
+orchestration.
 
 External retrieval providers are optional. When `integrations.retrieval.provider`
 is anything other than `lexical` and `command` is configured, `query_index.py`

@@ -24,7 +24,7 @@ EXIT_INVALID = 2
 
 STATE_TRANSITIONS = {
     "initialized": ("planned", "failed"),
-    "planned": ("discovering", "no_ship", "failed"),
+    "planned": ("discovering", "answering", "no_ship", "failed"),
     "discovering": ("candidates_ready", "blocked_on_sources", "failed"),
     "candidates_ready": ("fetch_planned", "blocked_on_sources", "failed"),
     "fetch_planned": ("fetching", "blocked_on_sources", "failed"),

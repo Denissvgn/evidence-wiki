@@ -82,6 +82,12 @@ The server does not expose question claiming, answer mutation, source request
 fulfillment, source inventory, normalization, shell execution, network access,
 or arbitrary file reads/writes.
 
+Managed orchestration is outside this boundary. The server does not expose
+`evidence-wiki orchestrate run`, launch Codex or Claude workers, or acquire
+remote evidence. Use the package CLI for those operations, or drive the
+model-neutral `orchestrate start` / `next` / `submit` / `status` protocol from
+a separately authorized parent process.
+
 MCP intake applies a transport-level batch cap before delegating to
 `scripts/intake_questions.py`: if `batch.questions` has more entries than
 `run.max_mcp_intake_batch_questions` (default 100), the tool returns
