@@ -198,7 +198,7 @@ For a session created by 0.2.0, upgrade the package and managed workspace
 scripts, then inspect its phase before replay:
 
 ```bash
-python -m pip install --upgrade evidence-wiki==0.2.1
+python -m pip install --upgrade evidence-wiki==0.2.2
 evidence-wiki upgrade --target . --dry-run
 evidence-wiki upgrade --target .
 evidence-wiki orchestrate status --target . --orchestration-id ORCH_ID --format json

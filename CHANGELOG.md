@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.2 - 2026-07-21
+
 - Canonicalize package-managed runner results by discarding descriptive
   `runs/orchestrations/` artifact references before submission, while keeping
   direct protocol validation strict and retaining fail-closed control-tree
