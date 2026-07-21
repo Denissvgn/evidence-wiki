@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Canonicalize package-managed runner results by discarding descriptive
+  `runs/orchestrations/` artifact references before submission, while keeping
+  direct protocol validation strict and retaining fail-closed control-tree
+  mutation detection.
+- Pin managed workspace scripts to the Python interpreter that launched
+  EvidenceWiki, disable Codex login-shell PATH rewriting, grant its external
+  runtime read-only, and preflight its PyYAML/TLS dependencies inside an
+  isolated read-only permission profile before creating a session.
+
 ## 0.2.1 - 2026-07-21
 
 - Fix the managed Codex result schema to use the supported Structured Outputs

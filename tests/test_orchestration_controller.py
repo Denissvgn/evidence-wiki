@@ -1144,6 +1144,55 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(RUN_CONTROLLER.EXIT_INVALID, code)
             self.assertEqual("RUN_TERMINAL", json.loads(stderr)["error_code"])
 
+    def test_failed_result_is_terminal_and_resume_does_not_reopen(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            summary = "The work order could not execute its required Python tooling."
+
+            code, failed, stderr = self.submit(
+                root,
+                target,
+                order["action_id"],
+                outcome="failed",
+                summary=summary,
+            )
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, stderr)
+            self.assertEqual("failed", failed["status"])
+            self.assertIsNone(failed["pending_action_id"])
+            self.assertIsNone(failed["pending_submission"])
+            self.assertEqual(
+                [
+                    {
+                        "recorded_at": failed["failure_records"][0]["recorded_at"],
+                        "action_id": order["action_id"],
+                        "summary": summary,
+                    }
+                ],
+                failed["failure_records"],
+            )
+            work_orders_dir = CONTROLLER.work_order_path(target, "orch-test", order["action_id"]).parent
+            work_orders = sorted(work_orders_dir.iterdir())
+
+            code, resumed, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--agent-id",
+                "agent-test",
+                "--resume",
+            )
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, stderr)
+            self.assertEqual(failed, resumed)
+            self.assertEqual(work_orders, sorted(work_orders_dir.iterdir()))
+            self.assertEqual(1, resumed["action_count"])
+            self.assertEqual(1, resumed["completed_action_count"])
+
     def test_retained_result_without_session_completion_proof_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

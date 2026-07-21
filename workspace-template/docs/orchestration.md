@@ -44,6 +44,18 @@ primitives fail before a worker is launched.
 A failed capability check returns `RUNNER_ISOLATION_UNAVAILABLE` before a worker
 starts.
 
+For every managed runner, EvidenceWiki pins the interpreter that launched the
+package as `EVIDENCE_WIKI_PYTHON`; workers must use that exact value with `-B`
+for workspace scripts instead of resolving `python`, `python3`, or `py` from
+`PATH`. The Codex adapter disables login-shell environment rewriting, supplies
+a minimal deterministic `PATH`, and adds read-only permission rules for only
+the selected virtual environment and its external Python runtime. Its
+preflight executes that interpreter inside a stricter read-only variant of the
+worker profile and imports PyYAML. An unreadable macOS framework, Windows base
+installation, missing dependency, or unavailable interpreter therefore fails
+before a new parent is created by `run` and before a worker is launched by
+`resume`.
+
 Any agent harness can drive the same model-neutral protocol:
 
 ```bash
@@ -142,6 +154,15 @@ A result contains the matching action ID, `completed`, `blocked`, or `failed`, a
 short summary, and workspace-relative artifact paths. Session artifacts must
 not contain provider credentials, absolute host paths, source instructions,
 chat transcripts, or unbounded runner output.
+
+For package-managed runners, the host removes otherwise safe artifact-list
+references below `runs/orchestrations/` before validating and submitting the
+result. Those paths describe host state rather than worker output, and the
+controller verifies completion from deterministic workspace postconditions.
+This canonicalization does not authorize control-tree writes: the post-action
+snapshot still rejects any creation, mutation, rename, relink, deletion, or
+metadata change below the parent session. Direct `submit` results remain strict
+and reject every `runs/orchestrations/` artifact reference.
 
 Result outcomes describe the work order, not the child run's research verdict:
 
@@ -254,6 +275,17 @@ Windows when `PATH` resolves an npm `.cmd`/`.bat`/`.ps1` shim: the host resolves
 and executes the validated packaged `codex.exe` directly to retain
 `shell=False` and avoid command-shell injection semantics.
 
+The same Codex preflight resolves the exact `sys.executable` used by the
+EvidenceWiki host without resolving away a workspace `.venv`/`venv` launcher.
+The launcher stays protected by the workspace profile while any external base
+runtime (including `Python.framework` on macOS) receives only a read-only
+grant. Login shells are disabled and the worker shell inherits only the core
+environment plus the pinned interpreter and system-tool path. The final probe
+runs that exact interpreter in isolated, no-bytecode mode inside a read-only
+workspace profile, verifies the environment binding, imports PyYAML, and
+initializes the TLS context. A developer-tools shim, dependency shadowing, or
+inaccessible framework therefore cannot reach the model action.
+
 The host calls the semantic baseline the **tripwire-protected controls**. Its
 bounded snapshot covers the workspace contract and instructions
 (`research.yml`, `workspace-system.yml`, `AGENTS.md`, `CLAUDE.md`, `README.md`,
@@ -305,6 +337,21 @@ Session writes and action submission are lock-protected. A leased action can be
 recovered after its lease expires; a runner crash leaves the same action pending
 for `resume`. Re-submitting an identical accepted result is idempotent, while a
 different result for the same completed action is a conflict.
+
+A host-side runner failure is resumable because no result was accepted. By
+contrast, a schema-valid worker result with `outcome: failed` is an accepted
+terminal result: it records the failure, completes the pending action, and
+closes the parent session as `failed`. `resume` never reopens that session.
+After repairing the environment, preserve the failed session for audit, review
+any partial worker outputs, and start a fresh parent without the old ID:
+
+```bash
+evidence-wiki orchestrate run \
+  --target . \
+  --runner codex \
+  --agent-id AGENT_ID \
+  --model MODEL_ID
+```
 
 Before launching a fresh worker, the host caps its timeout to the smallest of
 the managed action limit, the work-order budget, the lease duration, and the

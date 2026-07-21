@@ -20,6 +20,7 @@ import signal
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
@@ -41,6 +42,8 @@ DEFAULT_TOTAL_TIMEOUT_SECONDS = 2 * 60 * 60
 MAX_CAPTURE_BYTES = 128 * 1024
 MAX_WORK_ORDER_BYTES = 256 * 1024
 MAX_RESULT_BYTES = 64 * 1024
+MAX_RESULT_ARTIFACTS = 256
+MAX_RESULT_ARTIFACT_PATH_LENGTH = 512
 MAX_HOST_ENVELOPE_BYTES = 192 * 1024
 MAX_CONTROL_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_CONTROL_ARTIFACT_ENTRIES = 10_000
@@ -53,6 +56,14 @@ WINDOWS_TRANSIENT_REPLACE_ERRORS = frozenset({5, 32, 33})
 CODEX_MIN_PERMISSION_PROFILE_VERSION = (0, 138, 0)
 CODEX_PERMISSION_PROFILE_NAME = "evidence_wiki_worker"
 CODEX_NPM_PACKAGE_NAME = "@openai/codex"
+MANAGED_PYTHON_ENV = "EVIDENCE_WIKI_PYTHON"
+MANAGED_PYTHON_PROBE = (
+    "import os,pathlib,ssl,sys,yaml;"
+    f"expected=os.environ.get({MANAGED_PYTHON_ENV!r});"
+    "same=bool(expected) and pathlib.Path(expected).resolve()==pathlib.Path(sys.executable).resolve();"
+    "ssl.create_default_context();"
+    "raise SystemExit(0 if same else 73)"
+)
 CODEX_PLATFORM_LAYOUTS = {
     ("linux", "x64"): ("codex-linux-x64", "x86_64-unknown-linux-musl", "codex"),
     ("linux", "arm64"): ("codex-linux-arm64", "aarch64-unknown-linux-musl", "codex"),
@@ -433,6 +444,7 @@ def _execute_bounded(
     stdin_text: str,
     timeout_seconds: int,
     capture_limit: int = MAX_CAPTURE_BYTES,
+    environment: dict[str, str] | None = None,
 ) -> ProcessResult:
     """Run fixed argv while bounding retained stdout and stderr diagnostics."""
     popen_kwargs: dict[str, Any] = {}
@@ -442,6 +454,8 @@ def _execute_bounded(
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     runner_environment = dict(os.environ)
     runner_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    if environment is not None:
+        runner_environment.update(environment)
     process = subprocess.Popen(  # noqa: S603 - executable is selected from a closed runner registry
         argv,
         cwd=str(cwd),
@@ -1058,9 +1072,17 @@ def _validate_result(document: Any, action_id: str) -> dict[str, Any]:
     if not isinstance(summary, str) or not summary.strip() or len(summary) > 4000:
         raise OrchestrationHostError("Agent result summary must contain 1 to 4000 characters.", exit_code=EXIT_RUNNER_FAILED)
     artifacts = document.get("artifacts")
-    if not isinstance(artifacts, list) or len(artifacts) > 256:
-        raise OrchestrationHostError("Agent result artifacts must be a list of at most 256 paths.", exit_code=EXIT_RUNNER_FAILED)
-    if any(not isinstance(path, str) or len(path) > 512 or not _is_safe_relative_path(path) for path in artifacts):
+    if not isinstance(artifacts, list) or len(artifacts) > MAX_RESULT_ARTIFACTS:
+        raise OrchestrationHostError(
+            f"Agent result artifacts must be a list of at most {MAX_RESULT_ARTIFACTS} paths.",
+            exit_code=EXIT_RUNNER_FAILED,
+        )
+    if any(
+        not isinstance(path, str)
+        or len(path) > MAX_RESULT_ARTIFACT_PATH_LENGTH
+        or not _is_safe_relative_path(path)
+        for path in artifacts
+    ):
         raise OrchestrationHostError(
             "Agent result artifacts must be safe workspace-relative paths.", exit_code=EXIT_RUNNER_FAILED
         )
@@ -1076,8 +1098,42 @@ def _validate_result(document: Any, action_id: str) -> dict[str, Any]:
     return document
 
 
+def _canonicalize_managed_result(document: Any) -> Any:
+    """Drop harmless host-owned path references from managed runner output.
+
+    The reported artifact list is descriptive; controller postconditions and
+    the host's control snapshot remain authoritative. Direct protocol results
+    still pass through ``_validate_result`` unchanged and fail closed.
+    """
+    if not isinstance(document, dict):
+        return document
+    artifacts = document.get("artifacts")
+    if (
+        not isinstance(artifacts, list)
+        or len(artifacts) > MAX_RESULT_ARTIFACTS
+        or any(
+            not isinstance(path, str)
+            or len(path) > MAX_RESULT_ARTIFACT_PATH_LENGTH
+            or not _is_safe_relative_path(path)
+            for path in artifacts
+        )
+        or len(set(artifacts)) != len(artifacts)
+        or any(_contains_environment_secret(path) for path in artifacts)
+    ):
+        return document
+    retained = [path for path in artifacts if not _artifact_is_parent_orchestration_path(path)]
+    return document if len(retained) == len(artifacts) else {**document, "artifacts": retained}
+
+
 def _runner_prompt(work_order: dict[str, Any]) -> str:
     skill = work_order["skill"]
+    if _is_native_windows():  # pragma: no cover - exercised on Windows CI
+        python_instruction = (
+            f'In PowerShell use `& "$env:{MANAGED_PYTHON_ENV}" -B scripts/...`; '
+            f'in cmd use `"%{MANAGED_PYTHON_ENV}%" -B scripts/...`.'
+        )
+    else:
+        python_instruction = f'In a POSIX shell use `"${MANAGED_PYTHON_ENV}" -B scripts/...`.'
     return (
         "You are an EvidenceWiki worker agent executing exactly one bounded, persisted work order.\n"
         "Work only in the current workspace. Read AGENTS.md and, when present, "
@@ -1096,8 +1152,14 @@ def _runner_prompt(work_order: dict[str, Any]) -> str:
         "the host validates and persists your returned result. Generated run reports belong under "
         "runs/run-reports/, outside the trusted documentation tree. Do not start background processes, daemons, "
         "hooks, or detached subprocesses; every process started for this work order must finish within the action.\n"
+        f"For every Python workspace script, invoke the exact interpreter named by {MANAGED_PYTHON_ENV} with -B; "
+        f"never use bare python, python3, or py. {python_instruction} If a work-order route or documentation command "
+        "starts with python, python3, or py, replace only that executable with the managed interpreter. Do not print "
+        "or report the interpreter's absolute value.\n"
         "Perform the work order, verify its required postconditions from workspace artifacts, then return only "
-        "a JSON object matching the supplied result schema. Artifact paths must be workspace-relative.\n\n"
+        "a JSON object matching the supplied result schema. Artifact paths must be workspace-relative and worker-owned. "
+        "Never include runs/orchestrations or any descendant in artifacts; use an empty artifacts list when no "
+        "worker-owned artifact should be reported.\n\n"
         "Outcome semantics:\n"
         "- completed: this bounded action established its required postconditions. A research action that honestly "
         "leaves workspace readiness blocked_on_sources after creating structured source requests is completed, because "
@@ -1389,6 +1451,12 @@ class _CodexRuntimeResolution:
     runtime_root: Path
 
 
+@dataclass(frozen=True)
+class _ManagedPythonRuntime:
+    executable: Path
+    read_paths: tuple[str, ...]
+
+
 def _codex_packaged_runtime_candidate(
     platform_root: Path,
     target_triple: str,
@@ -1528,6 +1596,141 @@ def _codex_runtime_read_paths(executable: str) -> tuple[str, ...]:
     return (str(_codex_runtime_resolution(executable).runtime_root),)
 
 
+def _managed_python_runtime(root: Path) -> _ManagedPythonRuntime:
+    """Resolve the host interpreter and its narrow read-only runtime roots."""
+    try:
+        workspace_root = root.resolve(strict=True)
+        lexical_executable = Path(os.path.abspath(sys.executable))
+        managed_executable = lexical_executable.parent.resolve(strict=True) / lexical_executable.name
+        resolved_executable = lexical_executable.resolve(strict=True)
+        executable_metadata = resolved_executable.stat()
+    except OSError as exc:
+        raise _runner_isolation_error("Managed execution could not resolve its Python interpreter.") from exc
+    if not stat.S_ISREG(executable_metadata.st_mode):
+        raise _runner_isolation_error("Managed execution requires a regular Python interpreter executable.")
+    executable_parent_text = str(managed_executable.parent)
+    if os.pathsep in executable_parent_text or any(character in executable_parent_text for character in "\0\r\n"):
+        raise _runner_isolation_error(
+            "Managed execution refused a Python interpreter directory that cannot be represented safely on PATH."
+        )
+
+    try:
+        relative_executable = managed_executable.relative_to(workspace_root)
+    except ValueError:
+        relative_executable = None
+    protected_venv_names = {".venv", "venv"}
+
+    def protected_workspace_runtime(relative: Path) -> bool:
+        if not relative.parts:
+            return False
+        first = relative.parts[0]
+        return first.casefold() in protected_venv_names if os.name == "nt" else first in protected_venv_names
+
+    if relative_executable is not None and not protected_workspace_runtime(relative_executable):
+        raise _runner_isolation_error(
+            "Managed execution found a workspace-local Python interpreter outside the protected .venv/venv roots."
+        )
+
+    candidates: list[Path] = [resolved_executable]
+    prefix = Path(sys.prefix)
+    base_prefix = Path(sys.base_prefix)
+    if os.path.normcase(str(prefix)) != os.path.normcase(str(base_prefix)):
+        candidates.append(prefix)
+    base_parts = {part.casefold() for part in base_prefix.parts}
+    if os.name == "nt" or "python.framework" in base_parts:
+        candidates.append(base_prefix)
+    else:
+        for name in ("stdlib", "platstdlib", "purelib", "platlib"):
+            configured = sysconfig.get_path(name)
+            if configured:
+                candidates.append(Path(configured))
+        library_dir = sysconfig.get_config_var("LIBDIR")
+        library_name = sysconfig.get_config_var("LDLIBRARY")
+        if isinstance(library_dir, str) and library_dir and isinstance(library_name, str) and library_name:
+            candidates.append(Path(library_dir) / library_name)
+
+    retained: list[Path] = []
+    sensitive_paths: set[Path] = set()
+    with contextlib.suppress(OSError):
+        sensitive_paths.add(Path.home().resolve(strict=True))
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        with contextlib.suppress(OSError):
+            sensitive_paths.add(Path(codex_home).resolve(strict=True))
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved == Path(resolved.anchor) or any(
+            sensitive == resolved or sensitive.is_relative_to(resolved) for sensitive in sensitive_paths
+        ):
+            raise _runner_isolation_error(
+                "Managed execution refused an over-broad Python runtime read path; use a dedicated virtual environment."
+            )
+        try:
+            relative_runtime = resolved.relative_to(workspace_root)
+        except ValueError:
+            pass
+        else:
+            if not protected_workspace_runtime(relative_runtime):
+                raise _runner_isolation_error(
+                    "Managed execution found Python runtime files outside the protected workspace .venv/venv roots."
+                )
+            continue
+        try:
+            workspace_root.relative_to(resolved)
+        except ValueError:
+            pass
+        else:
+            raise _runner_isolation_error(
+                "Managed execution refused a Python runtime path that contains the research workspace."
+            )
+        if any(resolved == existing or resolved.is_relative_to(existing) for existing in retained):
+            continue
+        retained = [existing for existing in retained if not existing.is_relative_to(resolved)]
+        retained.append(resolved)
+    if not retained:
+        raise _runner_isolation_error("Managed execution could not identify readable Python runtime files.")
+    return _ManagedPythonRuntime(
+        executable=managed_executable,
+        read_paths=tuple(str(path) for path in retained),
+    )
+
+
+def _managed_python_search_path(runtime: _ManagedPythonRuntime) -> str:
+    paths = [str(runtime.executable.parent)]
+    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+        system_root = os.environ.get("SystemRoot")
+        if system_root:
+            paths.extend((str(Path(system_root) / "System32"), system_root))
+    else:
+        paths.extend(("/usr/bin", "/bin", "/usr/sbin", "/sbin"))
+    return os.pathsep.join(dict.fromkeys(paths))
+
+
+def _codex_shell_environment_config(runtime: _ManagedPythonRuntime) -> str:
+    values = {
+        MANAGED_PYTHON_ENV: str(runtime.executable),
+        "PATH": _managed_python_search_path(runtime),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    assignments = ",".join(f"{_toml_basic_string(key)}={_toml_basic_string(value)}" for key, value in values.items())
+    return f'shell_environment_policy={{inherit="core",set={{{assignments}}}}}'
+
+
+def _managed_python_environment(runtime: _ManagedPythonRuntime) -> dict[str, str]:
+    inherited_path = os.environ.get("PATH", "")
+    search_path = os.pathsep.join(
+        dict.fromkeys(path for path in (str(runtime.executable.parent), *inherited_path.split(os.pathsep)) if path)
+    )
+    return {
+        MANAGED_PYTHON_ENV: str(runtime.executable),
+        "PATH": search_path,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
 def _paths_overlap(left: Path, right: Path) -> bool:
     try:
         left.relative_to(right)
@@ -1573,14 +1776,17 @@ def _codex_permission_profile_config(
     writable_paths: tuple[str, ...] | None = None,
     *,
     runtime_read_paths: tuple[str, ...] = (),
+    workspace_root_mode: str = "write",
 ) -> str:
+    if workspace_root_mode not in {"read", "write"}:  # pragma: no cover - internal closed call sites
+        raise ValueError("workspace_root_mode must be read or write")
     if writable_paths is None:
         writable_paths = WORKER_WRITABLE_CONTROL_PATHS
     workspace_rules = [
         *(f'{_toml_basic_string(path)}="read"' for path in protected_paths),
         *(f'{_toml_basic_string(path)}="write"' for path in writable_paths),
     ]
-    workspace_roots = ",".join(['"."="write"', *workspace_rules])
+    workspace_roots = ",".join([f'"."="{workspace_root_mode}"', *workspace_rules])
     runtime_rules = ",".join(
         f'{_toml_basic_string(path)}="read"' for path in dict.fromkeys(runtime_read_paths)
     )
@@ -1615,9 +1821,12 @@ def _codex_argv(
     *,
     allow_network: bool = False,
     runtime_read_paths: tuple[str, ...] | None = None,
+    managed_python: _ManagedPythonRuntime | None = None,
 ) -> list[str]:
+    managed_python = managed_python or _managed_python_runtime(root)
     if runtime_read_paths is None:
         runtime_read_paths = _codex_runtime_read_paths(executable)
+    runtime_read_paths = tuple(dict.fromkeys((*runtime_read_paths, *managed_python.read_paths)))
     argv = [
         executable,
         "--ask-for-approval",
@@ -1639,9 +1848,13 @@ def _codex_argv(
         "--config",
         f'default_permissions="{CODEX_PERMISSION_PROFILE_NAME}"',
         "--config",
+        "allow_login_shell=false",
+        "--config",
         _codex_permission_profile_config(runtime_read_paths=runtime_read_paths),
         "--config",
         _codex_network_profile_config(allow_network),
+        "--config",
+        _codex_shell_environment_config(managed_python),
         "--output-schema",
         str(schema_path),
         "--output-last-message",
@@ -1876,6 +2089,49 @@ def _probe_codex_permission_profile(executable: str, runtime_read_paths: tuple[s
             )
 
 
+def _probe_codex_managed_python(
+    executable: str,
+    root: Path,
+    runtime_read_paths: tuple[str, ...],
+    managed_python: _ManagedPythonRuntime,
+) -> None:
+    argv = [
+        executable,
+        "sandbox",
+        "--cd",
+        str(root),
+        "--permission-profile",
+        CODEX_PERMISSION_PROFILE_NAME,
+        "--config",
+        "mcp_servers={}",
+        "--config",
+        "allow_login_shell=false",
+        "--config",
+        _codex_permission_profile_config(
+            (),
+            (),
+            runtime_read_paths=runtime_read_paths,
+            workspace_root_mode="read",
+        ),
+        "--config",
+        _codex_network_profile_config(False),
+        "--config",
+        _codex_shell_environment_config(managed_python),
+        str(managed_python.executable),
+        "-I",
+        "-B",
+        "-c",
+        MANAGED_PYTHON_PROBE,
+    ]
+    process = _run_runner_capability_command(argv, cwd=root)
+    if process.returncode != 0:
+        raise _runner_isolation_error(
+            "Managed Codex cannot execute the selected Python interpreter with its PyYAML and TLS dependencies "
+            "inside the read-only permission profile; recreate a dedicated workspace virtual environment and retry.",
+            process,
+        )
+
+
 def _probe_claude_sandbox_primitives() -> None:
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-claude-probe-") as tmpdir:
         probe_root = Path(tmpdir)
@@ -1981,7 +2237,8 @@ def _validate_runner_capability(name: str, executable: str, root: Path) -> tuple
     """Fail before a managed worker launch when hard isolation is unavailable."""
     if name == "codex":
         resolution = _codex_runtime_resolution(executable)
-        runtime_read_paths = (str(resolution.runtime_root),)
+        managed_python = _managed_python_runtime(root)
+        runtime_read_paths = tuple(dict.fromkeys((str(resolution.runtime_root), *managed_python.read_paths)))
         _validate_codex_runtime_workspace_boundary(
             runtime_read_paths,
             root,
@@ -1998,6 +2255,7 @@ def _validate_runner_capability(name: str, executable: str, root: Path) -> tuple
                 f"Managed Codex requires Codex CLI {minimum} or newer for custom permission profiles; found {found}.",
             )
         _probe_codex_permission_profile(selected_executable, runtime_read_paths)
+        _probe_codex_managed_python(selected_executable, root, runtime_read_paths, managed_python)
         return runtime_read_paths
 
     if name != "claude":  # pragma: no cover - guarded by the closed runner registry
@@ -2116,6 +2374,7 @@ def execute_work_order(
     """Execute and validate one work order without persisting runner output."""
     order = _validate_work_order(work_order)
     executable = executable or _runner_executable(runner)
+    managed_python = _managed_python_runtime(root)
     prompt = _runner_prompt(order)
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-runner-") as tmpdir:
         temporary_root = Path(tmpdir)
@@ -2131,6 +2390,7 @@ def execute_work_order(
                 model,
                 allow_network=_work_order_allows_network(order),
                 runtime_read_paths=runtime_read_paths,
+                managed_python=managed_python,
             )
         else:
             argv = _claude_argv(
@@ -2144,6 +2404,7 @@ def execute_work_order(
             cwd=root,
             stdin_text=prompt,
             timeout_seconds=timeout_seconds,
+            environment=_managed_python_environment(managed_python),
         )
         if process.timed_out:
             raise OrchestrationHostError(
@@ -2158,7 +2419,7 @@ def execute_work_order(
                 exit_code=EXIT_RUNNER_FAILED,
             )
         document = _read_result_file(result_path) if runner == "codex" else _claude_result(process.stdout)
-    return _validate_result(document, order["action_id"])
+    return _validate_result(_canonicalize_managed_result(document), order["action_id"])
 
 
 def _session_document(payload: dict[str, Any]) -> dict[str, Any]:

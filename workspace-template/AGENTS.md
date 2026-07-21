@@ -96,6 +96,14 @@ changed only through the scoped deterministic scripts. Do not start daemons,
 hooks, background jobs, or detached subprocesses; every process started for a
 managed work order must finish within that bounded action.
 
+During a package-managed work order, the host supplies the exact workspace
+interpreter in `EVIDENCE_WIKI_PYTHON`. Invoke every Python workspace script
+with that value and `-B`, even when examples elsewhere use `python3`: use
+`"$EVIDENCE_WIKI_PYTHON" -B scripts/...` in a POSIX shell or
+`& $env:EVIDENCE_WIKI_PYTHON -B scripts/...` in PowerShell. Never fall back to
+bare `python`, `python3`, or `py`, and do not print or report the absolute
+interpreter value.
+
 The question lifecycle has a machine API (`docs/question-api.md`): validated question batches enter through `scripts/intake_questions.py` (all-or-nothing, deduplicating, updates `index.md` and `log.md` itself), claimed questions move to answered/blocked/deferred/rejected through `scripts/question_resolve.py`, and structured answers with citations leave through `scripts/export_answers.py`. Use these scripts instead of hand-editing question frontmatter or wiki tables for the operations they cover; hand-authoring remains appropriate only for ad hoc human questions.
 
 Unattended runs follow the `research-run` skill: claim questions through `scripts/question_claim.py` (one claim per agent at a time; never downgrade another agent's claim), resolve held claims through `scripts/question_resolve.py`, respect the per-run budgets in the `research.yml` `run` block, and finish with a `scripts/run_report.py` report plus the answer export. The optional `research-verify` skill records `confidence`/`evidence_strength` on answered questions before final hand-off.

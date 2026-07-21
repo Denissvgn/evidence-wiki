@@ -1434,6 +1434,11 @@ class DocumentedWorkflowTests(unittest.TestCase):
                 self.assertIn("resume", text)
 
         self.assertIn('default_permissions="evidence_wiki_worker"', orchestration)
+        self.assertIn("EVIDENCE_WIKI_PYTHON", orchestration)
+        self.assertIn("login-shell", orchestration)
+        self.assertIn("initializes the TLS context", orchestration)
+        self.assertIn("`outcome: failed` is an accepted", orchestration)
+        self.assertIn("start a fresh parent without the old ID", orchestration)
         self.assertIn("Timestamp-only", orchestration)
         self.assertIn("does not automatically restore or roll back", orchestration)
         self.assertIn("same persisted action", orchestration)
@@ -1452,6 +1457,8 @@ class DocumentedWorkflowTests(unittest.TestCase):
         self.assertIn("parent exclusively owns", agents)
         self.assertIn("runs/orchestrations/", agents)
         self.assertIn("required postconditions", agents)
+        self.assertIn('"$EVIDENCE_WIKI_PYTHON" -B scripts/...', agents)
+        self.assertIn("$env:EVIDENCE_WIKI_PYTHON", agents)
 
     def test_workspace_status_documents_claim_invariants(self):
         workspace_status_doc = (REPO_ROOT / "workspace-template" / "docs" / "workspace-status.md").read_text()

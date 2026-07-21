@@ -13,6 +13,8 @@ from typing import Any
 
 from .orchestration import (
     ATTEMPT_ERROR_CODES,
+    MAX_RESULT_ARTIFACT_PATH_LENGTH,
+    MAX_RESULT_ARTIFACTS,
     ORCHESTRATION_ATTEMPT_SCHEMA,
     ORCHESTRATION_RESULT_SCHEMA,
     ORCHESTRATION_SESSION_SCHEMA_VERSION,
@@ -107,12 +109,12 @@ def _result_schema() -> dict[str, Any]:
     }
     properties["artifacts"] = {
         "type": "array",
-        "maxItems": 256,
+        "maxItems": MAX_RESULT_ARTIFACTS,
         "uniqueItems": True,
         "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 512,
+            "maxLength": MAX_RESULT_ARTIFACT_PATH_LENGTH,
             "pattern": RESULT_ARTIFACT_PATH_PATTERN,
         },
     }
