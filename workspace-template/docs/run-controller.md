@@ -12,6 +12,7 @@ deterministic `scripts/run_controller.py` commands that update it.
 
 - Active run state: `runs/<run_id>/run-state.json`
 - Append-only event stream: `runs/<run_id>/events.jsonl`
+- Generated run reports: `runs/run-reports/run-<UTC timestamp>.md`
 
 `run-state.json` is the current snapshot. `events.jsonl` is the audit trail:
 each line is one JSON object, appended in chronological order. Future writers
@@ -157,6 +158,66 @@ without pretending discovery occurred. All other forward paths remain
 unchanged. A durable parent session under `runs/orchestrations/` may reference
 several child runs; it never reopens a terminal child. See
 [orchestration.md](orchestration.md).
+
+These trees have different owners. A scoped worker may update
+`runs/<run_id>/` only through `run_controller.py`, `run_report.py`, and the
+deterministic evaluation scripts required by its skill. The EvidenceWiki host
+alone owns `runs/orchestrations/<orchestration_id>/`; workers must not invoke
+the package orchestration commands or create session, event, work-order,
+work-result, or answer-export files there. Host attempt records use the
+published `orchestration_attempt` version 1.0 schema.
+
+For a managed action, the host's bounded semantic baseline is the
+**tripwire-protected controls**: the workspace contract and instructions,
+`scripts/`, `skills/`, `docs/`, and the current
+`runs/orchestrations/<orchestration_id>/` tree. The sandbox additionally denies
+worker writes to `.git/`, `.codex/`, `.claude/`, `.agents/`, `.venv/`, `venv/`,
+and `runs/orchestration-guards/`; these are preventive-only read-only roots and
+are not recursively content-hashed into that tripwire. The durable repair guard
+lives at `runs/orchestration-guards/<orchestration_id>.json`, outside the parent
+tree whose expected fingerprint it retains.
+
+Scoped workers must not start daemons, hooks, background jobs, or detached
+subprocesses; every process must finish within its work order. Initial process
+group cleanup is not hostile-process containment. An operator-controlled
+container or equivalent lifecycle boundary is required for untrusted process
+trees.
+
+After an interruption, the host follows this exact order: accepted canonical
+result; clean validated host-staged result; replay the same persisted action.
+The controller then verifies its postconditions. Quarantine is conditional and is written
+only when a schema-valid result exists before the control tripwire reports
+drift. That drift also creates durable
+`runs/orchestration-guards/<orchestration_id>.json`; managed resume and direct
+controller replay/submission remain gated until the issued parent state is
+restored and acknowledged. If a `control_tampered` attempt survives without
+that pre-action guard baseline, acknowledgement fails with
+`CONTROL_REPAIR_BASELINE_MISSING` and the reviewed workspace must start a new
+parent session. Host attempt, repair, and quarantine records never make a
+terminal child run mutable. No recovery path requires a human-authored result document.
+
+Before a fresh worker launch, its timeout is capped by the remaining absolute
+lease time as well as the managed action, budget, and lease-duration limits.
+Malformed and expired lease times fail with `ORCHESTRATION_LEASE_INVALID` and
+`ORCHESTRATION_LEASE_EXPIRED`. A retained `running` attempt on the current lease
+fails with `ORCHESTRATION_LEASE_ACTIVE`; after expiry, resume increments the
+lease attempt and replays the same action ID instead of creating another child
+run.
+
+Only one package-managed host may drive a parent session at a time; a second
+returns `ORCHESTRATION_ALREADY_RUNNING` without launching a worker. External
+protocol hosts must coordinate the same single-driver rule and must not
+interleave `next` or `submit` with an active managed host. These parent-session
+rules do not change the child run state machine.
+
+Discovery and candidate-review child phases also retain an immutable evidence
+boundary. Their parent work orders snapshot configured raw roots with a bounded
+SHA-256 content digest (10,000 files and 2 GiB maximum) and retain the exact
+`sources/manifest.jsonl` digest (32 MiB maximum). Submission recomputes those
+values while checking request-scoped records in the exact configured candidate
+store. Candidate records and their audit trail may advance, but neither phase
+may rewrite raw evidence or existing evidence-manifest content; fetching starts
+only in the separate acquisition phase.
 
 `finish --final-verdict complete` has an additional fail-closed gate. While
 holding the run-state lock, the controller invokes the publication-readiness

@@ -144,3 +144,40 @@ jobs:
             --target "$smoke_root" \
             --orchestration-id wheel-smoke \
             --format json > /tmp/evidence-wiki-status.json
+          .wheel-venv/bin/python - <<'PY'
+          from importlib.metadata import version
+          from pathlib import Path
+
+          import evidence_wiki
+          from evidence_wiki import resources
+          from evidence_wiki.orchestration import ORCHESTRATION_RESULT_SCHEMA
+
+          if evidence_wiki.__version__ != version("evidence-wiki"):
+              raise SystemExit("Installed package metadata and module versions differ")
+          installed_path = Path(evidence_wiki.__file__).resolve()
+          if "site-packages" not in installed_path.parts:
+              raise SystemExit(f"EvidenceWiki was not imported from the installed wheel: {installed_path}")
+
+          properties = ORCHESTRATION_RESULT_SCHEMA["properties"]
+          if properties["schema_version"] != {"type": "string", "enum": ["1.0"]}:
+              raise SystemExit("Installed wheel contains an incompatible orchestration result schema")
+          if any("type" not in definition for definition in properties.values()):
+              raise SystemExit("Installed wheel result schema contains an untyped property")
+
+          with resources.assets_root() as assets:
+              required = (
+                  "workspace-template/docs/orchestration.md",
+                  "workspace-template/docs/orchestrator-handoff.md",
+                  "workspace-template/docs/run-controller.md",
+                  "workspace-template/skills/research-run.md",
+                  "workspace-template/skills/research-discover.md",
+                  "workspace-template/skills/research-acquire.md",
+                  "workspace-template/skills/research-verify.md",
+                  "orchestrator/skills/research-orchestrate.md",
+              )
+              missing = [relative for relative in required if not (assets / relative).is_file()]
+              if missing:
+                  raise SystemExit(f"Installed wheel is missing orchestration assets: {missing}")
+          PY
+          .wheel-venv/bin/python tools/smoke_installed_orchestration.py \
+            --cli .wheel-venv/bin/evidence-wiki

@@ -30,6 +30,20 @@ most 12 work orders, 1,800 seconds per worker, and 7,200 seconds overall.
 Reaching a bound pauses the session without declaring failure; `resume` starts
 a fresh bounded window for the same durable session.
 
+Managed execution is fail-closed when the runner cannot enforce the workspace
+boundary required by the host. Codex managed runs require Codex CLI 0.138 or
+newer so EvidenceWiki can select the named `evidence_wiki_worker` custom
+permission profile with `-c default_permissions="evidence_wiki_worker"`.
+Claude managed runs are not available from native Windows because Claude Code
+does not currently provide the required per-path isolation there. Use macOS,
+Linux, WSL2, or a container for managed Claude execution, or drive the
+model-neutral protocol from an external host that owns the control artifacts.
+A managed Claude preflight also requires `bubblewrap` and `socat` on
+Linux/WSL2, or the built-in `sandbox-exec` and `touch` tools on macOS. Missing
+primitives fail before a worker is launched.
+A failed capability check returns `RUNNER_ISOLATION_UNAVAILABLE` before a worker
+starts.
+
 Any agent harness can drive the same model-neutral protocol:
 
 ```bash
@@ -46,6 +60,13 @@ real question, request, candidate, source, run, verification, and export
 artifacts required by the order. A worker's `completed` claim is not sufficient
 by itself.
 
+Only one package-managed `run` or `resume` process may drive a parent session
+at a time. The host holds a session-scoped lock for the complete managed window;
+a concurrent managed driver exits with `ORCHESTRATION_ALREADY_RUNNING` before
+launching a worker. An external protocol host must provide the same
+single-driver coordination and must not interleave `next` or `submit` calls with
+an active managed host for that session. Read-only status polling remains safe.
+
 ## Artifacts
 
 One session is stored below:
@@ -56,12 +77,39 @@ runs/orchestrations/<orchestration_id>/
   events.jsonl
   work-orders/<action_id>.json
   work-results/<action_id>.json
+  trusted-inputs/<action_id>.json
+  attempts/<attempt_id>.json
+  .host-results/<action_id>.json
+  quarantine/<attempt_id>.json
+  .locks/managed-host.lock
   answers.json
+runs/orchestration-guards/<orchestration_id>.json
 ```
 
-The `orchestration_session`, `orchestration_work_order`, and
-`orchestration_result` schemas are version `1.0`. Query their supported versions
-with `evidence-wiki contract`.
+The `orchestration_session`, `orchestration_work_order`,
+`orchestration_result`, and `orchestration_attempt` schemas are version `1.0`.
+Query their supported versions with `evidence-wiki contract`.
+
+`work-results/` contains only controller-accepted results. `trusted-inputs/`
+contains the controller's static-input fingerprint for each pending action.
+`attempts/` contains bounded host execution metadata without prompts,
+transcripts, diagnostics, secrets, or absolute paths. `.host-results/` is a
+private, transient submission stage used after a validated worker response;
+it is removed after the identical canonical result is observed.
+`quarantine/` retains a validated result that was not submitted because the
+post-run control tripwire detected drift. Quarantined output is never treated
+as an accepted work result. It is created only when the runner produced a
+schema-valid result before the tripwire detected drift. The corresponding file
+under `runs/orchestration-guards/` is the durable repair gate shared by the
+managed host and workspace controller; it lives outside the guarded parent tree
+so replacing that tree cannot erase the repair requirement.
+The private `.locks/managed-host.lock` serializes managed drivers.
+
+The repair guard is deliberately not stored below the parent-session tree.
+`runs/orchestration-guards/<orchestration_id>.json` is a preventive-only,
+host-owned control file: a worker cannot erase the repair gate by replacing
+`runs/orchestrations/<orchestration_id>/`, and the guard itself is not included
+in the semantic tripwire whose expected fingerprint it retains.
 
 A work order contains:
 
@@ -98,6 +146,18 @@ discovery, verification, and export in that order. It declares
 `blocked_on_sources` only when open source requests remain and no configured
 provider route can progress them.
 
+Discovery and candidate-review work orders make their no-fetch boundary
+content-based. At issue time the controller records a SHA-256 fingerprint of
+the configured immutable raw roots, bounded to 10,000 files and 2 GiB, plus the
+exact digest of `sources/manifest.jsonl`, bounded to 32 MiB. Submission
+recomputes both values, so unchanged counts, sizes, or timestamps cannot hide a
+raw-evidence or evidence-manifest rewrite. The candidate side is checked from
+the exact configured candidate-store path: discovery must add a
+request-scoped candidate, and review must select a scoped candidate with an
+enabled acquisition route. These phases may update candidate records and their
+audit trail, but they may not fetch evidence or alter existing raw or manifest
+content.
+
 `blocked_on_sources`, `no_ship`, and `failed` remain terminal child-run states.
 The parent never reopens those records. For example, an initial research run
 against an empty workspace can block and create a source request; the parent
@@ -119,9 +179,48 @@ candidate URL cannot widen those permissions.
 The Codex and Claude adapters launch fixed argument vectors without a shell,
 request schema-constrained final output, cap time and captured output, and run
 with the workspace as their working directory. They do not add dangerous
-permission or sandbox bypass flags. Provider credentials may be injected into
-the process environment by the operator, but are never copied into work orders,
-results, logs, or error messages.
+permission or sandbox bypass flags. When recovery actually needs a fresh
+worker, the host lazily verifies before launch that the selected runner can
+enforce its permission profile and keep
+`runs/orchestrations/<orchestration_id>/` host-owned. Canonical-result and clean
+staged-result recovery do not require a runner capability check. Provider
+credentials may be injected into the process environment by the operator, but
+are never copied into work orders, results, logs, or error messages.
+
+Managed work orders must not start daemons, hooks, background jobs, or detached
+subprocesses; every process started for an action must finish within that
+action. The host cleans up the runner's initial process group, but that cleanup
+is not containment for hostile processes that deliberately escape or detach.
+A deployment that executes untrusted process trees must add an
+operator-controlled container or equivalent lifecycle boundary.
+
+The Codex adapter ignores user configuration and rules for the worker process,
+uses strict configuration, disables web search, and does not use the legacy
+`--sandbox` selector. Its named profile makes scoped workspace output writable
+while keeping the workspace contract and instructions (`research.yml`,
+`workspace-system.yml`, `AGENTS.md`, `CLAUDE.md`, `README.md`, and `.gitignore`),
+managed tooling and guidance (`scripts/`, `skills/`, and all of `docs/`), parent state
+(`runs/orchestrations/`), repository and agent configuration, and local virtual
+environments read-only. New generated reports are written to
+`runs/run-reports/`, outside the trusted documentation tree; reports left under
+`docs/run-reports/` by earlier starters remain historical read-only inputs. The
+bounded temporary roots remain writable. The Claude
+adapter supplies equivalent host-owned sandbox
+settings with fail-if-unavailable behavior, OS-level write denials, Edit-tool
+denials for the complete documentation tree, and WebFetch/WebSearch disabled.
+Network access is enabled only for a
+discovery or acquisition work order whose persisted provider policy permits it.
+
+The host calls the semantic baseline the **tripwire-protected controls**. Its
+bounded snapshot covers the workspace contract and instructions
+(`research.yml`, `workspace-system.yml`, `AGENTS.md`, `CLAUDE.md`, `README.md`,
+and `.gitignore`), `scripts/`, `skills/`, `docs/`, and the current
+`runs/orchestrations/<orchestration_id>/` parent session. The sandbox also keeps
+`.git/`, `.codex/`, `.claude/`, `.agents/`, `.venv/`, `venv/`, and
+`runs/orchestration-guards/` read-only, but those are **preventive-only
+read-only roots**: they are not recursively content-hashed into the bounded
+tripwire. Preventive-only does not mean worker-writable; it distinguishes a
+sandbox denial from the host's independent before/after semantic check.
 
 The allow-lists are application authorization enforced by the deterministic
 provider scripts; they are not a host-level domain firewall. A managed worker
@@ -130,6 +229,15 @@ provider commands in its work order. For an untrusted or prompt-injected agent,
 add an operator-controlled network proxy/sandbox or drive the protocol from a
 host that executes provider calls itself. Direct protocol workers must likewise
 not edit `runs/orchestrations/` control artifacts.
+
+The parent owns every file below
+`runs/orchestrations/<orchestration_id>/`. A worker must not invoke
+`evidence-wiki orchestrate`, create a work-result file, or otherwise mutate that
+tree. It receives all required orchestration data in the persisted work order
+and returns its result through the runner's structured-output channel. Child
+research state under `runs/<run_id>/` remains a separate workspace surface and
+may be updated only through the scoped deterministic scripts named by the
+workspace skill.
 
 Managed orchestration is intentionally not exposed through the current MCP
 server. MCP remains a read/append-only integration surface; starting workers
@@ -141,13 +249,96 @@ checks.
 Session writes and action submission are lock-protected. A leased action can be
 recovered after its lease expires; a runner crash leaves the same action pending
 for `resume`. Re-submitting an identical accepted result is idempotent, while a
-different result for the same completed action is a conflict. Inspect
-`events.jsonl`, the child run records, and `orchestrate status` before recovering
-a stale session.
+different result for the same completed action is a conflict.
 
-Managed runners snapshot the workspace contract, scripts, skills, and parent
-control tree around every action. `CONTROL_ARTIFACT_UNSAFE` refuses a snapshot
-that is unbounded or contains links/special files. `CONTROL_ARTIFACT_TAMPERED`
-means a worker changed protected inputs; the host restores the parent session,
-does not submit the result, and leaves the action resumable. Configuration or
-script changes are deliberately left visible for operator review.
+Before launching a fresh worker, the host caps its timeout to the smallest of
+the managed action limit, the work-order budget, the lease duration, and the
+remaining time until the absolute lease expiry. A malformed expiry fails with
+`ORCHESTRATION_LEASE_INVALID`; an already expired lease fails with
+`ORCHESTRATION_LEASE_EXPIRED` before worker launch. If a retained `running`
+attempt still owns the same lease attempt, replay fails with
+`ORCHESTRATION_LEASE_ACTIVE`. Wait for expiry and resume: the controller renews
+the lease by incrementing its attempt while retaining the same action ID.
+
+Recovery uses the least-mutating valid checkpoint in this exact order:
+accepted canonical result; clean validated host-staged result; replay the same persisted action.
+The first checkpoint is finalized, the second is submitted without launching a
+worker, and replay occurs only when neither checkpoint exists. Recovery never
+issues a replacement action. No recovery path requires a human-authored result document.
+The worker first checks the recorded postconditions against current workspace
+artifacts. When an earlier attempt already wrote a valid answer, request,
+candidate selection, or acquired source before it exited, the worker reports
+the existing artifacts as `completed` without repeating that work. The
+controller then verifies the real artifacts before advancing. Pre-0.2.1
+pending actions are bound to a controller-owned trusted-input fingerprint on
+their first successful `next --resume`, before a managed worker starts. A
+direct result submission is refused until that binding occurs. Do not hand-write
+`runs/orchestrations/<orchestration_id>/work-results/*.json`, edit
+`session.json`, or use `deploy --force` as recovery.
+
+Managed runners compare the tripwire-protected controls around every action.
+Timestamp-only filesystem drift is not a control change. Path membership, file
+type, mode, or content changes are control changes and are reported with
+bounded, workspace-relative paths. `CONTROL_ARTIFACT_UNSAFE` refuses an
+unbounded snapshot or links/special files. `CONTROL_ARTIFACT_TAMPERED` means the
+tripwire observed a semantic change; no result is submitted and the action
+remains pending. When the runner returned a valid structured result before the
+drift was detected, that unsubmitted result is retained under `quarantine/`;
+otherwise no quarantine file is invented. The attempt is marked
+`control_tampered`, and the host persists
+`runs/orchestration-guards/<orchestration_id>.json` with status `required`. A
+later managed resume stops with `CONTROL_REPAIR_REQUIRED` before any controller
+or worker command. Direct protocol `next` and `submit` calls independently stop
+with `ORCHESTRATION_CONTROL_REPAIR_REQUIRED` while the same marker is required.
+EvidenceWiki does not automatically restore or roll back any changed file.
+Inspect the named paths and quarantine, restore the issued control state, then
+explicitly acknowledge that review:
+
+```bash
+evidence-wiki orchestrate resume \
+  --target . \
+  --orchestration-id ORCH_ID \
+  --runner codex \
+  --agent-id ORIGINAL_AGENT_ID \
+  --acknowledge-control-repair
+```
+
+The acknowledgement clears the host gate only after every tripwire-protected
+control matches the `expected_control_fingerprint` retained in
+`runs/orchestration-guards/<orchestration_id>.json`; otherwise it fails with
+`CONTROL_REPAIR_MISMATCH`. If a legacy or damaged session retains a
+`control_tampered` attempt but no durable guard with that pre-action baseline,
+acknowledgement fails with `CONTROL_REPAIR_BASELINE_MISSING`; preserve the
+session for inspection and start a new session from reviewed workspace state.
+Acknowledgement does not accept the quarantined result or bypass controller
+verification. The controller also checks the action's trusted-input
+fingerprint. If a static control change was intentional, start a new
+orchestration session from that state. Do not use the flag before inspecting
+the reported paths.
+
+After upgrading the package, refresh an existing workspace's managed scripts
+before resuming an affected session. Preview both steps first:
+
+```bash
+python -m pip install --upgrade evidence-wiki==0.2.1
+evidence-wiki --version
+evidence-wiki upgrade --target . --dry-run
+evidence-wiki upgrade --target .
+evidence-wiki orchestrate status --target . --orchestration-id ORCH_ID --format json
+evidence-wiki orchestrate resume \
+  --target . \
+  --orchestration-id ORCH_ID \
+  --runner codex \
+  --agent-id ORIGINAL_AGENT_ID \
+  --model MODEL_ID
+```
+
+To refresh the optional worker guidance as well, review it separately:
+
+```bash
+evidence-wiki upgrade --target . --include skills --include docs --dry-run
+evidence-wiki upgrade --target . --include skills --include docs
+```
+
+Optional-file conflicts stop before replacement. Use `--force-optional` only
+after reviewing the local edits and the backup behavior under `.replaced/`.

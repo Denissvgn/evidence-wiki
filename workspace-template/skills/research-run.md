@@ -20,6 +20,10 @@ Inputs:
 
 ## Operating Rules
 
+- When executing a managed work order, never invoke `evidence-wiki orchestrate`
+  or write below `runs/orchestrations/`. Check the order's postconditions before
+  making new changes; if an interrupted attempt already established them,
+  report the existing artifacts as `completed` and do not duplicate the work.
 - Hold at most one claimed question at a time. Claim before working, release or resolve before claiming the next.
 - Never answer from raw files when normalized records exist; retrieve evidence through `query_index.py` and normalized records.
 - Never delete or downgrade another agent's claim. A refused claim (exit 3) means pick the next question. Stale-claim recovery (`--steal --if-older-than`) is orchestrator-mediated only.
@@ -164,7 +168,7 @@ readiness:
 - Every worked question was claimed first; no other agent's claim was touched.
 - Each resolved question was closed with `scripts/question_resolve.py` and follows the `research-answer.md` rules (real `answer_page`, cited `source_ids`, or a `blocked_reason` with a linked source request).
 - Budgets from the `run` block were respected.
-- The run report exists under `docs/run-reports/` and reflects the run window.
+- The run report exists under `runs/run-reports/` and reflects the run window.
 - The answer export was generated for the orchestrator.
 - Publication readiness was evaluated with `scripts/publication_readiness.py --format json`; controller-managed runs also wrote `runs/<run_id>/evaluation/`.
 - The final verdict and any unfinished work are reported honestly.

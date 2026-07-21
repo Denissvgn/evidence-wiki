@@ -26,7 +26,7 @@ defines the run window start. The report contains:
   date-match list for older records without exact timestamps,
 - the current lint issue counts by severity.
 
-The Markdown report is written to ``docs/run-reports/run-<UTC timestamp>.md``
+The Markdown report is written to ``runs/run-reports/run-<UTC timestamp>.md``
 (directory configurable only by editing the constant; reports are generated
 artifacts and belong under ``docs/``). ``--format json`` prints the full
 document, including ``report_path``, to stdout; the default text mode prints
@@ -55,7 +55,7 @@ if importlib.util.find_spec("yaml") is None:  # pragma: no cover - environment g
 
 SCHEMA_VERSION = "1.0"
 BASELINE_DOCUMENT_TYPE = "run_report_baseline"
-RUN_REPORTS_DIR = "docs/run-reports"
+RUN_REPORTS_DIR = "runs/run-reports"
 EXIT_OK = 0
 EXIT_INVALID = 2
 

@@ -23,6 +23,10 @@ Inputs:
 
 ## Operating Rules
 
+- When executing a managed work order, never invoke `evidence-wiki orchestrate`
+  or write below `runs/orchestrations/`. Check the order's postconditions before
+  acquiring again; report already-delivered, provenance-backed normalized
+  evidence as `completed` and do not duplicate downloads or fulfillment.
 - Read `research.yml` before choosing providers, target roots, request budgets, or question lifecycle states.
 - Acquisition is disabled by default. Do not run provider fetch commands when `integrations.acquisition.enabled` is absent or false, or when smoke validation reports acquisition config errors. Report the inert state and the `ACQUISITION_DISABLED` remediation instead.
 - Use only providers listed in `integrations.acquisition.providers`. Do not infer permission from domain-pack recommendations.

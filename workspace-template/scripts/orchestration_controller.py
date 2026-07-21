@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -22,6 +24,11 @@ from pathlib import Path, PurePosixPath
 from types import ModuleType, SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
+
+# Workspace sibling modules are protected static inputs.  Prevent controller
+# imports from creating ``scripts/__pycache__`` entries that would mutate the
+# very tree fingerprinted for pending-action integrity.
+sys.dont_write_bytecode = True
 
 try:
     import yaml
@@ -54,12 +61,40 @@ MAX_RESULT_BYTES = 64 * 1024
 MAX_SUMMARY_LENGTH = 4000
 MAX_ARTIFACTS = 256
 MAX_ARTIFACT_PATH_LENGTH = 512
+MAX_TRUSTED_STATIC_INPUT_BYTES = 32 * 1024 * 1024
+MAX_TRUSTED_STATIC_INPUT_ENTRIES = 10_000
+MAX_TRUSTED_STATIC_FINGERPRINT_BYTES = 8 * 1024 * 1024
+MAX_TRUSTED_STATIC_PATH_LENGTH = 1024
+MAX_TRUSTED_STATIC_INPUT_DIFFERENCES = 50
+MAX_JSON_DOCUMENT_BYTES = 8 * 1024 * 1024
+MAX_VERIFICATION_ARTIFACT_BYTES = 8 * 1024 * 1024
+MAX_MANIFEST_SNAPSHOT_BYTES = 32 * 1024 * 1024
+MAX_RAW_TREE_SNAPSHOT_BYTES = 2 * 1024 * 1024 * 1024
+MAX_RAW_TREE_SNAPSHOT_ENTRIES = 10_000
 
 SESSION_FILENAME = "session.json"
 EVENTS_FILENAME = "events.jsonl"
 ANSWERS_FILENAME = "answers.json"
 WORK_ORDERS_DIR = "work-orders"
 WORK_RESULTS_DIR = "work-results"
+TRUSTED_INPUTS_DIR = "trusted-inputs"
+CONTROL_REPAIR_GUARDS_DIR = "orchestration-guards"
+
+TRUSTED_STATIC_FILE_PATHS = (
+    "research.yml",
+    "workspace-system.yml",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md",
+    ".gitignore",
+)
+TRUSTED_STATIC_TREE_PATHS = ("scripts", "skills", "docs")
+TRUSTED_STATIC_EXCLUDED_SUBTREES: frozenset[str] = frozenset()
+
+RECOVERY_NONE = "none"
+RECOVERY_RECONCILE = "reconcile_required"
+RECOVERY_FINALIZING = "finalizing_submission"
+RECOVERY_STATES = frozenset({RECOVERY_NONE, RECOVERY_RECONCILE, RECOVERY_FINALIZING})
 
 ACTIVE_STATUS = "active"
 PAUSED_STATUS = "paused"
@@ -239,8 +274,617 @@ def work_result_path(project_root: Path, orchestration_id: str, action_id: str) 
     return session_dir(project_root, orchestration_id) / WORK_RESULTS_DIR / f"{action_id}.json"
 
 
+def trusted_static_input_path(project_root: Path, orchestration_id: str, action_id: str) -> Path:
+    return session_dir(project_root, orchestration_id) / TRUSTED_INPUTS_DIR / f"{action_id}.json"
+
+
+def control_repair_path(project_root: Path, orchestration_id: str) -> Path:
+    return project_root / "runs" / CONTROL_REPAIR_GUARDS_DIR / f"{orchestration_id}.json"
+
+
 def answers_path(project_root: Path, orchestration_id: str) -> Path:
     return session_dir(project_root, orchestration_id) / ANSWERS_FILENAME
+
+
+def default_recovery_state() -> dict[str, Any]:
+    return {
+        "state": RECOVERY_NONE,
+        "action_id": None,
+        "attempt": None,
+        "reason_code": None,
+        "recorded_at": None,
+    }
+
+
+def result_digest(document: dict[str, Any]) -> str:
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def bounded_regular_bytes(
+    path: Path,
+    *,
+    max_bytes: int,
+    error_code: str,
+    label: str,
+    missing_ok: bool = False,
+    containment_root: Path | None = None,
+) -> bytes | None:
+    """Read one bounded, singly linked regular file without following links."""
+    if containment_root is not None:
+        root = containment_root.resolve()
+        absolute = Path(os.path.abspath(path))
+        try:
+            relative = absolute.relative_to(root)
+        except ValueError as exc:
+            raise OrchestrationControllerError(error_code, f"{label} escapes the workspace") from exc
+        current = root
+        for part in relative.parts[:-1]:
+            current /= part
+            try:
+                ancestor = current.lstat()
+            except OSError as exc:
+                raise OrchestrationControllerError(error_code, f"could not inspect {label} ancestor: {current}") from exc
+            if not stat.S_ISDIR(ancestor.st_mode) or path_is_link_like(current, ancestor):
+                raise OrchestrationControllerError(error_code, f"{label} ancestor is not a real directory: {current}")
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise OrchestrationControllerError(error_code, f"{label} is missing: {path}") from None
+    except OSError as exc:
+        raise OrchestrationControllerError(error_code, f"could not inspect {label}: {path}: {exc}") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or path_is_link_like(path, before)
+        or int(getattr(before, "st_nlink", 1) or 1) != 1
+    ):
+        raise OrchestrationControllerError(error_code, f"{label} is not a singly linked regular file: {path}")
+    if before.st_size > max_bytes:
+        raise OrchestrationControllerError(error_code, f"{label} exceeds the {max_bytes}-byte limit: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or int(getattr(opened, "st_nlink", 1) or 1) != 1
+                or (before.st_dev, before.st_ino, before.st_size)
+                != (opened.st_dev, opened.st_ino, opened.st_size)
+            ):
+                raise OSError(f"{label} changed while it was opened")
+            chunks: list[bytes] = []
+            observed = 0
+            while observed <= max_bytes:
+                chunk = os.read(descriptor, min(64 * 1024, max_bytes + 1 - observed))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                observed += len(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise OrchestrationControllerError(error_code, f"could not safely read {label}: {path}: {exc}") from exc
+    if (
+        observed > max_bytes
+        or observed != before.st_size
+        or (opened.st_dev, opened.st_ino, opened.st_size) != (after.st_dev, after.st_ino, after.st_size)
+    ):
+        raise OrchestrationControllerError(error_code, f"{label} changed while it was read: {path}")
+    return b"".join(chunks)
+
+
+def file_digest(
+    path: Path,
+    *,
+    max_bytes: int = MAX_VERIFICATION_ARTIFACT_BYTES,
+    containment_root: Path | None = None,
+) -> str | None:
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_POSTCONDITION_FAILED",
+            f"could not inspect verification artifact: {path}",
+        ) from exc
+    if containment_root is not None:
+        root = containment_root.resolve()
+        absolute = Path(os.path.abspath(path))
+        try:
+            relative = absolute.relative_to(root)
+        except ValueError as exc:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                "verification artifact escapes the workspace",
+            ) from exc
+        current = root
+        for part in relative.parts[:-1]:
+            current /= part
+            try:
+                ancestor = current.lstat()
+            except OSError as exc:
+                raise OrchestrationControllerError(
+                    "ORCHESTRATION_POSTCONDITION_FAILED",
+                    f"could not inspect verification artifact ancestor: {current}",
+                ) from exc
+            if not stat.S_ISDIR(ancestor.st_mode) or path_is_link_like(current, ancestor):
+                raise OrchestrationControllerError(
+                    "ORCHESTRATION_POSTCONDITION_FAILED",
+                    f"verification artifact ancestor is not a real directory: {current}",
+                )
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or path_is_link_like(path, before)
+        or int(getattr(before, "st_nlink", 1) or 1) != 1
+        or before.st_size > max_bytes
+    ):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_POSTCONDITION_FAILED",
+            f"verification artifact is unsafe or exceeds the {max_bytes}-byte limit: {path}",
+        )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or int(getattr(opened, "st_nlink", 1) or 1) != 1
+                or (before.st_dev, before.st_ino, before.st_size)
+                != (opened.st_dev, opened.st_ino, opened.st_size)
+            ):
+                raise OSError("verification artifact changed while it was opened")
+            digest = hashlib.sha256()
+            observed = 0
+            while True:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                observed += len(chunk)
+                if observed > max_bytes:
+                    raise OSError("verification artifact exceeded its size limit while being read")
+                digest.update(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_POSTCONDITION_FAILED",
+            f"could not safely hash verification artifact: {path}: {exc}",
+        ) from exc
+    if (
+        observed != before.st_size
+        or (opened.st_dev, opened.st_ino, opened.st_size) != (after.st_dev, after.st_ino, after.st_size)
+    ):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_POSTCONDITION_FAILED",
+            f"verification artifact changed while it was hashed: {path}",
+        )
+    return f"sha256:{digest.hexdigest()}"
+
+
+def trusted_static_input_error(message: str, *, details: dict[str, Any] | None = None) -> OrchestrationControllerError:
+    return OrchestrationControllerError(
+        "ORCHESTRATION_TRUSTED_INPUT_UNSAFE",
+        message,
+        recoverable=True,
+        remediation=(
+            "Replace links or special files with bounded regular files/directories under the trusted workspace "
+            "inputs, then retry. Keep generated research output under its documented writable paths."
+        ),
+        details=details,
+    )
+
+
+def path_is_link_like(path: Path, metadata: os.stat_result) -> bool:
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is None:
+        return False
+    try:
+        return bool(is_junction())
+    except OSError:
+        return True
+
+
+def portable_mode(metadata: os.stat_result) -> int:
+    """Return only portable rwx permission bits for semantic comparisons."""
+    return stat.S_IMODE(metadata.st_mode) & 0o777
+
+
+def require_real_directory(path: Path, label: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise trusted_static_input_error(f"cannot inspect trusted input ancestor {label}: {exc}") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or path_is_link_like(path, metadata):
+        raise trusted_static_input_error(f"trusted input ancestor {label} is not a real directory")
+
+
+def validate_trusted_static_ancestors(project_root: Path, path: Path, label: str) -> None:
+    try:
+        relative = path.relative_to(project_root)
+    except ValueError as exc:  # pragma: no cover - paths are assembled internally
+        raise trusted_static_input_error(f"trusted input {label} escapes the workspace") from exc
+    require_real_directory(project_root, ".")
+    current = project_root
+    for part in relative.parts[:-1]:
+        current /= part
+        require_real_directory(current, current.relative_to(project_root).as_posix())
+
+
+def validate_trusted_static_carveouts(project_root: Path) -> None:
+    """Reject unsafe entries in writable control-tree carveouts without fingerprinting their contents."""
+    inspected = 0
+
+    def visit(path: Path, label: str) -> None:
+        nonlocal inspected
+        inspected += 1
+        if inspected > MAX_TRUSTED_STATIC_INPUT_ENTRIES:
+            raise trusted_static_input_error(
+                f"writable trusted-input carveouts exceed {MAX_TRUSTED_STATIC_INPUT_ENTRIES} entries"
+            )
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise trusted_static_input_error(f"cannot inspect writable trusted-input carveout {label}: {exc}") from exc
+        if path_is_link_like(path, metadata):
+            raise trusted_static_input_error(f"writable trusted-input carveout {label} is a symbolic link or junction")
+        if stat.S_ISDIR(metadata.st_mode):
+            try:
+                children = sorted(path.iterdir(), key=lambda child: child.name)
+            except OSError as exc:
+                raise trusted_static_input_error(
+                    f"cannot enumerate writable trusted-input carveout {label}: {exc}"
+                ) from exc
+            for child in children:
+                visit(child, f"{label}/{child.name}")
+            return
+        if not stat.S_ISREG(metadata.st_mode):
+            raise trusted_static_input_error(f"writable trusted-input carveout {label} contains a special file")
+        if metadata.st_nlink > 1:
+            raise trusted_static_input_error(f"writable trusted-input carveout {label} is multiply linked")
+
+    for relative in TRUSTED_STATIC_EXCLUDED_SUBTREES:
+        path = project_root.joinpath(*PurePosixPath(relative).parts)
+        validate_trusted_static_ancestors(project_root, path, relative)
+        visit(path, relative)
+
+
+def trusted_static_input_fingerprint(project_root: Path) -> dict[str, Any]:
+    """Capture a bounded, deterministic semantic fingerprint of trusted static workspace inputs."""
+    project_root = project_root.resolve()
+    validate_trusted_static_carveouts(project_root)
+    entries: list[dict[str, Any]] = []
+    total_bytes = 0
+
+    def visit(path: Path, relative: PurePosixPath) -> None:
+        nonlocal total_bytes
+        label = relative.as_posix()
+        if label in TRUSTED_STATIC_EXCLUDED_SUBTREES:
+            return
+        if len(entries) >= MAX_TRUSTED_STATIC_INPUT_ENTRIES:
+            raise trusted_static_input_error(
+                f"trusted static inputs exceed {MAX_TRUSTED_STATIC_INPUT_ENTRIES} entries"
+            )
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            entries.append({"path": label, "kind": "missing", "mode": 0, "size": 0, "sha256": None})
+            return
+        except OSError as exc:
+            raise trusted_static_input_error(f"cannot inspect trusted static input {label}: {exc}") from exc
+        if path_is_link_like(path, metadata):
+            raise trusted_static_input_error(f"trusted static input {label} is a symbolic link or junction")
+        mode = portable_mode(metadata)
+        if stat.S_ISDIR(metadata.st_mode):
+            entries.append({"path": label, "kind": "directory", "mode": mode, "size": 0, "sha256": None})
+            try:
+                children = sorted(path.iterdir(), key=lambda child: child.name)
+            except OSError as exc:
+                raise trusted_static_input_error(f"cannot enumerate trusted static input {label}: {exc}") from exc
+            for child in children:
+                visit(child, relative / child.name)
+            return
+        if not stat.S_ISREG(metadata.st_mode):
+            raise trusted_static_input_error(f"trusted static input {label} is not a regular file or directory")
+        if metadata.st_nlink > 1:
+            raise trusted_static_input_error(f"trusted static input {label} is multiply linked")
+        declared_size = int(metadata.st_size)
+        if declared_size > MAX_TRUSTED_STATIC_INPUT_BYTES - total_bytes:
+            raise trusted_static_input_error(
+                f"trusted static inputs exceed the {MAX_TRUSTED_STATIC_INPUT_BYTES}-byte limit"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_nlink > 1
+                    or (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino)
+                ):
+                    raise trusted_static_input_error(f"trusted static input {label} changed while it was opened")
+                digest = hashlib.sha256()
+                observed_size = 0
+                while True:
+                    chunk = os.read(descriptor, 64 * 1024)
+                    if not chunk:
+                        break
+                    observed_size += len(chunk)
+                    if observed_size > declared_size:
+                        raise trusted_static_input_error(f"trusted static input {label} changed while it was read")
+                    digest.update(chunk)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+        except OrchestrationControllerError:
+            raise
+        except OSError as exc:
+            raise trusted_static_input_error(f"cannot read trusted static input {label}: {exc}") from exc
+        if (
+            observed_size != declared_size
+            or (opened.st_dev, opened.st_ino, opened.st_size) != (after.st_dev, after.st_ino, after.st_size)
+            or portable_mode(after) != mode
+        ):
+            raise trusted_static_input_error(f"trusted static input {label} changed while it was inspected")
+        total_bytes += observed_size
+        entries.append(
+            {
+                "path": label,
+                "kind": "file",
+                "mode": mode,
+                "size": observed_size,
+                "sha256": f"sha256:{digest.hexdigest()}",
+            }
+        )
+
+    roots = (*TRUSTED_STATIC_FILE_PATHS, *TRUSTED_STATIC_TREE_PATHS)
+    for relative in roots:
+        path = project_root.joinpath(*PurePosixPath(relative).parts)
+        validate_trusted_static_ancestors(project_root, path, relative)
+        visit(path, PurePosixPath(relative))
+    entries.sort(key=lambda item: item["path"])
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > MAX_TRUSTED_STATIC_FINGERPRINT_BYTES:
+        raise trusted_static_input_error(
+            f"trusted static fingerprint exceeds the {MAX_TRUSTED_STATIC_FINGERPRINT_BYTES}-byte limit"
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "algorithm": "sha256",
+        "fingerprint": f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+        "entry_count": len(entries),
+        "total_bytes": total_bytes,
+        "entries": entries,
+    }
+
+
+def valid_trusted_static_input_fingerprint(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "algorithm",
+        "fingerprint",
+        "entry_count",
+        "total_bytes",
+        "entries",
+    }:
+        return False
+    entries = value.get("entries")
+    entry_count = value.get("entry_count")
+    total_bytes = value.get("total_bytes")
+    if (
+        not isinstance(entries, list)
+        or not isinstance(entry_count, int)
+        or isinstance(entry_count, bool)
+        or entry_count != len(entries)
+        or entry_count < 0
+        or entry_count > MAX_TRUSTED_STATIC_INPUT_ENTRIES
+        or not isinstance(total_bytes, int)
+        or isinstance(total_bytes, bool)
+        or total_bytes < 0
+        or total_bytes > MAX_TRUSTED_STATIC_INPUT_BYTES
+    ):
+        return False
+    seen_paths: set[str] = set()
+    observed_bytes = 0
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"path", "kind", "mode", "size", "sha256"}:
+            return False
+        path_value = entry.get("path")
+        if (
+            not isinstance(path_value, str)
+            or not path_value
+            or "\x00" in path_value
+            or len(path_value) > MAX_TRUSTED_STATIC_PATH_LENGTH
+        ):
+            return False
+        relative = PurePosixPath(path_value)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or "\\" in path_value
+            or relative.as_posix() != path_value
+            or path_value in seen_paths
+        ):
+            return False
+        allowed = path_value in TRUSTED_STATIC_FILE_PATHS or relative.parts[:1] in {
+            (root,) for root in TRUSTED_STATIC_TREE_PATHS
+        }
+        if not allowed:
+            return False
+        seen_paths.add(path_value)
+        kind = entry.get("kind")
+        mode = entry.get("mode")
+        size = entry.get("size")
+        digest = entry.get("sha256")
+        if kind not in {"missing", "directory", "file"}:
+            return False
+        if not isinstance(mode, int) or isinstance(mode, bool) or mode < 0 or mode > 0o777:
+            return False
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            return False
+        if kind == "file":
+            if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                return False
+            observed_bytes += size
+        elif size != 0 or digest is not None:
+            return False
+        if kind == "missing" and path_value not in {*TRUSTED_STATIC_FILE_PATHS, *TRUSTED_STATIC_TREE_PATHS}:
+            return False
+    if [entry["path"] for entry in entries] != sorted(seen_paths) or observed_bytes != total_bytes:
+        return False
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > MAX_TRUSTED_STATIC_FINGERPRINT_BYTES:
+        return False
+    expected_digest = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+    return (
+        value.get("schema_version") == SCHEMA_VERSION
+        and value.get("algorithm") == "sha256"
+        and value.get("fingerprint") == expected_digest
+    )
+
+
+def valid_pending_trusted_static_inputs(value: Any) -> bool:
+    if value is None:
+        return True
+    return (
+        isinstance(value, dict)
+        and set(value) == {"action_id", "fingerprint", "entry_count", "total_bytes"}
+        and isinstance(value.get("action_id"), str)
+        and bool(value["action_id"])
+        and isinstance(value.get("fingerprint"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", value["fingerprint"]) is not None
+        and isinstance(value.get("entry_count"), int)
+        and not isinstance(value.get("entry_count"), bool)
+        and 0 <= value["entry_count"] <= MAX_TRUSTED_STATIC_INPUT_ENTRIES
+        and isinstance(value.get("total_bytes"), int)
+        and not isinstance(value.get("total_bytes"), bool)
+        and 0 <= value["total_bytes"] <= MAX_TRUSTED_STATIC_INPUT_BYTES
+    )
+
+
+def trusted_static_input_differences(expected: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    before = {entry["path"]: entry for entry in expected.get("entries", []) if isinstance(entry, dict)}
+    after = {entry["path"]: entry for entry in current.get("entries", []) if isinstance(entry, dict)}
+    differences: list[str] = []
+    for path in sorted(set(before) | set(after)):
+        old = before.get(path)
+        new = after.get(path)
+        if old == new:
+            continue
+        if old is None:
+            reason = "created"
+        elif new is None:
+            reason = "removed"
+        else:
+            changed: list[str] = []
+            if old.get("kind") != new.get("kind"):
+                changed.append(f"kind {old.get('kind')}->{new.get('kind')}")
+            if old.get("mode") != new.get("mode"):
+                changed.append(f"mode {old.get('mode'):03o}->{new.get('mode'):03o}")
+            if old.get("size") != new.get("size") or old.get("sha256") != new.get("sha256"):
+                changed.append("content")
+            reason = ", ".join(changed) or "semantic state"
+        differences.append(f"{path} [{reason}]")
+    return differences
+
+
+def verify_pending_trusted_static_inputs(
+    project_root: Path,
+    session: dict[str, Any],
+    work_order: dict[str, Any],
+    *,
+    allow_legacy_unbound: bool = False,
+) -> None:
+    """Fail closed on static-input drift and explicitly migrate legacy pending actions."""
+    if session.get("pending_action_id") != work_order.get("action_id"):
+        return
+    if "pending_trusted_static_inputs" not in session:
+        # Version 0.2.0 sessions predate controller-owned static fingerprints.
+        if allow_legacy_unbound:
+            return
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_LEGACY_ACTION_UNBOUND",
+            "legacy pending action has not yet been bound to the current trusted static inputs",
+            recoverable=True,
+            remediation=(
+                "Replay the pending action with evidence-wiki orchestrate next --resume, or use managed "
+                "evidence-wiki orchestrate resume, before submitting a result. The replay binds a controller-owned "
+                "fingerprint before any worker is launched."
+            ),
+            details={"action_id": work_order.get("action_id")},
+        )
+    retained = session.get("pending_trusted_static_inputs")
+    if not valid_pending_trusted_static_inputs(retained) or retained is None:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "new pending action is missing its trusted static-input fingerprint",
+            recoverable=False,
+        )
+    if retained.get("action_id") != work_order.get("action_id"):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "trusted static-input fingerprint does not belong to the pending action",
+            recoverable=False,
+        )
+    snapshot_path = trusted_static_input_path(
+        project_root,
+        session["orchestration_id"],
+        work_order["action_id"],
+    )
+    expected = load_json_object(
+        snapshot_path,
+        error_code="ORCHESTRATION_STATE_INVALID",
+        label="trusted static-input fingerprint",
+    )
+    if not valid_trusted_static_input_fingerprint(expected):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "persisted trusted static-input fingerprint is invalid",
+            recoverable=False,
+        )
+    if (
+        retained.get("fingerprint") != expected.get("fingerprint")
+        or retained.get("entry_count") != expected.get("entry_count")
+        or retained.get("total_bytes") != expected.get("total_bytes")
+    ):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "parent session does not match its trusted static-input fingerprint",
+            recoverable=False,
+        )
+    current = trusted_static_input_fingerprint(project_root)
+    if expected.get("fingerprint") == current.get("fingerprint"):
+        return
+    differences = trusted_static_input_differences(expected, current)
+    shown = differences[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES]
+    omitted = max(0, len(differences) - len(shown))
+    raise OrchestrationControllerError(
+        "ORCHESTRATION_TRUSTED_INPUT_CHANGED",
+        "trusted static workspace inputs changed after the action was issued",
+        recoverable=True,
+        remediation=(
+            "Restore the issued static inputs and retry the same pending action. If the change was intentional, "
+            "start a new orchestration session from the updated workspace instead of editing parent state."
+        ),
+        details={
+            "action_id": work_order.get("action_id"),
+            "expected_fingerprint": expected.get("fingerprint"),
+            "current_fingerprint": current.get("fingerprint"),
+            "changed_paths": shown,
+            "omitted_changed_path_count": omitted,
+        },
+    )
 
 
 def relative_workspace_path(project_root: Path, path: Path) -> str:
@@ -268,16 +912,165 @@ def write_json_atomic(path: Path, document: dict[str, Any]) -> None:
         ) from exc
 
 
-def load_json_object(path: Path, *, error_code: str, label: str) -> dict[str, Any]:
+def load_json_object(
+    path: Path,
+    *,
+    error_code: str,
+    label: str,
+    max_bytes: int = MAX_JSON_DOCUMENT_BYTES,
+    containment_root: Path | None = None,
+) -> dict[str, Any]:
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise OrchestrationControllerError(error_code, f"could not read {label}: {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
+        content = bounded_regular_bytes(
+            path,
+            max_bytes=max_bytes,
+            error_code=error_code,
+            label=label,
+            containment_root=containment_root,
+        )
+        if content is None:  # pragma: no cover - missing_ok is false
+            raise OrchestrationControllerError(error_code, f"{label} is missing: {path}")
+        document = json.loads(content.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise OrchestrationControllerError(error_code, f"invalid JSON in {label}: {path}: {exc}") from exc
     if not isinstance(document, dict):
         raise OrchestrationControllerError(error_code, f"{label} must contain a JSON object: {path}")
     return document
+
+
+def enforce_control_repair_gate(project_root: Path, orchestration_id: str) -> None:
+    """Prevent protocol replay/submission while the host repair marker is required."""
+    path = control_repair_path(project_root, orchestration_id)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            f"could not inspect control-repair marker: {exc}",
+            recoverable=False,
+        ) from exc
+    if not stat.S_ISREG(metadata.st_mode) or path_is_link_like(path, metadata) or metadata.st_nlink > 1:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "control-repair marker is not a singly linked regular file",
+            recoverable=False,
+        )
+    marker = load_json_object(
+        path,
+        error_code="ORCHESTRATION_STATE_INVALID",
+        label="control-repair marker",
+        max_bytes=MAX_RESULT_BYTES,
+        containment_root=project_root,
+    )
+    required_keys = {
+        "schema_version",
+        "artifact_type",
+        "orchestration_id",
+        "status",
+        "reason_code",
+        "detected_at",
+        "acknowledged_at",
+        "attempt_ids",
+        "expected_control_fingerprint",
+    }
+    attempt_ids = marker.get("attempt_ids")
+    if (
+        set(marker) != required_keys
+        or marker.get("schema_version") != SCHEMA_VERSION
+        or marker.get("artifact_type") != "orchestration_control_repair"
+        or marker.get("orchestration_id") != orchestration_id
+        or marker.get("status") not in {"required", "acknowledged"}
+        or marker.get("reason_code") != "CONTROL_ARTIFACT_TAMPERED"
+        or not isinstance(marker.get("detected_at"), str)
+        or len(marker["detected_at"]) > 64
+        or not isinstance(attempt_ids, list)
+        or not attempt_ids
+        or len(attempt_ids) > 64
+        or len(attempt_ids) != len(set(attempt_ids))
+        or any(not isinstance(value, str) or SAFE_ID_RE.fullmatch(value) is None for value in attempt_ids)
+        or not isinstance(marker.get("expected_control_fingerprint"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", marker["expected_control_fingerprint"]) is None
+        or (
+            marker["status"] == "required"
+            and marker.get("acknowledged_at") is not None
+        )
+        or (
+            marker["status"] == "acknowledged"
+            and (
+                not isinstance(marker.get("acknowledged_at"), str)
+                or not marker["acknowledged_at"]
+                or len(marker["acknowledged_at"]) > 64
+            )
+        )
+    ):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "control-repair marker is invalid",
+            recoverable=False,
+        )
+    if marker["status"] == "required":
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_CONTROL_REPAIR_REQUIRED",
+            "managed control drift must be repaired and acknowledged before replay or submission",
+            recoverable=True,
+            remediation=(
+                "Inspect the retained attempt and quarantine, restore the issued state, then run managed "
+                "orchestrate resume with --acknowledge-control-repair."
+            ),
+            details={"attempt_ids": attempt_ids},
+        )
+
+
+def valid_pending_submission(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or set(value) != {
+        "action_id",
+        "accepted_at",
+        "result",
+        "result_digest",
+        "next_phase",
+        "completion_reason",
+    }:
+        return False
+    result = value.get("result")
+    return (
+        isinstance(value.get("action_id"), str)
+        and bool(value["action_id"])
+        and isinstance(value.get("accepted_at"), str)
+        and bool(value["accepted_at"])
+        and isinstance(result, dict)
+        and valid_stored_result_shape(result, value["action_id"])
+        and isinstance(value.get("result_digest"), str)
+        and value["result_digest"] == result_digest(result)
+        and (value.get("next_phase") is None or value["next_phase"] in PHASES)
+        and (value.get("completion_reason") is None or isinstance(value["completion_reason"], str))
+    )
+
+
+def valid_recovery_state(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or set(value) != {
+        "state",
+        "action_id",
+        "attempt",
+        "reason_code",
+        "recorded_at",
+    }:
+        return False
+    return (
+        value.get("state") in RECOVERY_STATES
+        and (value.get("action_id") is None or isinstance(value["action_id"], str))
+        and (
+            value.get("attempt") is None
+            or (isinstance(value["attempt"], int) and not isinstance(value["attempt"], bool) and value["attempt"] > 0)
+        )
+        and (value.get("reason_code") is None or isinstance(value["reason_code"], str))
+        and (value.get("recorded_at") is None or isinstance(value["recorded_at"], str))
+    )
 
 
 def load_session(project_root: Path, orchestration_id: str) -> dict[str, Any]:
@@ -297,6 +1090,12 @@ def load_session(project_root: Path, orchestration_id: str) -> dict[str, Any]:
         or document.get("phase") not in PHASES
         or not isinstance(document.get("child_run_ids"), list)
         or not isinstance(document.get("limits"), dict)
+        or not valid_pending_submission(document.get("pending_submission"))
+        or not valid_recovery_state(document.get("recovery"))
+        or (
+            "pending_trusted_static_inputs" in document
+            and not valid_pending_trusted_static_inputs(document.get("pending_trusted_static_inputs"))
+        )
     ):
         raise OrchestrationControllerError(
             "ORCHESTRATION_STATE_INVALID",
@@ -347,21 +1146,92 @@ def record_event(
     *,
     action_id: str | None = None,
     data: dict[str, Any] | None = None,
+    event_key: str | None = None,
 ) -> None:
+    event = {
+        "schema_version": SCHEMA_VERSION,
+        "orchestration_id": session["orchestration_id"],
+        "occurred_at": timestamp_utc(),
+        "agent_id": session["agent_id"],
+        "event_type": event_type,
+        "action_id": action_id,
+        "phase": session["phase"],
+        "message": message,
+        "data": data or {},
+    }
+    if event_key is not None:
+        event["event_key"] = event_key
     append_event(
         project_root,
         session["orchestration_id"],
-        {
-            "schema_version": SCHEMA_VERSION,
-            "orchestration_id": session["orchestration_id"],
-            "occurred_at": timestamp_utc(),
-            "agent_id": session["agent_id"],
-            "event_type": event_type,
-            "action_id": action_id,
-            "phase": session["phase"],
-            "message": message,
-            "data": data or {},
-        },
+        event,
+    )
+
+
+def event_key_exists(
+    project_root: Path,
+    orchestration_id: str,
+    event_key: str,
+    *,
+    event_type: str,
+    action_id: str | None,
+) -> bool:
+    path = events_path(project_root, orchestration_id)
+    if not path.is_file():
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_EVENTS_INVALID",
+            f"could not read retained orchestration events: {exc}",
+            recoverable=False,
+        ) from exc
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_EVENTS_INVALID",
+                f"invalid retained orchestration event JSON: {exc}",
+                recoverable=False,
+            ) from exc
+        if isinstance(event, dict):
+            if event.get("event_key") == event_key:
+                return True
+            if event.get("event_type") == event_type and event.get("action_id") == action_id:
+                return True
+    return False
+
+
+def record_event_once(
+    project_root: Path,
+    session: dict[str, Any],
+    event_type: str,
+    message: str,
+    *,
+    action_id: str | None = None,
+    data: dict[str, Any] | None = None,
+) -> None:
+    event_key = f"{event_type}:{action_id or 'session'}"
+    if event_key_exists(
+        project_root,
+        session["orchestration_id"],
+        event_key,
+        event_type=event_type,
+        action_id=action_id,
+    ):
+        return
+    record_event(
+        project_root,
+        session,
+        event_type,
+        message,
+        action_id=action_id,
+        data=data,
+        event_key=event_key,
     )
 
 
@@ -408,6 +1278,15 @@ def verify_runtime_guards(
     work_order: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Re-check mutable safety and authorization state before replay/submit."""
+    # The workspace status and configuration readers load code from the
+    # workspace.  Detect drift in those trusted inputs before importing or
+    # executing any of them.
+    if work_order is not None:
+        verify_pending_trusted_static_inputs(
+            project_root,
+            session,
+            work_order,
+        )
     status = fresh_workspace_status(project_root)
     health = status.get("workspace_health") if isinstance(status.get("workspace_health"), dict) else {}
     readiness = status.get("readiness") if isinstance(status.get("readiness"), dict) else {}
@@ -423,6 +1302,16 @@ def verify_runtime_guards(
                 "readiness_reasons": readiness.get("reasons", []),
             },
         )
+    verify_provider_policy_unchanged(project_root, session, work_order)
+    return status
+
+
+def verify_provider_policy_unchanged(
+    project_root: Path,
+    session: dict[str, Any],
+    work_order: dict[str, Any] | None = None,
+) -> None:
+    """Safely compare YAML provider authorization without executing workspace code."""
     current = provider_policy(load_config(project_root))
     expected = work_order.get("provider_policy") if isinstance(work_order, dict) else session.get("provider_policy")
     expected = expected if isinstance(expected, dict) else {}
@@ -449,7 +1338,73 @@ def verify_runtime_guards(
             remediation="Restore the work order's explicit provider allow-list or start a new orchestration session.",
             details={"removed_providers": removed, "current_provider_policy": current},
         )
-    return status
+
+
+def bind_legacy_pending_trusted_inputs(
+    project_root: Path,
+    session: dict[str, Any],
+    work_order: dict[str, Any],
+) -> None:
+    """Bind one pre-0.2.1 pending action before workspace code is executed."""
+    if "pending_trusted_static_inputs" in session:
+        return
+    action_id = require_safe_id(work_order.get("action_id"), "action_id")
+    if session.get("pending_action_id") != action_id:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "legacy trusted-input binding does not match the pending action",
+            recoverable=False,
+        )
+    fingerprint_path = trusted_static_input_path(project_root, session["orchestration_id"], action_id)
+    if fingerprint_path.exists():
+        fingerprint = load_json_object(
+            fingerprint_path,
+            error_code="ORCHESTRATION_STATE_INVALID",
+            label="legacy trusted static-input fingerprint",
+        )
+        if not valid_trusted_static_input_fingerprint(fingerprint):
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_STATE_INVALID",
+                "legacy trusted static-input fingerprint is invalid",
+                recoverable=False,
+            )
+        current = trusted_static_input_fingerprint(project_root)
+        if fingerprint.get("fingerprint") != current.get("fingerprint"):
+            differences = trusted_static_input_differences(fingerprint, current)
+            shown = differences[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES]
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_TRUSTED_INPUT_CHANGED",
+                "trusted static workspace inputs changed while legacy binding was being finalized",
+                recoverable=True,
+                remediation=(
+                    "Restore the static inputs recorded by the retained fingerprint, then replay the same action."
+                ),
+                details={
+                    "action_id": action_id,
+                    "expected_fingerprint": fingerprint.get("fingerprint"),
+                    "current_fingerprint": current.get("fingerprint"),
+                    "changed_paths": shown,
+                    "omitted_changed_path_count": max(0, len(differences) - len(shown)),
+                },
+            )
+    else:
+        fingerprint = trusted_static_input_fingerprint(project_root)
+        write_json_atomic(fingerprint_path, fingerprint)
+    session["pending_trusted_static_inputs"] = {
+        "action_id": action_id,
+        "fingerprint": fingerprint["fingerprint"],
+        "entry_count": fingerprint["entry_count"],
+        "total_bytes": fingerprint["total_bytes"],
+    }
+    session["updated_at"] = timestamp_utc()
+    write_json_atomic(session_path(project_root, session["orchestration_id"]), session)
+    record_event_once(
+        project_root,
+        session,
+        "trusted_inputs_bound",
+        "Bound a legacy pending action to controller-owned trusted static inputs.",
+        action_id=action_id,
+    )
 
 
 def fresh_workspace_status(project_root: Path) -> dict[str, Any]:
@@ -490,7 +1445,7 @@ def candidate_store_path(project_root: Path, config: dict[str, Any]) -> Path:
 
 
 def raw_tree_snapshot(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
-    """Return a bounded metadata fingerprint for configured immutable raw roots."""
+    """Return a bounded content fingerprint for configured immutable raw roots."""
     raw = config.get("raw") if isinstance(config.get("raw"), dict) else {}
     configured = raw.get("source_roots") if isinstance(raw.get("source_roots"), list) else []
     roots: list[Path] = []
@@ -506,21 +1461,120 @@ def raw_tree_snapshot(project_root: Path, config: dict[str, Any]) -> dict[str, A
         roots.append(project_root / relative.as_posix())
     records: list[str] = []
     total_bytes = 0
-    seen: set[Path] = set()
+    seen: set[str] = set()
+
+    def raw_error(message: str) -> OrchestrationControllerError:
+        return OrchestrationControllerError(
+            "ORCHESTRATION_WORKSPACE_UNSAFE",
+            message,
+            recoverable=True,
+            remediation="Replace links or special files in raw/ and keep the immutable evidence tree bounded.",
+        )
+
+    def visit(path: Path) -> None:
+        nonlocal total_bytes
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise raw_error(f"could not inspect immutable raw evidence: {path}: {exc}") from exc
+        if path_is_link_like(path, metadata):
+            raise raw_error(f"immutable raw evidence contains a symbolic link or junction: {path}")
+        if stat.S_ISDIR(metadata.st_mode):
+            try:
+                children = sorted(path.iterdir(), key=lambda child: child.name)
+            except OSError as exc:
+                raise raw_error(f"could not enumerate immutable raw evidence: {path}: {exc}") from exc
+            for child in children:
+                visit(child)
+            return
+        if not stat.S_ISREG(metadata.st_mode) or int(getattr(metadata, "st_nlink", 1) or 1) != 1:
+            raise raw_error(f"immutable raw evidence is not a singly linked regular file: {path}")
+        relative = relative_workspace_path(project_root, path)
+        if relative in seen:
+            return
+        seen.add(relative)
+        if len(records) >= MAX_RAW_TREE_SNAPSHOT_ENTRIES:
+            raise raw_error(f"immutable raw evidence exceeds {MAX_RAW_TREE_SNAPSHOT_ENTRIES} files")
+        declared_size = int(metadata.st_size)
+        if declared_size > MAX_RAW_TREE_SNAPSHOT_BYTES - total_bytes:
+            raise raw_error(f"immutable raw evidence exceeds {MAX_RAW_TREE_SNAPSHOT_BYTES} bytes")
+        try:
+            digest = file_digest(
+                path,
+                max_bytes=declared_size,
+                containment_root=project_root,
+            )
+        except OrchestrationControllerError as exc:
+            raise raw_error(f"could not fingerprint immutable raw evidence: {relative}: {exc}") from exc
+        if digest is None:
+            raise raw_error(f"immutable raw evidence changed while it was fingerprinted: {relative}")
+        total_bytes += declared_size
+        records.append(f"{relative}\0{declared_size}\0{digest}")
+
     for root in sorted(set(roots), key=lambda path: path.as_posix()):
-        if not root.is_dir():
-            continue
-        for path in sorted((item for item in root.rglob("*") if item.is_file()), key=lambda item: item.as_posix()):
-            resolved = path.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            stat = path.stat()
-            relative = relative_workspace_path(project_root, path)
-            total_bytes += stat.st_size
-            records.append(f"{relative}\0{stat.st_size}\0{stat.st_mtime_ns}")
+        try:
+            relative_root = root.relative_to(project_root)
+        except ValueError as exc:  # pragma: no cover - roots are assembled above
+            raise raw_error(f"immutable raw root escapes the workspace: {root}") from exc
+        current = project_root
+        root_exists = True
+        for part in relative_root.parts:
+            current /= part
+            try:
+                metadata = current.lstat()
+            except FileNotFoundError:
+                root_exists = False
+                break
+            except OSError as exc:
+                raise raw_error(f"could not inspect immutable raw root: {current}: {exc}") from exc
+            if not stat.S_ISDIR(metadata.st_mode) or path_is_link_like(current, metadata):
+                raise raw_error(f"immutable raw root ancestor is not a real directory: {current}")
+        if root_exists:
+            visit(root)
+    records.sort()
     digest = hashlib.sha256("\n".join(records).encode()).hexdigest()
-    return {"file_count": len(records), "total_bytes": total_bytes, "fingerprint": f"sha256:{digest}"}
+    return {
+        "algorithm": "sha256-content-v1",
+        "file_count": len(records),
+        "total_bytes": total_bytes,
+        "fingerprint": f"sha256:{digest}",
+    }
+
+
+def evidence_manifest_digest(project_root: Path) -> str | None:
+    return file_digest(
+        project_root / "sources" / "manifest.jsonl",
+        max_bytes=MAX_MANIFEST_SNAPSHOT_BYTES,
+        containment_root=project_root,
+    )
+
+
+def bind_legacy_immutability_postconditions(project_root: Path, work_order: dict[str, Any]) -> None:
+    """Upgrade pre-0.2.1 pending discovery/review guards before worker replay."""
+    if work_order.get("phase") not in {"discovery", "candidate_review"}:
+        return
+    config = load_config(project_root)
+    changed = False
+    for item in work_order.get("required_postconditions", []):
+        if not isinstance(item, dict):
+            continue
+        check = item.get("check")
+        if check == "raw_tree_unchanged":
+            before = item.get("before")
+            if not isinstance(before, dict) or before.get("algorithm") != "sha256-content-v1":
+                item["before"] = raw_tree_snapshot(project_root, config)
+                changed = True
+        elif check in {"discovery_never_fetches", "selection_does_not_fetch"}:
+            if "manifest_digest_before" not in item:
+                item["manifest_digest_before"] = evidence_manifest_digest(project_root)
+                changed = True
+    if changed:
+        write_json_atomic(
+            work_order_path(project_root, work_order["orchestration_id"], work_order["action_id"]),
+            work_order,
+        )
 
 
 def load_candidates(project_root: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -639,14 +1693,52 @@ def safe_relative_artifact(value: Any) -> str:
     return path.as_posix()
 
 
+def is_parent_orchestration_artifact(value: str) -> bool:
+    parts = tuple(part.casefold().rstrip(" .") for part in PurePosixPath(value.replace("\\", "/")).parts)
+    return len(parts) >= 2 and parts[:2] == ("runs", "orchestrations")
+
+
+def valid_stored_result_shape(document: dict[str, Any], action_id: str) -> bool:
+    expected_fields = {"schema_version", "action_id", "outcome", "summary", "artifacts"}
+    if set(document) != expected_fields:
+        return False
+    if document.get("schema_version") != SCHEMA_VERSION or document.get("action_id") != action_id:
+        return False
+    if document.get("outcome") not in RESULT_OUTCOMES:
+        return False
+    summary = document.get("summary")
+    if (
+        not isinstance(summary, str)
+        or summary != summary.strip()
+        or not summary
+        or len(summary) > MAX_SUMMARY_LENGTH
+    ):
+        return False
+    artifacts = document.get("artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) > MAX_ARTIFACTS:
+        return False
+    try:
+        normalized_artifacts = [safe_relative_artifact(value) for value in artifacts]
+    except OrchestrationControllerError:
+        return False
+    return (
+        artifacts == normalized_artifacts
+        and len(normalized_artifacts) == len(set(normalized_artifacts))
+        and not any(is_parent_orchestration_artifact(value) for value in normalized_artifacts)
+    )
+
+
 def load_result(path: Path, action_id: str, project_root: Path) -> dict[str, Any]:
     try:
-        size = path.stat().st_size
+        path.lstat()
     except OSError as exc:
         raise OrchestrationControllerError("RESULT_UNREADABLE", f"could not read result file: {path}") from exc
-    if size > MAX_RESULT_BYTES:
-        raise OrchestrationControllerError("RESULT_INVALID", f"result exceeds {MAX_RESULT_BYTES} bytes")
-    document = load_json_object(path, error_code="RESULT_INVALID", label="orchestration result")
+    document = load_json_object(
+        path,
+        error_code="RESULT_INVALID",
+        label="orchestration result",
+        max_bytes=MAX_RESULT_BYTES,
+    )
     expected_fields = {"schema_version", "action_id", "outcome", "summary", "artifacts"}
     if set(document) != expected_fields:
         raise OrchestrationControllerError(
@@ -670,6 +1762,11 @@ def load_result(path: Path, action_id: str, project_root: Path) -> dict[str, Any
     normalized_artifacts = [safe_relative_artifact(value) for value in artifacts]
     if len(normalized_artifacts) != len(set(normalized_artifacts)):
         raise OrchestrationControllerError("RESULT_INVALID", "result artifact paths must be unique")
+    if any(is_parent_orchestration_artifact(value) for value in normalized_artifacts):
+        raise OrchestrationControllerError(
+            "RESULT_INVALID",
+            "result artifacts may not reference controller-owned runs/orchestrations state",
+        )
     missing = [value for value in normalized_artifacts if not (project_root / value).exists()]
     if missing:
         raise OrchestrationControllerError(
@@ -990,6 +2087,7 @@ def action_spec(
             {
                 "check": "discovery_never_fetches",
                 "manifest_records_before": int(status.get("sources", {}).get("manifest_records", 0) or 0),
+                "manifest_digest_before": evidence_manifest_digest(project_root),
             },
             {"check": "raw_tree_unchanged", "before": raw_tree_snapshot(project_root, config)},
         ]
@@ -1002,6 +2100,7 @@ def action_spec(
             {
                 "check": "selection_does_not_fetch",
                 "manifest_records_before": int(status.get("sources", {}).get("manifest_records", 0) or 0),
+                "manifest_digest_before": evidence_manifest_digest(project_root),
             },
             {"check": "raw_tree_unchanged", "before": raw_tree_snapshot(project_root, config)},
         ]
@@ -1022,22 +2121,22 @@ def action_spec(
         skill = "research-verify"
         inputs.extend(["wiki/questions", "sources/normalized", "sources/manifest.jsonl"])
         evaluation_root = f"runs/{run_id}/evaluation"
+        verification_paths = [
+            f"{evaluation_root}/citation-verification.json",
+            f"{evaluation_root}/export.json",
+            f"{evaluation_root}/lint.json",
+            f"{evaluation_root}/publication-readiness.json",
+        ]
         postconditions = [
             {
                 "check": "fresh_verification_bundle",
-                "paths": [
-                    f"{evaluation_root}/citation-verification.json",
-                    f"{evaluation_root}/quote-verification.json",
-                    f"{evaluation_root}/coverage-summary.json",
-                    f"{evaluation_root}/lint.json",
-                    f"{evaluation_root}/publication-readiness.json",
-                ],
+                "paths": verification_paths,
+                "before": {
+                    path: file_digest(project_root / path, containment_root=project_root)
+                    for path in verification_paths
+                },
             },
             {"check": "publication_readiness", "expected": "ship"},
-            {
-                "check": "answer_export_written",
-                "path": f"runs/orchestrations/{session['orchestration_id']}/answers.json",
-            },
         ]
     else:  # pragma: no cover - internal guard
         raise OrchestrationControllerError("ORCHESTRATION_STATE_INVALID", f"unknown route: {route}")
@@ -1079,9 +2178,22 @@ def issue_work_order(project_root: Path, session: dict[str, Any], spec: dict[str
             "attempt": 1,
         },
     }
+    static_fingerprint = trusted_static_input_fingerprint(project_root)
+    write_json_atomic(
+        trusted_static_input_path(project_root, session["orchestration_id"], action_id),
+        static_fingerprint,
+    )
     write_json_atomic(work_order_path(project_root, session["orchestration_id"], action_id), work_order)
     session["phase"] = spec["phase"]
     session["pending_action_id"] = action_id
+    session["pending_submission"] = None
+    session["pending_trusted_static_inputs"] = {
+        "action_id": action_id,
+        "fingerprint": static_fingerprint["fingerprint"],
+        "entry_count": static_fingerprint["entry_count"],
+        "total_bytes": static_fingerprint["total_bytes"],
+    }
+    session["recovery"] = default_recovery_state()
     session["action_count"] = action_number
     session["window_action_count"] = int(session.get("window_action_count", 0)) + 1
     session["updated_at"] = timestamp_utc()
@@ -1109,16 +2221,31 @@ def replay_work_order(
     if resume and expires_at is not None and expires_at <= datetime.now(timezone.utc):
         now = datetime.now(timezone.utc)
         duration = int(lease.get("duration_seconds", session["limits"]["action_timeout_seconds"]) or 0)
+        attempt = int(lease.get("attempt", 1) or 1) + 1
         work_order["issued_at"] = format_timestamp(now)
         work_order["lease"] = {
             "duration_seconds": duration,
             "expires_at": format_timestamp(now + timedelta(seconds=duration)),
-            "attempt": int(lease.get("attempt", 1) or 1) + 1,
+            "attempt": attempt,
         }
         write_json_atomic(path, work_order)
+        session["recovery"] = {
+            "state": RECOVERY_RECONCILE,
+            "action_id": action_id,
+            "attempt": attempt,
+            "reason_code": "result_absent_after_interruption",
+            "recorded_at": timestamp_utc(),
+        }
         session["updated_at"] = timestamp_utc()
         write_json_atomic(session_path(project_root, session["orchestration_id"]), session)
-        record_event(project_root, session, "action_reissued", "Reissued expired work order.", action_id=action_id)
+        record_event(
+            project_root,
+            session,
+            "action_reissued",
+            "Reissued expired work order for same-action reconciliation.",
+            action_id=action_id,
+            data={"lease_attempt": attempt, "recovery_mode": "reconcile"},
+        )
     return work_order
 
 
@@ -1172,6 +2299,8 @@ def finish_session(
     session["phase"] = status
     session["verdict"] = status
     session["pending_action_id"] = None
+    if "pending_trusted_static_inputs" in session:
+        session["pending_trusted_static_inputs"] = None
     session["pause_reason"] = reason if status != "complete" else None
     session["updated_at"] = timestamp_utc()
     session["completed_at"] = session["updated_at"]
@@ -1217,6 +2346,9 @@ def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any
             "verdict": None,
             "pause_reason": None,
             "pending_action_id": None,
+            "pending_submission": None,
+            "pending_trusted_static_inputs": None,
+            "recovery": default_recovery_state(),
             "last_completed_action_id": None,
             "active_run_id": None,
             "child_run_ids": [],
@@ -1235,6 +2367,7 @@ def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any
         path.parent.mkdir(parents=True, exist_ok=True)
         (path.parent / WORK_ORDERS_DIR).mkdir(parents=True, exist_ok=True)
         (path.parent / WORK_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+        (path.parent / TRUSTED_INPUTS_DIR).mkdir(parents=True, exist_ok=True)
         write_json_atomic(path, session)
         record_event(project_root, session, "session_started", "Orchestration session created.")
         return session
@@ -1244,12 +2377,24 @@ def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
     orchestration_id = require_safe_id(args.orchestration_id, "orchestration_id")
     with workspace_lock(session_lock_path(project_root, orchestration_id), purpose=f"orchestration {orchestration_id}"):
         session = load_session(project_root, orchestration_id)
+        enforce_control_repair_gate(project_root, orchestration_id)
         if args.agent_id is not None and require_agent_id(args.agent_id) != session["agent_id"]:
             raise OrchestrationControllerError(
                 "ORCHESTRATION_OWNER_MISMATCH",
                 "--agent-id does not own this orchestration session",
                 recoverable=False,
             )
+        pending_submission = session.get("pending_submission")
+        if pending_submission is not None:
+            action_id = require_safe_id(pending_submission.get("action_id"), "action_id")
+            order = load_json_object(
+                work_order_path(project_root, orchestration_id, action_id),
+                error_code="WORK_ORDER_INVALID",
+                label="work order",
+            )
+            verify_runtime_guards(project_root, session, order)
+            session = finalize_pending_submission(project_root, session, order)
+        repair_last_completion_events(project_root, session)
         if session["status"] in TERMINAL_STATUSES:
             return session
         if args.resume:
@@ -1263,7 +2408,15 @@ def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
                 error_code="WORK_ORDER_INVALID",
                 label="work order",
             )
+            legacy_unbound = "pending_trusted_static_inputs" not in session
+            if legacy_unbound:
+                # Only parse the declarative YAML authorization before the
+                # migration snapshot exists. Bind all trusted workspace code
+                # before fresh_workspace_status imports or executes it.
+                verify_provider_policy_unchanged(project_root, session, order)
+                bind_legacy_pending_trusted_inputs(project_root, session, order)
             verify_runtime_guards(project_root, session, order)
+            bind_legacy_immutability_postconditions(project_root, order)
             return replay_work_order(project_root, session, resume=args.resume, retained_order=order)
         if pause_if_limited(project_root, session):
             return session
@@ -1284,6 +2437,125 @@ def selected_candidates_for_scope(
         for candidate in load_candidates(project_root, config)
         if candidate_request_id(candidate) in set(request_ids) and candidate_state(candidate) == "selected"
     ]
+
+
+def strip_generated_timestamps(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: strip_generated_timestamps(child)
+            for key, child in value.items()
+            if key != "generated_at"
+        }
+    if isinstance(value, list):
+        return [strip_generated_timestamps(child) for child in value]
+    return value
+
+
+def citation_results_by_source(citation: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    selected: dict[str, list[dict[str, Any]]] = {}
+    results = citation.get("results") if isinstance(citation.get("results"), list) else []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        source_id = result.get("source_id")
+        if isinstance(source_id, str) and source_id.strip():
+            selected.setdefault(source_id.strip(), []).append(dict(result))
+    return selected
+
+
+def export_with_authoritative_citations(
+    export: dict[str, Any],
+    citation: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(export))
+    by_source = citation_results_by_source(citation)
+    questions = normalized.get("questions") if isinstance(normalized.get("questions"), list) else []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        source_ids = question.get("source_ids") if isinstance(question.get("source_ids"), list) else []
+        question["citation_verification"] = [
+            dict(result)
+            for source_id in source_ids
+            if isinstance(source_id, str)
+            for result in by_source.get(source_id, [])
+        ]
+    return normalized
+
+
+def build_authoritative_verification(
+    project_root: Path,
+    run_id: str,
+) -> dict[str, dict[str, Any]]:
+    """Recompute all publication inputs in memory without trusting or writing worker JSON."""
+    try:
+        config = load_config(project_root)
+        status_module = load_sibling_module("workspace_status")
+        lint_module = load_sibling_module("lint")
+        export_module = load_sibling_module("export_answers")
+        citation_module = load_sibling_module("verify_citations")
+        readiness_module = load_sibling_module("publication_readiness")
+
+        run_state = project_root / "runs" / run_id / "run-state.json"
+        status = status_module.build_status_document(project_root, run_id=run_id if run_state.is_file() else None)
+        lint_report = lint_module.run_checks(project_root, config)
+        citation = citation_module.build_report(
+            project_root,
+            SimpleNamespace(source_id=None, live=False, provider=None),
+        )
+        authoritative_by_source = citation_results_by_source(citation)
+        original_loader = export_module.load_citation_verification_by_source
+
+        def load_authoritative_citations(_root: Path, _warnings: list[str]) -> dict[str, list[dict[str, Any]]]:
+            return authoritative_by_source
+
+        export_module.load_citation_verification_by_source = load_authoritative_citations
+        try:
+            export = export_module.build_export(project_root, None)
+        finally:
+            export_module.load_citation_verification_by_source = original_loader
+        export = export_with_authoritative_citations(export, citation)
+        publication = readiness_module.build_readiness_document(
+            project_root,
+            embedded_inputs={
+                "status": status,
+                "lint": lint_report,
+                "export": export,
+                "citation_verification": citation,
+            },
+        )
+    except OrchestrationControllerError:
+        raise
+    except (Exception, SystemExit) as exc:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_POSTCONDITION_FAILED",
+            f"could not recompute authoritative verification inputs: {exc}",
+            recoverable=True,
+            remediation="Repair the workspace artifacts, regenerate the verification bundle, and retry the action.",
+        ) from exc
+    return {
+        "citation-verification.json": citation,
+        "lint.json": lint_report,
+        "export.json": export,
+        "publication-readiness.json": publication,
+    }
+
+
+def verification_semantic_value(
+    name: str,
+    document: dict[str, Any],
+    citation: dict[str, Any],
+) -> Any:
+    value: Any = document
+    if name == "export.json":
+        value = export_with_authoritative_citations(document, citation)
+    elif name == "publication-readiness.json":
+        value = {
+            key: child
+            for key, child in document.items()
+            if key not in {"generated_at", "workspace_status"}
+        }
+    return strip_generated_timestamps(value)
 
 
 def verify_action_postconditions(
@@ -1378,6 +2650,11 @@ def verify_action_postconditions(
         before_manifest = int(recorded_postcondition("discovery_never_fetches").get("manifest_records_before", 0) or 0)
         current_manifest = int(status.get("sources", {}).get("manifest_records", 0) or 0)
         require(current_manifest == before_manifest, "discovery changed the evidence manifest")
+        before_manifest_digest = recorded_postcondition("discovery_never_fetches").get("manifest_digest_before")
+        require(
+            evidence_manifest_digest(project_root) == before_manifest_digest,
+            "discovery changed existing evidence-manifest content",
+        )
         require_raw_unchanged()
         acquisition = work_order.get("provider_policy", {}).get("acquisition", {})
         enabled = set(acquisition.get("providers", [])) if acquisition.get("enabled") is True else set()
@@ -1397,6 +2674,11 @@ def verify_action_postconditions(
         before_manifest = int(recorded_postcondition("selection_does_not_fetch").get("manifest_records_before", 0) or 0)
         current_manifest = int(status.get("sources", {}).get("manifest_records", 0) or 0)
         require(current_manifest == before_manifest, "candidate review changed the evidence manifest")
+        before_manifest_digest = recorded_postcondition("selection_does_not_fetch").get("manifest_digest_before")
+        require(
+            evidence_manifest_digest(project_root) == before_manifest_digest,
+            "candidate review changed existing evidence-manifest content",
+        )
         require_raw_unchanged()
         require(current == "candidates_ready", "candidate-review child run is not in candidates_ready state")
         selected = selected_candidates_for_scope(project_root, config, request_ids)
@@ -1470,25 +2752,75 @@ def verify_action_postconditions(
 
     if phase == "verification":
         require(current in {"verifying", "complete"}, "verification child run is in an invalid state")
-        readiness_module = load_sibling_module("publication_readiness")
-        bundle = readiness_module.build_bundle(project_root, str(run_id))
-        readiness = bundle["publication_readiness"]
         evaluation_dir = project_root / "runs" / str(run_id) / "evaluation"
-        citation = load_json_object(
-            evaluation_dir / "citation-verification.json",
-            error_code="ORCHESTRATION_POSTCONDITION_FAILED",
-            label="fresh citation verification",
+        expected_relative_paths = [
+            f"runs/{run_id}/evaluation/citation-verification.json",
+            f"runs/{run_id}/evaluation/export.json",
+            f"runs/{run_id}/evaluation/lint.json",
+            f"runs/{run_id}/evaluation/publication-readiness.json",
+        ]
+        bundle_postcondition = recorded_postcondition("fresh_verification_bundle")
+        recorded_paths = bundle_postcondition.get("paths")
+        require(
+            isinstance(recorded_paths, list) and recorded_paths == expected_relative_paths,
+            "verification work order does not name the canonical bundle artifacts",
         )
-        lint = load_json_object(
-            evaluation_dir / "lint.json",
-            error_code="ORCHESTRATION_POSTCONDITION_FAILED",
-            label="fresh lint report",
+        actual_digests = {
+            path: file_digest(project_root / path, containment_root=project_root)
+            for path in expected_relative_paths
+        }
+        missing_bundle = [path for path, digest in actual_digests.items() if digest is None]
+        require(
+            not missing_bundle,
+            "fresh verification bundle is incomplete",
+            {"missing_artifacts": missing_bundle},
         )
-        export = load_json_object(
-            evaluation_dir / "export.json",
-            error_code="ORCHESTRATION_POSTCONDITION_FAILED",
-            label="fresh answer export",
-        )
+        before_digests = bundle_postcondition.get("before")
+        if isinstance(before_digests, dict) and any(value is not None for value in before_digests.values()):
+            require(
+                any(actual_digests.get(path) != before_digests.get(path) for path in expected_relative_paths),
+                "verification bundle was not refreshed after the work order was issued",
+                {"paths": expected_relative_paths},
+            )
+        labels = {
+            "citation-verification.json": "fresh citation verification",
+            "export.json": "fresh answer export",
+            "lint.json": "fresh lint report",
+            "publication-readiness.json": "fresh publication readiness",
+        }
+        worker_documents = {
+            name: load_json_object(
+                evaluation_dir / name,
+                error_code="ORCHESTRATION_POSTCONDITION_FAILED",
+                label=label,
+                max_bytes=MAX_VERIFICATION_ARTIFACT_BYTES,
+                containment_root=project_root,
+            )
+            for name, label in labels.items()
+        }
+        authoritative = build_authoritative_verification(project_root, str(run_id))
+        authoritative_citation = authoritative["citation-verification.json"]
+        for name in labels:
+            worker_semantics = verification_semantic_value(
+                name,
+                worker_documents[name],
+                authoritative_citation,
+            )
+            authoritative_semantics = verification_semantic_value(
+                name,
+                authoritative[name],
+                authoritative_citation,
+            )
+            require(
+                worker_semantics == authoritative_semantics,
+                f"worker verification artifact does not match authoritative recomputation: {name}",
+                {"artifact": f"runs/{run_id}/evaluation/{name}"},
+                "Regenerate the deterministic verification bundle from current workspace artifacts and retry.",
+            )
+        citation = authoritative_citation
+        lint = authoritative["lint.json"]
+        export = authoritative["export.json"]
+        readiness = authoritative["publication-readiness.json"]
         answered_slugs = [
             str(question.get("slug"))
             for question in export.get("questions", [])
@@ -1512,7 +2844,6 @@ def verify_action_postconditions(
                 "counts": {"questions": 0, "grounding_entries": 0, "verified": 0, "failed": 0, "missing_grounding": 0},
                 "overall_result": "verified",
             }
-        write_json_atomic(evaluation_dir / "quote-verification.json", quotes)
         coverage = status.get("coverage") if isinstance(status.get("coverage"), dict) else {}
         coverage_report = {
             "schema_version": SCHEMA_VERSION,
@@ -1520,7 +2851,6 @@ def verify_action_postconditions(
             "network_io_executed": False,
             "coverage": coverage,
         }
-        write_json_atomic(evaluation_dir / "coverage-summary.json", coverage_report)
         citation_counts = citation.get("counts") if isinstance(citation.get("counts"), dict) else {}
         citation_total = int(citation_counts.get("total", 0) or 0)
         require(
@@ -1544,6 +2874,10 @@ def verify_action_postconditions(
             {"verdict": readiness.get("verdict")},
         )
         if apply_effects:
+            for name in labels:
+                write_json_atomic(evaluation_dir / name, authoritative[name])
+            write_json_atomic(evaluation_dir / "quote-verification.json", quotes)
+            write_json_atomic(evaluation_dir / "coverage-summary.json", coverage_report)
             write_json_atomic(answers_path(project_root, session["orchestration_id"]), export)
             if current == "verifying":
                 controller.run_finish(project_root, child_args(run_id, session["agent_id"], final_verdict="complete"))
@@ -1553,20 +2887,193 @@ def verify_action_postconditions(
     raise OrchestrationControllerError("ORCHESTRATION_STATE_INVALID", f"unsupported submitted phase: {phase}")
 
 
+def prepare_submission(
+    project_root: Path,
+    session: dict[str, Any],
+    work_order: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if result["outcome"] == "completed":
+        next_phase, completion_reason = verify_action_postconditions(
+            project_root,
+            session,
+            work_order,
+            apply_effects=False,
+        )
+    elif result["outcome"] == "blocked":
+        next_phase, completion_reason = "blocked_on_sources", result["summary"]
+    else:
+        next_phase, completion_reason = "failed", result["summary"]
+    pending = {
+        "action_id": result["action_id"],
+        "accepted_at": timestamp_utc(),
+        "result": result,
+        "result_digest": result_digest(result),
+        "next_phase": next_phase,
+        "completion_reason": completion_reason,
+    }
+    session["pending_submission"] = pending
+    lease = work_order.get("lease") if isinstance(work_order.get("lease"), dict) else {}
+    session["recovery"] = {
+        "state": RECOVERY_FINALIZING,
+        "action_id": result["action_id"],
+        "attempt": int(lease.get("attempt", 1) or 1),
+        "reason_code": "accepted_result_pending_finalization",
+        "recorded_at": timestamp_utc(),
+    }
+    session["updated_at"] = timestamp_utc()
+    write_json_atomic(session_path(project_root, session["orchestration_id"]), session)
+    return pending
+
+
+def retained_result(
+    project_root: Path,
+    orchestration_id: str,
+    action_id: str,
+) -> dict[str, Any] | None:
+    path = work_result_path(project_root, orchestration_id, action_id)
+    if not path.is_file():
+        return None
+    return load_result(path, action_id, project_root)
+
+
+def ensure_completion_events(
+    project_root: Path,
+    session: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    action_id = result["action_id"]
+    record_event_once(
+        project_root,
+        session,
+        "action_completed",
+        result["summary"],
+        action_id=action_id,
+        data={"artifacts": result["artifacts"], "outcome": result["outcome"]},
+    )
+    if session.get("status") in TERMINAL_STATUSES:
+        reason = session.get("pause_reason") or result["summary"]
+        record_event_once(
+            project_root,
+            session,
+            "session_finished",
+            str(reason),
+            data={"status": session["status"]},
+        )
+
+
+def finalize_pending_submission(
+    project_root: Path,
+    session: dict[str, Any],
+    work_order: dict[str, Any],
+) -> dict[str, Any]:
+    pending = session.get("pending_submission")
+    if not valid_pending_submission(pending) or pending is None:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "parent session does not contain a valid accepted submission",
+            recoverable=False,
+        )
+    action_id = require_safe_id(pending["action_id"], "action_id")
+    result = pending["result"]
+    if session.get("pending_action_id") != action_id or work_order.get("action_id") != action_id:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "accepted submission does not match the pending work order",
+            recoverable=False,
+        )
+    verify_pending_trusted_static_inputs(project_root, session, work_order)
+    existing = retained_result(project_root, session["orchestration_id"], action_id)
+    if existing is not None and existing != result:
+        raise OrchestrationControllerError(
+            "RESULT_CONFLICT",
+            f"action {action_id} already has a different retained result",
+            recoverable=False,
+        )
+    if existing is None:
+        write_json_atomic(work_result_path(project_root, session["orchestration_id"], action_id), result)
+
+    expected_phase = pending.get("next_phase")
+    completion_reason = pending.get("completion_reason")
+    if result["outcome"] == "completed":
+        verified_phase, verified_reason = verify_action_postconditions(
+            project_root,
+            session,
+            work_order,
+            apply_effects=False,
+        )
+        if verified_phase != expected_phase:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_STATE_INVALID",
+                "accepted submission no longer verifies to its prepared next phase",
+                recoverable=True,
+            )
+        finalized_phase, finalized_reason = verify_action_postconditions(
+            project_root,
+            session,
+            work_order,
+            apply_effects=True,
+        )
+        if finalized_phase != expected_phase:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_STATE_INVALID",
+                "action finalization changed the verified next phase",
+                recoverable=True,
+            )
+        completion_reason = finalized_reason or verified_reason or completion_reason
+    elif result["outcome"] == "blocked":
+        finish_active_child(project_root, session, "blocked_on_sources")
+    else:
+        finish_active_child(project_root, session, "failed")
+        if not any(record.get("action_id") == action_id for record in session["failure_records"]):
+            session["failure_records"].append(
+                {"recorded_at": timestamp_utc(), "action_id": action_id, "summary": result["summary"]}
+            )
+
+    if session.get("last_completed_action_id") != action_id:
+        session["completed_action_count"] = int(session["completed_action_count"]) + 1
+    session["pending_action_id"] = None
+    session["pending_submission"] = None
+    if "pending_trusted_static_inputs" in session:
+        session["pending_trusted_static_inputs"] = None
+    session["last_completed_action_id"] = action_id
+    session["recovery"] = default_recovery_state()
+    session["updated_at"] = timestamp_utc()
+    if expected_phase in TERMINAL_STATUSES:
+        session["status"] = expected_phase
+        session["phase"] = expected_phase
+        session["verdict"] = expected_phase
+        session["pause_reason"] = None if expected_phase == "complete" else str(completion_reason or result["summary"])
+        session["completed_at"] = session["updated_at"]
+    else:
+        session["status"] = ACTIVE_STATUS
+        session["phase"] = expected_phase or "planning"
+        session["verdict"] = None
+        session["pause_reason"] = None
+    write_json_atomic(session_path(project_root, session["orchestration_id"]), session)
+    ensure_completion_events(project_root, session, result)
+    return session
+
+
+def repair_last_completion_events(project_root: Path, session: dict[str, Any]) -> None:
+    action_id = session.get("last_completed_action_id")
+    if not isinstance(action_id, str) or not action_id:
+        return
+    result = retained_result(project_root, session["orchestration_id"], action_id)
+    if result is not None:
+        ensure_completion_events(project_root, session, result)
+
+
 def submit_result(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
     orchestration_id = require_safe_id(args.orchestration_id, "orchestration_id")
     action_id = require_safe_id(args.action_id, "action_id")
     result = load_result(Path(args.result_file).expanduser().resolve(), action_id, project_root)
     with workspace_lock(session_lock_path(project_root, orchestration_id), purpose=f"orchestration {orchestration_id}"):
         session = load_session(project_root, orchestration_id)
+        enforce_control_repair_gate(project_root, orchestration_id)
         if args.agent_id is not None and require_agent_id(args.agent_id) != session["agent_id"]:
             raise OrchestrationControllerError("ORCHESTRATION_OWNER_MISMATCH", "--agent-id does not own this session")
-        retained_path = work_result_path(project_root, orchestration_id, action_id)
-        retained = (
-            load_json_object(retained_path, error_code="RESULT_INVALID", label="retained result")
-            if retained_path.is_file()
-            else None
-        )
+        retained = retained_result(project_root, orchestration_id, action_id)
         if retained is not None and retained != result:
             raise OrchestrationControllerError(
                 "RESULT_CONFLICT",
@@ -1579,6 +3086,15 @@ def submit_result(project_root: Path, args: argparse.Namespace) -> dict[str, Any
             label="work order",
         )
         verify_runtime_guards(project_root, session, order)
+        pending_submission = session.get("pending_submission")
+        if pending_submission is not None:
+            if pending_submission.get("action_id") != action_id or pending_submission.get("result") != result:
+                raise OrchestrationControllerError(
+                    "RESULT_CONFLICT",
+                    f"action {action_id} already has a different accepted submission",
+                    recoverable=False,
+                )
+            return finalize_pending_submission(project_root, session, order)
         if retained is not None and session.get("pending_action_id") != action_id:
             if (
                 session.get("last_completed_action_id") != action_id
@@ -1589,6 +3105,7 @@ def submit_result(project_root: Path, args: argparse.Namespace) -> dict[str, Any
                     f"retained result {action_id} is not proven completed by the parent session",
                     recoverable=False,
                 )
+            ensure_completion_events(project_root, session, retained)
             return session
         if session.get("pending_action_id") != action_id:
             raise OrchestrationControllerError(
@@ -1596,65 +3113,8 @@ def submit_result(project_root: Path, args: argparse.Namespace) -> dict[str, Any
                 f"action {action_id} is not the pending action",
                 details={"pending_action_id": session.get("pending_action_id")},
             )
-        if result["outcome"] == "failed":
-            if retained is None:
-                write_json_atomic(retained_path, result)
-            session["failure_records"].append(
-                {"recorded_at": timestamp_utc(), "action_id": action_id, "summary": result["summary"]}
-            )
-            finish_active_child(project_root, session, "failed")
-            session["last_completed_action_id"] = action_id
-            session["completed_action_count"] = int(session["completed_action_count"]) + 1
-            return finish_session(project_root, session, "failed", result["summary"])
-        if result["outcome"] == "blocked":
-            if retained is None:
-                write_json_atomic(retained_path, result)
-            finish_active_child(project_root, session, "blocked_on_sources")
-            session["last_completed_action_id"] = action_id
-            session["completed_action_count"] = int(session["completed_action_count"]) + 1
-            return finish_session(project_root, session, "blocked_on_sources", result["summary"])
-
-        next_phase, completion_reason = verify_action_postconditions(
-            project_root,
-            session,
-            order,
-            apply_effects=False,
-        )
-        # Retain the accepted result before mutating child-run/session state.
-        # A crash after this point is recoverable: the identical resubmission
-        # replays idempotent finalization from the retained result.
-        if retained is None:
-            write_json_atomic(retained_path, result)
-        finalized_phase, finalized_reason = verify_action_postconditions(
-            project_root,
-            session,
-            order,
-            apply_effects=True,
-        )
-        if finalized_phase != next_phase:
-            raise OrchestrationControllerError(
-                "ORCHESTRATION_STATE_INVALID",
-                "action finalization changed the verified next phase",
-                recoverable=True,
-            )
-        completion_reason = finalized_reason or completion_reason
-        session["pending_action_id"] = None
-        session["last_completed_action_id"] = action_id
-        session["completed_action_count"] = int(session["completed_action_count"]) + 1
-        session["phase"] = next_phase or "planning"
-        session["updated_at"] = timestamp_utc()
-        write_json_atomic(session_path(project_root, orchestration_id), session)
-        record_event(
-            project_root,
-            session,
-            "action_completed",
-            result["summary"],
-            action_id=action_id,
-            data={"artifacts": result["artifacts"]},
-        )
-        if next_phase == "complete":
-            return finish_session(project_root, session, "complete", completion_reason or "Orchestration complete.")
-        return session
+        prepare_submission(project_root, session, order, result)
+        return finalize_pending_submission(project_root, session, order)
 
 
 def select_session(project_root: Path, orchestration_id: str | None) -> dict[str, Any]:

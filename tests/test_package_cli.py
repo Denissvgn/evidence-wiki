@@ -93,6 +93,13 @@ class PackageCliTests(unittest.TestCase):
         )
         required_assets = payload["required_asset_manifest"]
         self.assertIn("workspace-template/AGENTS.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/orchestration.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/orchestrator-handoff.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/run-controller.md", required_assets["starter"])
+        self.assertIn("workspace-template/skills/research-run.md", required_assets["starter"])
+        self.assertIn("workspace-template/skills/research-discover.md", required_assets["starter"])
+        self.assertIn("workspace-template/skills/research-acquire.md", required_assets["starter"])
+        self.assertIn("workspace-template/skills/research-verify.md", required_assets["starter"])
         self.assertIn(
             "domain-packs/standards-compliance/research.overlay.yml",
             required_assets["domain_packs"],
@@ -109,6 +116,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual("1.0", payload["artifact_schemas"]["mcp_server"])
         self.assertEqual("1.0", payload["artifact_schemas"]["question_resolve"])
         self.assertEqual("1.0", payload["artifact_schemas"]["run_state"])
+        self.assertEqual("1.0", payload["artifact_schemas"]["orchestration_attempt"])
         self.assertEqual("1.0", payload["artifact_schemas"]["coverage_manifest"])
         self.assertEqual("1.0", payload["artifact_schemas"]["publication_readiness"])
         self.assertEqual("1.0", payload["artifact_schemas"]["error_envelope"])

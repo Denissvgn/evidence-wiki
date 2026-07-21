@@ -32,6 +32,13 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/orchestration_controller.py",
     "scripts/smoke_validate_workspace.py",
     "scripts/workspace_status.py",
+    "docs/orchestration.md",
+    "docs/orchestrator-handoff.md",
+    "docs/run-controller.md",
+    "skills/research-acquire.md",
+    "skills/research-discover.md",
+    "skills/research-run.md",
+    "skills/research-verify.md",
 )
 REQUIRED_DOMAIN_PACKS = (
     "general-science",

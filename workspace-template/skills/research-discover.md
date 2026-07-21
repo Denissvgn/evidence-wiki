@@ -23,6 +23,10 @@ Inputs:
 
 ## Operating Rules
 
+- When executing a managed work order, never invoke `evidence-wiki orchestrate`
+  or write below `runs/orchestrations/`. Check the order's postconditions before
+  discovering or selecting again; report already-materialized candidates as
+  `completed` and do not duplicate provider requests.
 - Read `research.yml` before running anything. Discovery is **disabled by default**: when `integrations.discovery.enabled` is absent or false, every provider-backed command refuses with `DISCOVERY_DISABLED` before any network I/O. `enabled: true` requires a non-empty concrete provider allow-list. Report the inert state and stop; do not work around the gate.
 - Treat `arxiv`, `openalex`, `github`, `search`, `standards`, and scoped `standards:*` values as provider permissions. `legal`, `authors`, and `companions` are strategies, not network authorization: legal execution requires `search`, author publication expansion requires `openalex`, and companion GitHub/search phases run only when those providers are allowed. Legacy strategy values remain readable for one compatibility release but never enable transport.
 - Discovery proposes; it never fetches. A candidate is not evidence until `research-acquire` delivers a *selected* candidate into `raw/` with a provenance sidecar.

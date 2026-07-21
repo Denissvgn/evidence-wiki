@@ -751,6 +751,136 @@ summary: Curation status fixture.
             self.assertEqual(newest_active, document["run_controller"]["run_id"])
             self.assertFalse(document["run_controller"]["terminal"])
 
+    def test_orchestration_summary_exposes_only_bounded_recovery_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir)
+            summary = STATUS.summarize_orchestration_session(
+                target,
+                {
+                    "orchestration_id": "orch-recovery",
+                    "status": "active",
+                    "phase": "research",
+                    "verdict": None,
+                    "pause_reason": None,
+                    "pending_action_id": "action-0004",
+                    "pending_submission": {
+                        "action_id": "action-0004",
+                        "result": {"summary": "private retained worker result"},
+                    },
+                    "recovery": {
+                        "state": "finalizing_submission",
+                        "action_id": "action-0004",
+                        "attempt": 2,
+                        "reason_code": "accepted_result_pending_finalization",
+                        "recorded_at": "2026-07-21T10:00:00Z",
+                    },
+                    "active_run_id": "run-orch-recovery-001",
+                    "child_run_ids": ["run-orch-recovery-001"],
+                    "action_count": 4,
+                    "completed_action_count": 3,
+                    "started_at": "2026-07-21T09:00:00Z",
+                    "updated_at": "2026-07-21T10:00:00Z",
+                    "completed_at": None,
+                },
+                selection="newest_active",
+            )
+
+        self.assertEqual("action-0004", summary["pending_submission_action_id"])
+        self.assertEqual(
+            {
+                "state": "finalizing_submission",
+                "action_id": "action-0004",
+                "attempt": 2,
+                "reason_code": "accepted_result_pending_finalization",
+                "recorded_at": "2026-07-21T10:00:00Z",
+            },
+            summary["recovery"],
+        )
+        self.assertNotIn("private retained worker result", json.dumps(summary))
+        self.assertEqual(
+            {"count": 0, "invalid_records": 0, "truncated": False, "latest": None},
+            summary["attempts"],
+        )
+        self.assertEqual(
+            {"present": False, "repair_required": False, "invalid": False},
+            summary["control_repair"],
+        )
+
+    def test_orchestration_summary_exposes_only_latest_safe_attempt_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir)
+            attempts = target / "runs" / "orchestrations" / "orch-attempts" / "attempts"
+            attempts.mkdir(parents=True)
+            base = {
+                "schema_version": "1.0",
+                "artifact_type": "orchestration_attempt",
+                "orchestration_id": "orch-attempts",
+                "action_id": "action-0001",
+                "lease_attempt": 1,
+                "runner": "codex",
+                "phase": "research",
+                "run_id": "run-1",
+                "started_at": "2026-07-21T10:00:00Z",
+                "work_order_identity": "sha256:" + "a" * 64,
+                "result_digest": None,
+                "error_code": None,
+            }
+            for attempt_id, updated_at, status in (
+                ("attempt-one", "2026-07-21T10:01:00Z", "runner_failed"),
+                ("attempt-two", "2026-07-21T10:02:00Z", "submitted"),
+            ):
+                document = {
+                    **base,
+                    "attempt_id": attempt_id,
+                    "updated_at": updated_at,
+                    "status": status,
+                    "result_digest": "sha256:" + "b" * 64 if status == "submitted" else None,
+                    "error_code": "RUNNER_FAILED" if status == "runner_failed" else None,
+                }
+                (attempts / f"{attempt_id}.json").write_text(json.dumps(document), encoding="utf-8")
+            (attempts / "invalid.json").write_text("not json", encoding="utf-8")
+            repair_guards = target / "runs" / "orchestration-guards"
+            repair_guards.mkdir(parents=True)
+            (repair_guards / "orch-attempts.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "artifact_type": "orchestration_control_repair",
+                        "orchestration_id": "orch-attempts",
+                        "status": "required",
+                        "reason_code": "CONTROL_ARTIFACT_TAMPERED",
+                        "detected_at": "2026-07-21T10:03:00Z",
+                        "acknowledged_at": None,
+                        "attempt_ids": ["attempt-two"],
+                        "expected_control_fingerprint": "sha256:" + "c" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = STATUS.summarize_orchestration_session(
+                target,
+                {
+                    "orchestration_id": "orch-attempts",
+                    "status": "active",
+                    "phase": "research",
+                },
+                selection="newest_active",
+            )
+
+        self.assertEqual(2, summary["attempts"]["count"])
+        self.assertEqual(1, summary["attempts"]["invalid_records"])
+        self.assertFalse(summary["attempts"]["truncated"])
+        self.assertEqual("attempt-two", summary["attempts"]["latest"]["attempt_id"])
+        self.assertEqual("submitted", summary["attempts"]["latest"]["status"])
+        serialized = json.dumps(summary["attempts"])
+        self.assertNotIn("work_order_identity", serialized)
+        self.assertNotIn("result_digest", serialized)
+        self.assertTrue(summary["control_repair"]["present"])
+        self.assertTrue(summary["control_repair"]["repair_required"])
+        self.assertEqual(["attempt-two"], summary["control_repair"]["attempt_ids"])
+        self.assertNotIn("expected_control_fingerprint", json.dumps(summary["control_repair"]))
+
     def test_active_run_reports_stale_after_liveness_threshold(self):
         stale_at = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
         with tempfile.TemporaryDirectory() as tmpdir:

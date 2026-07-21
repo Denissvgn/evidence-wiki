@@ -282,6 +282,7 @@ def _contract_payload() -> dict:
                 "orchestration_session": orchestration.ORCHESTRATION_SESSION_SCHEMA_VERSION,
                 "orchestration_work_order": orchestration.ORCHESTRATION_WORK_ORDER_SCHEMA_VERSION,
                 "orchestration_result": orchestration.ORCHESTRATION_RESULT_SCHEMA_VERSION,
+                "orchestration_attempt": orchestration.ORCHESTRATION_ATTEMPT_SCHEMA_VERSION,
                 "run_report": run_report_module.SCHEMA_VERSION,
                 "coverage_manifest": coverage_manifest_module.SCHEMA_VERSION,
                 "publication_readiness": publication_readiness_module.SCHEMA_VERSION,

@@ -19,14 +19,84 @@ path—not a prerequisite for a provider-enabled orchestration that starts with 
 empty `raw/` directory.
 
 The durable parent protocol publishes `orchestration_session`,
-`orchestration_work_order`, and `orchestration_result` schema version `1.0`
-through `evidence-wiki contract`. Work orders contain only stable IDs, a phase
+`orchestration_work_order`, `orchestration_result`, and
+`orchestration_attempt` schema version `1.0` through `evidence-wiki contract`.
+Work orders contain only stable IDs, a phase
 and workspace skill, one child `run_id`, bounded scope and budgets, the effective
 provider policy, workspace-relative inputs, structured postconditions, and a
 lease. Results contain exactly `schema_version`, `action_id`, `outcome`,
 `summary`, and workspace-relative `artifacts`. See
 [orchestration.md](orchestration.md) for persistence, idempotency, recovery, and
 runner safety details.
+
+The parent keeps canonical `session.json`, `events.jsonl`, `work-orders/`,
+`work-results/`, controller-owned `trusted-inputs/` and `answers.json`, bounded
+host `attempts/`, transient private `.host-results/`, never-submittable
+`quarantine/`, and a private managed-host lock below
+`runs/orchestrations/<orchestration_id>/`. The durable repair anchor is stored
+separately at `runs/orchestration-guards/<orchestration_id>.json`, so parent-tree
+replacement cannot erase the gate. Attempt records use the
+published `orchestration_attempt` version 1.0 schema and contain safe IDs,
+phase, runner, timestamps, status, hashes, and an error code; they never contain
+prompts, transcripts, diagnostics, credentials, or absolute paths. Quarantine
+is conditional: the host creates it only when a schema-valid worker result
+exists before tripwire-protected control drift is detected.
+
+The bounded semantic baseline is named the **tripwire-protected controls**. It
+covers the workspace contract and instructions (`research.yml`,
+`workspace-system.yml`, `AGENTS.md`, `CLAUDE.md`, `README.md`, and `.gitignore`),
+`scripts/`, `skills/`, `docs/`, and the current parent-session tree. The runner
+sandbox separately keeps `.git/`, `.codex/`, `.claude/`, `.agents/`, `.venv/`,
+`venv/`, and `runs/orchestration-guards/` as preventive-only read-only roots.
+Those roots remain non-writable, but the host does not recursively content-hash
+them into the bounded tripwire. The repair guard is therefore both host-owned
+and outside the parent tree whose expected fingerprint it retains.
+
+Managed Codex execution requires Codex CLI 0.138 or newer so EvidenceWiki can
+select its named `evidence_wiki_worker` custom permission profile. Managed
+Claude execution is unavailable on native Windows; use macOS, Linux, WSL2, or a
+container instead. Claude additionally requires `bubblewrap` and `socat` on
+Linux/WSL2, or `sandbox-exec` and `touch` on macOS. The package host checks isolation before a worker launches
+and returns `RUNNER_ISOLATION_UNAVAILABLE` if it cannot keep
+`runs/orchestrations/<orchestration_id>/` host-owned. Direct protocol hosts must
+provide the equivalent boundary themselves. Workers must not invoke
+`evidence-wiki orchestrate` or write parent session, event, work-order,
+work-result, or answer-export files.
+
+Workers must not start daemons, hooks, background jobs, or detached
+subprocesses; every process started for one work order must finish within that
+action. The managed host cleans up the runner's initial process group, but that
+cleanup is not containment for hostile processes that deliberately escape or
+detach. An operator-controlled container or equivalent lifecycle boundary is
+required when a deployment will execute untrusted process trees.
+
+One package-managed host owns a parent session for its complete run or resume
+window. A concurrent managed driver exits with
+`ORCHESTRATION_ALREADY_RUNNING` before a worker starts. An external protocol
+host must similarly serialize its driver and must not interleave `next` or
+`submit` with a managed host driving the same session; read-only status polling
+is safe.
+
+After an interruption, recovery follows this exact order: accepted canonical
+result; clean validated host-staged result; replay the same persisted action.
+Only the last checkpoint starts a fresh worker. The worker checks recorded postconditions before new
+mutations and reports already-materialized artifacts instead of duplicating
+them; the controller still verifies those artifacts. No recovery path requires a human-authored result document. A tripwire-protected control failure
+quarantines a schema-valid unsubmitted result when one exists and leaves changed
+paths in place for inspection—there is no automatic restore or rollback. The
+host records the durable repair requirement in
+`runs/orchestration-guards/<orchestration_id>.json`. Managed
+resume is gated until the operator restores the parent state and passes
+`--acknowledge-control-repair`; direct controller `next` and `submit` calls are
+gated independently while that marker remains required.
+
+Each work order has an absolute lease. Before a fresh worker starts, the host
+caps its timeout to the remaining lease time as well as the configured action,
+budget, and lease-duration limits. `ORCHESTRATION_LEASE_INVALID` rejects a
+malformed expiry, `ORCHESTRATION_LEASE_EXPIRED` rejects an expired lease before
+launch, and `ORCHESTRATION_LEASE_ACTIVE` refuses to overlap a retained
+`running` attempt for the same lease attempt. After expiry, managed resume asks
+the controller to increment the lease attempt and replay the same action ID.
 
 `outcome` describes execution of the work order, not the child run's readiness
 verdict. When a research work order creates source requests and correctly ends
@@ -86,8 +156,8 @@ Output is JSON:
 {
   "schema_version": "1.0",
   "package": "evidence-wiki",
-  "package_version": "0.2.0",
-  "starter_version": "0.5.0",
+  "package_version": "0.2.1",
+  "starter_version": "0.5.1",
   "starter_schema_version": "0.1",
   "compatible_research_yml_contract": "0.1",
   "profile_schema_versions": ["0.1"],
@@ -111,6 +181,7 @@ Output is JSON:
     "orchestration_session": "1.0",
     "orchestration_work_order": "1.0",
     "orchestration_result": "1.0",
+    "orchestration_attempt": "1.0",
     "mcp_server": "1.0",
     "error_envelope": "1.0"
   },
@@ -210,7 +281,7 @@ errors that prevent the report from being built.
 | `intake_questions.py` | `python3 scripts/intake_questions.py --format json`, or any `--dry-run` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `HANDOFF_SIGNATURE_INVALID`, `INTAKE_FIELD_TOO_LONG`, `INTAKE_TOTAL_CAP_EXCEEDED`, `INTAKE_RATE_LIMITED`, `WORKSPACE_UNREADABLE` |
 | `lint.py` | `python3 scripts/lint.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `WORKSPACE_UNREADABLE` |
 | `normalize_sources.py` | `python3 scripts/normalize_sources.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `SOURCE_UNKNOWN`, `WORKSPACE_UNREADABLE` |
-| `orchestration_controller.py` | `python3 scripts/orchestration_controller.py start\|next\|submit\|status --format json` | `CONFIG_MISSING`, `CONFIG_INVALID`, `ORCHESTRATION_ID_INVALID`, `ACTION_ID_INVALID`, `AGENT_ID_INVALID`, `ORCHESTRATION_EXISTS`, `ORCHESTRATION_UNKNOWN`, `ORCHESTRATION_STATE_INVALID`, `ORCHESTRATION_EVENTS_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`, `ORCHESTRATION_WRITE_FAILED`, `ORCHESTRATION_WORKSPACE_UNSAFE`, `ORCHESTRATION_PROVIDER_POLICY_CHANGED`, `ACTION_NOT_PENDING`, `RESULT_UNREADABLE`, `RESULT_INVALID`, `RESULT_CONFLICT`, `ORCHESTRATION_POSTCONDITION_FAILED`, `WORK_ORDER_INVALID`, `CANDIDATE_STORE_INVALID`, `SOURCE_REQUESTS_INVALID`, `WORKSPACE_UNREADABLE` |
+| `orchestration_controller.py` | `python3 scripts/orchestration_controller.py start\|next\|submit\|status --format json` | `CONFIG_MISSING`, `CONFIG_INVALID`, `ORCHESTRATION_ID_INVALID`, `ACTION_ID_INVALID`, `AGENT_ID_INVALID`, `ORCHESTRATION_EXISTS`, `ORCHESTRATION_UNKNOWN`, `ORCHESTRATION_STATE_INVALID`, `ORCHESTRATION_EVENTS_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`, `ORCHESTRATION_WRITE_FAILED`, `ORCHESTRATION_WORKSPACE_UNSAFE`, `ORCHESTRATION_PROVIDER_POLICY_CHANGED`, `ORCHESTRATION_CONTROL_REPAIR_REQUIRED`, `ORCHESTRATION_TRUSTED_INPUT_UNSAFE`, `ORCHESTRATION_TRUSTED_INPUT_CHANGED`, `ORCHESTRATION_LEGACY_ACTION_UNBOUND`, `ACTION_NOT_PENDING`, `RESULT_UNREADABLE`, `RESULT_INVALID`, `RESULT_CONFLICT`, `ORCHESTRATION_POSTCONDITION_FAILED`, `WORK_ORDER_INVALID`, `CANDIDATE_STORE_INVALID`, `SOURCE_REQUESTS_INVALID`, `WORKSPACE_UNREADABLE` |
 | `query_index.py` | `python3 scripts/query_index.py QUERY --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `QUERY_MISSING`, `WORKSPACE_UNREADABLE` |
 | `question_claim.py` | `python3 scripts/question_claim.py claim --slug SLUG --agent-id AGENT --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `CLAIM_NOT_STALE`, `STEAL_THRESHOLD_REQUIRED`, `STEAL_FLAG_REQUIRED`, `STEAL_NOT_APPLICABLE`, `STATUS_NOT_CLAIMABLE`, `STATUS_NOT_RELEASABLE`, `SLUG_INVALID`, `SLUG_UNKNOWN`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
 | `question_resolve.py` | `python3 scripts/question_resolve.py answer\|block\|defer\|reject\|reopen --slug SLUG --agent-id AGENT ... --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `STATUS_NOT_RESOLVABLE`, `STATUS_NOT_REOPENABLE`, `SOURCE_NOT_NORMALIZED`, `QUESTION_NOT_CLAIMED`, `ANSWER_SOURCE_REQUIRED`, `COVERAGE_REQUIRED`, `COVERAGE_BLOCKED`, `COVERAGE_MANIFEST_INVALID`, `ANSWER_PAGE_INVALID`, `ANSWER_PAGE_MISSING`, `SOURCE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_LINKED`, `RESOLUTION_REASON_INVALID`, `VALUE_INVALID`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
@@ -223,6 +294,22 @@ errors that prevent the report from being built.
 | `source_requests.py` | `python3 scripts/source_requests.py list --format json` or `python3 scripts/source_requests.py plan-fetch --request-id ID --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_INVALID`, `QUESTION_UNKNOWN`, `REQUEST_UNKNOWN`, `WORKSPACE_UNREADABLE` |
 | `verify_citations.py` | `python3 scripts/verify_citations.py --format json`, optionally `--live --provider arxiv\|openalex` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `VALUE_INVALID`, `ACQUISITION_DISABLED`, `ACQUISITION_PROVIDER_DISABLED`, `ACQUISITION_NETWORK_ERROR`, `ACQUISITION_RESPONSE_INVALID`, `WORKSPACE_UNREADABLE` |
 | `workspace_status.py` | `python3 scripts/workspace_status.py --format json`, `--check-complete --format json`, or `--run-id RUN_ID --format json` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `RUN_ID_INVALID`, `RUN_UNKNOWN`, `RUN_STATE_INVALID`, `WORKSPACE_UNREADABLE` |
+
+Managed runner host failures occur before the workspace controller can accept a
+result:
+
+| Code | Meaning | Typical remediation |
+|------|---------|---------------------|
+| `RUNNER_ISOLATION_UNAVAILABLE` | The selected runner or platform cannot enforce the required permission profile. | For Codex, install Codex CLI 0.138 or newer. For Claude, install `bubblewrap` and `socat` on Linux/WSL2 or use the built-in `sandbox-exec` and `touch` on macOS. Do not use managed Claude on native Windows; use WSL2, a container, or an external protocol host with equivalent isolation. No worker was started. |
+| `CONTROL_ARTIFACT_UNSAFE` | The host cannot construct the bounded snapshot of tripwire-protected controls because a tripwire root is too large or contains a link or special file. | Inspect the named workspace-relative path, restore a bounded regular-file tree, and resume the same action. Preventive-only read-only roots are sandbox controls, not recursively hashed tripwire roots. |
+| `CONTROL_ARTIFACT_TAMPERED` | A worker changed tripwire-protected path membership, file type, mode, or content. Timestamp-only drift is not included. | Inspect the exact workspace-relative changes and any quarantined valid result. No result was submitted and no file was automatically restored or rolled back. Restore the issued control state, then resume with `--acknowledge-control-repair`; the controller still checks its trusted-input fingerprint. Start a new session for intentional static-control changes. |
+| `CONTROL_REPAIR_REQUIRED` | A prior host attempt detected control drift and managed resume is paused before any controller or worker command. | Inspect the retained attempt and any quarantine, restore the issued state, then rerun `orchestrate resume --acknowledge-control-repair`. The flag acknowledges inspection; it does not accept quarantine or bypass fingerprints. |
+| `CONTROL_REPAIR_MISMATCH` | The tripwire-protected controls do not match `expected_control_fingerprint` in `runs/orchestration-guards/<orchestration_id>.json`. | Restore the reported control files exactly and retry acknowledgement, or start a new session for an intentional change. No acknowledgement was recorded. |
+| `CONTROL_REPAIR_BASELINE_MISSING` | A retained `control_tampered` attempt has no durable pre-action guard fingerprint, so repair cannot be verified. | Preserve the affected session for inspection and start a new orchestration session from reviewed workspace state. Do not fabricate or infer a baseline. |
+| `ORCHESTRATION_LEASE_INVALID` | The pending work order's absolute lease expiry is malformed. | Inspect or restore the controller-owned work order, then resume the same action. No worker was launched. |
+| `ORCHESTRATION_LEASE_EXPIRED` | The pending work-order lease expired before a fresh worker could launch. | Resume the session so the controller renews the lease attempt for the same action ID. |
+| `ORCHESTRATION_LEASE_ACTIVE` | A retained `running` host attempt may still own the same current lease attempt. | Wait for the absolute lease expiry, then resume so the controller can renew that same action. Do not launch an overlapping worker. |
+| `ORCHESTRATION_ALREADY_RUNNING` | Another package-managed host holds the session-scoped driver lock. | Wait for that host to finish or stop it before resuming. Do not run an external protocol driver concurrently; no worker was launched by the refused host. |
 
 Stable error codes:
 
@@ -253,6 +340,7 @@ Stable error codes:
 | `ORCHESTRATION_OWNER_MISMATCH` | A command supplied a different agent id from the session owner. | Retry with the owning `agent_id` or start a separately owned session. |
 | `ORCHESTRATION_WORKSPACE_UNSAFE` | Workspace health or a HIGH validation finding makes the next action unsafe. | Resolve the reported health or validation findings, then request the same next action again. |
 | `ORCHESTRATION_PROVIDER_POLICY_CHANGED` | The retained session's explicit provider authority no longer matches `research.yml`. | Restore the reviewed provider policy or start a new parent session for the changed policy. |
+| `ORCHESTRATION_CONTROL_REPAIR_REQUIRED` | The workspace controller found a required `runs/orchestration-guards/<orchestration_id>.json` marker before `next` or `submit`. | Restore the issued state and use managed `orchestrate resume --acknowledge-control-repair`; direct protocol submission stays fail-closed until the marker is acknowledged. |
 | `ACTION_NOT_PENDING` | `submit` named an action other than the persisted pending action. | Call `next` and submit the returned action id. |
 | `RESULT_INVALID` | A work result violates the version 1.0 schema or safe-path rules. | Return only action id, outcome, bounded summary, and workspace-relative artifact paths. |
 | `RESULT_CONFLICT` | A completed action already retains a different result. | Treat the accepted result as immutable; do not overwrite it. |
@@ -533,6 +621,16 @@ or the exploratory `discovery_run_id`. Candidates are proposals, not evidence:
 they become evidence only when a candidate selected for a source request
 (`selected_for_request_id`) is fetched into `raw/` with a provenance sidecar
 through the delivery and acquisition contracts above.
+
+For parent-managed discovery and candidate review, the work order records a
+bounded SHA-256 content fingerprint of every configured raw root (at most
+10,000 files and 2 GiB) and the exact digest of the evidence manifest (at most
+32 MiB). Submission recomputes both, so matching record counts, sizes, or
+timestamps cannot conceal a rewrite. Discovery must add request-scoped records
+to the exact configured candidate store; review must select a scoped candidate
+with an enabled acquisition route. Candidate records and their audit trail may
+change in these phases, but `raw/` and existing `sources/manifest.jsonl`
+content must remain unchanged until a distinct acquisition work order.
 
 Autonomous source delivery must close the candidate lifecycle before any fetch:
 
@@ -851,7 +949,7 @@ Between steps 4 and 5, the research agent works the backlog unattended following
 
 A loop implementation needs only `workspace_status.py` output to decide continue/stop.
 
-**Run reports** (`scripts/run_report.py`): the agent captures a baseline at run start (`run_report.py baseline --output baseline.json`) and finishes with `run_report.py --baseline baseline.json --format json`. For controller-managed runs, `run_report.py --run-id RUN_ID --format json` loads the baseline path from `runs/<run_id>/run-state.json` when `--baseline` is omitted and includes the run id, state transitions, candidate counts, coverage counts, budget state, and final verdict in a top-level `run_controller` block. The baseline artifact includes the full `question_status.py --format json` snapshot, currently open source requests, current normalized source IDs with `normalized_at`, and a generated timestamp. The report (also written to `docs/run-reports/run-<UTC timestamp>.md`) carries backlog counts before/after, every question touched with its status transition, source requests opened/fulfilled during the window, normalized sources with `normalized_at >= baseline.generated_at`, and the current lint summary. Older normalized records without `normalized_at` are reported separately as `sources_normalized_legacy_date_match` with a warning because their date-only `updated` value cannot prove they were generated during the run. Legacy unmodified `question_status.py --format json` baselines remain accepted for v1 compatibility.
+**Run reports** (`scripts/run_report.py`): the agent captures a baseline at run start (`run_report.py baseline --output baseline.json`) and finishes with `run_report.py --baseline baseline.json --format json`. For controller-managed runs, `run_report.py --run-id RUN_ID --format json` loads the baseline path from `runs/<run_id>/run-state.json` when `--baseline` is omitted and includes the run id, state transitions, candidate counts, coverage counts, budget state, and final verdict in a top-level `run_controller` block. The baseline artifact includes the full `question_status.py --format json` snapshot, currently open source requests, current normalized source IDs with `normalized_at`, and a generated timestamp. The report (also written to `runs/run-reports/run-<UTC timestamp>.md`) carries backlog counts before/after, every question touched with its status transition, source requests opened/fulfilled during the window, normalized sources with `normalized_at >= baseline.generated_at`, and the current lint summary. Older normalized records without `normalized_at` are reported separately as `sources_normalized_legacy_date_match` with a warning because their date-only `updated` value cannot prove they were generated during the run. Legacy unmodified `question_status.py --format json` baselines remain accepted for v1 compatibility. Reports previously generated under `docs/run-reports/` remain historical files; 0.5.1 writes new reports outside the trusted documentation tree.
 
 ## Copy-Pasteable Sequence
 

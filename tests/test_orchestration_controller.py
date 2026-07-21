@@ -3,6 +3,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -146,6 +149,20 @@ class OrchestrationControllerTests(unittest.TestCase):
         code, payload, stderr = self.json_script(module, argv)
         self.assertEqual(0, code, stderr)
         return payload
+
+    def build_verification_bundle(self, target: Path, run_id: str) -> dict:
+        return self.assert_json_script_ok(
+            READINESS,
+            [
+                "--project-root",
+                str(target),
+                "--format",
+                "json",
+                "bundle",
+                "--run-id",
+                run_id,
+            ],
+        )
 
     def enable_academic_providers(self, target: Path) -> None:
         config_path = target / "research.yml"
@@ -356,6 +373,13 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(["test-question"], first["scope"]["question_slugs"])
             retained = target / "runs" / "orchestrations" / "orch-test" / "work-orders" / "action-0001.json"
             self.assertEqual(first, json.loads(retained.read_text(encoding="utf-8")))
+            pending_session = CONTROLLER.load_session(target, "orch-test")
+            fingerprint_summary = pending_session["pending_trusted_static_inputs"]
+            self.assertNotIn("entries", fingerprint_summary)
+            fingerprint_path = CONTROLLER.trusted_static_input_path(target, "orch-test", first["action_id"])
+            fingerprint = json.loads(fingerprint_path.read_text(encoding="utf-8"))
+            self.assertTrue(CONTROLLER.valid_trusted_static_input_fingerprint(fingerprint))
+            self.assertEqual(fingerprint["fingerprint"], fingerprint_summary["fingerprint"])
             child = RUN_CONTROLLER.load_run_state(target, first["run_id"])
             self.assertEqual("answering", child["state"]["current"])
             self.assertEqual(
@@ -381,6 +405,443 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(first["action_id"], reissued["action_id"])
             self.assertEqual(2, reissued["lease"]["attempt"])
             self.assertNotEqual(expired["lease"]["expires_at"], reissued["lease"]["expires_at"])
+
+    def test_required_control_repair_marker_blocks_protocol_next_and_submit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            marker_path = CONTROLLER.control_repair_path(target, "orch-test")
+            marker = {
+                "schema_version": "1.0",
+                "artifact_type": "orchestration_control_repair",
+                "orchestration_id": "orch-test",
+                "status": "required",
+                "reason_code": "CONTROL_ARTIFACT_TAMPERED",
+                "detected_at": "2026-07-21T00:00:00Z",
+                "acknowledged_at": None,
+                "attempt_ids": ["attempt-test"],
+                "expected_control_fingerprint": f"sha256:{'0' * 64}",
+            }
+            CONTROLLER.write_json_atomic(marker_path, marker)
+
+            code, error, _ = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--resume",
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_CONTROL_REPAIR_REQUIRED", error["error_code"])
+
+            code, error, _ = self.submit(root, target, order["action_id"])
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_CONTROL_REPAIR_REQUIRED", error["error_code"])
+            self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
+
+            marker["status"] = "acknowledged"
+            marker["acknowledged_at"] = "2026-07-21T00:05:00Z"
+            CONTROLLER.write_json_atomic(marker_path, marker)
+            code, replayed, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--resume",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(order["action_id"], replayed["action_id"])
+
+    def test_trusted_static_fingerprint_tracks_semantics_and_excludes_generated_run_reports(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            baseline = CONTROLLER.trusted_static_input_fingerprint(target)
+            self.assertTrue(CONTROLLER.valid_trusted_static_input_fingerprint(baseline))
+            agents_entry = next(item for item in baseline["entries"] if item["path"] == "AGENTS.md")
+            self.assertEqual({"path", "kind", "mode", "size", "sha256"}, set(agents_entry))
+            self.assertEqual("file", agents_entry["kind"])
+
+            agents = target / "AGENTS.md"
+            agents_stat = agents.stat()
+            os.utime(agents, ns=(agents_stat.st_atime_ns, agents_stat.st_mtime_ns + 1_000_000_000))
+            self.assertEqual(baseline, CONTROLLER.trusted_static_input_fingerprint(target))
+
+            report = target / "runs" / "run-reports" / "worker-output.md"
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("# Writable run report\n", encoding="utf-8")
+            self.assertEqual(baseline, CONTROLLER.trusted_static_input_fingerprint(target))
+
+            original_agents = agents.read_bytes()
+            original_agents_mode = stat.S_IMODE(agents.stat().st_mode)
+            agents.write_bytes(original_agents + b"\nsemantic change\n")
+            self.assertNotEqual(baseline["fingerprint"], CONTROLLER.trusted_static_input_fingerprint(target)["fingerprint"])
+            agents.write_bytes(original_agents)
+            agents.chmod(original_agents_mode)
+
+            if os.name != "nt":
+                agents.chmod(original_agents_mode ^ stat.S_IXUSR)
+                self.assertNotEqual(
+                    baseline["fingerprint"],
+                    CONTROLLER.trusted_static_input_fingerprint(target)["fingerprint"],
+                )
+                agents.chmod(original_agents_mode)
+
+            static_doc = target / "docs" / "acquisition.md"
+            original_doc = static_doc.read_bytes()
+            original_doc_mode = stat.S_IMODE(static_doc.stat().st_mode)
+            static_doc.unlink()
+            static_doc.mkdir()
+            self.assertNotEqual(baseline["fingerprint"], CONTROLLER.trusted_static_input_fingerprint(target)["fingerprint"])
+            static_doc.rmdir()
+            static_doc.write_bytes(original_doc)
+            static_doc.chmod(original_doc_mode)
+
+            added = target / "docs" / "new-static-input.md"
+            added.write_text("new\n", encoding="utf-8")
+            self.assertNotEqual(baseline["fingerprint"], CONTROLLER.trusted_static_input_fingerprint(target)["fingerprint"])
+            added.unlink()
+
+            skill = target / "skills" / "research-run.md"
+            original_skill = skill.read_bytes()
+            original_skill_mode = stat.S_IMODE(skill.stat().st_mode)
+            skill.unlink()
+            self.assertNotEqual(baseline["fingerprint"], CONTROLLER.trusted_static_input_fingerprint(target)["fingerprint"])
+            skill.write_bytes(original_skill)
+            skill.chmod(original_skill_mode)
+            self.assertEqual(baseline["fingerprint"], CONTROLLER.trusted_static_input_fingerprint(target)["fingerprint"])
+
+    def test_raw_tree_snapshot_detects_same_size_content_change_with_restored_mtime(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            raw_path = target / "raw" / "papers" / "immutable.txt"
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_text("first-value", encoding="utf-8")
+            config = CONTROLLER.load_config(target)
+            before = CONTROLLER.raw_tree_snapshot(target, config)
+            timestamps = (raw_path.stat().st_atime_ns, raw_path.stat().st_mtime_ns)
+
+            raw_path.write_text("other-value", encoding="utf-8")
+            os.utime(raw_path, ns=timestamps)
+            after = CONTROLLER.raw_tree_snapshot(target, config)
+
+            self.assertEqual("sha256-content-v1", before["algorithm"])
+            self.assertEqual(before["file_count"], after["file_count"])
+            self.assertEqual(before["total_bytes"], after["total_bytes"])
+            self.assertNotEqual(before["fingerprint"], after["fingerprint"])
+
+    def test_manifest_digest_detects_same_count_same_size_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            manifest = target / "sources" / "manifest.jsonl"
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text('{"source_id":"source-one"}\n', encoding="utf-8")
+            before = CONTROLLER.evidence_manifest_digest(target)
+
+            manifest.write_text('{"source_id":"source-two"}\n', encoding="utf-8")
+            after = CONTROLLER.evidence_manifest_digest(target)
+
+            self.assertNotEqual(before, after)
+
+    def test_legacy_discovery_replay_binds_content_immutability_guards(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            order = {
+                "orchestration_id": "orch-legacy",
+                "action_id": "action-0001",
+                "phase": "discovery",
+                "required_postconditions": [
+                    {
+                        "check": "discovery_never_fetches",
+                        "manifest_records_before": 0,
+                    },
+                    {
+                        "check": "raw_tree_unchanged",
+                        "before": {"file_count": 0, "total_bytes": 0, "fingerprint": "sha256:legacy"},
+                    },
+                ],
+            }
+            retained = CONTROLLER.work_order_path(target, "orch-legacy", "action-0001")
+            retained.parent.mkdir(parents=True)
+            CONTROLLER.write_json_atomic(retained, order)
+
+            CONTROLLER.bind_legacy_immutability_postconditions(target, order)
+
+            no_fetch = order["required_postconditions"][0]
+            raw_guard = order["required_postconditions"][1]["before"]
+            self.assertIn("manifest_digest_before", no_fetch)
+            self.assertEqual("sha256-content-v1", raw_guard["algorithm"])
+            self.assertEqual(order, json.loads(retained.read_text(encoding="utf-8")))
+
+    def test_verification_artifact_reads_are_bounded_and_do_not_follow_links(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            evaluation = target / "runs" / "run-test" / "evaluation"
+            evaluation.mkdir(parents=True)
+            oversized = evaluation / "oversized.json"
+            with oversized.open("wb") as handle:
+                handle.seek(CONTROLLER.MAX_VERIFICATION_ARTIFACT_BYTES)
+                handle.write(b"x")
+            with self.assertRaisesRegex(
+                CONTROLLER.OrchestrationControllerError,
+                "exceeds|unsafe",
+            ):
+                CONTROLLER.file_digest(oversized, containment_root=target)
+
+            outside = target / "outside.json"
+            outside.write_text("{}\n", encoding="utf-8")
+            linked = evaluation / "linked.json"
+            try:
+                linked.symlink_to(outside)
+            except OSError:
+                self.skipTest("symbolic links are unavailable on this platform")
+            with self.assertRaisesRegex(
+                CONTROLLER.OrchestrationControllerError,
+                "unsafe|singly linked",
+            ):
+                CONTROLLER.file_digest(linked, containment_root=target)
+            with self.assertRaisesRegex(
+                CONTROLLER.OrchestrationControllerError,
+                "singly linked",
+            ):
+                CONTROLLER.load_json_object(
+                    linked,
+                    error_code="ORCHESTRATION_POSTCONDITION_FAILED",
+                    label="linked verification artifact",
+                    max_bytes=CONTROLLER.MAX_VERIFICATION_ARTIFACT_BYTES,
+                    containment_root=target,
+                )
+
+    def test_trusted_static_fingerprint_rejects_hardlinks_and_invalid_persisted_shape(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            fingerprint = CONTROLLER.trusted_static_input_fingerprint(target)
+            invalid = json.loads(json.dumps(fingerprint))
+            invalid["entries"].append(dict(invalid["entries"][0]))
+            invalid["entry_count"] += 1
+            invalid["fingerprint"] = CONTROLLER.result_digest({"entries": invalid["entries"]})
+            self.assertFalse(CONTROLLER.valid_trusted_static_input_fingerprint(invalid))
+
+            source = target / "wiki" / "hardlink-source.txt"
+            source.write_text("hardlinked\n", encoding="utf-8")
+            linked = target / "docs" / "hardlink.txt"
+            try:
+                os.link(source, linked)
+            except OSError as exc:
+                self.skipTest(f"hardlinks unavailable: {exc}")
+            with self.assertRaisesRegex(CONTROLLER.OrchestrationControllerError, "multiply linked"):
+                CONTROLLER.trusted_static_input_fingerprint(target)
+
+    def test_submit_rejects_static_input_drift_and_legacy_pending_action_requires_binding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            agents = target / "AGENTS.md"
+            original = agents.read_text(encoding="utf-8")
+            agents.write_text(original + "\nstatic drift\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(
+                    CONTROLLER,
+                    "fresh_workspace_status",
+                    side_effect=AssertionError("workspace status must not run after trusted-input drift"),
+                ) as status_mock,
+                mock.patch.object(
+                    CONTROLLER,
+                    "load_config",
+                    side_effect=AssertionError("workspace config must not be read after trusted-input drift"),
+                ) as config_mock,
+            ):
+                code, error, _ = self.submit(root, target, order["action_id"])
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_TRUSTED_INPUT_CHANGED", error["error_code"])
+            self.assertTrue(any(path.startswith("AGENTS.md ") for path in error["details"]["changed_paths"]))
+            self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
+            status_mock.assert_not_called()
+            config_mock.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            session = CONTROLLER.load_session(target, "orch-test")
+            session.pop("pending_trusted_static_inputs")
+            CONTROLLER.write_json_atomic(CONTROLLER.session_path(target, "orch-test"), session)
+            CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"]).unlink()
+
+            code, error, _ = self.submit(root, target, order["action_id"])
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_LEGACY_ACTION_UNBOUND", error["error_code"])
+
+            code, replayed, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--resume",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(order["action_id"], replayed["action_id"])
+            migrated = CONTROLLER.load_session(target, "orch-test")
+            self.assertTrue(CONTROLLER.valid_pending_trusted_static_inputs(migrated["pending_trusted_static_inputs"]))
+            fingerprint_path = CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"])
+            self.assertTrue(fingerprint_path.is_file())
+
+            agents = target / "AGENTS.md"
+            agents.write_text(agents.read_text(encoding="utf-8") + "\npost-binding drift\n", encoding="utf-8")
+            code, error, _ = self.submit(root, target, order["action_id"])
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_TRUSTED_INPUT_CHANGED", error["error_code"])
+
+    def test_legacy_trusted_input_binding_recovers_after_snapshot_precedes_session_write(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            session = CONTROLLER.load_session(target, "orch-test")
+            session.pop("pending_trusted_static_inputs")
+            CONTROLLER.write_json_atomic(CONTROLLER.session_path(target, "orch-test"), session)
+            fingerprint_path = CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"])
+            fingerprint_path.unlink()
+            real_write = CONTROLLER.write_json_atomic
+            crashed = False
+
+            def crash_before_session_binding(path: Path, document: dict) -> None:
+                nonlocal crashed
+                if (
+                    not crashed
+                    and path == CONTROLLER.session_path(target, "orch-test")
+                    and "pending_trusted_static_inputs" in document
+                ):
+                    crashed = True
+                    raise CONTROLLER.OrchestrationControllerError(
+                        "INJECTED_CRASH",
+                        "injected crash after legacy fingerprint persistence",
+                    )
+                real_write(path, document)
+
+            with mock.patch.object(CONTROLLER, "write_json_atomic", side_effect=crash_before_session_binding):
+                code, error, _ = self.controller(
+                    target,
+                    "next",
+                    "--orchestration-id",
+                    "orch-test",
+                    "--resume",
+                )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("INJECTED_CRASH", error["error_code"])
+            self.assertTrue(fingerprint_path.is_file())
+            retained_fingerprint = fingerprint_path.read_bytes()
+            self.assertNotIn("pending_trusted_static_inputs", CONTROLLER.load_session(target, "orch-test"))
+
+            code, replayed, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--resume",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(order["action_id"], replayed["action_id"])
+            self.assertEqual(retained_fingerprint, fingerprint_path.read_bytes())
+            rebound = CONTROLLER.load_session(target, "orch-test")
+            self.assertTrue(CONTROLLER.valid_pending_trusted_static_inputs(rebound["pending_trusted_static_inputs"]))
+
+    def test_legacy_replay_binds_trusted_inputs_before_workspace_status_executes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            session = CONTROLLER.load_session(target, "orch-test")
+            session.pop("pending_trusted_static_inputs")
+            CONTROLLER.write_json_atomic(CONTROLLER.session_path(target, "orch-test"), session)
+            CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"]).unlink()
+            real_status = CONTROLLER.fresh_workspace_status
+
+            def status_after_binding(project_root: Path) -> dict:
+                retained = CONTROLLER.load_session(project_root, "orch-test")
+                self.assertTrue(
+                    CONTROLLER.valid_pending_trusted_static_inputs(
+                        retained.get("pending_trusted_static_inputs")
+                    )
+                )
+                return real_status(project_root)
+
+            with mock.patch.object(
+                CONTROLLER,
+                "fresh_workspace_status",
+                side_effect=status_after_binding,
+            ):
+                code, replayed, stderr = self.controller(
+                    target,
+                    "next",
+                    "--orchestration-id",
+                    "orch-test",
+                    "--resume",
+                )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(order["action_id"], replayed["action_id"])
+
+    def test_materialized_effects_without_result_replay_same_action_then_submit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            materialized = target / "runs" / "run-reports" / "interrupted-answer.md"
+            materialized.parent.mkdir(parents=True, exist_ok=True)
+            materialized.write_text("# Materialized answer from the interrupted attempt\n", encoding="utf-8")
+
+            order_path = CONTROLLER.work_order_path(target, "orch-test", order["action_id"])
+            expired = json.loads(order_path.read_text(encoding="utf-8"))
+            expired["lease"]["expires_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            CONTROLLER.write_json_atomic(order_path, expired)
+
+            code, replayed, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--resume",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(order["action_id"], replayed["action_id"])
+            self.assertEqual(2, replayed["lease"]["attempt"])
+            pending = CONTROLLER.load_session(target, "orch-test")
+            self.assertEqual(order["action_id"], pending["pending_action_id"])
+            self.assertEqual(0, pending["completed_action_count"])
+            self.assertEqual(CONTROLLER.RECOVERY_RECONCILE, pending["recovery"]["state"])
+            self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
+            self.assertEqual("answering", RUN_CONTROLLER.load_run_state(target, order["run_id"])["state"]["current"])
+
+            recovered_status = {
+                "workspace_health": {"materially_valid": True},
+                "readiness": {"verdict": "complete", "reasons": []},
+            }
+            with mock.patch.object(CONTROLLER, "fresh_workspace_status", return_value=recovered_status):
+                code, accepted, stderr = self.submit(
+                    root,
+                    target,
+                    order["action_id"],
+                    summary="Reconciled the already materialized answer after interruption.",
+                    artifacts=["runs/run-reports/interrupted-answer.md"],
+                )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("active", accepted["status"])
+            self.assertEqual("verification", accepted["phase"])
+            self.assertEqual(1, accepted["completed_action_count"])
+            self.assertEqual(CONTROLLER.RECOVERY_NONE, accepted["recovery"]["state"])
+            self.assertEqual("verifying", RUN_CONTROLLER.load_run_state(target, order["run_id"])["state"]["current"])
 
     def test_action_limit_pauses_and_resume_starts_a_fresh_window(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -443,20 +904,44 @@ class OrchestrationControllerTests(unittest.TestCase):
             retained = target / "runs" / "orchestrations" / "orch-test" / "work-results" / "action-0001.json"
             self.assertFalse(retained.exists())
 
+    def test_controller_owned_parent_artifact_is_rejected_without_persistence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            controller_owned = "runs/orchestrations/orch-test/answers.json"
+            (target / controller_owned).write_text("{}\n", encoding="utf-8")
+
+            code, error, _ = self.submit(
+                root,
+                target,
+                order["action_id"],
+                artifacts=[controller_owned],
+            )
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("RESULT_INVALID", error["error_code"])
+            self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
+
     def test_failed_postcondition_retains_no_result_and_identical_retry_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
             self.start(target)
             _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
-            readiness = CONTROLLER.load_sibling_module("publication_readiness")
-            with mock.patch.object(readiness, "build_readiness_document", return_value={"verdict": "no_ship"}):
-                code, error, _ = self.submit(root, target, order["action_id"])
+            self.build_verification_bundle(target, order["run_id"])
+            publication_path = target / "runs" / order["run_id"] / "evaluation" / "publication-readiness.json"
+            publication = json.loads(publication_path.read_text(encoding="utf-8"))
+            publication["verdict"] = "no_ship"
+            publication_path.write_text(json.dumps(publication), encoding="utf-8")
+            code, error, _ = self.submit(root, target, order["action_id"])
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
             self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
             retained = target / "runs" / "orchestrations" / "orch-test" / "work-results" / "action-0001.json"
             self.assertFalse(retained.exists())
 
+            self.build_verification_bundle(target, order["run_id"])
             code, completed, stderr = self.submit(root, target, order["action_id"])
             self.assertEqual(0, code, stderr)
             self.assertEqual("complete", completed["status"])
@@ -545,6 +1030,43 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
             self.assertEqual("ORCHESTRATION_STATE_INVALID", error["error_code"])
 
+    def test_pending_submission_rejects_tampered_result_even_with_matching_digest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir), question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            session = CONTROLLER.load_session(target, "orch-test")
+            result = {
+                "schema_version": "1.0",
+                "action_id": order["action_id"],
+                "outcome": "completed",
+                "summary": "Tampered accepted result.",
+                "artifacts": [],
+                "unsupported": True,
+            }
+            session["pending_submission"] = {
+                "action_id": order["action_id"],
+                "accepted_at": "2026-07-21T10:00:00Z",
+                "result": result,
+                "result_digest": CONTROLLER.result_digest(result),
+                "next_phase": "verification",
+                "completion_reason": None,
+            }
+            session["recovery"] = {
+                "state": CONTROLLER.RECOVERY_FINALIZING,
+                "action_id": order["action_id"],
+                "attempt": 1,
+                "reason_code": "accepted_result_pending_finalization",
+                "recorded_at": "2026-07-21T10:00:00Z",
+            }
+            CONTROLLER.write_json_atomic(CONTROLLER.session_path(target, "orch-test"), session)
+
+            with self.assertRaisesRegex(
+                CONTROLLER.OrchestrationControllerError,
+                "invalid orchestration session shape",
+            ):
+                CONTROLLER.load_session(target, "orch-test")
+
     def test_fresh_ship_verification_writes_answer_export_and_completes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -552,6 +1074,16 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.start(target)
             _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
             self.assertEqual("verification", order["phase"])
+            checks = {item["check"] for item in order["required_postconditions"]}
+            self.assertNotIn("answer_export_written", checks)
+            self.assertFalse(
+                any(
+                    path.startswith("runs/orchestrations/")
+                    for item in order["required_postconditions"]
+                    for path in item.get("paths", [])
+                )
+            )
+            self.build_verification_bundle(target, order["run_id"])
 
             code, completed, stderr = self.submit(root, target, order["action_id"])
             self.assertEqual(0, code, stderr)
@@ -565,6 +1097,30 @@ class OrchestrationControllerTests(unittest.TestCase):
             status = STATUS.build_status_document(target)
             self.assertEqual("orch-test", status["orchestration"]["orchestration_id"])
             self.assertTrue(status["orchestration"]["terminal"])
+
+    def test_verification_preflight_is_read_only_and_controller_writes_derived_outputs_only_on_apply(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.build_verification_bundle(target, order["run_id"])
+            session = CONTROLLER.load_session(target, "orch-test")
+            evaluation = target / "runs" / order["run_id"] / "evaluation"
+
+            with mock.patch.object(CONTROLLER, "write_json_atomic") as write:
+                next_phase, _ = CONTROLLER.verify_action_postconditions(
+                    target,
+                    session,
+                    order,
+                    apply_effects=False,
+                )
+
+            self.assertEqual("complete", next_phase)
+            write.assert_not_called()
+            self.assertFalse((evaluation / "quote-verification.json").exists())
+            self.assertFalse((evaluation / "coverage-summary.json").exists())
+            self.assertFalse(CONTROLLER.answers_path(target, "orch-test").exists())
 
     def test_invalid_workspace_health_refuses_before_session_creation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -725,6 +1281,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             target = self.init_workspace(root)
             self.start(target)
             _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.build_verification_bundle(target, order["run_id"])
             result_path = root / "crash-result.json"
             result_path.write_text(
                 json.dumps(
@@ -791,13 +1348,320 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(1, completed["completed_action_count"])
             self.assertEqual([order["run_id"]], completed["child_run_ids"])
 
-    def test_pending_work_refuses_narrowed_provider_policy_on_replay(self):
+    def test_terminal_submit_recovers_after_child_finalization_precedes_session_write(self):
+        cases = (
+            ("blocked", "blocked_on_sources", CONTROLLER.EXIT_BLOCKED),
+            ("failed", "failed", CONTROLLER.EXIT_INVALID),
+        )
+        for outcome, expected_status, expected_exit_code in cases:
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                target = self.init_workspace(root, question=True)
+                self.start(target)
+                _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+                result_path = root / f"{outcome}-crash-result.json"
+                result_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "1.0",
+                            "action_id": order["action_id"],
+                            "outcome": outcome,
+                            "summary": f"Worker ended the action as {outcome}.",
+                            "artifacts": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                real_write = CONTROLLER.write_json_atomic
+                expected_session_path = CONTROLLER.session_path(target.resolve(), "orch-test")
+                expected_action_id = order["action_id"]
+                crashed = False
+
+                def crash_before_parent_commit(
+                    path: Path,
+                    document: dict,
+                    expected_path: Path = expected_session_path,
+                    action_id: str = expected_action_id,
+                    write=real_write,
+                ) -> None:
+                    nonlocal crashed
+                    if (
+                        not crashed
+                        and path == expected_path
+                        and document.get("last_completed_action_id") == action_id
+                    ):
+                        crashed = True
+                        raise CONTROLLER.OrchestrationControllerError(
+                            "INJECTED_CRASH",
+                            "injected crash after terminal child finalization",
+                        )
+                    write(path, document)
+
+                with mock.patch.object(
+                    CONTROLLER,
+                    "write_json_atomic",
+                    side_effect=crash_before_parent_commit,
+                ):
+                    code, error, _ = self.controller(
+                        target,
+                        "submit",
+                        "--orchestration-id",
+                        "orch-test",
+                        "--action-id",
+                        order["action_id"],
+                        "--result-file",
+                        str(result_path),
+                    )
+                self.assertTrue(crashed)
+                self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+                self.assertEqual("INJECTED_CRASH", error["error_code"])
+                self.assertEqual(
+                    expected_status,
+                    RUN_CONTROLLER.load_run_state(target, order["run_id"])["state"]["current"],
+                )
+
+                code, completed, stderr = self.controller(
+                    target,
+                    "submit",
+                    "--orchestration-id",
+                    "orch-test",
+                    "--action-id",
+                    order["action_id"],
+                    "--result-file",
+                    str(result_path),
+                )
+                self.assertEqual(expected_exit_code, code, stderr)
+                self.assertEqual(expected_status, completed["status"])
+                self.assertIsNone(completed["active_run_id"])
+                self.assertIsNone(completed["pending_submission"])
+                self.assertEqual(1, completed["completed_action_count"])
+
+    def test_record_event_once_recognizes_legacy_equivalent_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            session = self.start(target)
+            CONTROLLER.record_event(
+                target,
+                session,
+                "action_completed",
+                "Legacy action completion event.",
+                action_id="action-0001",
+            )
+            CONTROLLER.record_event(
+                target,
+                session,
+                "session_finished",
+                "Legacy session completion event.",
+            )
+
+            CONTROLLER.record_event_once(
+                target,
+                session,
+                "action_completed",
+                "Replayed action completion event.",
+                action_id="action-0001",
+            )
+            CONTROLLER.record_event_once(
+                target,
+                session,
+                "session_finished",
+                "Replayed session completion event.",
+            )
+
+            events = [
+                json.loads(line)
+                for line in CONTROLLER.events_path(target, "orch-test").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(
+                1,
+                sum(
+                    event.get("event_type") == "action_completed"
+                    and event.get("action_id") == "action-0001"
+                    for event in events
+                ),
+            )
+            self.assertEqual(1, sum(event.get("event_type") == "session_finished" for event in events))
+
+    def test_next_finalizes_prepared_submission_after_result_persistence_crash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.build_verification_bundle(target, order["run_id"])
+            result_path = root / "prepared-result.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "action_id": order["action_id"],
+                        "outcome": "completed",
+                        "summary": "Accepted before the injected result persistence crash.",
+                        "artifacts": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            expected_result_path = CONTROLLER.work_result_path(target.resolve(), "orch-test", order["action_id"])
+            real_write = CONTROLLER.write_json_atomic
+            crashed = False
+
+            def crash_before_result_persistence(path: Path, document: dict) -> None:
+                nonlocal crashed
+                if not crashed and path == expected_result_path:
+                    crashed = True
+                    raise CONTROLLER.OrchestrationControllerError(
+                        "INJECTED_CRASH",
+                        "injected crash before work-result persistence",
+                    )
+                real_write(path, document)
+
+            with mock.patch.object(CONTROLLER, "write_json_atomic", side_effect=crash_before_result_persistence):
+                code, error, _ = self.controller(
+                    target,
+                    "submit",
+                    "--orchestration-id",
+                    "orch-test",
+                    "--action-id",
+                    order["action_id"],
+                    "--result-file",
+                    str(result_path),
+                )
+            self.assertTrue(crashed)
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("INJECTED_CRASH", error["error_code"])
+            prepared = CONTROLLER.load_session(target, "orch-test")
+            self.assertEqual(order["action_id"], prepared["pending_submission"]["action_id"])
+            self.assertEqual(CONTROLLER.RECOVERY_FINALIZING, prepared["recovery"]["state"])
+            self.assertFalse(expected_result_path.exists())
+
+            code, completed, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("complete", completed["status"])
+            self.assertIsNone(completed["pending_submission"])
+            self.assertTrue(expected_result_path.is_file())
+            self.assertEqual(1, completed["completed_action_count"])
+
+    def test_next_repairs_missing_completion_events_without_recounting_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.build_verification_bundle(target, order["run_id"])
+
+            with mock.patch.object(
+                CONTROLLER,
+                "ensure_completion_events",
+                side_effect=CONTROLLER.OrchestrationControllerError(
+                    "INJECTED_CRASH",
+                    "injected crash after final session commit",
+                ),
+            ):
+                code, error, _ = self.submit(root, target, order["action_id"])
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("INJECTED_CRASH", error["error_code"])
+            committed = CONTROLLER.load_session(target, "orch-test")
+            self.assertEqual("complete", committed["status"])
+            self.assertEqual(1, committed["completed_action_count"])
+
+            code, completed, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("complete", completed["status"])
+            self.assertEqual(1, completed["completed_action_count"])
+            events = [
+                json.loads(line)
+                for line in CONTROLLER.events_path(target, "orch-test").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(
+                1,
+                sum(event.get("event_type") == "action_completed" for event in events),
+            )
+            self.assertEqual(
+                1,
+                sum(event.get("event_type") == "session_finished" for event in events),
+            )
+
+    def test_standalone_controller_does_not_mutate_protected_scripts_with_bytecode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            controller_path = target / "scripts" / "orchestration_controller.py"
+            environment = os.environ.copy()
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            environment.pop("PYTHONPYCACHEPREFIX", None)
+
+            def run_controller(*args: str) -> dict:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(controller_path),
+                        "--project-root",
+                        str(target),
+                        *args,
+                        "--format",
+                        "json",
+                    ],
+                    cwd=target,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr or completed.stdout)
+                return json.loads(completed.stdout)
+
+            run_controller(
+                "start",
+                "--orchestration-id",
+                "orch-bytecode",
+                "--agent-id",
+                "bytecode-agent",
+            )
+            first = run_controller("next", "--orchestration-id", "orch-bytecode")
+            replayed = run_controller("next", "--orchestration-id", "orch-bytecode")
+
+            self.assertEqual(first["action_id"], replayed["action_id"])
+            self.assertEqual([], list((target / "scripts").rglob("__pycache__")))
+            self.assertEqual([], list((target / "scripts").rglob("*.pyc")))
+
+    def test_pending_work_checks_trusted_fingerprint_before_narrowed_provider_policy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root, question=True)
             self.enable_academic_providers(target)
             self.start(target)
             _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["integrations"]["discovery"]["providers"] = ["arxiv"]
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+            code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_TRUSTED_INPUT_CHANGED", error["error_code"])
+            self.assertTrue(any(path.startswith("research.yml ") for path in error["details"]["changed_paths"]))
+            self.assertEqual(order["action_id"], CONTROLLER.load_session(target, "orch-test")["pending_action_id"])
+
+    def test_legacy_pending_work_refuses_narrowed_provider_policy_on_replay(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            session = CONTROLLER.load_session(target, "orch-test")
+            session.pop("pending_trusted_static_inputs")
+            CONTROLLER.write_json_atomic(CONTROLLER.session_path(target, "orch-test"), session)
+            CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"]).unlink()
             config_path = target / "research.yml"
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             config["integrations"]["discovery"]["providers"] = ["arxiv"]
@@ -1181,11 +2045,78 @@ class OrchestrationControllerTests(unittest.TestCase):
                 ],
             )
             self.assertEqual("verified", quote_report["overall_result"])
-            readiness = self.assert_json_script_ok(
-                READINESS,
-                ["--project-root", str(target), "--format", "json"],
+            verification_bundle = self.build_verification_bundle(target, verification_order["run_id"])
+            self.assertEqual("ship", verification_bundle["publication_readiness"]["verdict"])
+            evaluation = target / "runs" / verification_order["run_id"] / "evaluation"
+
+            fabricated_export_path = evaluation / "export.json"
+            fabricated_export = json.loads(fabricated_export_path.read_text(encoding="utf-8"))
+            fabricated_export["questions"] = []
+            fabricated_export["counts"] = {"total": 0, "by_status": {}, "exported": 0}
+            fabricated_export_path.write_text(json.dumps(fabricated_export), encoding="utf-8")
+            code, rejected, _ = self.submit(
+                root,
+                target,
+                verification_order["action_id"],
+                summary="Fresh deterministic verification returned ship and exported the answer.",
+                artifacts=["wiki/questions/test-question.md"],
             )
-            self.assertEqual("ship", readiness["verdict"])
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", rejected["error_code"])
+            self.assertIn("export.json", rejected["message"])
+            self.assertFalse(
+                CONTROLLER.work_result_path(target, "orch-test", verification_order["action_id"]).exists()
+            )
+
+            self.build_verification_bundle(target, verification_order["run_id"])
+            fabricated_citation_path = evaluation / "citation-verification.json"
+            fabricated_citation = json.loads(fabricated_citation_path.read_text(encoding="utf-8"))
+            fabricated_citation["results"] = []
+            fabricated_citation["counts"] = {
+                "verified": 0,
+                "mismatch": 0,
+                "not_found": 0,
+                "skipped_no_live": 0,
+                "insufficient_metadata": 0,
+                "total": 0,
+            }
+            fabricated_citation["overall_result"] = "verified"
+            fabricated_citation_path.write_text(json.dumps(fabricated_citation), encoding="utf-8")
+            code, rejected, _ = self.submit(
+                root,
+                target,
+                verification_order["action_id"],
+                summary="Fresh deterministic verification returned ship and exported the answer.",
+                artifacts=["wiki/questions/test-question.md"],
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", rejected["error_code"])
+            self.assertIn("citation-verification.json", rejected["message"])
+            self.assertFalse(
+                CONTROLLER.work_result_path(target, "orch-test", verification_order["action_id"]).exists()
+            )
+
+            self.build_verification_bundle(target, verification_order["run_id"])
+            fabricated_publication_path = evaluation / "publication-readiness.json"
+            fabricated_publication_path.write_text(
+                json.dumps({"schema_version": "1.0", "verdict": "ship"}),
+                encoding="utf-8",
+            )
+            code, rejected, _ = self.submit(
+                root,
+                target,
+                verification_order["action_id"],
+                summary="Fresh deterministic verification returned ship and exported the answer.",
+                artifacts=["wiki/questions/test-question.md"],
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", rejected["error_code"])
+            self.assertIn("publication-readiness.json", rejected["message"])
+            self.assertFalse(
+                CONTROLLER.work_result_path(target, "orch-test", verification_order["action_id"]).exists()
+            )
+
+            self.build_verification_bundle(target, verification_order["run_id"])
             code, completed, stderr = self.submit(
                 root,
                 target,

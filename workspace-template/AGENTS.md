@@ -84,6 +84,18 @@ Do not rely on git hooks that run `git commit`, auto-add broad paths, or create 
 
 External orchestrators and parent agents read workspace state through `scripts/workspace_status.py`, which aggregates smoke validation, the question backlog, source coverage, and lint health into one versioned JSON document with a readiness verdict (`docs/workspace-status.md`). Keep question frontmatter and the source manifest accurate so this surface stays truthful, and report progress by resolving question task records rather than by editing status output. The end-to-end contract for upstream systems is documented in `docs/orchestrator-handoff.md`; `project.handoff` in `research.yml` carries upstream correlation IDs and must not be removed or renamed.
 
+For managed work orders, the parent exclusively owns
+`runs/orchestrations/<orchestration_id>/`. Do not invoke `evidence-wiki
+orchestrate`, create a work-result file, or create, edit, rename, or delete any
+path in that tree. The work order already contains the trusted orchestration
+data needed by the worker. Before making new workspace changes, inspect its
+required postconditions; if a previous interrupted attempt already materialized
+them, report those existing artifacts through the runner result instead of
+repeating the work. Child state under `runs/<run_id>/` is separate and may be
+changed only through the scoped deterministic scripts. Do not start daemons,
+hooks, background jobs, or detached subprocesses; every process started for a
+managed work order must finish within that bounded action.
+
 The question lifecycle has a machine API (`docs/question-api.md`): validated question batches enter through `scripts/intake_questions.py` (all-or-nothing, deduplicating, updates `index.md` and `log.md` itself), claimed questions move to answered/blocked/deferred/rejected through `scripts/question_resolve.py`, and structured answers with citations leave through `scripts/export_answers.py`. Use these scripts instead of hand-editing question frontmatter or wiki tables for the operations they cover; hand-authoring remains appropriate only for ad hoc human questions.
 
 Unattended runs follow the `research-run` skill: claim questions through `scripts/question_claim.py` (one claim per agent at a time; never downgrade another agent's claim), resolve held claims through `scripts/question_resolve.py`, respect the per-run budgets in the `research.yml` `run` block, and finish with a `scripts/run_report.py` report plus the answer export. The optional `research-verify` skill records `confidence`/`evidence_strength` on answered questions before final hand-off.

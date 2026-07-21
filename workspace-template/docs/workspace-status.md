@@ -154,10 +154,57 @@ submits work. With no readable session it returns:
 ```
 
 When present, the block includes `orchestration_id`, `status`, `phase`,
-`terminal`, `verdict`, `pause_reason`, `pending_action_id`, `active_run_id`,
+`terminal`, `verdict`, `pause_reason`, `pending_action_id`,
+`pending_submission_action_id`, bounded `recovery` metadata, `active_run_id`,
 `child_run_ids`, action counters, lifecycle timestamps, and the
-workspace-relative `session_path`. Use `evidence-wiki orchestrate status` for the
-complete version 1.0 session artifact.
+workspace-relative `session_path`. It also reports an `attempts` summary with a
+hard limit of 1,000 inspected directory entries and 64 KiB per record. The
+summary contains the valid `orchestration_attempt` version 1.0 record count,
+invalid-record count, truncation flag, and only the latest valid attempt's safe
+identifiers, runner, phase, status, timestamps, and error code. It never exposes
+a result digest, work-order fingerprint, prompt, transcript, diagnostic,
+secret, or absolute path. Use
+`evidence-wiki orchestrate status` for the complete version 1.0 session
+artifact.
+
+`control_repair` reports whether the durable managed-host marker at
+`runs/orchestration-guards/<orchestration_id>.json` is present,
+required, acknowledged, or invalid, plus its bounded reason, timestamps, and
+attempt IDs. It never exposes the retained
+`expected_control_fingerprint` for the tripwire-protected controls. The guard is
+outside the parent-session tree and is a preventive-only read-only root. A
+required marker makes the managed host stop with `CONTROL_REPAIR_REQUIRED` and
+makes controller `next` and `submit` stop with
+`ORCHESTRATION_CONTROL_REPAIR_REQUIRED`; an acknowledgement whose
+tripwire-protected controls do not match fails with
+`CONTROL_REPAIR_MISMATCH`. An invalid marker is also fail-closed even if the
+parent session itself still says `active`.
+
+The tripwire-protected controls are the bounded workspace contract and
+instructions, `scripts/`, `skills/`, `docs/`, and current parent-session tree.
+The sandbox separately keeps `.git/`, `.codex/`, `.claude/`, `.agents/`,
+`.venv/`, `venv/`, and `runs/orchestration-guards/` preventive-only and
+read-only; their contents are not recursively hashed into the semantic
+tripwire. If a retained `control_tampered` attempt exists without its durable
+guard baseline, managed acknowledgement fails with
+`CONTROL_REPAIR_BASELINE_MISSING`; status does not invent a replacement
+fingerprint.
+
+Attempt status is durable metadata, not proof that a process is still alive.
+When a fresh worker is needed, the host caps its timeout to the work order's
+remaining absolute lease. It reports `ORCHESTRATION_LEASE_INVALID` for a
+malformed expiry, `ORCHESTRATION_LEASE_EXPIRED` when no lease time remains, and
+`ORCHESTRATION_LEASE_ACTIVE` when a retained `running` attempt still owns the
+same lease attempt. Wait for expiry and resume the same action so the controller
+can increment the lease attempt. A managed work order must never leave a
+daemon, background job, or detached process; status cannot establish process
+containment, so untrusted process trees require an operator-controlled
+container or equivalent lifecycle boundary.
+
+`workspace_status.py` only observes these artifacts. One managed host at a time
+may drive a session; a second returns `ORCHESTRATION_ALREADY_RUNNING`. External
+protocol hosts must coordinate a single writer and not interleave `next` or
+`submit` with an active managed host. Status polling itself remains read-only.
 
 ### `smoke`
 

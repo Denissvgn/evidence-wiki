@@ -17,6 +17,8 @@ SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 README = REPO_ROOT / "README.md"
 READINESS = REPO_ROOT / "workspace-template" / "docs" / "production-readiness-checklist.md"
 HANDOFF_DOC = REPO_ROOT / "workspace-template" / "docs" / "orchestrator-handoff.md"
+ORCHESTRATION_DOC = REPO_ROOT / "workspace-template" / "docs" / "orchestration.md"
+RUN_CONTROLLER_DOC = REPO_ROOT / "workspace-template" / "docs" / "run-controller.md"
 DOMAIN_GUIDANCE_DOC = REPO_ROOT / "workspace-template" / "docs" / "domain-guidance-generator.md"
 QUESTION_API_DOC = REPO_ROOT / "workspace-template" / "docs" / "question-api.md"
 COVERAGE_DOC = REPO_ROOT / "workspace-template" / "docs" / "coverage-manifest.md"
@@ -1408,6 +1410,46 @@ class DocumentedWorkflowTests(unittest.TestCase):
         ):
             for phrase in stale_phrases:
                 self.assertNotIn(phrase, text, label)
+
+    def test_managed_orchestration_isolation_and_recovery_are_documented(self):
+        orchestration = ORCHESTRATION_DOC.read_text(encoding="utf-8")
+        handoff = HANDOFF_DOC.read_text(encoding="utf-8")
+        orchestrate = ORCHESTRATE_SKILL.read_text(encoding="utf-8")
+        run_controller = RUN_CONTROLLER_DOC.read_text(encoding="utf-8")
+        readme = README.read_text(encoding="utf-8")
+
+        for label, text in (
+            ("README.md", readme),
+            ("orchestration.md", orchestration),
+            ("orchestrator-handoff.md", handoff),
+            ("research-orchestrate.md", orchestrate),
+        ):
+            with self.subTest(document=label):
+                self.assertIn("Codex CLI 0.138", text)
+                self.assertIn("native Windows", text)
+                self.assertIn("RUNNER_ISOLATION_UNAVAILABLE", text)
+                self.assertIn("runs/orchestrations/", text)
+                self.assertIn("resume", text)
+
+        self.assertIn('default_permissions="evidence_wiki_worker"', orchestration)
+        self.assertIn("Timestamp-only", orchestration)
+        self.assertIn("does not automatically restore or roll back", orchestration)
+        self.assertIn("same persisted action", orchestration)
+        self.assertIn("No recovery path requires a human-authored result document", handoff)
+        self.assertIn("EvidenceWiki host", run_controller)
+        self.assertIn("alone owns `runs/orchestrations/", run_controller)
+
+        for skill_path in (RUN_SKILL, RESEARCH_DISCOVER_SKILL, RESEARCH_ACQUIRE_SKILL, VERIFY_SKILL):
+            skill = skill_path.read_text(encoding="utf-8")
+            with self.subTest(skill=skill_path.name):
+                self.assertIn("runs/orchestrations/", skill)
+                self.assertIn("postconditions", skill)
+                self.assertIn("never invoke `evidence-wiki orchestrate`", skill)
+
+        agents = AGENTS.read_text(encoding="utf-8")
+        self.assertIn("parent exclusively owns", agents)
+        self.assertIn("runs/orchestrations/", agents)
+        self.assertIn("required postconditions", agents)
 
     def test_workspace_status_documents_claim_invariants(self):
         workspace_status_doc = (REPO_ROOT / "workspace-template" / "docs" / "workspace-status.md").read_text()
