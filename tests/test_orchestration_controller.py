@@ -140,6 +140,9 @@ class OrchestrationControllerTests(unittest.TestCase):
         payload = json.loads(stdout or stderr)
         return code, payload, stderr
 
+    def hydrated_order(self, target: Path, order: dict) -> dict:
+        return CONTROLLER.hydrate_integrity_baselines(target, order)
+
     def json_script(self, module, argv: list[str]) -> tuple[int, dict, str]:
         code, stdout, stderr = self.run_module(module, argv)
         payload_text = stdout.strip() or stderr.strip()
@@ -303,6 +306,73 @@ class OrchestrationControllerTests(unittest.TestCase):
         code, payload, stderr = self.controller(target, "start", *args)
         self.assertEqual(0, code, stderr)
         return payload
+
+    def add_questions(self, root: Path, target: Path, questions: list[dict]) -> None:
+        batch = root / f"batch-{len(questions)}-{questions[0]['id']}.json"
+        batch.write_text(
+            json.dumps({"schema_version": "1.0", "questions": questions}),
+            encoding="utf-8",
+        )
+        code, _, stderr = self.run_module(
+            INTAKE,
+            ["--project-root", str(target), "--from-file", str(batch), "--format", "json"],
+        )
+        self.assertEqual(0, code, stderr)
+
+    def block_question(self, target: Path, slug: str = "test-question") -> str:
+        self.assert_json_script_ok(
+            CLAIM,
+            [
+                "--project-root",
+                str(target),
+                "claim",
+                "--slug",
+                slug,
+                "--agent-id",
+                "agent-test",
+                "--format",
+                "json",
+            ],
+        )
+        request = self.assert_json_script_ok(
+            SOURCE_REQUESTS,
+            [
+                "--project-root",
+                str(target),
+                "add",
+                "--kind",
+                "paper",
+                "--query-or-identifier",
+                f"Evidence needed for {slug}",
+                "--rationale",
+                "The scoped question cannot be answered from delivered evidence.",
+                "--priority",
+                "high",
+                "--question-slug",
+                slug,
+                "--format",
+                "json",
+            ],
+        )["request"]
+        self.assert_json_script_ok(
+            RESOLVE,
+            [
+                "--project-root",
+                str(target),
+                "block",
+                "--slug",
+                slug,
+                "--agent-id",
+                "agent-test",
+                "--blocked-reason",
+                "The scoped question requires additional evidence.",
+                "--request-id",
+                request["request_id"],
+                "--format",
+                "json",
+            ],
+        )
+        return request["request_id"]
 
     def submit(
         self,
@@ -544,9 +614,49 @@ class OrchestrationControllerTests(unittest.TestCase):
 
             self.assertNotEqual(before, after)
 
-    def test_legacy_discovery_replay_binds_content_immutability_guards(self):
+    def test_work_order_externalizes_integrity_baselines_and_detects_sidecar_tampering(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            target = self.init_workspace(Path(tmpdir))
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertLessEqual(
+                CONTROLLER.work_order_path(target, "orch-test", order["action_id"]).stat().st_size,
+                CONTROLLER.MAX_WORK_ORDER_BYTES,
+            )
+            guard = next(
+                item
+                for item in order["required_postconditions"]
+                if item["check"] == "controller_integrity_baseline"
+            )
+            readiness = next(
+                item
+                for item in order["required_postconditions"]
+                if item["check"] == "workspace_readiness_changed"
+            )
+            self.assertNotIn("scoped_questions_before", readiness)
+            hydrated = self.hydrated_order(target, order)
+            hydrated_readiness = next(
+                item
+                for item in hydrated["required_postconditions"]
+                if item["check"] == "workspace_readiness_changed"
+            )
+            self.assertEqual(["test-question"], sorted(hydrated_readiness["scoped_questions_before"]))
+
+            sidecar = target / guard["path"]
+            document = json.loads(sidecar.read_text(encoding="utf-8"))
+            document["phase"] = "discovery"
+            CONTROLLER.write_json_atomic(sidecar, document)
+            with self.assertRaisesRegex(
+                CONTROLLER.OrchestrationControllerError,
+                "missing or changed",
+            ):
+                self.hydrated_order(target, order)
+
+    def test_legacy_discovery_replay_refuses_missing_content_immutability_guards(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.init_workspace(Path(tmpdir))
             order = {
                 "orchestration_id": "orch-legacy",
                 "action_id": "action-0001",
@@ -562,17 +672,11 @@ class OrchestrationControllerTests(unittest.TestCase):
                     },
                 ],
             }
-            retained = CONTROLLER.work_order_path(target, "orch-legacy", "action-0001")
-            retained.parent.mkdir(parents=True)
-            CONTROLLER.write_json_atomic(retained, order)
-
-            CONTROLLER.bind_legacy_immutability_postconditions(target, order)
-
-            no_fetch = order["required_postconditions"][0]
-            raw_guard = order["required_postconditions"][1]["before"]
-            self.assertIn("manifest_digest_before", no_fetch)
-            self.assertEqual("sha256-content-v1", raw_guard["algorithm"])
-            self.assertEqual(order, json.loads(retained.read_text(encoding="utf-8")))
+            with self.assertRaisesRegex(
+                CONTROLLER.OrchestrationControllerError,
+                "immutability baseline",
+            ):
+                CONTROLLER.require_action_baselines(order)
 
     def test_verification_artifact_reads_are_bounded_and_do_not_follow_links(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -799,6 +903,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             materialized = target / "runs" / "run-reports" / "interrupted-answer.md"
             materialized.parent.mkdir(parents=True, exist_ok=True)
             materialized.write_text("# Materialized answer from the interrupted attempt\n", encoding="utf-8")
+            self.block_question(target)
 
             order_path = CONTROLLER.work_order_path(target, "orch-test", order["action_id"])
             expired = json.loads(order_path.read_text(encoding="utf-8"))
@@ -847,8 +952,20 @@ class OrchestrationControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [
+                    {
+                        "id": "second-question",
+                        "question": "Which evidence answers the second test question?",
+                        "priority": "medium",
+                    }
+                ],
+            )
             self.start(target, max_actions=1)
             _, work_order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.block_question(target)
             code, accepted, stderr = self.submit(root, target, work_order["action_id"])
             self.assertEqual(0, code, stderr)
             self.assertEqual("active", accepted["status"])
@@ -877,6 +994,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             target = self.init_workspace(root, question=True)
             self.start(target)
             _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.block_question(target)
             first = self.submit(root, target, order["action_id"], summary="First accepted result.")
             self.assertEqual(0, first[0], first[2])
             duplicate = self.submit(root, target, order["action_id"], summary="First accepted result.")
@@ -1177,6 +1295,689 @@ class OrchestrationControllerTests(unittest.TestCase):
         )
         self.assertEqual({"enabled": False, "providers": []}, alias_only["discovery"])
 
+    def test_research_scope_uses_configured_max_questions_per_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [
+                    {"id": "question-two", "question": "Second bounded question?", "priority": "high"},
+                    {"id": "question-three", "question": "Third bounded question?", "priority": "low"},
+                ],
+            )
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config.setdefault("run", {})["max_questions_per_run"] = 2
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            self.start(target)
+
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual("research", order["phase"])
+        self.assertEqual(2, order["budgets"]["max_questions_per_run"])
+        self.assertEqual(["question-two", "test-question"], order["scope"]["question_slugs"])
+
+    def test_research_scope_uses_active_child_remaining_budget_and_rolls_over_at_zero(self):
+        base_status = {
+            "workspace_health": {"materially_valid": True},
+            "readiness": {
+                "verdict": "in_progress",
+                "budget_state": {"questions_remaining_this_run": 1},
+            },
+            "questions": {"actionable_slugs": ["question-one", "question-two", "question-three"]},
+            "run": {"max_questions_per_run": 3},
+            "run_controller": {"run_id": "run-active", "state": "answering", "terminal": False},
+        }
+        session = {"active_run_id": "run-active"}
+        with (
+            mock.patch.object(CONTROLLER, "load_config", return_value={}),
+            mock.patch.object(CONTROLLER, "fresh_workspace_status", return_value=base_status),
+        ):
+            route, context = CONTROLLER.choose_route(Path("/unused"), session)
+
+        self.assertEqual("research", route)
+        self.assertEqual(["question-one"], context["scope"]["question_slugs"])
+
+        exhausted = json.loads(json.dumps(base_status))
+        exhausted["readiness"]["budget_state"]["questions_remaining_this_run"] = 0
+        rollover_session = {"active_run_id": "run-active"}
+
+        def close_active(_project_root: Path, retained_session: dict, verdict: str) -> None:
+            self.assertEqual("no_ship", verdict)
+            retained_session["active_run_id"] = None
+
+        with (
+            mock.patch.object(CONTROLLER, "load_config", return_value={}),
+            mock.patch.object(CONTROLLER, "fresh_workspace_status", return_value=exhausted),
+            mock.patch.object(CONTROLLER, "finish_active_child", side_effect=close_active) as finish_mock,
+            mock.patch.object(CONTROLLER, "record_event") as event_mock,
+        ):
+            route, context = CONTROLLER.choose_route(Path("/unused"), rollover_session)
+
+        self.assertEqual("research", route)
+        self.assertEqual(
+            ["question-one", "question-two", "question-three"],
+            context["scope"]["question_slugs"],
+        )
+        self.assertIsNone(rollover_session["active_run_id"])
+        finish_mock.assert_called_once()
+        event_mock.assert_called_once()
+
+    def test_source_request_budget_exhaustion_rolls_unanswered_questions_to_fresh_child(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [
+                    {"id": "question-two", "question": "Second evidence gap?", "priority": "high"},
+                    {"id": "question-three", "question": "Third unanswered question?", "priority": "high"},
+                ],
+            )
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config.setdefault("run", {})["max_source_requests_per_run"] = 2
+            config["run"]["max_questions_per_run"] = 3
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            self.start(target)
+            _, first_order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            for slug in ("test-question", "question-two"):
+                request = self.assert_json_script_ok(
+                    SOURCE_REQUESTS,
+                    [
+                        "--project-root",
+                        str(target),
+                        "add",
+                        "--kind",
+                        "paper",
+                        "--query",
+                        f"evidence for {slug}",
+                        "--rationale",
+                        f"The scoped question {slug} needs primary evidence.",
+                        "--question-slug",
+                        slug,
+                        "--format",
+                        "json",
+                    ],
+                )["request"]
+                self.assert_json_script_ok(
+                    CLAIM,
+                    [
+                        "--project-root",
+                        str(target),
+                        "claim",
+                        "--slug",
+                        slug,
+                        "--agent-id",
+                        "agent-test",
+                        "--format",
+                        "json",
+                    ],
+                )
+                self.assert_json_script_ok(
+                    RESOLVE,
+                    [
+                        "--project-root",
+                        str(target),
+                        "block",
+                        "--slug",
+                        slug,
+                        "--agent-id",
+                        "agent-test",
+                        "--blocked-reason",
+                        "The run reached its bounded source-request workflow.",
+                        "--request-id",
+                        request["request_id"],
+                        "--format",
+                        "json",
+                    ],
+                )
+
+            code, _, stderr = self.submit(
+                root,
+                target,
+                first_order["action_id"],
+                summary="Opened the two permitted source requests while leaving one question actionable.",
+            )
+            self.assertEqual(0, code, stderr)
+            first_child_path = target / "runs" / first_order["run_id"] / "run-state.json"
+            self.assertEqual("answering", json.loads(first_child_path.read_text())["state"]["current"])
+
+            code, second_order, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("research", second_order["phase"])
+            self.assertNotEqual(first_order["run_id"], second_order["run_id"])
+            self.assertEqual(["question-three"], second_order["scope"]["question_slugs"])
+            self.assertEqual("no_ship", json.loads(first_child_path.read_text())["state"]["current"])
+
+    def test_legacy_research_without_question_baseline_requires_fresh_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            order_path = CONTROLLER.work_order_path(target, "orch-test", order["action_id"])
+            retained_order = json.loads(order_path.read_text(encoding="utf-8"))
+            retained_order["required_postconditions"] = [
+                item
+                for item in retained_order["required_postconditions"]
+                if item["check"] != "controller_integrity_baseline"
+            ]
+            CONTROLLER.write_json_atomic(order_path, retained_order)
+
+            code, error, _ = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--resume",
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_RESEARCH_BASELINE_UNAVAILABLE", error["error_code"])
+            self.assertIn("fresh orchestration session", error["remediation"])
+
+            code, error, _ = self.submit(root, target, order["action_id"])
+
+        self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+        self.assertEqual("ORCHESTRATION_RESEARCH_BASELINE_UNAVAILABLE", error["error_code"])
+        self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
+
+    def test_selected_candidates_are_bounded_by_work_order_candidate_scope(self):
+        candidates = [
+            {
+                "candidate_id": "cand-authorized",
+                "source_request_id": "req-test",
+                "provider": "arxiv",
+                "lifecycle_state": "selected",
+            },
+            {
+                "candidate_id": "cand-out-of-scope",
+                "source_request_id": "req-test",
+                "provider": "arxiv",
+                "lifecycle_state": "selected",
+            },
+            {
+                "candidate_id": "cand-other-request",
+                "source_request_id": "req-other",
+                "provider": "arxiv",
+                "lifecycle_state": "selected",
+            },
+        ]
+        with mock.patch.object(CONTROLLER, "load_candidates", return_value=candidates):
+            selected = CONTROLLER.selected_candidates_for_scope(
+                Path("/unused"),
+                {},
+                ["req-test"],
+                ["cand-authorized"],
+            )
+            outside = CONTROLLER.selected_candidates_outside_scope(
+                Path("/unused"),
+                {},
+                ["req-test"],
+                ["cand-authorized"],
+            )
+
+        self.assertEqual(["cand-authorized"], [item["candidate_id"] for item in selected])
+        self.assertEqual(["cand-out-of-scope"], [item["candidate_id"] for item in outside])
+
+    def test_candidate_review_rejects_only_new_out_of_scope_selections(self):
+        request_id = "req-review"
+        historical = {
+            "candidate_id": "cand-historical-unroutable",
+            "source_request_id": request_id,
+            "provider": "github",
+            "lifecycle_state": "selected",
+        }
+        authorized = {
+            "candidate_id": "cand-authorized",
+            "source_request_id": request_id,
+            "provider": "arxiv",
+            "source_type": "paper",
+            "paper": {"provider_ids": {"arxiv": "2601.12345v2"}},
+            "lifecycle_state": "selected",
+        }
+        authorized_before = {**authorized, "lifecycle_state": "proposed"}
+        injected = {
+            "candidate_id": "cand-injected",
+            "source_request_id": request_id,
+            "provider": "arxiv",
+            "source_type": "paper",
+            "paper": {"provider_ids": {"arxiv": "2601.54321v1"}},
+            "lifecycle_state": "selected",
+        }
+        raw_baseline = {
+            "algorithm": "sha256-content-v1",
+            "file_count": 0,
+            "total_bytes": 0,
+            "fingerprint": "sha256:" + "0" * 64,
+        }
+        work_order = {
+            "phase": "candidate_review",
+            "run_id": "run-review",
+            "scope": {
+                "question_slugs": [],
+                "request_ids": [request_id],
+                "candidate_ids": [authorized["candidate_id"]],
+            },
+            "required_postconditions": [
+                {
+                    "check": "selected_candidate_for_request",
+                    "selected_before": 1,
+                    "selected_candidate_ids_before": [historical["candidate_id"]],
+                    "candidate_record_fingerprints_before": CONTROLLER.candidate_record_fingerprint_snapshot(
+                        [historical, authorized_before]
+                    ),
+                },
+                {
+                    "check": "selection_does_not_fetch",
+                    "manifest_records_before": 0,
+                    "manifest_digest_before": None,
+                },
+                {"check": "raw_tree_unchanged", "before": raw_baseline},
+            ],
+        }
+        status = {"readiness": {"verdict": "blocked_on_sources"}, "sources": {"manifest_records": 0}}
+        config = {
+            "integrations": {
+                "discovery": {"enabled": True, "providers": ["arxiv"]},
+                "acquisition": {"enabled": True, "providers": ["arxiv"]},
+            }
+        }
+        run_controller = mock.Mock()
+        run_controller.load_run_state.return_value = {"state": {"current": "candidates_ready"}}
+
+        def verify(candidates: list[dict]) -> tuple[str | None, str | None]:
+            def sibling(stem: str):
+                return run_controller if stem == "run_controller" else SOURCE_REQUESTS
+
+            with (
+                mock.patch.object(CONTROLLER, "load_config", return_value=config),
+                mock.patch.object(CONTROLLER, "fresh_workspace_status", return_value=status),
+                mock.patch.object(CONTROLLER, "load_candidates", return_value=candidates),
+                mock.patch.object(CONTROLLER, "raw_tree_snapshot", return_value=raw_baseline),
+                mock.patch.object(CONTROLLER, "evidence_manifest_digest", return_value=None),
+                mock.patch.object(CONTROLLER, "load_sibling_module", side_effect=sibling),
+            ):
+                return CONTROLLER.verify_action_postconditions(
+                    Path("/unused"),
+                    {"agent_id": "test-agent"},
+                    work_order,
+                )
+
+        self.assertEqual(("acquisition", None), verify([historical, authorized]))
+        with self.assertRaisesRegex(
+            CONTROLLER.OrchestrationControllerError,
+            "outside the persisted candidate scope",
+        ):
+            verify([historical, authorized, injected])
+
+    def test_completed_research_requires_terminal_scoped_progress_and_accepts_linked_source_block(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            code, error, _ = self.submit(
+                root,
+                target,
+                order["action_id"],
+                summary="The worker returned without processing its scoped question.",
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
+            self.assertIn("without terminally processing", error["message"])
+            self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
+
+            request_id = self.block_question(target)
+            code, accepted, stderr = self.submit(
+                root,
+                target,
+                order["action_id"],
+                summary="Created a scoped source request and durably blocked the question on it.",
+                artifacts=["sources/source-requests.jsonl", "wiki/questions/test-question.md"],
+            )
+            retained_request = json.loads(
+                (target / "sources" / "source-requests.jsonl").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual("active", accepted["status"])
+        self.assertEqual("planning", accepted["phase"])
+        self.assertEqual(request_id, retained_request["request_id"])
+
+    def test_research_validates_blocked_links_even_when_other_questions_keep_readiness_in_progress(self):
+        work_order = {
+            "phase": "research",
+            "run_id": "run-mixed-research",
+            "scope": {
+                "question_slugs": ["blocked-question", "open-question"],
+                "request_ids": [],
+                "candidate_ids": [],
+            },
+            "required_postconditions": [
+                {
+                    "check": "workspace_readiness_changed",
+                    "allowed_verdicts": ["in_progress", "blocked_on_sources", "complete"],
+                    "scoped_questions_before": {
+                        "blocked-question": {
+                            "status": "open",
+                            "blocking_request_ids": [],
+                            "answer_page": "",
+                        },
+                        "open-question": {
+                            "status": "open",
+                            "blocking_request_ids": [],
+                            "answer_page": "",
+                        },
+                    },
+                    "question_file_fingerprints_before": {
+                        "blocked-question.md": "sha256:" + "1" * 64,
+                        "open-question.md": "sha256:" + "2" * 64,
+                    },
+                    "source_request_record_fingerprints_before": {},
+                },
+                {"check": "child_run_state", "expected": "answering"},
+            ],
+        }
+        after_questions = {
+            "blocked-question": {
+                "status": "blocked",
+                "blocking_request_ids": ["req-orphaned"],
+                "answer_page": "",
+            },
+            "open-question": {
+                "status": "open",
+                "blocking_request_ids": [],
+                "answer_page": "",
+            },
+        }
+        run_controller = mock.Mock()
+        run_controller.load_run_state.return_value = {"state": {"current": "answering"}}
+        source_requests = mock.Mock()
+        source_requests.requests_path.return_value = Path("/unused/source-requests.jsonl")
+        source_requests.load_requests.return_value = []
+
+        def sibling(stem: str):
+            return {"run_controller": run_controller, "source_requests": source_requests}[stem]
+
+        with (
+            mock.patch.object(CONTROLLER, "load_config", return_value={}),
+            mock.patch.object(
+                CONTROLLER,
+                "fresh_workspace_status",
+                return_value={"readiness": {"verdict": "in_progress"}},
+            ),
+            mock.patch.object(CONTROLLER, "scoped_question_snapshot", return_value=after_questions),
+            mock.patch.object(
+                CONTROLLER,
+                "question_file_fingerprint_snapshot",
+                return_value={
+                    "blocked-question.md": "sha256:" + "3" * 64,
+                    "open-question.md": "sha256:" + "2" * 64,
+                },
+            ),
+            mock.patch.object(CONTROLLER, "load_sibling_module", side_effect=sibling),
+            self.assertRaisesRegex(
+                CONTROLLER.OrchestrationControllerError,
+                "blocked research questions lack open request artifacts",
+            ),
+        ):
+            CONTROLLER.verify_action_postconditions(
+                Path("/unused"),
+                {"agent_id": "agent-test"},
+                work_order,
+            )
+
+    def test_blocked_provider_scopes_are_bounded_before_work_order_issuance(self):
+        config = {
+            "integrations": {
+                "discovery": {"enabled": True, "providers": ["openalex"]},
+                "acquisition": {"enabled": True, "providers": ["openalex"]},
+            }
+        }
+        request = {
+            "request_id": "req-bounded",
+            "status": "open",
+            "priority": "high",
+            "question_slugs": ["test-question"],
+        }
+        status = {
+            "workspace_health": {"materially_valid": True},
+            "readiness": {"verdict": "blocked_on_sources"},
+        }
+        reviewable = [
+            {
+                "candidate_id": f"cand-{index:03d}",
+                "source_request_id": request["request_id"],
+                "provider": "openalex",
+                "source_type": "paper",
+                "paper": {"provider_ids": {"openalex": f"W{index + 1}"}},
+                "lifecycle_state": "proposed",
+            }
+            for index in range(CONTROLLER.MAX_SCOPE_IDS + 44)
+        ]
+
+        def choose(candidates: list[dict]) -> tuple[str | None, dict]:
+            with (
+                mock.patch.object(CONTROLLER, "load_config", return_value=config),
+                mock.patch.object(CONTROLLER, "fresh_workspace_status", return_value=status),
+                mock.patch.object(CONTROLLER, "open_requests", return_value=[request]),
+                mock.patch.object(CONTROLLER, "load_candidates", return_value=candidates),
+            ):
+                return CONTROLLER.choose_route(Path("/unused"), {})
+
+        route, context = choose(reviewable)
+        self.assertEqual("candidate_review", route)
+        self.assertEqual(CONTROLLER.MAX_SCOPE_IDS, len(context["scope"]["candidate_ids"]))
+        self.assertEqual("cand-000", context["scope"]["candidate_ids"][0])
+        self.assertEqual("cand-255", context["scope"]["candidate_ids"][-1])
+
+        selected = [
+            {**candidate, "lifecycle_state": "selected"}
+            for candidate in reviewable[:2]
+        ]
+        route, context = choose(selected)
+        self.assertEqual("acquisition", route)
+        self.assertEqual(["cand-000"], context["scope"]["candidate_ids"])
+
+    def test_exhausted_or_unroutable_existing_candidates_trigger_rediscovery(self):
+        config = {
+            "integrations": {
+                "discovery": {"enabled": True, "providers": ["arxiv"]},
+                "acquisition": {"enabled": True, "providers": ["openalex"]},
+            }
+        }
+        request = {
+            "request_id": "req-retry-route",
+            "status": "open",
+            "priority": "high",
+            "question_slugs": ["test-question"],
+        }
+        candidates = [
+            {
+                "candidate_id": "cand-rejected",
+                "source_request_id": request["request_id"],
+                "provider": "openalex",
+                "lifecycle_state": "rejected",
+            },
+            {
+                "candidate_id": "cand-failed",
+                "source_request_id": request["request_id"],
+                "provider": "openalex",
+                "lifecycle_state": "failed",
+            },
+            {
+                "candidate_id": "cand-superseded",
+                "source_request_id": request["request_id"],
+                "provider": "openalex",
+                "lifecycle_state": "superseded",
+            },
+            {
+                "candidate_id": "cand-unroutable",
+                "source_request_id": request["request_id"],
+                "provider": "github",
+                "lifecycle_state": "proposed",
+            },
+        ]
+        status = {
+            "workspace_health": {"materially_valid": True},
+            "readiness": {"verdict": "blocked_on_sources"},
+        }
+        session: dict = {}
+        with (
+            mock.patch.object(CONTROLLER, "load_config", return_value=config),
+            mock.patch.object(CONTROLLER, "fresh_workspace_status", return_value=status),
+            mock.patch.object(CONTROLLER, "open_requests", return_value=[request]),
+            mock.patch.object(CONTROLLER, "load_candidates", return_value=candidates),
+        ):
+            route, context = CONTROLLER.choose_route(Path("/unused"), session)
+
+        self.assertEqual("discovery", route)
+        self.assertEqual(4, context["candidate_count_before"])
+        self.assertEqual(["arxiv"], context["discovery_providers"])
+        self.assertEqual([request["request_id"]], context["scope"]["request_ids"])
+
+    def test_discovery_completion_requires_new_reviewable_end_to_end_candidate(self):
+        request_id = "req-retry-route"
+        historical = {
+            "candidate_id": "cand-historical-rejected",
+            "source_request_id": request_id,
+            "provider": "openalex",
+            "source_type": "paper",
+            "lifecycle_state": "rejected",
+            "paper": {"provider_ids": {"openalex": "W12345"}},
+        }
+        baseline = CONTROLLER.request_candidate_state_snapshot([historical], [request_id])
+        new_unroutable = {
+            "candidate_id": "cand-new-unroutable",
+            "source_request_id": request_id,
+            "provider": "arxiv",
+            "discovery_providers": ["arxiv"],
+            "source_type": "paper",
+            "lifecycle_state": "proposed",
+            "paper": {"provider_ids": {}},
+        }
+
+        eligible = CONTROLLER.eligible_new_discovery_candidates(
+            [historical, new_unroutable],
+            [request_id],
+            baseline,
+            {"arxiv"},
+            {"openalex"},
+        )
+
+        self.assertEqual([], eligible, "historical rejected routes must not make a new unroutable result pass")
+
+        new_routable = {
+            **new_unroutable,
+            "candidate_id": "cand-new-routable",
+            "paper": {"provider_ids": {"doi": "10.5555/routable"}},
+        }
+        eligible = CONTROLLER.eligible_new_discovery_candidates(
+            [historical, new_routable],
+            [request_id],
+            baseline,
+            {"arxiv"},
+            {"openalex"},
+        )
+
+        self.assertEqual(["cand-new-routable"], [item["candidate_id"] for item in eligible])
+        for non_append_state in ("reviewed", "deferred"):
+            with self.subTest(non_append_state=non_append_state):
+                injected = {**new_routable, "lifecycle_state": non_append_state}
+                self.assertEqual(
+                    [],
+                    CONTROLLER.eligible_new_discovery_candidates(
+                        [historical, injected],
+                        [request_id],
+                        baseline,
+                        {"arxiv"},
+                        {"openalex"},
+                    ),
+                )
+
+        raw_baseline = {
+            "algorithm": "sha256-content-v1",
+            "file_count": 0,
+            "total_bytes": 0,
+            "fingerprint": "sha256:" + "0" * 64,
+        }
+        work_order = {
+            "phase": "discovery",
+            "run_id": "run-discovery",
+            "scope": {"question_slugs": [], "request_ids": [request_id], "candidate_ids": []},
+            "provider_policy": {
+                "discovery": {"enabled": True, "providers": ["arxiv"]},
+                "acquisition": {"enabled": True, "providers": ["openalex"]},
+            },
+            "required_postconditions": [
+                {
+                    "check": "request_scoped_candidates_increased",
+                    "before": 1,
+                    "candidate_states_before": baseline,
+                    "candidate_record_fingerprints_before": CONTROLLER.candidate_record_fingerprint_snapshot(
+                        [historical]
+                    ),
+                },
+                {
+                    "check": "discovery_never_fetches",
+                    "manifest_records_before": 0,
+                    "manifest_digest_before": None,
+                },
+                {"check": "raw_tree_unchanged", "before": raw_baseline},
+            ],
+        }
+        status = {"readiness": {"verdict": "blocked_on_sources"}, "sources": {"manifest_records": 0}}
+        run_controller = mock.Mock()
+        run_controller.load_run_state.return_value = {"state": {"current": "discovering"}}
+
+        def verify(candidates: list[dict]) -> tuple[str | None, str | None]:
+            def sibling(stem: str):
+                return run_controller if stem == "run_controller" else SOURCE_REQUESTS
+
+            with (
+                mock.patch.object(CONTROLLER, "load_config", return_value={}),
+                mock.patch.object(CONTROLLER, "fresh_workspace_status", return_value=status),
+                mock.patch.object(CONTROLLER, "load_candidates", return_value=candidates),
+                mock.patch.object(CONTROLLER, "raw_tree_snapshot", return_value=raw_baseline),
+                mock.patch.object(CONTROLLER, "evidence_manifest_digest", return_value=None),
+                mock.patch.object(CONTROLLER, "load_sibling_module", side_effect=sibling),
+            ):
+                return CONTROLLER.verify_action_postconditions(
+                    Path("/unused"),
+                    {"agent_id": "test-agent"},
+                    work_order,
+                )
+
+        with self.assertRaisesRegex(
+            CONTROLLER.OrchestrationControllerError,
+            "no newly added, reviewable candidate",
+        ):
+            verify([historical, new_unroutable])
+        self.assertEqual(("candidate_review", None), verify([historical, new_routable]))
+        disabled_provider = {
+            **new_routable,
+            "candidate_id": "cand-disabled-provider",
+            "provider": "github",
+            "discovery_providers": ["github"],
+        }
+        with self.assertRaisesRegex(
+            CONTROLLER.OrchestrationControllerError,
+            "enabled discovery-provider policy",
+        ):
+            verify([historical, new_routable, disabled_provider])
+
     def test_academic_candidate_routes_through_either_retained_provider_identity(self):
         merged_arxiv = {
             "provider": "arxiv",
@@ -1209,8 +2010,28 @@ class OrchestrationControllerTests(unittest.TestCase):
             "source_type": "code_repository",
             "url": "https://github.com/example/electrolyte-data",
         }
+        official_web = {
+            "provider": "search",
+            "source_type": "web_page",
+            "url": "https://standards.example.test/electrolytes",
+            "official_source": True,
+        }
+        unofficial_web = {
+            **official_web,
+            "official_source": False,
+            "trust_tier": "secondary",
+        }
+        manual_dataset = {
+            "provider": "search",
+            "source_type": "dataset",
+            "url": "https://data.example.test/electrolytes.csv",
+            "official_source": True,
+        }
         self.assertEqual("openalex", CONTROLLER.acquisition_route(search_paper, {"openalex"}))
         self.assertEqual("github", CONTROLLER.acquisition_route(search_repository, {"github"}))
+        self.assertEqual("web", CONTROLLER.acquisition_route(official_web, {"web"}))
+        self.assertIsNone(CONTROLLER.acquisition_route(unofficial_web, {"web"}))
+        self.assertIsNone(CONTROLLER.acquisition_route(manual_dataset, {"web"}))
 
     def test_only_end_to_end_composable_provider_pairs_can_issue_discovery(self):
         self.assertEqual(
@@ -1240,6 +2061,193 @@ class OrchestrationControllerTests(unittest.TestCase):
                 }
             ),
         )
+
+    def test_acquisition_reconciles_existing_matching_evidence_and_requires_exact_reopen(self):
+        request_id = "req-existing-evidence"
+        candidate_id = "cand-existing-evidence"
+        source_id = "html:existing-evidence"
+        work_order = {
+            "phase": "acquisition",
+            "run_id": "run-existing-evidence",
+            "scope": {
+                "question_slugs": ["test-question"],
+                "request_ids": [request_id],
+                "candidate_ids": [candidate_id],
+            },
+            "required_postconditions": [
+                {"check": "request_fulfilled_with_normalized_source"},
+                {
+                    "check": "linked_blocked_questions_reopened",
+                    "blocked_questions_before": {
+                        "test-question": {
+                            "status": "blocked",
+                            "blocking_request_ids": [request_id],
+                            "source_ids_before": [],
+                        }
+                    },
+                },
+                {
+                    "check": "manifest_records_increased",
+                    "before": 1,
+                    "matching_source_ids_before": [source_id],
+                },
+            ],
+        }
+        fulfilled_request = {
+            "request_id": request_id,
+            "status": "fulfilled",
+            "source_id": source_id,
+            "question_slugs": ["test-question"],
+        }
+        manifest_record = {
+            "id": source_id,
+            "provenance": {"request_id": request_id, "candidate_id": candidate_id},
+        }
+        fetched_candidate = {
+            "candidate_id": candidate_id,
+            "source_request_id": request_id,
+            "lifecycle_state": "fetched",
+            "fetched_source_id": source_id,
+        }
+        status = {
+            "readiness": {"verdict": "in_progress"},
+            "sources": {"manifest_records": 1},
+            "questions": {"blocked_slugs": []},
+        }
+        run_controller = mock.Mock()
+        run_controller.load_run_state.return_value = {"state": {"current": "fetching"}}
+        source_requests = mock.Mock()
+        source_requests.requests_path.return_value = Path("/unused/source-requests.jsonl")
+        source_requests.load_requests.return_value = [fulfilled_request]
+        normalize_sources = mock.Mock()
+        normalize_sources.source_paths.return_value = (
+            "sources/manifest.jsonl",
+            "sources/normalized",
+        )
+        normalize_sources.load_manifest.return_value = [manifest_record]
+        normalize_sources.records_by_source_id.return_value = {source_id: manifest_record}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            normalized_path = Path(tmpdir) / "sources" / "normalized" / "existing.md"
+            normalized_path.parent.mkdir(parents=True)
+            normalized_path.write_text("normalized evidence\n", encoding="utf-8")
+            normalize_sources.normalized_output_path_for_record.return_value = normalized_path
+            raw_baseline = {
+                "algorithm": "sha256-content-v1",
+                "file_count": 0,
+                "total_bytes": 0,
+                "fingerprint": "sha256:" + hashlib.sha256(b"").hexdigest(),
+                "entries": {},
+            }
+            selected_candidate = {
+                **fetched_candidate,
+                "lifecycle_state": "selected",
+            }
+            selected_candidate.pop("fetched_source_id")
+            open_request = {**fulfilled_request, "status": "open"}
+            open_request.pop("source_id")
+            manifest_guard = work_order["required_postconditions"][2]
+            manifest_fingerprint = CONTROLLER.canonical_json_fingerprint(
+                manifest_record,
+                label="test manifest",
+            )[0]
+            normalized_fingerprint = CONTROLLER.file_digest(
+                normalized_path,
+                containment_root=Path(tmpdir),
+            )
+            manifest_guard.update(
+                {
+                    "matching_source_records_before": {
+                        source_id: {
+                            "record_fingerprint": manifest_fingerprint,
+                            "normalized_fingerprint": normalized_fingerprint,
+                        }
+                    },
+                    "manifest_record_fingerprints_before": {source_id: manifest_fingerprint},
+                    "raw_tree_before": raw_baseline,
+                    "candidate_record_fingerprints_before": (
+                        CONTROLLER.candidate_record_fingerprint_snapshot([selected_candidate])
+                    ),
+                    "source_request_record_fingerprints_before": CONTROLLER.record_fingerprint_snapshot(
+                        [open_request],
+                        id_field="request_id",
+                        label="test requests",
+                    ),
+                    "normalized_file_fingerprints_before": {
+                        "sources/normalized/existing.md": normalized_fingerprint,
+                    },
+                    "question_file_fingerprints_before": {
+                        "test-question.md": "sha256:" + "4" * 64,
+                    },
+                }
+            )
+
+            def sibling(stem: str):
+                return {
+                    "run_controller": run_controller,
+                    "source_requests": source_requests,
+                    "normalize_sources": normalize_sources,
+                }[stem]
+
+            def verify(question: dict) -> tuple[str | None, str | None]:
+                with (
+                    mock.patch.object(CONTROLLER, "load_config", return_value={}),
+                    mock.patch.object(CONTROLLER, "fresh_workspace_status", return_value=status),
+                    mock.patch.object(CONTROLLER, "open_requests", return_value=[]),
+                    mock.patch.object(CONTROLLER, "load_candidates", return_value=[fetched_candidate]),
+                    mock.patch.object(CONTROLLER, "raw_tree_snapshot", return_value=raw_baseline),
+                    mock.patch.object(
+                        CONTROLLER,
+                        "normalized_file_fingerprint_snapshot",
+                        return_value={"sources/normalized/existing.md": normalized_fingerprint},
+                    ),
+                    mock.patch.object(
+                        CONTROLLER,
+                        "question_file_fingerprint_snapshot",
+                        return_value={"test-question.md": "sha256:" + "5" * 64},
+                    ),
+                    mock.patch.object(
+                        CONTROLLER,
+                        "scoped_question_evidence_snapshot",
+                        return_value={"test-question": question},
+                    ),
+                    mock.patch.object(CONTROLLER, "load_sibling_module", side_effect=sibling),
+                ):
+                    return CONTROLLER.verify_action_postconditions(
+                        Path(tmpdir),
+                        {"agent_id": "agent-test"},
+                        work_order,
+                    )
+
+            reopened = {
+                "status": "open",
+                "blocking_request_ids": [],
+                "source_ids": [source_id],
+            }
+            self.assertEqual(("research", None), verify(reopened))
+            for bypass_status in ("answered", "deferred", "rejected"):
+                with self.subTest(bypass_status=bypass_status), self.assertRaisesRegex(
+                    CONTROLLER.OrchestrationControllerError,
+                    "did not reopen every scoped blocked question",
+                ):
+                    verify({**reopened, "status": bypass_status})
+
+    def test_legacy_acquisition_without_reconciliation_baselines_requires_fresh_session(self):
+        with self.assertRaisesRegex(
+            CONTROLLER.OrchestrationControllerError,
+            "question/evidence baseline",
+        ):
+            CONTROLLER.require_action_baselines(
+                {
+                    "phase": "acquisition",
+                    "action_id": "action-legacy-acquisition",
+                    "required_postconditions": [
+                        {"check": "request_fulfilled_with_normalized_source"},
+                        {"check": "linked_blocked_questions_reopened"},
+                        {"check": "manifest_records_increased", "before": 0},
+                    ],
+                }
+            )
 
     def test_child_creation_intent_survives_crash_before_work_order_persistence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1764,6 +2772,14 @@ class OrchestrationControllerTests(unittest.TestCase):
 
             _, discovery_order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
             self.assertEqual("discovery", discovery_order["phase"])
+            hydrated_discovery_order = self.hydrated_order(target, discovery_order)
+            candidate_baseline = next(
+                item
+                for item in hydrated_discovery_order["required_postconditions"]
+                if item["check"] == "request_scoped_candidates_increased"
+            )
+            self.assertEqual(0, candidate_baseline["before"])
+            self.assertEqual({}, candidate_baseline["candidate_states_before"])
             provider_calls: list[tuple[str, str]] = []
 
             def arxiv_transport(url, _timeout, _headers):
@@ -1852,6 +2868,24 @@ class OrchestrationControllerTests(unittest.TestCase):
 
             _, acquisition_order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
             self.assertEqual("acquisition", acquisition_order["phase"])
+            hydrated_acquisition_order = self.hydrated_order(target, acquisition_order)
+            acquisition_guards = {
+                item["check"]: item for item in hydrated_acquisition_order["required_postconditions"]
+            }
+            self.assertEqual(
+                {
+                    "test-question": {
+                        "status": "blocked",
+                        "blocking_request_ids": [request_id],
+                        "source_ids_before": [],
+                    }
+                },
+                acquisition_guards["linked_blocked_questions_reopened"]["blocked_questions_before"],
+            )
+            self.assertEqual(
+                [],
+                acquisition_guards["manifest_records_increased"]["matching_source_ids_before"],
+            )
             raw_relative = self.write_mock_acquired_paper(
                 target,
                 request_id=request_id,
@@ -1871,31 +2905,6 @@ class OrchestrationControllerTests(unittest.TestCase):
             matches = [record for record in records if raw_relative in record.get("raw_paths", [])]
             self.assertEqual(1, len(matches))
             source_id = matches[0]["id"]
-            self.assert_json_script_ok(
-                DISCOVER,
-                [
-                    "--project-root",
-                    str(target),
-                    "--format",
-                    "json",
-                    "candidates",
-                    "transition",
-                    "--candidate-id",
-                    candidate_id,
-                    "--expected-state",
-                    "selected",
-                    "--to-state",
-                    "fetched",
-                    "--reason",
-                    "Provenance-backed evidence was inventoried and normalized.",
-                    "--source-id",
-                    source_id,
-                    "--actor",
-                    "acquire-agent",
-                    "--run-id",
-                    acquisition_order["run_id"],
-                ],
-            )
             self.assert_json_script_ok(
                 SOURCE_REQUESTS,
                 [
@@ -1928,6 +2937,61 @@ class OrchestrationControllerTests(unittest.TestCase):
                     "json",
                 ],
             )
+
+            code, error, _ = self.submit(
+                root,
+                target,
+                acquisition_order["action_id"],
+                summary="Fulfilled evidence before recording the candidate-to-source transition.",
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
+            self.assertIn("candidate provenance", error["message"])
+
+            self.assert_json_script_ok(
+                DISCOVER,
+                [
+                    "--project-root",
+                    str(target),
+                    "--format",
+                    "json",
+                    "candidates",
+                    "transition",
+                    "--candidate-id",
+                    candidate_id,
+                    "--expected-state",
+                    "selected",
+                    "--to-state",
+                    "fetched",
+                    "--reason",
+                    "Provenance-backed evidence was inventoried and normalized.",
+                    "--source-id",
+                    source_id,
+                    "--actor",
+                    "acquire-agent",
+                    "--run-id",
+                    acquisition_order["run_id"],
+                ],
+            )
+
+            manifest_path = target / "sources" / "manifest.jsonl"
+            original_manifest = manifest_path.read_text(encoding="utf-8")
+            wrong_records = self.manifest_records(target)
+            wrong_records[0]["provenance"]["candidate_id"] = "cand-out-of-scope"
+            manifest_path.write_text(
+                "".join(json.dumps(record, sort_keys=True) + "\n" for record in wrong_records),
+                encoding="utf-8",
+            )
+            code, error, _ = self.submit(
+                root,
+                target,
+                acquisition_order["action_id"],
+                summary="Fulfilled evidence with unrelated candidate provenance.",
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
+            self.assertIn("candidate provenance", error["message"])
+            manifest_path.write_text(original_manifest, encoding="utf-8")
 
             # Resuming while the acquisition result is pending must replay the
             # same action and cannot authorize a second delivery.

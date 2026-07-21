@@ -42,6 +42,13 @@ prompts, transcripts, diagnostics, credentials, or absolute paths. Quarantine
 is conditional: the host creates it only when a schema-valid worker result
 exists before tripwire-protected control drift is detected.
 
+For every non-verification action, `trusted-inputs/` also contains
+`<action_id>-scope-baseline.json`. The public work order exposes only its
+workspace-relative path, SHA-256 digest, and bounded field/entry counts. The
+controller validates and hydrates this private pre-action record in memory;
+workers never own or rewrite it. Sidecars are capped at 8 MiB and persisted
+work orders at 256 KiB.
+
 The bounded semantic baseline is named the **tripwire-protected controls**. It
 covers the workspace contract and instructions (`research.yml`,
 `workspace-system.yml`, `AGENTS.md`, `CLAUDE.md`, `README.md`, and `.gitignore`),
@@ -150,14 +157,15 @@ Before deploying or upgrading, query the installed package:
 evidence-wiki contract
 ```
 
-Output is JSON:
+The output is JSON. This abridged example omits the large
+`artifact_schema_documents` mapping, which is described immediately below:
 
 ```json
 {
   "schema_version": "1.0",
   "package": "evidence-wiki",
   "package_version": "0.2.1",
-  "starter_version": "0.5.1",
+  "starter_version": "0.5.2",
   "starter_schema_version": "0.1",
   "compatible_research_yml_contract": "0.1",
   "profile_schema_versions": ["0.1"],
@@ -239,7 +247,7 @@ Compatibility policy:
 
 - An orchestrator must only submit setup profiles whose `schema_version` appears in `profile_schema_versions`.
 - Before `evidence-wiki upgrade`, compare the workspace's `workspace-system.yml` `compatible_research_yml_contract` with the value reported here; upgrade only when they match.
-- `artifact_schemas` lists the schema version of each machine-readable artifact the workspace tooling emits. A minor package upgrade never changes a published artifact schema without bumping its version; orchestrators should pin parsers to the major version of each artifact schema and treat unknown additional fields as forward-compatible additions.
+- `artifact_schemas` remains the compact schema-version map for every machine-readable artifact the workspace tooling emits. `artifact_schema_documents` additionally contains complete Draft 2020-12 JSON Schema documents for `orchestration_session`, `orchestration_work_order`, `orchestration_result`, and `orchestration_attempt`; external protocol hosts should validate controller output against those documents before use. A minor package upgrade never changes a published artifact schema without bumping its version; orchestrators should pin parsers to the major version of each artifact schema and follow each published document's `additionalProperties` policy.
 - `policy_vocabularies` lists the allowed evidence policy identifiers for coverage manifests and domain-pack coverage templates. Human-readable definitions live in [evidence-policies.md](evidence-policies.md).
 - `contract.compatible_research_yml_contract` in workspace status output (see step 5) reports what an already-created workspace was built against.
 
@@ -274,7 +282,7 @@ errors that prevent the report from being built.
 | Script | JSON mode | Fatal envelope codes |
 |--------|-----------|----------------------|
 | `coverage_manifest.py` | `python3 scripts/coverage_manifest.py init\|show\|validate\|set-facet\|evaluate --format json` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `COVERAGE_MANIFEST_INVALID`, `COVERAGE_MANIFEST_EXISTS`, `COVERAGE_CLAIM_PROBE_INVALID`, `COVERAGE_FACET_UNKNOWN`, `COVERAGE_POLICY_UNKNOWN`, `COVERAGE_TEMPLATE_INVALID`, `SOURCE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_LINKED`, `VALUE_INVALID`, `SLUG_INVALID`, `SLUG_UNKNOWN`, `WORKSPACE_UNREADABLE` |
-| `discover_sources.py` | `python3 scripts/discover_sources.py --format json <command>` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `VALUE_INVALID`, `DISCOVERY_DISABLED`, `DISCOVERY_PROVIDER_DISABLED`, `NOT_IMPLEMENTED`, `DISCOVERY_NETWORK_ERROR`, `DISCOVERY_RESPONSE_INVALID`, `ARXIV_RATE_LIMITED`, `OPENALEX_AUTH_REQUIRED`, `OPENALEX_RATE_LIMITED`, `SEARCH_PROVIDER_DISABLED`, `SEARCH_PROVIDER_FAILED`, `GITHUB_AUTH_REQUIRED`, `GITHUB_RATE_LIMITED`, `CANDIDATE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_OPEN`, `QUESTION_UNKNOWN`, `WORKSPACE_UNREADABLE` |
+| `discover_sources.py` | `python3 scripts/discover_sources.py --format json <command>` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `VALUE_INVALID`, `DISCOVERY_DISABLED`, `DISCOVERY_PROVIDER_DISABLED`, `NOT_IMPLEMENTED`, `DISCOVERY_NETWORK_ERROR`, `DISCOVERY_RESPONSE_INVALID`, `ARXIV_RATE_LIMITED`, `OPENALEX_AUTH_REQUIRED`, `OPENALEX_RATE_LIMITED`, `SEARCH_PROVIDER_DISABLED`, `SEARCH_PROVIDER_FAILED`, `GITHUB_AUTH_REQUIRED`, `GITHUB_RATE_LIMITED`, `CANDIDATE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_OPEN`, `QUESTION_UNKNOWN`, `DISCOVERY_RUN_STATE_INVALID`, `DISCOVERY_RUN_RECOVERY_REQUIRED`, `DISCOVERY_RUN_ID_INVALID`, `DISCOVERY_RUN_UNKNOWN`, `DISCOVERY_RUN_TERMINAL`, `DISCOVERY_RUN_ID_REQUIRED`, `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID`, `ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED`, `ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED`, `WORKSPACE_UNREADABLE` |
 | `doctor.py` | `python3 scripts/doctor.py --format json` | `WORKSPACE_UNREADABLE` for fatal setup exceptions; missing capabilities are normal report checks. |
 | `export_answers.py` | `python3 scripts/export_answers.py --format json` or `--format jsonl` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `HANDOFF_SIGNATURE_INVALID`, `WORKSPACE_UNREADABLE` |
 | `fetch_sources.py` | `python3 scripts/fetch_sources.py --format json <provider> <command>` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `ACQUISITION_DISABLED`, `ACQUISITION_PROVIDER_DISABLED`, `ACQUISITION_LIMIT_EXCEEDED`, `ARXIV_ID_INVALID`, `ACQUISITION_NETWORK_ERROR`, `ACQUISITION_RESPONSE_INVALID`, `ACQUISITION_ARCHIVE_UNSAFE`, `ACQUISITION_TARGET_EXISTS`, `OPENALEX_ID_INVALID`, `OPENALEX_RESOLUTION_UNCERTAIN`, `OPENALEX_AUTH_REQUIRED`, `OPENALEX_RATE_LIMITED`, `OPENALEX_PDF_UNAVAILABLE`, `GITHUB_AUTH_REQUIRED`, `GITHUB_RATE_LIMITED`, `GITHUB_REPO_INVALID`, `GITHUB_NOT_FOUND`, `GITHUB_RELEASE_UNAVAILABLE`, `GITHUB_ARCHIVE_TOO_LARGE`, `NOT_IMPLEMENTED` |
@@ -300,7 +308,7 @@ result:
 
 | Code | Meaning | Typical remediation |
 |------|---------|---------------------|
-| `RUNNER_ISOLATION_UNAVAILABLE` | The selected runner or platform cannot enforce the required permission profile. | For Codex, install Codex CLI 0.138 or newer. For Claude, install `bubblewrap` and `socat` on Linux/WSL2 or use the built-in `sandbox-exec` and `touch` on macOS. Do not use managed Claude on native Windows; use WSL2, a container, or an external protocol host with equivalent isolation. No worker was started. |
+| `RUNNER_ISOLATION_UNAVAILABLE` | The selected runner/runtime or platform cannot enforce the required permission profile. | For Codex, install CLI 0.138+ outside the writable workspace and reinstall it if the npm/pnpm/bun platform runtime is missing; EvidenceWiki grants only that native runtime tree read-only. For Claude, install `bubblewrap` and `socat` on Linux/WSL2 or use the built-in `sandbox-exec` and `touch` on macOS. Do not use managed Claude on native Windows; use WSL2, a container, or an external protocol host with equivalent isolation. No worker or parent session was started by preflight. |
 | `CONTROL_ARTIFACT_UNSAFE` | The host cannot construct the bounded snapshot of tripwire-protected controls because a tripwire root is too large or contains a link or special file. | Inspect the named workspace-relative path, restore a bounded regular-file tree, and resume the same action. Preventive-only read-only roots are sandbox controls, not recursively hashed tripwire roots. |
 | `CONTROL_ARTIFACT_TAMPERED` | A worker changed tripwire-protected path membership, file type, mode, or content. Timestamp-only drift is not included. | Inspect the exact workspace-relative changes and any quarantined valid result. No result was submitted and no file was automatically restored or rolled back. Restore the issued control state, then resume with `--acknowledge-control-repair`; the controller still checks its trusted-input fingerprint. Start a new session for intentional static-control changes. |
 | `CONTROL_REPAIR_REQUIRED` | A prior host attempt detected control drift and managed resume is paused before any controller or worker command. | Inspect the retained attempt and any quarantine, restore the issued state, then rerun `orchestrate resume --acknowledge-control-repair`. The flag acknowledges inspection; it does not accept quarantine or bypass fingerprints. |
@@ -345,6 +353,14 @@ Stable error codes:
 | `RESULT_INVALID` | A work result violates the version 1.0 schema or safe-path rules. | Return only action id, outcome, bounded summary, and workspace-relative artifact paths. |
 | `RESULT_CONFLICT` | A completed action already retains a different result. | Treat the accepted result as immutable; do not overwrite it. |
 | `ORCHESTRATION_POSTCONDITION_FAILED` | A worker reported completion but deterministic workspace artifacts do not satisfy the order. | Finish the same persisted action and resubmit it without changing the action id. |
+| `ORCHESTRATION_RESEARCH_BASELINE_UNAVAILABLE` | A pending legacy research action lacks its scoped question baseline. | Preserve the parent session for audit and start a fresh orchestration; do not infer the baseline after execution. |
+| `ORCHESTRATION_DISCOVERY_BASELINE_UNAVAILABLE` | A pending legacy discovery action lacks its request-scoped candidate-state baseline. | Preserve the parent session for audit and start a fresh orchestration; do not infer created candidates after execution. |
+| `ORCHESTRATION_CANDIDATE_REVIEW_BASELINE_UNAVAILABLE` | A pending legacy review action lacks its selected-candidate baseline. | Preserve the parent session for audit and start a fresh orchestration; do not infer prior selections. |
+| `ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE` | A pending legacy acquisition action lacks its blocked-question or matching-evidence baseline. | Preserve the parent session for audit and start a fresh orchestration; do not infer question or source transitions. |
+| `ORCHESTRATION_IMMUTABILITY_BASELINE_UNAVAILABLE` | A pending legacy discovery or review action lacks the exact raw/manifest no-fetch baseline. | Preserve the parent session for audit and start a fresh orchestration; never bind a baseline after worker execution. |
+| `ORCHESTRATION_INTEGRITY_BASELINE_INVALID` | A current action's protected scope sidecar reference, identity, shape, or summary is invalid. | Restore the exact controller-owned sidecar from trusted recovery material, or preserve the session and start a fresh one. Do not infer it from current workspace state. |
+| `ORCHESTRATION_INTEGRITY_BASELINE_CHANGED` | The protected scope sidecar is missing or its content no longer matches the issued SHA-256 digest. | Restore the exact issued sidecar, or preserve the session and start a fresh one. Do not regenerate it after execution. |
+| `ORCHESTRATION_SCOPE_EXCEEDED` | A bounded ID set, protected scope sidecar, or persisted work order exceeds its safety limit. | Reduce or archive historical records and start a safely bounded action; sidecars are capped at 8 MiB and public work orders at 256 KiB. |
 | `FINAL_VERDICT_REQUIRED` | `finish` omitted the terminal verdict. | Pass `--final-verdict complete`, `blocked_on_sources`, `no_ship`, or `failed`. |
 | `EVENT_DATA_INVALID` | `event --data-json` was not a JSON object. | Pass a JSON object or omit `--data-json`. |
 | `COVERAGE_REQUIRED` | `question_resolve.py answer --require-coverage` could not find the selected coverage manifest. | Initialize or select a coverage manifest under `sources.coverage_dir`, then evaluate it before answering. |
@@ -372,6 +388,17 @@ Stable error codes:
 | `DISCOVERY_PROVIDER_DISABLED` | A discovery provider route is not allow-listed for the workspace. | Add the provider to `integrations.discovery.providers` or choose an enabled discovery route. |
 | `DISCOVERY_NETWORK_ERROR` | A discovery provider request failed due to network or server errors. | Retry later, check network access, or lower request volume. |
 | `DISCOVERY_RESPONSE_INVALID` | A discovery provider response was malformed or missing required data. | Retry later or inspect the provider response manually. |
+| `DISCOVERY_RUN_ID_INVALID` | The academic-discovery run id is malformed. | Pass a filename-safe active run id. |
+| `DISCOVERY_RUN_UNKNOWN` | The requested academic-discovery run does not exist. | Start a fresh run or choose an existing active run. |
+| `DISCOVERY_RUN_TERMINAL` | Academic discovery was assigned to a terminal run. | Start a fresh run; terminal run artifacts are immutable. |
+| `DISCOVERY_RUN_ID_REQUIRED` | More than one active run makes provider-budget ownership ambiguous. | Pass the exact `--run-id` from the work order. |
+| `DISCOVERY_RUN_STATE_INVALID` | Retained run state cannot safely authorize a provider call. | Restore verified run state or start a fresh run before retrying. |
+| `DISCOVERY_RUN_RECOVERY_REQUIRED` | The selected run has an interrupted controller mutation. | Recover the run with `run_controller.py recover`, then retry. |
+| `ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED` | An active legacy run has no trustworthy academic-provider call baseline. | Preserve it for audit and start a fresh run; never create the marker or an empty ledger by hand. |
+| `ACADEMIC_PROVIDER_ACCOUNTING_INVALID` | The run's accounting marker does not bind the canonical ledger. | Restore the exact trusted marker and ledger, or start a fresh run. |
+| `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID` | The marked provider-call ledger is missing, linked, unreadable, or malformed. | Restore it from a trusted backup or start a fresh run; do not reset it. |
+| `ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED` | The next arXiv/OpenAlex transport attempt would exceed the run budget. | Start a new run or deliberately raise the reviewed budget. |
+| `ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED` | The call reservation could not be persisted before transport. | Restore workspace write access and retry; no provider call was authorized. |
 | `SEARCH_PROVIDER_DISABLED` | No search provider is configured for `discover_sources.py search`. | Configure `integrations.discovery.search` with a fixture, command, or http provider. |
 | `SEARCH_PROVIDER_FAILED` | The configured search command or fixture could not produce results. | Check the configured command/fixture path and rerun. |
 | `GITHUB_AUTH_REQUIRED` | GitHub returned an authentication-required response. | Set a valid `GITHUB_TOKEN` in the environment, or unset an invalid token to use unauthenticated discovery or acquisition. |
@@ -743,7 +770,10 @@ Evidence gaps flow the other way as structured source requests (`sources/source-
 
 ```bash
 python3 scripts/source_requests.py list --status open --format json
-python3 scripts/source_requests.py plan-fetch --request-id req-1a2b3c4d5e --format json
+python3 scripts/source_requests.py plan-fetch \
+  --request-id req-1a2b3c4d5e \
+  --candidate-id cand-1a2b3c4d5e \
+  --format json
 # ... deliver the requested files with provenance sidecars ...
 python3 scripts/source_inventory.py --report
 python3 scripts/normalize_sources.py --all
@@ -752,11 +782,17 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
 
 `plan-fetch` is read-only and emits provider command suggestions with
 `network_io_executed: false`. Orchestrators must still enforce the acquisition
-configuration before running a suggested provider command. When a request has
+configuration before running a suggested provider command. A managed
+acquisition work order must repeat `--candidate-id` for its exact candidate
+scope; the planner rejects unknown, non-selected, and request-mismatched IDs and
+does not emit other selected candidates from the same request. When a request has
 discovery candidates selected for it (`candidates select`, above), `plan-fetch`
 also returns a `candidate_routes` array — an explicit `fetch_sources.py` command
 for arXiv/OpenAlex/GitHub candidates, or a manual-delivery target for
-official-legal/web/dataset candidates. For academic paper candidates, selected
+official-legal/web/dataset candidates. Selected
+candidate routes become the sole executable plan (`routing_basis:
+selected_candidates` and an empty heuristic `routes` list), so managed workers
+cannot accidentally use an unscoped request-level command. For academic paper candidates, selected
 route records copy provider-neutral `paper` metadata plus
 `candidate_network_io_executed` and `provider_budget`; the planner prefers those
 fields over URL parsing so OpenAlex/arXiv candidates produce exact existing
@@ -942,7 +978,7 @@ Between steps 4 and 5, the research agent works the backlog unattended following
 
 **Run controller state** (`runs/<run_id>/run-state.json`, surfaced in the status document's `run_controller` section): a PM run records its current state, allowed next states, candidate counts, coverage counts, budget state, budget overrides, failure count, recovery history, heartbeat timestamp, and final verdict. `workspace_status.py --run-id RUN_ID --format json` reads an exact run; without `--run-id`, status reports the newest active run or, when no active run exists, the newest terminal run. Active runs whose latest heartbeat/event/update exceeds `run.stale_run_threshold_hours` report `run_controller.stale: true`. Recovery is explicit: `run_controller.py adopt --if-stale-hours HOURS` transfers stale ownership, and `run_controller.py abandon --if-stale-hours HOURS --reason REASON` fails a stale active run with machine reason `stale_run_abandoned`. `run_report.py` additionally emits `official_source_evaluation` with the artifact verdict, `blocked_request_ids`, open source requests, candidate summary, coverage summary, source summary, and budget state for final PM handoff. This lets an orchestrator distinguish `in_progress`, `blocked_on_sources`, `no_ship`, and `failed` from one status poll without reading `events.jsonl`.
 
-**Run budgets** (`research.yml` `run` block, surfaced in the status document's `run` section): `max_questions_per_run`, `max_source_requests_per_run`, `max_releases_per_run`, `max_discovery_results_per_run`, `max_academic_provider_requests_per_run`, `max_web_downloads_per_run`, and `max_manual_url_deliveries_per_run` bound one unattended pass; `max_web_downloads_per_run` inherits the manual URL limit when unset. `max_acquisition_downloads_per_run` and `max_github_archive_bytes_per_run` are derived from acquisition config so provider download and byte limits have one source of truth. `max_open_questions_total`, `max_intake_per_hour`, and `max_mcp_intake_batch_questions` bound externally supplied intake. With a selected `run_id`, `readiness.budget_state` is artifact-derived from the run window and legacy counter flags are reported as `runner_reported` with `counter_divergence` on disagreement. Defaults are generous but finite. Wall-clock and token budgets belong to the orchestrator, not the workspace. The canonical stop conditions for a loop are:
+**Run budgets** (`research.yml` `run` block, surfaced in the status document's `run` section): `max_questions_per_run`, `max_source_requests_per_run`, `max_releases_per_run`, `max_discovery_results_per_run`, `max_academic_provider_requests_per_run`, `max_web_downloads_per_run`, and `max_manual_url_deliveries_per_run` bound one unattended pass; the academic-provider limit counts pre-transport arXiv/OpenAlex discovery reservations (including retries and errors), not acquisition calls. `max_web_downloads_per_run` inherits the manual URL limit when unset. `max_acquisition_downloads_per_run` and `max_github_archive_bytes_per_run` are derived from acquisition config so provider download and byte limits have one source of truth. `max_open_questions_total`, `max_intake_per_hour`, and `max_mcp_intake_batch_questions` bound externally supplied intake. With a selected `run_id`, `readiness.budget_state` is artifact-derived from the run window and legacy counter flags are reported as `runner_reported` with `counter_divergence` on disagreement. Defaults are generous but finite. Wall-clock and token budgets belong to the orchestrator, not the workspace. The canonical stop conditions for a loop are:
 
 - `workspace_status.py --check-complete` exits `0` (`complete`), `3` (`blocked_on_sources`), or `4` (`attention_required`),
 - `readiness.budget_state.should_stop` is true, with `stop_reasons` naming the exhausted budget.

@@ -28,6 +28,7 @@ RUN_STATE_FIELDS = {
     "state",
     "state_history",
     "workspace_baseline",
+    "academic_provider_request_accounting",
     "question_counts",
     "source_counts",
     "candidate_counts",
@@ -204,6 +205,15 @@ class RunControllerTests(unittest.TestCase):
             baseline = run_state["workspace_baseline"]
             self.assertTrue((target / baseline["status_path"]).is_file())
             self.assertTrue((target / baseline["run_report_baseline_path"]).is_file())
+            accounting = run_state["academic_provider_request_accounting"]
+            self.assertEqual(
+                {
+                    "schema_version": "1.0",
+                    "ledger_path": f"runs/{run_id}/academic-provider-requests.jsonl",
+                },
+                accounting,
+            )
+            self.assertEqual(b"", (target / accounting["ledger_path"]).read_bytes())
 
             events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(1, len(events))
@@ -211,6 +221,55 @@ class RunControllerTests(unittest.TestCase):
             self.assertEqual("state_transition", events[0]["event_type"])
             self.assertIsNone(events[0]["from_state"])
             self.assertEqual("initialized", events[0]["to_state"])
+
+    def test_start_refuses_to_truncate_retained_provider_accounting(self):
+        controller = self.load_controller()
+        run_id = "run-2026-07-21T010203Z-retained-accounting"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            run_dir = target / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            ledger = run_dir / "academic-provider-requests.jsonl"
+            ledger.write_text('{"retained":true}\n', encoding="utf-8")
+
+            code, stdout, stderr = self.run_module(
+                controller,
+                [
+                    "--project-root",
+                    str(target),
+                    "start",
+                    "--run-id",
+                    run_id,
+                    "--agent-id",
+                    "agent-pm",
+                    "--format",
+                    "json",
+                ],
+            )
+
+            self.assertEqual(2, code)
+            self.assertEqual("", stdout)
+            self.assertEqual("RUN_ACADEMIC_PROVIDER_ACCOUNTING_EXISTS", json.loads(stderr)["error_code"])
+            self.assertEqual(b'{"retained":true}\n', ledger.read_bytes())
+            self.assertFalse((run_dir / "run-state.json").exists())
+
+    def test_start_reuses_empty_provider_ledger_left_by_interrupted_start(self):
+        controller = self.load_controller()
+        run_id = "run-2026-07-21T020304Z-interrupted-start"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            run_dir = target / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            ledger = run_dir / "academic-provider-requests.jsonl"
+            ledger.write_text("", encoding="utf-8")
+
+            run_state = self.start_run(controller, target, run_id)
+
+            self.assertEqual(
+                f"runs/{run_id}/academic-provider-requests.jsonl",
+                run_state["academic_provider_request_accounting"]["ledger_path"],
+            )
+            self.assertEqual(b"", ledger.read_bytes())
 
     def test_valid_transition_and_custom_event_increment_event_ids(self):
         controller = self.load_controller()

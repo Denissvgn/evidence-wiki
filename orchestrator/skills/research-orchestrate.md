@@ -58,7 +58,11 @@ evidence-wiki orchestrate resume \
 ```
 
 Managed Codex execution requires Codex CLI 0.138 or newer so the adapter can
-apply the named `evidence_wiki_worker` custom permission profile. Managed Claude
+apply the named `evidence_wiki_worker` custom permission profile. For npm,
+pnpm, bun, and direct native/IDE installations, the adapter resolves the
+bounded platform-native runtime tree and makes only that tree read-only inside
+the profile. Keep the runner outside the writable workspace; the host never
+grants the home directory, `CODEX_HOME`, or a package-manager prefix. Managed Claude
 execution is unavailable on native Windows; use macOS, Linux, WSL2, or a
 container. Claude requires `bubblewrap` plus `socat` on Linux/WSL2, or
 `sandbox-exec` plus `touch` on macOS. The host checks this isolation capability

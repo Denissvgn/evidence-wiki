@@ -31,6 +31,7 @@ def load_script_module(name: str, filename: str):
 
 DISCOVER = load_script_module("academic_discovery_under_test", "discover_sources.py")
 SOURCE_REQUESTS = load_script_module("academic_source_requests_under_test", "source_requests.py")
+RUN_CONTROLLER = load_script_module("academic_run_controller_under_test", "run_controller.py")
 REQUEST_ID = "req-paper-1234567890"
 QUERY = "solid state electrolyte conductivity"
 DOI = "10.5555/solid-electrolyte"
@@ -72,6 +73,10 @@ def openalex_payload() -> bytes:
 
 
 class AcademicDiscoveryTests(unittest.TestCase):
+    def test_retained_run_state_vocabulary_matches_run_controller(self):
+        self.assertEqual(frozenset(RUN_CONTROLLER.STATE_NAMES), DISCOVER.RUN_STATES)
+        self.assertEqual(frozenset(RUN_CONTROLLER.TERMINAL_STATES), DISCOVER.RUN_TERMINAL_STATES)
+
     def setUp(self):
         self._saved_key = os.environ.pop("OPENALEX_API_KEY", None)
         self.addCleanup(self._restore)
@@ -124,6 +129,34 @@ class AcademicDiscoveryTests(unittest.TestCase):
         }
         (target / "sources" / "source-requests.jsonl").write_text(json.dumps(request) + "\n", encoding="utf-8")
         return target
+
+    def start_run(self, workspace: Path, *, run_id: str = "run-academic-budget", limit: int = 25) -> str:
+        config_path = workspace / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["run"] = {"max_academic_provider_requests_per_run": limit}
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        run_dir = workspace / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        ledger_path = run_dir / "academic-provider-requests.jsonl"
+        ledger_path.write_text("", encoding="utf-8")
+        (run_dir / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "run_id": run_id,
+                    "started_at": "2026-07-20T00:00:00Z",
+                    "state": {"current": "discovering"},
+                    "_pending_event": None,
+                    "academic_provider_request_accounting": {
+                        "schema_version": "1.0",
+                        "ledger_path": f"runs/{run_id}/academic-provider-requests.jsonl",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return run_id
 
     def run_cli(self, workspace: Path, *args: str) -> tuple[int, str, str]:
         argv = ["--project-root", str(workspace), "--format", "json", "academic", *args]
@@ -355,6 +388,281 @@ class AcademicDiscoveryTests(unittest.TestCase):
         self.assertEqual(50, report["candidates"][0]["provider_budget"]["max_results"])
         self.assertEqual(50, report["candidates"][0]["provider_budget"]["max_results_cap"])
         self.assertTrue(any("max_results=50" in url for _, url in calls))
+
+    def test_zero_result_call_is_durably_charged_and_next_call_stops_before_transport(self):
+        calls: list[str] = []
+
+        def empty_arxiv(url, _timeout, _headers):
+            calls.append(url)
+            return b'<feed xmlns="http://www.w3.org/2005/Atom" />'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), providers=["arxiv"])
+            run_id = self.start_run(workspace, limit=1)
+            DISCOVER.ARXIV_TRANSPORT = empty_arxiv
+            DISCOVER.ARXIV_CLOCK = lambda: 0.0
+            DISCOVER.ARXIV_SLEEP = lambda _seconds: None
+            first_code, first_stdout, first_stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "arxiv",
+                "--run-id",
+                run_id,
+            )
+            second_code, _, second_stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "arxiv",
+                "--run-id",
+                run_id,
+            )
+            ledger = DISCOVER.load_academic_provider_request_events(workspace, run_id)
+
+        self.assertEqual(0, first_code, first_stderr)
+        self.assertEqual(0, json.loads(first_stdout)["count"])
+        self.assertEqual(2, second_code)
+        self.assertEqual("ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED", json.loads(second_stderr)["error_code"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, len(ledger))
+        self.assertEqual("arxiv", ledger[0]["provider"])
+
+    def test_error_and_retry_calls_are_charged_before_each_transport_attempt(self):
+        calls: list[str] = []
+
+        def failing_openalex(url, _timeout, _headers):
+            calls.append(url)
+            raise URLError("provider unavailable")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), providers=["openalex"])
+            run_id = self.start_run(workspace, limit=2)
+            DISCOVER.OPENALEX_TRANSPORT = failing_openalex
+            DISCOVER.OPENALEX_CLOCK = lambda: 0.0
+            DISCOVER.OPENALEX_SLEEP = lambda _seconds: None
+            code, stdout, stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "openalex",
+                "--run-id",
+                run_id,
+            )
+            ledger = DISCOVER.load_academic_provider_request_events(workspace, run_id)
+
+        error = json.loads(stderr)
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout)
+        self.assertEqual("ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED", error["error_code"])
+        self.assertTrue(error["details"]["network_io_executed"])
+        self.assertEqual(2, len(calls))
+        self.assertEqual([1, 2], [record["attempt"] for record in ledger])
+
+    def test_multiple_active_runs_require_explicit_budget_owner_before_transport(self):
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), providers=["arxiv"])
+            self.start_run(workspace, run_id="run-a")
+            second = workspace / "runs" / "run-b"
+            second.mkdir(parents=True)
+            (second / "academic-provider-requests.jsonl").write_text("", encoding="utf-8")
+            (second / "run-state.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "run_id": "run-b",
+                        "started_at": "2026-07-20T00:00:01Z",
+                        "state": {"current": "discovering"},
+                        "_pending_event": None,
+                        "academic_provider_request_accounting": {
+                            "schema_version": "1.0",
+                            "ledger_path": "runs/run-b/academic-provider-requests.jsonl",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.install_transports(calls)
+            code, _, stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "arxiv",
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual("DISCOVERY_RUN_ID_REQUIRED", json.loads(stderr)["error_code"])
+        self.assertEqual([], calls)
+
+    def test_unknown_retained_run_state_fails_before_transport(self):
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), providers=["arxiv"])
+            run_id = self.start_run(workspace)
+            state_path = workspace / "runs" / run_id / "run-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["state"]["current"] = "discovery_typo"
+            state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+            self.install_transports(calls)
+
+            code, _, stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "arxiv",
+                "--run-id",
+                run_id,
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual("DISCOVERY_RUN_STATE_INVALID", json.loads(stderr)["error_code"])
+        self.assertEqual([], calls)
+
+    def test_malformed_provider_call_ledger_fails_closed_before_transport(self):
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), providers=["arxiv"])
+            run_id = self.start_run(workspace)
+            ledger = workspace / "runs" / run_id / "academic-provider-requests.jsonl"
+            ledger.write_text("{not valid json\n", encoding="utf-8")
+            self.install_transports(calls)
+            code, _, stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "arxiv",
+                "--run-id",
+                run_id,
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual("ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID", json.loads(stderr)["error_code"])
+        self.assertEqual([], calls)
+
+    def test_duplicate_provider_call_id_fails_closed_before_transport(self):
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), providers=["arxiv"])
+            run_id = self.start_run(workspace)
+            record = {
+                "schema_version": "1.0",
+                "event_type": "academic_provider_request",
+                "call_id": "academic-call-duplicate",
+                "run_id": run_id,
+                "command": "academic",
+                "scope_id": REQUEST_ID,
+                "provider": "arxiv",
+                "attempt": 1,
+                "reserved_at": "2026-07-20T00:00:00Z",
+                "budget_consumed": True,
+            }
+            ledger = workspace / "runs" / run_id / "academic-provider-requests.jsonl"
+            ledger.write_text(
+                json.dumps(record, sort_keys=True) + "\n" + json.dumps(record, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            self.install_transports(calls)
+
+            code, stdout, stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "arxiv",
+                "--run-id",
+                run_id,
+            )
+
+        error = json.loads(stderr)
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout)
+        self.assertEqual("ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID", error["error_code"])
+        self.assertIn("Duplicate provider call_id", error["message"])
+        self.assertEqual([], calls)
+
+    def test_legacy_active_run_without_accounting_marker_fails_before_transport(self):
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), providers=["arxiv"])
+            run_id = self.start_run(workspace)
+            state_path = workspace / "runs" / run_id / "run-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            del state["academic_provider_request_accounting"]
+            state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+            self.install_transports(calls)
+
+            code, stdout, stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "arxiv",
+                "--run-id",
+                run_id,
+            )
+
+        error = json.loads(stderr)
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout)
+        self.assertEqual("ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED", error["error_code"])
+        self.assertEqual(DISCOVER.ACADEMIC_PROVIDER_ACCOUNTING_FRESH_RUN_REMEDIATION, error["remediation"])
+        self.assertEqual(False, error["details"]["network_io_executed"])
+        self.assertEqual([], calls)
+
+    def test_run_bound_discovery_rejects_mismatched_accounting_path_before_transport(self):
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), providers=["openalex"])
+            run_id = self.start_run(workspace)
+            state_path = workspace / "runs" / run_id / "run-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["academic_provider_request_accounting"]["ledger_path"] = "runs/other/ledger.jsonl"
+            state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+            self.install_transports(calls)
+
+            code, _, stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "openalex",
+                "--run-id",
+                run_id,
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual("ACADEMIC_PROVIDER_ACCOUNTING_INVALID", json.loads(stderr)["error_code"])
+        self.assertEqual([], calls)
+
+    def test_run_bound_discovery_rejects_missing_accounting_ledger_before_transport(self):
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), providers=["arxiv"])
+            run_id = self.start_run(workspace)
+            (workspace / "runs" / run_id / "academic-provider-requests.jsonl").unlink()
+            self.install_transports(calls)
+
+            code, _, stderr = self.run_cli(
+                workspace,
+                "--request-id",
+                REQUEST_ID,
+                "--provider",
+                "arxiv",
+                "--run-id",
+                run_id,
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual("ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID", json.loads(stderr)["error_code"])
+        self.assertEqual([], calls)
 
     def test_openalex_auth_and_rate_errors_are_academic_envelopes(self):
         secret = "openalex-secret-auth-rate"

@@ -205,7 +205,7 @@ python3 scripts/fetch_sources.py openalex resolve --entity works --query "Synthe
 python3 scripts/fetch_sources.py openalex resolve --entity works --query "TurboQuant" --max-results 5 --allow-unconfirmed
 python3 scripts/fetch_sources.py openalex get --id-or-doi W260100001
 python3 scripts/fetch_sources.py openalex get --id-or-doi 10.5555/example
-python3 scripts/fetch_sources.py openalex get --id-or-doi W260100002 --output raw/papers/openalex-W260100002-metadata.json --request-id req-1a2b3c4d5e
+python3 scripts/fetch_sources.py openalex get --id-or-doi W260100002 --output raw/papers/openalex-W260100002-metadata.json --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e
 python3 scripts/fetch_sources.py openalex enrich --source-id paper:2601.00001v1 --request-id req-1a2b3c4d5e
 python3 scripts/fetch_sources.py openalex enrich --all-arxiv --request-id req-1a2b3c4d5e
 ```
@@ -431,9 +431,9 @@ acquisition captures an *explicitly selected* repository as evidence
 through `scripts/fetch_sources.py github`:
 
 ```bash
-python3 scripts/fetch_sources.py github repo-metadata --repo acme/rag-toolkit
-python3 scripts/fetch_sources.py github release-metadata --repo acme/rag-toolkit
-python3 scripts/fetch_sources.py github download-archive --repo acme/rag-toolkit --ref v1.2.0 --request-id req-1a2b3c4d5e
+python3 scripts/fetch_sources.py github repo-metadata --repo acme/rag-toolkit --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e
+python3 scripts/fetch_sources.py github release-metadata --repo acme/rag-toolkit --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e
+python3 scripts/fetch_sources.py github download-archive --repo acme/rag-toolkit --ref v1.2.0 --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e
 ```
 
 Every command requires an explicit repository, passed as `--repo owner/repo` or
@@ -487,6 +487,31 @@ GitHub's license detection is heuristic and is frequently absent, so adapters
 must record the detected SPDX `license` key when the API surfaces one and
 surface license uncertainty otherwise rather than assuming a permissive license.
 Stars and forks are weak popularity metadata only, never trust or license proof.
+
+## Managed Candidate Completion
+
+After a scoped provider artifact has been inventoried and normalized, bind the
+same selected candidate to the resulting manifest source before fulfilling its
+request:
+
+```bash
+python3 scripts/discover_sources.py --format json candidates transition \
+  --candidate-id cand-1a2b3c4d5e \
+  --expected-state selected \
+  --to-state fetched \
+  --reason "Provenance-backed evidence was inventoried and normalized." \
+  --source-id paper:2601.00001v1 \
+  --actor acquire-agent \
+  --run-id RUN_ID
+python3 scripts/source_requests.py fulfill \
+  --request-id req-1a2b3c4d5e \
+  --source-id paper:2601.00001v1
+```
+
+The request ID and candidate ID must match the acquisition sidecar, and
+`fetched_source_id` must match the fulfilled normalized source. Only then may
+linked blocked questions be reopened. This correlation is a required managed
+orchestration postcondition, not an optional audit annotation.
 
 ## Provenance Requirements
 
@@ -560,6 +585,10 @@ Fetch agents should follow `skills/research-acquire.md` for the complete
 request-backed loop: smoke validation, open-request listing, explicit provider
 fetching, sidecar checks, inventory, normalization, request fulfillment,
 blocked-question reopening, logging, and final workspace status.
+For a managed work order, its `plan-fetch` invocation repeats
+`--candidate-id` for the exact persisted candidate scope. The planner fails
+closed when a requested candidate is unknown, not selected, or linked to a
+different request, and it omits every other selected candidate on that request.
 
 ## `fetch_sources.py` Registry Contract
 

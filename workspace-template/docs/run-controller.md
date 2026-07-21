@@ -51,6 +51,7 @@ Top-level `run_state` fields:
 | `state` | Current state object with `current`, `entered_at`, `allowed_next_states`, and `blocking_reason`. |
 | `state_history` | Ordered transition summaries from run creation through the current state. |
 | `workspace_baseline` | Run-start checkpoint references, such as status/report baseline paths and generated timestamps. |
+| `academic_provider_request_accounting` | Versioned ownership marker for the run's provider-call ledger. Version `1.0` records the exact workspace-relative `ledger_path` `runs/<run_id>/academic-provider-requests.jsonl`. |
 | `question_counts` | Summary counts from the question backlog. |
 | `source_counts` | Summary counts from source inventory, normalization, and source requests. |
 | `candidate_counts` | Summary counts from discovery candidates. |
@@ -75,6 +76,24 @@ The `state` object is intentionally self-contained:
 `blocking_reason` is `null` while the run can continue. For
 `blocked_on_sources`, `no_ship`, or `failed`, it carries the durable reason a
 future PM agent should read before choosing a recovery path.
+
+Academic discovery reserves each arXiv/OpenAlex transport attempt before I/O in
+`runs/<run-id>/academic-provider-requests.jsonl`. The status surface derives the
+run counter from that ledger, including zero-result and failed attempts, and
+fails readiness closed when the marker is absent/invalid or the ledger is
+missing/corrupt. Managed discovery commands
+must pass the work order's exact `--run-id`; sole-active-run inference exists
+only for manual compatibility.
+
+### Upgrade note: runs created before accounting version `1.0`
+
+Do not add an empty ledger or marker to an already active legacy run: doing so
+would assert an unverifiable zero provider-call count. Preserve that run for
+audit, start a fresh run with `python3 scripts/run_controller.py start`, and use
+the new run ID for subsequent academic discovery. The old active run reports
+`ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED`; workspace status reports
+`attention_required` and omits `readiness.budget_state` instead of publishing a
+false zero. Completed legacy runs remain inspectable and immutable.
 
 Manual URL delivery and contracted web download budgets are enforced when a
 runner supplies `--manual-url-deliveries-this-run` or

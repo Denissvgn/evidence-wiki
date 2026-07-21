@@ -1067,6 +1067,160 @@ summary: Curation status fixture.
             ):
                 self.assertEqual(1, restarted_budget[counter], counter)
 
+    def test_academic_provider_budget_uses_discovery_call_ledger_not_acquisitions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.update_run_config(target, {"max_academic_provider_requests_per_run": 3})
+            run_id = "run-academic-provider-ledger"
+            self.start_run(target, run_id)
+
+            ledger_path = target / "runs" / run_id / "academic-provider-requests.jsonl"
+            ledger_path.write_text(
+                "".join(
+                    json.dumps(
+                        {
+                            "schema_version": "1.0",
+                            "event_type": "academic_provider_request",
+                            "call_id": f"academic-call-{index}",
+                            "run_id": run_id,
+                            "command": "academic",
+                            "scope_id": "req-budget",
+                            "provider": provider,
+                            "attempt": 1,
+                            "reserved_at": f"2999-01-01T00:00:0{index}Z",
+                            "budget_consumed": True,
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                    for index, provider in enumerate(("arxiv", "openalex"), start=1)
+                ),
+                encoding="utf-8",
+            )
+            raw_path = target / "raw" / "papers" / "acquired.pdf"
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_bytes(b"%PDF-1.4\n")
+            (target / "sources" / "manifest.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "paper:acquired",
+                        "kind": "pdf",
+                        "raw_paths": ["raw/papers/acquired.pdf"],
+                        "status": "integrated",
+                        "provenance": {
+                            "retrieved_at": "2999-01-01T00:00:03Z",
+                            "retrieved_by": "fetch_sources.py/arxiv",
+                            "acquisition_run_id": run_id,
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            code, document = self.status_json(target, "--run-id", run_id, "--no-cache")
+
+        self.assertEqual(0, code)
+        budget = document["readiness"]["budget_state"]
+        self.assertEqual(2, budget["academic_provider_requests_this_run"])
+        self.assertEqual(1, budget["academic_provider_requests_remaining_this_run"])
+        self.assertEqual(1, budget["acquisition_downloads_this_run"])
+
+    def test_corrupt_academic_provider_ledger_requires_attention_and_hides_budget_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            run_id = "run-corrupt-academic-provider-ledger"
+            self.start_run(target, run_id)
+            ledger_path = target / "runs" / run_id / "academic-provider-requests.jsonl"
+            ledger_path.write_text("{not valid json\n", encoding="utf-8")
+
+            code, document = self.status_json(target, "--run-id", run_id, "--no-cache")
+            check_code, check_stdout, check_stderr = self.run_status(
+                "--project-root",
+                str(target),
+                "--format",
+                "json",
+                "--run-id",
+                run_id,
+                "--no-cache",
+                "--check-complete",
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual("attention_required", document["readiness"]["verdict"])
+        self.assertNotIn("budget_state", document["readiness"])
+        self.assertEqual(
+            {
+                "status": "invalid",
+                "run_id": run_id,
+                "error_code": "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+            },
+            document["readiness"]["budget_accounting"],
+        )
+        self.assertEqual(
+            "academic_provider_request_ledger_invalid",
+            document["readiness"]["verdict_reasons"][0]["code"],
+        )
+        self.assertEqual(4, check_code, check_stderr)
+        self.assertEqual("attention_required", json.loads(check_stdout)["readiness"]["verdict"])
+
+    def test_legacy_active_run_without_accounting_marker_requires_fresh_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            run_id = "run-legacy-academic-provider-accounting"
+            self.start_run(target, run_id)
+            state_path = target / "runs" / run_id / "run-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            del state["academic_provider_request_accounting"]
+            state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+
+            code, document = self.status_json(target, "--run-id", run_id, "--no-cache")
+
+        self.assertEqual(0, code)
+        readiness = document["readiness"]
+        self.assertEqual("attention_required", readiness["verdict"])
+        self.assertNotIn("budget_state", readiness)
+        self.assertEqual(
+            {
+                "status": "invalid",
+                "run_id": run_id,
+                "error_code": "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED",
+            },
+            readiness["budget_accounting"],
+        )
+        reason = readiness["verdict_reasons"][0]
+        self.assertEqual("academic_provider_accounting_uninitialized", reason["code"])
+        self.assertEqual(
+            "This active run predates durable academic provider accounting. Preserve it for audit, "
+            "start a fresh run with `python3 scripts/run_controller.py start --run-id <new-run-id> "
+            "--agent-id <agent-id>`, and retry discovery with the new run ID. Do not create the marker "
+            "or ledger by hand.",
+            reason["remediation"],
+        )
+
+    def test_completed_legacy_run_without_accounting_marker_remains_inspectable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            run_id = "run-completed-legacy-accounting"
+            self.start_run(target, run_id)
+            self.finish_run(target, run_id, "failed")
+            state_path = target / "runs" / run_id / "run-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            del state["academic_provider_request_accounting"]
+            state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+
+            code, document = self.status_json(target, "--run-id", run_id, "--no-cache")
+
+        self.assertEqual(0, code)
+        self.assertTrue(document["run_controller"]["terminal"])
+        self.assertIn("budget_state", document["readiness"])
+        self.assertNotIn("budget_accounting", document["readiness"])
+        self.assertEqual(
+            0,
+            document["readiness"]["budget_state"]["academic_provider_requests_this_run"],
+        )
+
     def test_status_reports_terminal_run_controller_states(self):
         cases = {
             "blocked_on_sources": ("run-2026-06-29T040000Z-blocked", ["planned", "discovering"]),

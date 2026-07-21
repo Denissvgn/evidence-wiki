@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -141,6 +142,40 @@ CANDIDATE_AUDIT_RELATIVE = ("sources", "discovery", "audit.jsonl")
 # concurrent select/reject writers serialize instead of clobbering each other
 # (mirrors the per-question workspace lock in question_claim.py).
 CANDIDATE_LOCK_RELATIVE = ("sources", "discovery", ".locks", "candidates.lock")
+# Academic provider calls consume a per-run budget before transport.  The
+# append-only ledger is intentionally stored with the run-controller artifacts:
+# candidates cannot account for zero-result/error calls, and acquisition
+# provenance describes downloads rather than discovery requests.
+ACADEMIC_PROVIDER_REQUESTS_FILENAME = "academic-provider-requests.jsonl"
+ACADEMIC_PROVIDER_REQUESTS_LOCK_FILENAME = "academic-provider-requests.lock"
+ACADEMIC_PROVIDER_ACCOUNTING_FIELD = "academic_provider_request_accounting"
+ACADEMIC_PROVIDER_ACCOUNTING_SCHEMA_VERSION = "1.0"
+ACADEMIC_PROVIDER_ACCOUNTING_FRESH_RUN_REMEDIATION = (
+    "This active run predates durable academic provider accounting. Preserve it for audit, "
+    "start a fresh run with `python3 scripts/run_controller.py start --run-id <new-run-id> "
+    "--agent-id <agent-id>`, and retry discovery with the new run ID. Do not create the marker "
+    "or ledger by hand."
+)
+DEFAULT_MAX_ACADEMIC_PROVIDER_REQUESTS_PER_RUN = 25
+RUN_STATES = frozenset(
+    {
+        "initialized",
+        "planned",
+        "discovering",
+        "candidates_ready",
+        "fetch_planned",
+        "fetching",
+        "evidence_ready",
+        "answering",
+        "verifying",
+        "complete",
+        "blocked_on_sources",
+        "no_ship",
+        "failed",
+    }
+)
+RUN_TERMINAL_STATES = frozenset({"complete", "blocked_on_sources", "no_ship", "failed"})
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Map a candidate source_type to a source-request kind when minting a request.
 SOURCE_TYPE_TO_REQUEST_KIND = {
     "paper": "paper",
@@ -688,6 +723,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     academic.add_argument("--max-results", type=positive_int, default=15, help="Maximum deduplicated candidates.")
     academic.add_argument(
+        "--run-id",
+        default=None,
+        help=(
+            "Active run-controller id used for restart-stable academic provider-call budgets. "
+            "When omitted, the sole active run is selected automatically."
+        ),
+    )
+    academic.add_argument(
         "--format",
         dest="output_format",
         choices=("text", "json"),
@@ -772,6 +815,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Query OpenAlex for each author's works and propose related publication candidates "
             "(network I/O). Without it, the command is read-only author extraction only."
+        ),
+    )
+    authors.add_argument(
+        "--run-id",
+        default=None,
+        help=(
+            "Active run-controller id used for restart-stable OpenAlex provider-call budgets. "
+            "Used only with --discover-publications; the sole active run is selected automatically when omitted."
         ),
     )
 
@@ -983,6 +1034,8 @@ def require_non_empty(value: Any, label: str) -> str:
 def validate_command_arguments(args: argparse.Namespace) -> None:
     if args.command == "academic":
         require_non_empty(args.request_id, "--request-id")
+        if args.run_id is not None:
+            require_non_empty(args.run_id, "--run-id")
         if args.query is not None:
             require_non_empty(args.query, "--query")
         duplicates = sorted({provider for provider in args.provider if args.provider.count(provider) > 1})
@@ -1006,6 +1059,8 @@ def validate_command_arguments(args: argparse.Namespace) -> None:
             require_non_empty(args.request_id, "--request-id")
     elif args.command == "authors":
         require_non_empty(args.source_id, "--source-id")
+        if args.run_id is not None:
+            require_non_empty(args.run_id, "--run-id")
     elif args.command == "companions":
         require_non_empty(args.source_id, "--source-id")
         if getattr(args, "request_id", None) is not None:
@@ -1158,6 +1213,395 @@ def relative_label(project_root: Path, path: Path) -> str:
         return path.relative_to(project_root).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def academic_provider_requests_path(project_root: Path, run_id: str) -> Path:
+    return project_root / "runs" / run_id / ACADEMIC_PROVIDER_REQUESTS_FILENAME
+
+
+def academic_provider_requests_lock_path(project_root: Path, run_id: str) -> Path:
+    return project_root / "runs" / run_id / ".locks" / ACADEMIC_PROVIDER_REQUESTS_LOCK_FILENAME
+
+
+def expected_academic_provider_accounting(run_id: str) -> dict[str, str]:
+    return {
+        "schema_version": ACADEMIC_PROVIDER_ACCOUNTING_SCHEMA_VERSION,
+        "ledger_path": f"runs/{run_id}/{ACADEMIC_PROVIDER_REQUESTS_FILENAME}",
+    }
+
+
+def validate_academic_provider_accounting(
+    project_root: Path,
+    run_id: str,
+    *,
+    run_state: dict[str, Any] | None = None,
+) -> Path:
+    """Validate the versioned run-state marker and its run-owned ledger."""
+
+    if run_state is None:
+        state_path = project_root / "runs" / run_id / "run-state.json"
+        try:
+            loaded = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DiscoverSourcesError(
+                "ACADEMIC_PROVIDER_ACCOUNTING_INVALID",
+                f"Cannot validate academic provider accounting for run {run_id}: {exc}",
+                recoverable=False,
+                remediation=(
+                    "Preserve the affected run for audit, restore its verified run state and accounting "
+                    "artifacts from a trusted backup, or start a fresh run."
+                ),
+                details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+            ) from exc
+        run_state = loaded if isinstance(loaded, dict) else None
+
+    marker = run_state.get(ACADEMIC_PROVIDER_ACCOUNTING_FIELD) if isinstance(run_state, dict) else None
+    if marker is None:
+        raise DiscoverSourcesError(
+            "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED",
+            f"Run {run_id} has no durable academic provider accounting marker.",
+            recoverable=False,
+            remediation=ACADEMIC_PROVIDER_ACCOUNTING_FRESH_RUN_REMEDIATION,
+            details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+        )
+
+    expected = expected_academic_provider_accounting(run_id)
+    if not isinstance(marker, dict) or marker != expected:
+        raise DiscoverSourcesError(
+            "ACADEMIC_PROVIDER_ACCOUNTING_INVALID",
+            f"Run {run_id} has an invalid academic provider accounting marker.",
+            recoverable=False,
+            remediation=(
+                "Preserve the affected run for audit, restore the exact verified marker and ledger from a "
+                "trusted backup, or start a fresh run. Do not reconstruct accounting by hand."
+            ),
+            details={
+                "command": "academic",
+                "run_id": run_id,
+                "expected": expected,
+                "network_io_executed": False,
+            },
+        )
+
+    path = academic_provider_requests_path(project_root, run_id)
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise DiscoverSourcesError(
+            "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+            f"Cannot inspect academic provider-call ledger {relative_label(project_root, path)}: {exc}",
+            recoverable=False,
+            remediation=(
+                "Preserve the affected run for audit, restore its verified provider-call ledger from a trusted "
+                "backup, or start a fresh run. Do not create an empty replacement by hand."
+            ),
+            details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+        ) from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or int(getattr(metadata, "st_nlink", 1) or 1) != 1
+    ):
+        raise DiscoverSourcesError(
+            "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+            (
+                "Academic provider-call ledger must be a singly linked regular file: "
+                f"{relative_label(project_root, path)}"
+            ),
+            recoverable=False,
+            remediation=(
+                "Preserve the affected run for audit, restore its verified provider-call ledger from a trusted "
+                "backup, or start a fresh run. Do not replace it with a symlink or hard link."
+            ),
+            details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+        )
+    return path
+
+
+def _load_academic_run_state(path: Path, *, requested_run_id: str | None) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DiscoverSourcesError(
+            "DISCOVERY_RUN_STATE_INVALID",
+            f"Cannot read retained discovery run state {path}: {exc}",
+            recoverable=False,
+            remediation="Repair or recover the retained run-state artifact before contacting an academic provider.",
+            details={"command": "academic", "network_io_executed": False},
+        ) from exc
+    state = document.get("state") if isinstance(document, dict) and isinstance(document.get("state"), dict) else {}
+    run_id = document.get("run_id") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(run_id, str)
+        or run_id != path.parent.name
+        or state.get("current") not in RUN_STATES
+        or not isinstance(document.get("started_at"), str)
+        or not document["started_at"].strip()
+    ):
+        raise DiscoverSourcesError(
+            "DISCOVERY_RUN_STATE_INVALID",
+            f"Retained discovery run state has an invalid shape: {path}",
+            recoverable=False,
+            remediation="Repair or recover the retained run-state artifact before contacting an academic provider.",
+            details={"command": "academic", "network_io_executed": False},
+        )
+    if document.get("_pending_event") is not None:
+        raise DiscoverSourcesError(
+            "DISCOVERY_RUN_RECOVERY_REQUIRED",
+            f"Run {run_id} has an interrupted mutation and cannot reserve an academic provider call.",
+            remediation=f"Run run_controller.py recover --run-id {run_id} before retrying discovery.",
+            details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+        )
+    return {
+        "run_id": run_id,
+        "state": state["current"],
+        "path": path,
+        "requested": requested_run_id is not None,
+        "document": document,
+    }
+
+
+def resolve_academic_discovery_run(project_root: Path, requested_run_id: str | None) -> dict[str, Any] | None:
+    runs_root = project_root / "runs"
+    if requested_run_id is not None:
+        run_id = requested_run_id.strip()
+        if not RUN_ID_RE.fullmatch(run_id) or run_id in {".", ".."} or ".." in run_id:
+            raise DiscoverSourcesError(
+                "DISCOVERY_RUN_ID_INVALID",
+                f"Invalid discovery run id: {requested_run_id!r}",
+                recoverable=False,
+                remediation="Use a filename-safe active run id from runs/<run-id>/run-state.json.",
+                details={"command": "academic", "network_io_executed": False},
+            )
+        state_path = runs_root / run_id / "run-state.json"
+        if not state_path.is_file():
+            raise DiscoverSourcesError(
+                "DISCOVERY_RUN_UNKNOWN",
+                f"No retained run state exists for discovery run {run_id}.",
+                remediation="Start the run with run_controller.py or pass an existing active --run-id.",
+                details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+            )
+        selected = _load_academic_run_state(state_path, requested_run_id=run_id)
+        if selected["state"] in RUN_TERMINAL_STATES:
+            raise DiscoverSourcesError(
+                "DISCOVERY_RUN_TERMINAL",
+                f"Discovery run {run_id} is already terminal: {selected['state']}.",
+                recoverable=False,
+                remediation="Start a new run before contacting additional academic providers.",
+                details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+            )
+        validate_academic_provider_accounting(project_root, run_id, run_state=selected["document"])
+        return selected
+
+    if not runs_root.is_dir():
+        return None
+    active: list[dict[str, Any]] = []
+    for state_path in sorted(runs_root.glob("*/run-state.json")):
+        selected = _load_academic_run_state(state_path, requested_run_id=None)
+        if selected["state"] not in RUN_TERMINAL_STATES:
+            active.append(selected)
+    if not active:
+        return None
+    if len(active) > 1:
+        raise DiscoverSourcesError(
+            "DISCOVERY_RUN_ID_REQUIRED",
+            "Multiple active runs exist; academic provider-call budget ownership is ambiguous.",
+            remediation="Pass --run-id for the active run that owns this discovery call.",
+            details={"command": "academic", "network_io_executed": False},
+        )
+    selected = active[0]
+    validate_academic_provider_accounting(
+        project_root,
+        selected["run_id"],
+        run_state=selected["document"],
+    )
+    return selected
+
+
+def max_academic_provider_requests_per_run(config: dict[str, Any]) -> int:
+    run = config.get("run") if isinstance(config.get("run"), dict) else {}
+    value = run.get(
+        "max_academic_provider_requests_per_run",
+        DEFAULT_MAX_ACADEMIC_PROVIDER_REQUESTS_PER_RUN,
+    )
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise SystemExit("research.yml run.max_academic_provider_requests_per_run must be a positive integer")
+    return value
+
+
+def load_academic_provider_request_events(
+    project_root: Path,
+    run_id: str,
+    *,
+    strict: bool = True,
+) -> list[dict[str, Any]]:
+    path = validate_academic_provider_accounting(project_root, run_id)
+    records: list[dict[str, Any]] = []
+    seen_call_ids: set[str] = set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        if not strict:
+            return []
+        raise DiscoverSourcesError(
+            "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+            f"Cannot read academic provider-call ledger {relative_label(project_root, path)}: {exc}",
+            recoverable=False,
+            remediation="Repair or restore the run-bound provider-call ledger before retrying discovery.",
+            details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+        ) from exc
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if not strict:
+                continue
+            raise DiscoverSourcesError(
+                "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+                (
+                    f"Invalid JSONL in {relative_label(project_root, path)} "
+                    f"at line {line_number}: {exc}"
+                ),
+                recoverable=False,
+                remediation="Repair or restore the run-bound provider-call ledger before retrying discovery.",
+                details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+            ) from exc
+        valid = (
+            isinstance(record, dict)
+            and record.get("schema_version") == SCHEMA_VERSION
+            and record.get("event_type") == "academic_provider_request"
+            and record.get("run_id") == run_id
+            and record.get("provider") in {"arxiv", "openalex"}
+            and isinstance(record.get("call_id"), str)
+            and bool(record["call_id"].strip())
+            and isinstance(record.get("reserved_at"), str)
+        )
+        if not valid:
+            if not strict:
+                continue
+            raise DiscoverSourcesError(
+                "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+                f"Invalid provider-call record in {relative_label(project_root, path)} at line {line_number}.",
+                recoverable=False,
+                remediation="Repair or restore the run-bound provider-call ledger before retrying discovery.",
+                details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+            )
+        call_id = record["call_id"].strip()
+        if call_id in seen_call_ids:
+            if not strict:
+                continue
+            raise DiscoverSourcesError(
+                "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+                (
+                    f"Duplicate provider call_id {call_id!r} in "
+                    f"{relative_label(project_root, path)} at line {line_number}."
+                ),
+                recoverable=False,
+                remediation=(
+                    "Preserve the affected run for audit, restore its provider-call ledger from a trusted "
+                    "backup, or start a fresh run. Do not deduplicate or reset accounting by hand."
+                ),
+                details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+            )
+        seen_call_ids.add(call_id)
+        records.append(record)
+    return records
+
+
+def academic_provider_request_count(project_root: Path, run_id: str, *, strict: bool = True) -> int:
+    return len(load_academic_provider_request_events(project_root, run_id, strict=strict))
+
+
+def academic_provider_budget_context(
+    project_root: Path,
+    config: dict[str, Any],
+    requested_run_id: str | None,
+    *,
+    command: str,
+    scope_id: str,
+) -> dict[str, Any] | None:
+    run = resolve_academic_discovery_run(project_root, requested_run_id)
+    if run is None:
+        return None
+    return {
+        "project_root": project_root,
+        "run_id": run["run_id"],
+        "limit": max_academic_provider_requests_per_run(config),
+        "command": command,
+        "scope_id": scope_id,
+        "network_io_executed": False,
+    }
+
+
+def reserve_academic_provider_request(
+    context: dict[str, Any] | None,
+    *,
+    provider: str,
+    attempt: int,
+) -> dict[str, Any] | None:
+    """Durably consume one provider-call slot immediately before transport."""
+    if context is None:
+        return None
+    project_root = context["project_root"]
+    run_id = context["run_id"]
+    limit = int(context["limit"])
+    ledger_path = academic_provider_requests_path(project_root, run_id)
+    lock_path = academic_provider_requests_lock_path(project_root, run_id)
+    with workspace_lock(lock_path, purpose=f"academic provider-call budget for {run_id}"):
+        used = academic_provider_request_count(project_root, run_id)
+        if used >= limit:
+            raise DiscoverSourcesError(
+                "ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED",
+                (
+                    f"Run {run_id} already reserved {used} academic provider request(s); "
+                    f"the next {provider} call would exceed max_academic_provider_requests_per_run={limit}."
+                ),
+                remediation="Start a new run or raise the reviewed academic provider request budget.",
+                details={
+                    "command": context["command"],
+                    "provider": provider,
+                    "run_id": run_id,
+                    "used": used,
+                    "limit": limit,
+                    "network_io_executed": bool(context.get("network_io_executed")),
+                },
+            )
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "event_type": "academic_provider_request",
+            "call_id": f"academic-call-{uuid.uuid4().hex}",
+            "run_id": run_id,
+            "command": context["command"],
+            "scope_id": context["scope_id"],
+            "provider": provider,
+            "attempt": attempt,
+            "reserved_at": timestamp_utc(),
+            "budget_consumed": True,
+        }
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with ledger_path.open("a", encoding="utf-8") as handle:
+                handle.write(compact_json(record) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise DiscoverSourcesError(
+                "ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED",
+                f"Cannot persist the academic provider-call reservation for run {run_id}: {exc}",
+                recoverable=False,
+                remediation="Restore workspace write access before retrying; no provider transport was invoked.",
+                details={
+                    "command": context["command"],
+                    "provider": provider,
+                    "run_id": run_id,
+                    "network_io_executed": False,
+                },
+            ) from exc
+        return record
 
 
 def configured_candidate_store_relative(config: dict[str, Any] | None) -> str:
@@ -4887,12 +5331,20 @@ def openalex_build_url(path: str, params: dict[str, Any] | None = None) -> str:
     return f"{OPENALEX_API_URL}{path}" + (f"?{encoded}" if encoded else "")
 
 
-def openalex_fetch_url(url: str, *, command: str = "authors") -> bytes:
+def openalex_fetch_url(
+    url: str,
+    *,
+    command: str = "authors",
+    budget_context: dict[str, Any] | None = None,
+) -> bytes:
     transport = active_openalex_transport()
     last_error: BaseException | None = None
     safe_url = redact_openalex_diagnostic(url)
     for attempt in range(1, OPENALEX_MAX_ATTEMPTS + 1):
         openalex_wait_for_rate_limit()
+        reserve_academic_provider_request(budget_context, provider="openalex", attempt=attempt)
+        if budget_context is not None:
+            budget_context["network_io_executed"] = True
         try:
             payload = transport(url, OPENALEX_TIMEOUT_SECONDS, openalex_headers())
             if not isinstance(payload, bytes):
@@ -5006,7 +5458,13 @@ def openalex_results_list(
     return [item for item in results if isinstance(item, dict)]
 
 
-def openalex_works_by_filter(filter_key: str, filter_value: str, per_page: int) -> list[dict[str, Any]]:
+def openalex_works_by_filter(
+    filter_key: str,
+    filter_value: str,
+    per_page: int,
+    *,
+    budget_context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Fetch an author's works via an OpenAlex works filter (author.orcid or
     author.id), most recent first. Bounded by per_page; never paginated."""
     params = {
@@ -5015,16 +5473,20 @@ def openalex_works_by_filter(filter_key: str, filter_value: str, per_page: int) 
         "sort": "publication_year:desc",
     }
     url = openalex_build_url(OPENALEX_WORKS_PATH, params)
-    document = openalex_json_response(openalex_fetch_url(url))
+    document = openalex_json_response(openalex_fetch_url(url, budget_context=budget_context))
     return openalex_results_list(document, endpoint="works")
 
 
-def openalex_author_search(name: str) -> list[dict[str, Any]]:
+def openalex_author_search(
+    name: str,
+    *,
+    budget_context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     url = openalex_build_url(
         OPENALEX_AUTHORS_PATH,
         {"search": name, "per_page": OPENALEX_AUTHOR_SEARCH_PER_PAGE},
     )
-    document = openalex_json_response(openalex_fetch_url(url))
+    document = openalex_json_response(openalex_fetch_url(url, budget_context=budget_context))
     return openalex_results_list(document, endpoint="authors")
 
 
@@ -5258,12 +5720,19 @@ def _arxiv_wait_for_rate_limit() -> None:
     ARXIV_LAST_REQUEST_AT = now
 
 
-def _arxiv_fetch_url(url: str) -> bytes:
+def _arxiv_fetch_url(
+    url: str,
+    *,
+    budget_context: dict[str, Any] | None = None,
+) -> bytes:
     transport = ARXIV_TRANSPORT or _urllib_arxiv_transport
     last_error: BaseException | None = None
     details = {"command": "academic", "provider": "arxiv", "network_io_executed": True}
     for attempt in range(1, ARXIV_MAX_ATTEMPTS + 1):
         _arxiv_wait_for_rate_limit()
+        reserve_academic_provider_request(budget_context, provider="arxiv", attempt=attempt)
+        if budget_context is not None:
+            budget_context["network_io_executed"] = True
         try:
             payload = transport(url, ARXIV_TIMEOUT_SECONDS, _arxiv_headers())
             if not isinstance(payload, bytes) or not payload:
@@ -5640,6 +6109,13 @@ def run_academic_discovery(
     request_record = _academic_request(project_root, config, request_id)
     query_value = args.query if isinstance(args.query, str) and args.query.strip() else request_record.get("query_or_identifier")
     query = require_non_empty(query_value, "source request query_or_identifier")
+    budget_context = academic_provider_budget_context(
+        project_root,
+        config,
+        args.run_id,
+        command="academic",
+        scope_id=request_id,
+    )
     cap = min(args.max_results, OPENALEX_DISCOVERY_MAX_RESULTS_CAP)
     discovered_at = timestamp_utc()
     candidates: list[dict[str, Any]] = []
@@ -5648,7 +6124,9 @@ def run_academic_discovery(
     for provider in args.provider:
         if provider == "arxiv":
             url = f"{ARXIV_API_URL}?{urlencode({'search_query': f'all:{query}', 'start': 0, 'max_results': cap, 'sortBy': 'relevance', 'sortOrder': 'descending'})}"
-            records = _parse_arxiv_results(_arxiv_fetch_url(url))
+            records = _parse_arxiv_results(
+                _arxiv_fetch_url(url, budget_context=budget_context)
+            )
             provider_candidates = [
                 _arxiv_academic_candidate(
                     record,
@@ -5661,7 +6139,14 @@ def run_academic_discovery(
             ]
         else:
             url = openalex_build_url(OPENALEX_WORKS_PATH, {"search": query, "per_page": cap})
-            document = openalex_json_response(openalex_fetch_url(url, command="academic"), command="academic")
+            document = openalex_json_response(
+                openalex_fetch_url(
+                    url,
+                    command="academic",
+                    budget_context=budget_context,
+                ),
+                command="academic",
+            )
             works = openalex_results_list(document, endpoint="works", command="academic")
             provider_candidates = [
                 _openalex_academic_candidate(
@@ -5790,7 +6275,12 @@ def pick_openalex_author(seed_name: str, results: list[dict[str, Any]]) -> dict[
     return best
 
 
-def resolve_author_identity(seed: dict[str, Any], seed_context: dict[str, Any]) -> dict[str, Any]:
+def resolve_author_identity(
+    seed: dict[str, Any],
+    seed_context: dict[str, Any],
+    *,
+    budget_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Resolve an author seed to an OpenAlex identity. ORCID seeds are exact and
     need no lookup (works are filtered by author.orcid). Name-only seeds search
     the authors endpoint and either resolve a single best match or flag ambiguity.
@@ -5821,7 +6311,7 @@ def resolve_author_identity(seed: dict[str, Any], seed_context: dict[str, Any]) 
             ),
             "works_filter": None,
         }
-    results = openalex_author_search(name)
+    results = openalex_author_search(name, budget_context=budget_context)
     resolved = pick_openalex_author(name, results)
     if resolved is None:
         identity = AUTHOR_IDENTITY_AMBIGUOUS if results else AUTHOR_IDENTITY_NO_MATCH
@@ -6067,6 +6557,7 @@ def discover_author_publications(
     seed_context: dict[str, Any],
     max_results: int,
     warnings: list[dict[str, str]],
+    budget_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve each author seed to an OpenAlex identity and propose that author's
     works as related-publication candidates. Network I/O is performed against
@@ -6080,7 +6571,11 @@ def discover_author_publications(
     identities: list[dict[str, Any]] = []
 
     for seed in seeds[:OPENALEX_DISCOVERY_MAX_AUTHORS]:
-        identity_record = resolve_author_identity(seed, seed_context)
+        identity_record = resolve_author_identity(
+            seed,
+            seed_context,
+            budget_context=budget_context,
+        )
         works_filter = identity_record["works_filter"]
         author_quality_gate = author_identity_quality_gate(
             identity_record["identity"], seed=seed, seed_context=seed_context
@@ -6114,7 +6609,12 @@ def discover_author_publications(
             )
             continue
 
-        works = openalex_works_by_filter(works_filter[0], works_filter[1], OPENALEX_DISCOVERY_PER_AUTHOR)
+        works = openalex_works_by_filter(
+            works_filter[0],
+            works_filter[1],
+            OPENALEX_DISCOVERY_PER_AUTHOR,
+            budget_context=budget_context,
+        )
         for work in works:
             candidate = build_publication_candidate(
                 work,
@@ -6238,6 +6738,13 @@ def run_authors_discovery(project_root: Path, config: dict[str, Any], args: argp
     # Publication discovery (E35-T02): resolve each author seed to an OpenAlex
     # identity and propose that author's works as related-publication candidates.
     # Discovery appends to the same `warnings` list surfaced in the report.
+    budget_context = academic_provider_budget_context(
+        project_root,
+        config,
+        args.run_id,
+        command="authors",
+        scope_id=source_id,
+    )
     seed_context = build_seed_paper_context(record, frontmatter)
     report.update(
         discover_author_publications(
@@ -6248,6 +6755,7 @@ def run_authors_discovery(project_root: Path, config: dict[str, Any], args: argp
             seed_context=seed_context,
             max_results=args.max_results,
             warnings=warnings,
+            budget_context=budget_context,
         )
     )
     return report

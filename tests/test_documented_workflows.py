@@ -527,7 +527,9 @@ class DocumentedWorkflowTests(unittest.TestCase):
             "## Completion Checklist",
             "python3 scripts/smoke_validate_workspace.py --format json",
             "python3 scripts/source_requests.py list --status open --format json",
-            "python3 scripts/source_requests.py plan-fetch --request-id",
+            "python3 scripts/source_requests.py plan-fetch \\",
+            "--request-id req-1a2b3c4d5e",
+            "--candidate-id cand-1a2b3c4d5e",
             "python3 scripts/discover_sources.py --format json candidates list --request-id",
             "python3 scripts/discover_sources.py --format json candidates select --candidate-id",
             "--reason \"official_primary trust tier satisfies the linked source policy\"",
@@ -1824,6 +1826,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
             "python3 scripts/discover_sources.py --format json standards uk-geospatial-register",
             "python3 scripts/discover_sources.py --format json standards nist",
             "python3 scripts/discover_sources.py --format json authors --source-id",
+            "--run-id <work-order-run-id>",
             # explicit review and selection
             "python3 scripts/discover_sources.py --format json candidates list --status new",
             "python3 scripts/discover_sources.py --format json candidates list --request-id",

@@ -23,7 +23,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from types import ModuleType, SimpleNamespace
 from typing import Any
-from urllib.parse import urlparse
 
 # Workspace sibling modules are protected static inputs.  Prevent controller
 # imports from creating ``scripts/__pycache__`` entries that would mutate the
@@ -60,6 +59,8 @@ DEFAULT_TOTAL_TIMEOUT_SECONDS = 2 * 60 * 60
 MAX_RESULT_BYTES = 64 * 1024
 MAX_SUMMARY_LENGTH = 4000
 MAX_ARTIFACTS = 256
+MAX_SCOPE_IDS = 256
+MAX_SCOPE_ID_LENGTH = 200
 MAX_ARTIFACT_PATH_LENGTH = 512
 MAX_TRUSTED_STATIC_INPUT_BYTES = 32 * 1024 * 1024
 MAX_TRUSTED_STATIC_INPUT_ENTRIES = 10_000
@@ -71,6 +72,9 @@ MAX_VERIFICATION_ARTIFACT_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_SNAPSHOT_BYTES = 32 * 1024 * 1024
 MAX_RAW_TREE_SNAPSHOT_BYTES = 2 * 1024 * 1024 * 1024
 MAX_RAW_TREE_SNAPSHOT_ENTRIES = 10_000
+MAX_SCOPE_GUARD_BYTES = 8 * 1024 * 1024
+MAX_SCOPE_GUARD_ENTRIES = 10_000
+MAX_WORK_ORDER_BYTES = 256 * 1024
 
 SESSION_FILENAME = "session.json"
 EVENTS_FILENAME = "events.jsonl"
@@ -100,6 +104,8 @@ ACTIVE_STATUS = "active"
 PAUSED_STATUS = "paused"
 TERMINAL_STATUSES = frozenset({"complete", "blocked_on_sources", "no_ship", "failed"})
 RESULT_OUTCOMES = frozenset({"completed", "blocked", "failed"})
+REVIEWABLE_CANDIDATE_STATES = frozenset({"new", "proposed", "discovered", "reviewed", "deferred"})
+DISCOVERY_APPEND_CANDIDATE_STATES = frozenset({"new", "proposed", "discovered"})
 PHASES = frozenset(
     {
         "planning",
@@ -236,7 +242,11 @@ def require_safe_id(value: Any, label: str) -> str:
 
 def require_agent_id(value: Any) -> str:
     normalized = value.strip() if isinstance(value, str) else ""
-    if not normalized or len(normalized) > 160 or "\x00" in normalized:
+    if (
+        not normalized
+        or len(normalized) > 160
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+    ):
         raise OrchestrationControllerError("AGENT_ID_INVALID", "--agent-id must be a non-empty string")
     return normalized
 
@@ -276,6 +286,10 @@ def work_result_path(project_root: Path, orchestration_id: str, action_id: str) 
 
 def trusted_static_input_path(project_root: Path, orchestration_id: str, action_id: str) -> Path:
     return session_dir(project_root, orchestration_id) / TRUSTED_INPUTS_DIR / f"{action_id}.json"
+
+
+def scope_integrity_baseline_path(project_root: Path, orchestration_id: str, action_id: str) -> Path:
+    return session_dir(project_root, orchestration_id) / TRUSTED_INPUTS_DIR / f"{action_id}-scope-baseline.json"
 
 
 def control_repair_path(project_root: Path, orchestration_id: str) -> Path:
@@ -1444,7 +1458,20 @@ def candidate_store_path(project_root: Path, config: dict[str, Any]) -> Path:
     return project_root / path.as_posix()
 
 
-def raw_tree_snapshot(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
+def safe_snapshot_relative_path(value: str) -> bool:
+    normalized = value.replace("\\", "/")
+    if not normalized or normalized.startswith("/") or WINDOWS_ABSOLUTE_RE.match(value):
+        return False
+    path = PurePosixPath(normalized)
+    return not path.is_absolute() and ".." not in path.parts and path.as_posix() == normalized
+
+
+def raw_tree_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+    *,
+    include_entries: bool = False,
+) -> dict[str, Any]:
     """Return a bounded content fingerprint for configured immutable raw roots."""
     raw = config.get("raw") if isinstance(config.get("raw"), dict) else {}
     configured = raw.get("source_roots") if isinstance(raw.get("source_roots"), list) else []
@@ -1460,6 +1487,7 @@ def raw_tree_snapshot(project_root: Path, config: dict[str, Any]) -> dict[str, A
             )
         roots.append(project_root / relative.as_posix())
     records: list[str] = []
+    entries: dict[str, str] = {}
     total_bytes = 0
     seen: set[str] = set()
 
@@ -1512,6 +1540,7 @@ def raw_tree_snapshot(project_root: Path, config: dict[str, Any]) -> dict[str, A
             raise raw_error(f"immutable raw evidence changed while it was fingerprinted: {relative}")
         total_bytes += declared_size
         records.append(f"{relative}\0{declared_size}\0{digest}")
+        entries[relative] = digest
 
     for root in sorted(set(roots), key=lambda path: path.as_posix()):
         try:
@@ -1535,12 +1564,15 @@ def raw_tree_snapshot(project_root: Path, config: dict[str, Any]) -> dict[str, A
             visit(root)
     records.sort()
     digest = hashlib.sha256("\n".join(records).encode()).hexdigest()
-    return {
+    snapshot = {
         "algorithm": "sha256-content-v1",
         "file_count": len(records),
         "total_bytes": total_bytes,
         "fingerprint": f"sha256:{digest}",
     }
+    if include_entries:
+        snapshot["entries"] = dict(sorted(entries.items()))
+    return snapshot
 
 
 def evidence_manifest_digest(project_root: Path) -> str | None:
@@ -1551,30 +1583,318 @@ def evidence_manifest_digest(project_root: Path) -> str | None:
     )
 
 
-def bind_legacy_immutability_postconditions(project_root: Path, work_order: dict[str, Any]) -> None:
-    """Upgrade pre-0.2.1 pending discovery/review guards before worker replay."""
-    if work_order.get("phase") not in {"discovery", "candidate_review"}:
-        return
-    config = load_config(project_root)
-    changed = False
-    for item in work_order.get("required_postconditions", []):
-        if not isinstance(item, dict):
-            continue
-        check = item.get("check")
-        if check == "raw_tree_unchanged":
-            before = item.get("before")
-            if not isinstance(before, dict) or before.get("algorithm") != "sha256-content-v1":
-                item["before"] = raw_tree_snapshot(project_root, config)
-                changed = True
-        elif check in {"discovery_never_fetches", "selection_does_not_fetch"}:
-            if "manifest_digest_before" not in item:
-                item["manifest_digest_before"] = evidence_manifest_digest(project_root)
-                changed = True
-    if changed:
-        write_json_atomic(
-            work_order_path(project_root, work_order["orchestration_id"], work_order["action_id"]),
-            work_order,
+def valid_sha256_fingerprint(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+
+
+def valid_raw_tree_snapshot(value: Any, *, include_entries: bool = False) -> bool:
+    required = {"algorithm", "file_count", "total_bytes", "fingerprint"}
+    if include_entries:
+        required.add("entries")
+    if not isinstance(value, dict) or set(value) != required:
+        return False
+    if (
+        value.get("algorithm") != "sha256-content-v1"
+        or isinstance(value.get("file_count"), bool)
+        or not isinstance(value.get("file_count"), int)
+        or not 0 <= value["file_count"] <= MAX_RAW_TREE_SNAPSHOT_ENTRIES
+        or isinstance(value.get("total_bytes"), bool)
+        or not isinstance(value.get("total_bytes"), int)
+        or not 0 <= value["total_bytes"] <= MAX_RAW_TREE_SNAPSHOT_BYTES
+        or not valid_sha256_fingerprint(value.get("fingerprint"))
+    ):
+        return False
+    if not include_entries:
+        return True
+    entries = value.get("entries")
+    return (
+        isinstance(entries, dict)
+        and len(entries) == value["file_count"]
+        and len(entries) <= MAX_RAW_TREE_SNAPSHOT_ENTRIES
+        and all(
+            isinstance(path, str)
+            and path.startswith("raw/")
+            and len(path) <= MAX_ARTIFACT_PATH_LENGTH
+            and safe_snapshot_relative_path(path)
+            and valid_sha256_fingerprint(fingerprint)
+            for path, fingerprint in entries.items()
         )
+    )
+
+
+def require_immutability_baselines(work_order: dict[str, Any]) -> None:
+    """Fail closed when a pending action predates pre-action immutability guards."""
+    phase = work_order.get("phase")
+    if phase not in {"discovery", "candidate_review"}:
+        return
+    checks = {
+        item.get("check"): item
+        for item in work_order.get("required_postconditions", [])
+        if isinstance(item, dict) and isinstance(item.get("check"), str)
+    }
+    manifest_check = "discovery_never_fetches" if phase == "discovery" else "selection_does_not_fetch"
+    raw_before = checks.get("raw_tree_unchanged", {}).get("before")
+    manifest_guard = checks.get(manifest_check, {})
+    manifest_digest = manifest_guard.get("manifest_digest_before")
+    if valid_raw_tree_snapshot(raw_before) and (
+        manifest_digest is None or valid_sha256_fingerprint(manifest_digest)
+    ) and "manifest_digest_before" in manifest_guard:
+        return
+    raise OrchestrationControllerError(
+        "ORCHESTRATION_IMMUTABILITY_BASELINE_UNAVAILABLE",
+        f"pending {phase} work predates the raw/manifest immutability baseline and cannot be replayed safely",
+        recoverable=False,
+        remediation=(
+            "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+            "workspace state. Never bind raw or manifest digests after worker execution."
+        ),
+        details={"action_id": work_order.get("action_id")},
+    )
+
+
+def require_research_question_baseline(work_order: dict[str, Any]) -> None:
+    """Refuse legacy research replay when no trustworthy pre-action state exists."""
+    if work_order.get("phase") != "research":
+        return
+    guard = next(
+        (
+            item
+            for item in work_order.get("required_postconditions", [])
+            if isinstance(item, dict) and item.get("check") == "workspace_readiness_changed"
+        ),
+        None,
+    )
+    baseline = guard.get("scoped_questions_before") if isinstance(guard, dict) else None
+    question_files_before = (
+        guard.get("question_file_fingerprints_before") if isinstance(guard, dict) else None
+    )
+    source_requests_before = (
+        guard.get("source_request_record_fingerprints_before") if isinstance(guard, dict) else None
+    )
+    if (
+        isinstance(baseline, dict)
+        and baseline
+        and valid_question_file_fingerprint_snapshot(question_files_before)
+        and valid_record_fingerprint_snapshot(source_requests_before)
+        and all(f"{slug}.md" in question_files_before for slug in baseline)
+    ):
+        return
+    raise OrchestrationControllerError(
+        "ORCHESTRATION_RESEARCH_BASELINE_UNAVAILABLE",
+        "pending research work predates the scoped-question baseline and cannot be replayed safely",
+        recoverable=False,
+        remediation=(
+            "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+            "workspace state. Do not hand-edit the retained work order or infer a baseline after worker execution."
+        ),
+        details={"action_id": work_order.get("action_id")},
+    )
+
+
+def require_discovery_candidate_baseline(work_order: dict[str, Any]) -> None:
+    """Refuse discovery replay when newly created candidate IDs cannot be proven."""
+    if work_order.get("phase") != "discovery":
+        return
+    guard = next(
+        (
+            item
+            for item in work_order.get("required_postconditions", [])
+            if isinstance(item, dict) and item.get("check") == "request_scoped_candidates_increased"
+        ),
+        None,
+    )
+    baseline = guard.get("candidate_states_before") if isinstance(guard, dict) else None
+    record_baseline = guard.get("candidate_record_fingerprints_before") if isinstance(guard, dict) else None
+    before = guard.get("before") if isinstance(guard, dict) else None
+    if (
+        valid_candidate_state_baseline(baseline)
+        and valid_record_fingerprint_snapshot(record_baseline)
+        and set(baseline) <= set(record_baseline)
+        and isinstance(before, int)
+        and not isinstance(before, bool)
+        and before == len(baseline)
+    ):
+        return
+    raise OrchestrationControllerError(
+        "ORCHESTRATION_DISCOVERY_BASELINE_UNAVAILABLE",
+        "pending discovery work predates the bounded candidate-state baseline and cannot be replayed safely",
+        recoverable=False,
+        remediation=(
+            "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+            "workspace state. Do not hand-edit the retained work order or infer candidate creation after execution."
+        ),
+        details={"action_id": work_order.get("action_id")},
+    )
+
+
+def require_action_baselines(
+    work_order: dict[str, Any],
+    project_root: Path | None = None,
+) -> dict[str, Any]:
+    resolved = hydrate_integrity_baselines(project_root, work_order) if project_root is not None else work_order
+    require_immutability_baselines(resolved)
+    require_research_question_baseline(resolved)
+    require_discovery_candidate_baseline(resolved)
+    require_candidate_review_selection_baseline(resolved)
+    require_acquisition_evidence_baselines(resolved)
+    return resolved
+
+
+def valid_candidate_state_baseline(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and len(value) <= MAX_SCOPE_IDS
+        and all(
+            isinstance(candidate_id, str)
+            and bool(candidate_id)
+            and len(candidate_id) <= MAX_SCOPE_ID_LENGTH
+            and "\x00" not in candidate_id
+            and isinstance(state, str)
+            and len(state) <= 64
+            and re.fullmatch(r"[a-z][a-z0-9_-]*", state) is not None
+            for candidate_id, state in value.items()
+        )
+    )
+
+
+def valid_scope_id_list(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= MAX_SCOPE_IDS
+        and all(
+            isinstance(item, str)
+            and bool(item)
+            and len(item) <= MAX_SCOPE_ID_LENGTH
+            and "\x00" not in item
+            for item in value
+        )
+        and len(value) == len(set(value))
+    )
+
+
+def valid_blocked_question_baseline(value: Any) -> bool:
+    if not isinstance(value, dict) or len(value) > MAX_SCOPE_IDS:
+        return False
+    for slug, snapshot in value.items():
+        if (
+            not isinstance(slug, str)
+            or not slug
+            or len(slug) > MAX_SCOPE_ID_LENGTH
+            or "\x00" in slug
+            or not isinstance(snapshot, dict)
+            or set(snapshot) != {"status", "blocking_request_ids", "source_ids_before"}
+            or snapshot.get("status") != "blocked"
+            or not valid_scope_id_list(snapshot.get("blocking_request_ids"))
+            or not snapshot.get("blocking_request_ids")
+            or not valid_scope_id_list(snapshot.get("source_ids_before"))
+        ):
+            return False
+    return True
+
+
+def require_acquisition_evidence_baselines(work_order: dict[str, Any]) -> None:
+    """Refuse acquisition replay when exact pre-action reconciliation cannot be proven."""
+    if work_order.get("phase") != "acquisition":
+        return
+    question_guard = next(
+        (
+            item
+            for item in work_order.get("required_postconditions", [])
+            if isinstance(item, dict) and item.get("check") == "linked_blocked_questions_reopened"
+        ),
+        None,
+    )
+    manifest_guard = next(
+        (
+            item
+            for item in work_order.get("required_postconditions", [])
+            if isinstance(item, dict) and item.get("check") == "manifest_records_increased"
+        ),
+        None,
+    )
+    blocked_questions_before = (
+        question_guard.get("blocked_questions_before") if isinstance(question_guard, dict) else None
+    )
+    matching_source_ids_before = (
+        manifest_guard.get("matching_source_ids_before") if isinstance(manifest_guard, dict) else None
+    )
+    matching_source_records_before = (
+        manifest_guard.get("matching_source_records_before") if isinstance(manifest_guard, dict) else None
+    )
+    manifest_records_before = (
+        manifest_guard.get("manifest_record_fingerprints_before") if isinstance(manifest_guard, dict) else None
+    )
+    raw_tree_before = manifest_guard.get("raw_tree_before") if isinstance(manifest_guard, dict) else None
+    candidate_records_before = (
+        manifest_guard.get("candidate_record_fingerprints_before") if isinstance(manifest_guard, dict) else None
+    )
+    source_requests_before = (
+        manifest_guard.get("source_request_record_fingerprints_before") if isinstance(manifest_guard, dict) else None
+    )
+    normalized_files_before = (
+        manifest_guard.get("normalized_file_fingerprints_before") if isinstance(manifest_guard, dict) else None
+    )
+    question_files_before = (
+        manifest_guard.get("question_file_fingerprints_before") if isinstance(manifest_guard, dict) else None
+    )
+    if valid_blocked_question_baseline(blocked_questions_before) and valid_scope_id_list(
+        matching_source_ids_before
+    ) and valid_matching_source_record_snapshot(matching_source_records_before) and (
+        set(matching_source_ids_before) == set(matching_source_records_before)
+    ) and valid_record_fingerprint_snapshot(manifest_records_before) and (
+        set(matching_source_ids_before) <= set(manifest_records_before)
+    ) and valid_raw_tree_snapshot(raw_tree_before, include_entries=True) and valid_record_fingerprint_snapshot(
+        candidate_records_before
+    ) and valid_record_fingerprint_snapshot(source_requests_before) and valid_file_fingerprint_snapshot(
+        normalized_files_before,
+        prefix="sources/",
+    ) and valid_question_file_fingerprint_snapshot(question_files_before):
+        return
+    raise OrchestrationControllerError(
+        "ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE",
+        "pending acquisition work predates the bounded question/evidence baseline and cannot be replayed safely",
+        recoverable=False,
+        remediation=(
+            "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+            "workspace state. Do not infer question transitions or matching evidence after worker execution."
+        ),
+        details={"action_id": work_order.get("action_id")},
+    )
+
+
+def require_candidate_review_selection_baseline(work_order: dict[str, Any]) -> None:
+    if work_order.get("phase") != "candidate_review":
+        return
+    guard = next(
+        (
+            item
+            for item in work_order.get("required_postconditions", [])
+            if isinstance(item, dict) and item.get("check") == "selected_candidate_for_request"
+        ),
+        None,
+    )
+    baseline = guard.get("selected_candidate_ids_before") if isinstance(guard, dict) else None
+    record_baseline = guard.get("candidate_record_fingerprints_before") if isinstance(guard, dict) else None
+    before = guard.get("selected_before") if isinstance(guard, dict) else None
+    if (
+        valid_scope_id_list(baseline)
+        and valid_record_fingerprint_snapshot(record_baseline)
+        and set(baseline) <= set(record_baseline)
+        and isinstance(before, int)
+        and not isinstance(before, bool)
+        and before == len(baseline)
+    ):
+        return
+    raise OrchestrationControllerError(
+        "ORCHESTRATION_CANDIDATE_REVIEW_BASELINE_UNAVAILABLE",
+        "pending candidate-review work predates the bounded selected-candidate baseline and cannot be replayed safely",
+        recoverable=False,
+        remediation=(
+            "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+            "workspace state. Do not infer which candidate selections occurred after execution."
+        ),
+        details={"action_id": work_order.get("action_id")},
+    )
 
 
 def load_candidates(project_root: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1597,6 +1917,295 @@ def load_candidates(project_root: Path, config: dict[str, Any]) -> list[dict[str
     return records
 
 
+def canonical_json_fingerprint(value: Any, *, label: str) -> tuple[str, int]:
+    try:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_SCOPE_INVALID",
+            f"{label} cannot be canonically fingerprinted: {exc}",
+            recoverable=False,
+        ) from exc
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}", len(encoded)
+
+
+def record_fingerprint_snapshot(
+    records: list[dict[str, Any]],
+    *,
+    id_field: str,
+    label: str,
+) -> dict[str, str]:
+    """Capture all existing record identities without retaining record content."""
+    snapshot: dict[str, str] = {}
+    total_bytes = 0
+    for record in records:
+        record_id = record.get(id_field) if isinstance(record, dict) else None
+        if (
+            not isinstance(record_id, str)
+            or not record_id
+            or len(record_id) > MAX_SCOPE_ID_LENGTH
+            or "\x00" in record_id
+        ):
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_INVALID",
+                f"{label} contains a record without a bounded {id_field}",
+                recoverable=False,
+            )
+        if record_id in snapshot:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_INVALID",
+                f"{label} contains duplicate id: {record_id}",
+                recoverable=False,
+            )
+        if len(snapshot) >= MAX_SCOPE_GUARD_ENTRIES:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_EXCEEDED",
+                f"{label} exceeds the {MAX_SCOPE_GUARD_ENTRIES}-record integrity-guard limit",
+                recoverable=False,
+                remediation=f"Archive or split {label} before starting another managed action.",
+            )
+        fingerprint, encoded_bytes = canonical_json_fingerprint(record, label=label)
+        total_bytes += encoded_bytes
+        if total_bytes > MAX_SCOPE_GUARD_BYTES:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_EXCEEDED",
+                f"{label} exceeds the {MAX_SCOPE_GUARD_BYTES}-byte integrity-guard limit",
+                recoverable=False,
+                remediation=f"Archive or split {label} before starting another managed action.",
+            )
+        snapshot[record_id] = fingerprint
+    return dict(sorted(snapshot.items()))
+
+
+def valid_record_fingerprint_snapshot(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and len(value) <= MAX_SCOPE_GUARD_ENTRIES
+        and all(
+            isinstance(record_id, str)
+            and bool(record_id)
+            and len(record_id) <= MAX_SCOPE_ID_LENGTH
+            and "\x00" not in record_id
+            and valid_sha256_fingerprint(fingerprint)
+            for record_id, fingerprint in value.items()
+        )
+    )
+
+
+def fingerprint_scope_violations(
+    before: dict[str, str],
+    after: dict[str, str],
+    *,
+    mutable_ids: set[str],
+    allowed_new_ids: set[str] | None = None,
+) -> dict[str, list[str]]:
+    """Describe bounded identity changes outside an explicitly mutable scope."""
+    allowed_new = allowed_new_ids if allowed_new_ids is not None else set()
+    removed = sorted(set(before) - set(after))
+    added = sorted(set(after) - set(before) - allowed_new)
+    changed = sorted(
+        record_id
+        for record_id in set(before) & set(after)
+        if record_id not in mutable_ids and before[record_id] != after[record_id]
+    )
+    return {
+        "removed": removed[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+        "added_outside_scope": added[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+        "changed_outside_scope": changed[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+    }
+
+
+def candidate_record_fingerprint_snapshot(candidates: list[dict[str, Any]]) -> dict[str, str]:
+    return record_fingerprint_snapshot(candidates, id_field="candidate_id", label="candidate store")
+
+
+def source_request_record_fingerprint_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+) -> dict[str, str]:
+    source_requests = load_sibling_module("source_requests")
+    records = source_requests.load_requests(source_requests.requests_path(project_root, config))
+    return record_fingerprint_snapshot(records, id_field="request_id", label="source-request store")
+
+
+def file_tree_fingerprint_snapshot(
+    project_root: Path,
+    root: Path,
+    *,
+    label: str,
+) -> dict[str, str]:
+    """Fingerprint a bounded regular-file tree without following links or junctions."""
+    snapshot: dict[str, str] = {}
+    total_bytes = 0
+
+    def fail(message: str) -> OrchestrationControllerError:
+        return OrchestrationControllerError(
+            "ORCHESTRATION_WORKSPACE_UNSAFE",
+            f"{label} {message}",
+            recoverable=True,
+            remediation=f"Replace links or special files and keep the {label} tree bounded.",
+        )
+
+    def visit(path: Path) -> None:
+        nonlocal total_bytes
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise fail(f"could not be inspected: {path}: {exc}") from exc
+        if path_is_link_like(path, metadata):
+            raise fail(f"contains a symbolic link or junction: {path}")
+        if stat.S_ISDIR(metadata.st_mode):
+            try:
+                children = sorted(path.iterdir(), key=lambda item: item.name)
+            except OSError as exc:
+                raise fail(f"could not be enumerated: {path}: {exc}") from exc
+            for child in children:
+                visit(child)
+            return
+        if not stat.S_ISREG(metadata.st_mode) or int(getattr(metadata, "st_nlink", 1) or 1) != 1:
+            raise fail(f"contains a non-regular or multiply linked file: {path}")
+        if len(snapshot) >= MAX_SCOPE_GUARD_ENTRIES:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_EXCEEDED",
+                f"{label} exceeds the {MAX_SCOPE_GUARD_ENTRIES}-file integrity-guard limit",
+                recoverable=False,
+            )
+        size = int(metadata.st_size)
+        total_bytes += size
+        if total_bytes > MAX_SCOPE_GUARD_BYTES:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_EXCEEDED",
+                f"{label} exceeds the {MAX_SCOPE_GUARD_BYTES}-byte integrity-guard limit",
+                recoverable=False,
+            )
+        relative = relative_workspace_path(project_root, path)
+        fingerprint = file_digest(path, max_bytes=size, containment_root=project_root)
+        if fingerprint is None:
+            raise fail(f"changed while it was fingerprinted: {relative}")
+        snapshot[relative] = fingerprint
+
+    visit(root)
+    return dict(sorted(snapshot.items()))
+
+
+def normalized_file_fingerprint_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+) -> dict[str, str]:
+    normalize_sources = load_sibling_module("normalize_sources")
+    _, normalized_relative = normalize_sources.source_paths(config)
+    return file_tree_fingerprint_snapshot(
+        project_root,
+        project_root / normalized_relative,
+        label="normalized evidence",
+    )
+
+
+def valid_file_fingerprint_snapshot(value: Any, *, prefix: str | None = None) -> bool:
+    return (
+        isinstance(value, dict)
+        and len(value) <= MAX_SCOPE_GUARD_ENTRIES
+        and all(
+            isinstance(path, str)
+            and len(path) <= MAX_ARTIFACT_PATH_LENGTH
+            and safe_snapshot_relative_path(path)
+            and (prefix is None or path.startswith(prefix))
+            and valid_sha256_fingerprint(fingerprint)
+            for path, fingerprint in value.items()
+        )
+    )
+
+
+def question_file_fingerprint_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+) -> dict[str, str]:
+    """Capture every question file so research cannot mutate work outside its scope."""
+    question_status = load_sibling_module("question_status")
+    questions_dir = question_status.questions_directory(project_root, config)
+    snapshot: dict[str, str] = {}
+    total_bytes = 0
+    if not questions_dir.exists():
+        return snapshot
+    try:
+        paths = sorted(questions_dir.glob("*.md"), key=lambda item: item.name)
+    except OSError as exc:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_WORKSPACE_UNSAFE",
+            f"could not enumerate question files: {exc}",
+            recoverable=True,
+        ) from exc
+    for path in paths:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_WORKSPACE_UNSAFE",
+                f"could not inspect question file {path.name}: {exc}",
+                recoverable=True,
+            ) from exc
+        if (
+            path_is_link_like(path, metadata)
+            or not stat.S_ISREG(metadata.st_mode)
+            or int(getattr(metadata, "st_nlink", 1) or 1) != 1
+        ):
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_WORKSPACE_UNSAFE",
+                f"question integrity guard requires a singly linked regular file: {path.name}",
+                recoverable=True,
+            )
+        if len(snapshot) >= MAX_SCOPE_GUARD_ENTRIES:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_EXCEEDED",
+                "question store exceeds the bounded integrity-guard entry limit",
+                recoverable=False,
+            )
+        declared_size = int(metadata.st_size)
+        total_bytes += declared_size
+        if total_bytes > MAX_SCOPE_GUARD_BYTES:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_EXCEEDED",
+                "question store exceeds the bounded integrity-guard byte limit",
+                recoverable=False,
+            )
+        fingerprint = file_digest(
+            path,
+            max_bytes=declared_size,
+            containment_root=project_root,
+        )
+        if fingerprint is None:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_WORKSPACE_UNSAFE",
+                f"question file changed while it was fingerprinted: {path.name}",
+                recoverable=True,
+            )
+        snapshot[path.name] = fingerprint
+    return snapshot
+
+
+def valid_question_file_fingerprint_snapshot(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and len(value) <= MAX_SCOPE_GUARD_ENTRIES
+        and all(
+            isinstance(filename, str)
+            and len(filename) <= MAX_ARTIFACT_PATH_LENGTH
+            and PurePosixPath(filename).name == filename
+            and filename.endswith(".md")
+            and valid_sha256_fingerprint(fingerprint)
+            for filename, fingerprint in value.items()
+        )
+    )
+
+
 def candidate_request_id(candidate: dict[str, Any]) -> str | None:
     for field in ("source_request_id", "selected_for_request_id", "selected_request_id", "request_id"):
         value = candidate.get(field)
@@ -1610,6 +2219,217 @@ def candidate_state(candidate: dict[str, Any]) -> str:
     return value.strip().lower() if isinstance(value, str) and value.strip() else "new"
 
 
+def scoped_question_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+    slugs: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Capture the bounded lifecycle fields needed to prove research progress."""
+    question_status = load_sibling_module("question_status")
+    questions_dir = question_status.questions_directory(project_root, config)
+    records = {
+        str(record.get("slug")): record
+        for record in question_status.collect_questions(questions_dir)
+        if isinstance(record, dict) and isinstance(record.get("slug"), str)
+    }
+    snapshot: dict[str, dict[str, Any]] = {}
+    for slug in slugs:
+        record = records.get(slug)
+        if record is None:
+            continue
+        snapshot[slug] = {
+            "status": str(record.get("status") or "unknown"),
+            "blocking_request_ids": sorted(
+                value
+                for value in record.get("blocking_request_ids", [])
+                if isinstance(value, str) and value
+            ),
+            "answer_page": str(record.get("answer_page") or ""),
+        }
+    return snapshot
+
+
+def scoped_question_evidence_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+    slugs: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Capture lifecycle, blocking links, and source links for bounded question scope."""
+    question_status = load_sibling_module("question_status")
+    questions_dir = question_status.questions_directory(project_root, config)
+    snapshot: dict[str, dict[str, Any]] = {}
+    for slug in slugs:
+        path = questions_dir / f"{slug}.md"
+        if not path.is_file():
+            continue
+        frontmatter = question_status.load_frontmatter(path)
+        if not isinstance(frontmatter, dict) or frontmatter.get("type") != "question":
+            continue
+        snapshot[slug] = {
+            "status": str(frontmatter.get("status") or "unknown"),
+            "blocking_request_ids": sorted(
+                {
+                    value
+                    for value in frontmatter.get("blocking_request_ids", [])
+                    if isinstance(value, str) and value
+                }
+            )
+            if isinstance(frontmatter.get("blocking_request_ids"), list)
+            else [],
+            "source_ids": sorted(
+                {
+                    value
+                    for value in frontmatter.get("source_ids", [])
+                    if isinstance(value, str) and value
+                }
+            )
+            if isinstance(frontmatter.get("source_ids"), list)
+            else [],
+        }
+    return snapshot
+
+
+def linked_blocked_questions_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+    slugs: list[str],
+    request_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Capture only blocked scoped questions linked to the scoped source requests."""
+    request_scope = set(request_ids)
+    linked: dict[str, dict[str, Any]] = {}
+    for slug, snapshot in scoped_question_evidence_snapshot(project_root, config, slugs).items():
+        blocking_request_ids = [
+            request_id
+            for request_id in snapshot.get("blocking_request_ids", [])
+            if request_id in request_scope
+        ]
+        if snapshot.get("status") != "blocked" or not blocking_request_ids:
+            continue
+        linked[slug] = {
+            "status": "blocked",
+            "blocking_request_ids": blocking_request_ids,
+            "source_ids_before": list(snapshot.get("source_ids", [])),
+        }
+    if not valid_blocked_question_baseline(linked):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_SCOPE_EXCEEDED",
+            "linked blocked-question baseline exceeds the bounded orchestration contract",
+            recoverable=False,
+            remediation="Split or repair the oversized question/request linkage before starting acquisition.",
+        )
+    return linked
+
+
+def matching_normalized_source_ids(
+    project_root: Path,
+    config: dict[str, Any],
+    request_ids: list[str],
+    candidate_ids: list[str],
+) -> list[str]:
+    """Return normalized evidence already correlated to the exact acquisition scope."""
+    return sorted(
+        matching_normalized_source_records(
+            project_root,
+            config,
+            request_ids,
+            candidate_ids,
+        )
+    )
+
+
+def matching_normalized_source_records(
+    project_root: Path,
+    config: dict[str, Any],
+    request_ids: list[str],
+    candidate_ids: list[str],
+) -> dict[str, dict[str, str]]:
+    """Fingerprint exact pre-existing normalized evidence for scoped reconciliation."""
+    request_scope = set(request_ids)
+    candidate_scope = set(candidate_ids)
+    normalize_sources = load_sibling_module("normalize_sources")
+    manifest_relative, normalized_relative = normalize_sources.source_paths(config)
+    records = normalize_sources.load_manifest(project_root / manifest_relative)
+    normalized_root = project_root / normalized_relative
+    matching: dict[str, dict[str, str]] = {}
+    for record in records:
+        provenance = record.get("provenance") if isinstance(record, dict) else None
+        source_id = record.get("id") if isinstance(record, dict) else None
+        normalized_path = (
+            normalize_sources.normalized_output_path_for_record(record, normalized_root)
+            if isinstance(record, dict)
+            else None
+        )
+        if (
+            not isinstance(provenance, dict)
+            or provenance.get("request_id") not in request_scope
+            or provenance.get("candidate_id") not in candidate_scope
+            or not isinstance(source_id, str)
+            or not source_id
+            or source_id in matching
+            or not isinstance(normalized_path, Path)
+            or not normalized_path.is_file()
+        ):
+            continue
+        record_fingerprint, _ = canonical_json_fingerprint(record, label="evidence manifest")
+        normalized_fingerprint = file_digest(
+            normalized_path,
+            max_bytes=MAX_VERIFICATION_ARTIFACT_BYTES,
+            containment_root=project_root,
+        )
+        if normalized_fingerprint is None:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_WORKSPACE_UNSAFE",
+                f"matching normalized evidence is unreadable or oversized: {source_id}",
+                recoverable=True,
+                remediation="Repair the normalized evidence record before starting acquisition.",
+            )
+        matching[source_id] = {
+            "record_fingerprint": record_fingerprint,
+            "normalized_fingerprint": normalized_fingerprint,
+        }
+        if len(matching) > MAX_SCOPE_IDS:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_EXCEEDED",
+                "matching normalized-source baseline exceeds the bounded orchestration contract",
+                recoverable=False,
+                remediation="Split or repair duplicate evidence provenance before starting acquisition.",
+            )
+    if not valid_scope_id_list(sorted(matching)):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_SCOPE_INVALID",
+            "matching normalized-source baseline contains an invalid source id",
+            recoverable=False,
+            remediation="Repair invalid manifest source ids before starting acquisition.",
+        )
+    return dict(sorted(matching.items()))
+
+
+def valid_matching_source_record_snapshot(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and len(value) <= MAX_SCOPE_IDS
+        and valid_scope_id_list(sorted(value))
+        and all(
+            isinstance(snapshot, dict)
+            and set(snapshot) == {"record_fingerprint", "normalized_fingerprint"}
+            and valid_sha256_fingerprint(snapshot.get("record_fingerprint"))
+            and valid_sha256_fingerprint(snapshot.get("normalized_fingerprint"))
+            for snapshot in value.values()
+        )
+    )
+
+
+def manifest_record_fingerprint_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+) -> dict[str, str]:
+    normalize_sources = load_sibling_module("normalize_sources")
+    manifest_relative, _ = normalize_sources.source_paths(config)
+    records = normalize_sources.load_manifest(project_root / manifest_relative)
+    return record_fingerprint_snapshot(records, id_field="id", label="evidence manifest")
+
+
 def candidate_provider(candidate: dict[str, Any]) -> str | None:
     value = candidate.get("provider")
     if isinstance(value, str) and value.strip():
@@ -1620,34 +2440,24 @@ def candidate_provider(candidate: dict[str, Any]) -> str | None:
 
 
 def acquisition_route(candidate: dict[str, Any], enabled: set[str]) -> str | None:
-    provider = candidate_provider(candidate)
-    paper = candidate.get("paper") if isinstance(candidate.get("paper"), dict) else {}
-    provider_ids = paper.get("provider_ids") if isinstance(paper.get("provider_ids"), dict) else {}
-    arxiv_id = provider_ids.get("arxiv") or paper.get("arxiv_id")
-    openalex_id = provider_ids.get("openalex") or paper.get("openalex_id")
-    doi = provider_ids.get("doi") or paper.get("doi")
-    # Academic discovery deduplicates provider records into one neutral paper
-    # candidate. Route by retained identities, not only by the primary/top-level
-    # discovery provider, so either explicitly enabled academic adapter can be
-    # used when the merged record supports it.
-    if provider in enabled:
-        return provider
-    if "arxiv" in enabled and isinstance(arxiv_id, str) and arxiv_id.strip():
-        return "arxiv"
-    if "openalex" in enabled and any(
-        isinstance(value, str) and value.strip() for value in (openalex_id, doi)
+    """Return the executable provider chosen by the canonical acquisition planner."""
+    if not enabled:
+        return None
+    source_requests = load_sibling_module("source_requests")
+    route = source_requests.candidate_acquisition_route(
+        candidate,
+        {"enabled": True, "providers": sorted(enabled)},
+        candidate_request_id(candidate) or "route-check",
+    )
+    provider = route.get("provider") if isinstance(route, dict) else None
+    if (
+        route.get("provider_backed") is not True
+        or route.get("allowed_by_config") is not True
+        or not isinstance(provider, str)
+        or provider not in enabled
     ):
-        return "openalex"
-    url = candidate.get("url") if isinstance(candidate.get("url"), str) else ""
-    host = urlparse(url).hostname or ""
-    if "github" in enabled and (host == "github.com" or host.endswith(".github.com")):
-        return "github"
-    if provider == "search" or (isinstance(provider, str) and provider.startswith("standards")):
-        return "web" if "web" in enabled else None
-    source_type = str(candidate.get("source_type") or "")
-    if source_type in {"web_page", "official_document", "standards_registry_entry", "dataset"}:
-        return "web" if "web" in enabled else None
-    return None
+        return None
+    return provider
 
 
 def composable_discovery_providers(policy: dict[str, Any]) -> list[str]:
@@ -1679,6 +2489,163 @@ def composable_discovery_providers(policy: dict[str, Any]) -> list[str]:
 
 def request_candidates(candidates: list[dict[str, Any]], request_id: str) -> list[dict[str, Any]]:
     return [candidate for candidate in candidates if candidate_request_id(candidate) == request_id]
+
+
+def bounded_scope_ids(
+    values: list[Any],
+    label: str,
+    *,
+    truncate: bool = False,
+) -> list[str]:
+    """Normalize an order scope without ever persisting a host-invalid ID array."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > MAX_SCOPE_ID_LENGTH
+            or "\x00" in value
+        ):
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_INVALID",
+                f"{label} contains an invalid scoped id",
+                recoverable=False,
+                remediation=f"Repair malformed {label} workspace records before resuming orchestration.",
+            )
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+        if truncate and len(normalized) == MAX_SCOPE_IDS:
+            break
+    if len(normalized) > MAX_SCOPE_IDS:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_SCOPE_EXCEEDED",
+            f"{label} exceeds the {MAX_SCOPE_IDS}-id work-order limit",
+            recoverable=False,
+            remediation=f"Split or reduce {label} before resuming orchestration.",
+        )
+    return normalized
+
+
+def selected_candidate_id_snapshot(
+    candidates: list[dict[str, Any]],
+    request_ids: list[str],
+) -> list[str]:
+    """Capture bounded historical selections without snapshotting unrelated candidates."""
+    request_scope = set(request_ids)
+    selected = [
+        candidate.get("candidate_id")
+        for candidate in candidates
+        if candidate_request_id(candidate) in request_scope and candidate_state(candidate) == "selected"
+    ]
+    return sorted(bounded_scope_ids(selected, "selected candidate baseline"))
+
+
+def request_candidate_state_snapshot(
+    candidates: list[dict[str, Any]],
+    request_ids: list[str],
+) -> dict[str, str]:
+    """Capture a bounded identity/state baseline for request-scoped candidates."""
+    request_scope = set(request_ids)
+    snapshot: dict[str, str] = {}
+    for candidate in candidates:
+        if candidate_request_id(candidate) not in request_scope:
+            continue
+        candidate_id = candidate.get("candidate_id")
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id
+            or len(candidate_id) > MAX_SCOPE_ID_LENGTH
+            or "\x00" in candidate_id
+        ):
+            raise OrchestrationControllerError(
+                "CANDIDATE_STORE_INVALID",
+                "request-scoped discovery candidate lacks a bounded candidate_id",
+                recoverable=False,
+            )
+        if candidate_id in snapshot:
+            raise OrchestrationControllerError(
+                "CANDIDATE_STORE_INVALID",
+                f"request-scoped discovery candidate id is duplicated: {candidate_id}",
+                recoverable=False,
+            )
+        if len(snapshot) >= MAX_SCOPE_IDS:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_EXCEEDED",
+                f"request-scoped candidate baseline exceeds {MAX_SCOPE_IDS} records",
+                recoverable=False,
+                remediation="Resolve, supersede, or split the source request before starting another discovery action.",
+            )
+        state = candidate_state(candidate)
+        if len(state) > 64 or not re.fullmatch(r"[a-z][a-z0-9_-]*", state):
+            raise OrchestrationControllerError(
+                "CANDIDATE_STORE_INVALID",
+                f"request-scoped discovery candidate {candidate_id} has an invalid lifecycle state",
+                recoverable=False,
+            )
+        snapshot[candidate_id] = state
+    return dict(sorted(snapshot.items()))
+
+
+def standards_discovery_route(candidate: dict[str, Any]) -> str | None:
+    standards = candidate.get("standards") if isinstance(candidate.get("standards"), dict) else None
+    if standards is None:
+        return None
+    registry = standards.get("registry_provider")
+    if not isinstance(registry, str) or not registry.strip():
+        return None
+    registry = registry.strip().lower()
+    if registry == "iso-open-data":
+        return "iso-open-data"
+    if registry in {"your-europe", "eu-harmonised-standards", "eur-lex"}:
+        return "eu-product-requirements"
+    if registry == "uk-geospatial-register":
+        return "uk-geospatial-register"
+    if registry in {"nist", "nist-standards-info", "nist-csrc"}:
+        return "nist"
+    return None
+
+
+def candidate_uses_permitted_discovery_provider(
+    candidate: dict[str, Any],
+    permitted: set[str],
+) -> bool:
+    standards_route = standards_discovery_route(candidate)
+    if standards_route is not None:
+        return "standards" in permitted or f"standards:{standards_route}" in permitted
+    recorded = candidate.get("discovery_providers")
+    if isinstance(recorded, list):
+        providers = {
+            value.strip().lower()
+            for value in recorded
+            if isinstance(value, str) and value.strip()
+        }
+    else:
+        provider = candidate_provider(candidate)
+        providers = {provider} if provider is not None else set()
+    return bool(providers) and providers <= permitted
+
+
+def eligible_new_discovery_candidates(
+    candidates: list[dict[str, Any]],
+    request_ids: list[str],
+    candidate_states_before: dict[str, str],
+    discovery_providers: set[str],
+    acquisition_providers: set[str],
+) -> list[dict[str, Any]]:
+    request_scope = set(request_ids)
+    return [
+        candidate
+        for candidate in candidates
+        if candidate_request_id(candidate) in request_scope
+        and isinstance(candidate.get("candidate_id"), str)
+        and candidate.get("candidate_id") not in candidate_states_before
+        and candidate_state(candidate) in DISCOVERY_APPEND_CANDIDATE_STATES
+        and candidate_uses_permitted_discovery_provider(candidate, discovery_providers)
+        and acquisition_route(candidate, acquisition_providers) is not None
+    ]
 
 
 def safe_relative_artifact(value: Any) -> str:
@@ -1906,6 +2873,144 @@ def work_order_budgets(status: dict[str, Any], session: dict[str, Any]) -> dict[
     return allowed
 
 
+PHASE_BUDGET_STOP_REASONS = {
+    "research": {"questions_exhausted", "source_requests_exhausted"},
+    "discovery": {"discovery_results_exhausted", "academic_provider_requests_exhausted"},
+    "acquisition": {
+        "acquisition_downloads_exhausted",
+        "github_archive_bytes_exhausted",
+        "academic_provider_requests_exhausted",
+        "web_downloads_exhausted",
+        "manual_url_deliveries_exhausted",
+    },
+}
+
+
+def rollover_exhausted_child_for_phase(
+    project_root: Path,
+    status: dict[str, Any],
+    session: dict[str, Any],
+    phase: str,
+) -> bool:
+    """Close an exhausted immutable child before issuing same-phase work in a fresh run."""
+    relevant = PHASE_BUDGET_STOP_REASONS.get(phase, set())
+    active_run_id = session.get("active_run_id")
+    if not relevant or not isinstance(active_run_id, str) or not active_run_id:
+        return False
+    run_controller_status = (
+        status.get("run_controller") if isinstance(status.get("run_controller"), dict) else {}
+    )
+    if run_controller_status.get("run_id") != active_run_id or run_controller_status.get("terminal") is True:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "workspace status did not bind phase budgets to the parent session's active child run",
+            recoverable=True,
+            remediation="Repair conflicting run-controller state before resuming the orchestration.",
+            details={
+                "phase": phase,
+                "active_run_id": active_run_id,
+                "status_run_id": run_controller_status.get("run_id"),
+                "status_run_terminal": run_controller_status.get("terminal"),
+            },
+        )
+    readiness = status.get("readiness") if isinstance(status.get("readiness"), dict) else {}
+    budget = readiness.get("budget_state") if isinstance(readiness.get("budget_state"), dict) else {}
+    stop_reasons = {
+        value for value in budget.get("stop_reasons", []) if isinstance(value, str)
+    }
+    exhausted = sorted(stop_reasons & relevant)
+    if not exhausted:
+        return False
+    document = active_child(project_root, session)
+    if document is None:
+        return False
+    allowed = set(document.get("state", {}).get("allowed_next_states") or [])
+    verdict = "no_ship" if "no_ship" in allowed else "blocked_on_sources" if "blocked_on_sources" in allowed else None
+    if verdict is None:
+        reason = (
+            f"active child {active_run_id} exhausted {', '.join(exhausted)} but has no safe terminal transition"
+        )
+        session["status"] = PAUSED_STATUS
+        session["phase"] = "paused"
+        session["verdict"] = "paused"
+        session["pause_reason"] = reason
+        session["updated_at"] = timestamp_utc()
+        write_json_atomic(session_path(project_root, session["orchestration_id"]), session)
+        record_event(project_root, session, "session_paused", reason)
+        return True
+    finish_active_child(project_root, session, verdict)
+    record_event(
+        project_root,
+        session,
+        "child_run_budget_exhausted",
+        "Closed a bounded child run after an artifact-derived phase budget was exhausted; subsequent work uses a fresh child run.",
+        data={"run_id": active_run_id, "phase": phase, "stop_reasons": exhausted},
+    )
+    return True
+
+
+def research_question_scope_limit(
+    project_root: Path,
+    status: dict[str, Any],
+    session: dict[str, Any],
+) -> int:
+    """Return the current child run's remaining question budget, rolling over at zero."""
+    run = status.get("run") if isinstance(status.get("run"), dict) else {}
+    configured = run.get("max_questions_per_run", 25)
+    if isinstance(configured, bool) or not isinstance(configured, int) or configured < 1:
+        configured = 25
+    configured = min(configured, MAX_SCOPE_IDS)
+
+    active_run_id = session.get("active_run_id")
+    if not isinstance(active_run_id, str) or not active_run_id:
+        return configured
+    run_controller = status.get("run_controller") if isinstance(status.get("run_controller"), dict) else {}
+    if run_controller.get("run_id") != active_run_id or run_controller.get("terminal") is True:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "workspace status did not bind the research budget to the parent session's active child run",
+            recoverable=True,
+            remediation="Re-run orchestration status, repair conflicting active child runs, and resume the session.",
+            details={
+                "active_run_id": active_run_id,
+                "status_run_id": run_controller.get("run_id"),
+                "status_run_terminal": run_controller.get("terminal"),
+            },
+        )
+    readiness = status.get("readiness") if isinstance(status.get("readiness"), dict) else {}
+    budget = readiness.get("budget_state") if isinstance(readiness.get("budget_state"), dict) else {}
+    remaining = budget.get("questions_remaining_this_run")
+    if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "active child run is missing a valid artifact-derived remaining-question budget",
+            recoverable=True,
+            remediation="Repair the run-controller budget state before resuming this orchestration session.",
+            details={"active_run_id": active_run_id, "questions_remaining_this_run": remaining},
+        )
+    if remaining > 0:
+        return min(configured, remaining)
+
+    if run_controller.get("state") != "answering":
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_INVALID",
+            "only an answering child run can roll over an exhausted question budget",
+            recoverable=True,
+            remediation="Repair the active child run state before resuming this orchestration session.",
+            details={"active_run_id": active_run_id, "state": run_controller.get("state")},
+        )
+
+    finish_active_child(project_root, session, "no_ship")
+    record_event(
+        project_root,
+        session,
+        "child_run_budget_exhausted",
+        "Closed a bounded child run after its question budget was exhausted; the next action uses a fresh child run.",
+        data={"run_id": active_run_id, "budget": "max_questions_per_run"},
+    )
+    return configured
+
+
 def choose_route(
     project_root: Path,
     session: dict[str, Any],
@@ -1928,9 +3033,17 @@ def choose_route(
     if verdict == "in_progress":
         questions = status.get("questions") if isinstance(status.get("questions"), dict) else {}
         slugs = questions.get("actionable_slugs") if isinstance(questions.get("actionable_slugs"), list) else []
+        if rollover_exhausted_child_for_phase(project_root, status, session, "research"):
+            if session.get("status") == PAUSED_STATUS:
+                return None, {"paused": True, "workspace_status": status}
+        scope_limit = research_question_scope_limit(project_root, status, session)
         return "research", {
             "status": status,
-            "scope": {"question_slugs": [str(value) for value in slugs[:25]], "request_ids": [], "candidate_ids": []},
+            "scope": {
+                "question_slugs": [str(value) for value in slugs[:scope_limit]],
+                "request_ids": [],
+                "candidate_ids": [],
+            },
         }
 
     if verdict == "blocked_on_sources":
@@ -1941,9 +3054,14 @@ def choose_route(
         discovery_providers = composable_discovery_providers(policy)
         route_failures: list[dict[str, Any]] = []
         for request in requests:
-            request_id = str(request.get("request_id") or "")
-            if not request_id:
+            raw_request_id = request.get("request_id")
+            if not isinstance(raw_request_id, str) or not raw_request_id:
                 continue
+            request_id = bounded_scope_ids([raw_request_id], "source request scope")[0]
+            question_slugs = bounded_scope_ids(
+                [value for value in request.get("question_slugs", []) if isinstance(value, str)],
+                f"question scope for source request {request_id}",
+            )
             scoped = request_candidates(candidates, request_id)
             routable = [
                 candidate
@@ -1951,38 +3069,72 @@ def choose_route(
                 if candidate_state(candidate) == "selected" and acquisition_route(candidate, acquisition_providers)
             ]
             if routable:
+                # Candidate stores retain provider ranking. Acquire one selected
+                # candidate at a time so retries never authorize duplicate
+                # downloads for every historical selection on a request.
+                candidate_ids = bounded_scope_ids(
+                    [routable[0].get("candidate_id")],
+                    f"acquisition candidate scope for source request {request_id}",
+                )
+                if rollover_exhausted_child_for_phase(project_root, status, session, "acquisition"):
+                    if session.get("status") == PAUSED_STATUS:
+                        return None, {"paused": True, "workspace_status": status}
                 return "acquisition", {
                     "status": status,
                     "scope": {
-                        "question_slugs": [
-                            str(value) for value in request.get("question_slugs", []) if isinstance(value, str)
-                        ],
+                        "question_slugs": question_slugs,
                         "request_ids": [request_id],
-                        "candidate_ids": [
-                            str(item.get("candidate_id")) for item in routable if item.get("candidate_id")
-                        ],
+                        "candidate_ids": candidate_ids,
                     },
                     "request": request,
                 }
             reviewable = [
                 candidate
                 for candidate in scoped
-                if candidate_state(candidate) in {"new", "proposed", "discovered", "reviewed", "deferred"}
+                if candidate_state(candidate) in REVIEWABLE_CANDIDATE_STATES
                 and acquisition_route(candidate, acquisition_providers) is not None
             ]
             if reviewable:
+                candidate_ids = bounded_scope_ids(
+                    [item.get("candidate_id") for item in reviewable],
+                    f"candidate-review scope for source request {request_id}",
+                    truncate=True,
+                )
                 return "candidate_review", {
                     "status": status,
                     "scope": {
-                        "question_slugs": [
-                            str(value) for value in request.get("question_slugs", []) if isinstance(value, str)
-                        ],
+                        "question_slugs": question_slugs,
                         "request_ids": [request_id],
-                        "candidate_ids": [
-                            str(item.get("candidate_id")) for item in reviewable if item.get("candidate_id")
-                        ],
+                        "candidate_ids": candidate_ids,
                     },
                     "request": request,
+                }
+            if discovery_providers:
+                if len(scoped) >= MAX_SCOPE_IDS:
+                    route_failures.append(
+                        {
+                            "request_id": request_id,
+                            "reason": (
+                                "request candidate history exhausted the bounded discovery baseline; review, "
+                                "supersede, or split the request before further discovery"
+                            ),
+                            "candidate_count": len(scoped),
+                        }
+                    )
+                    continue
+                if rollover_exhausted_child_for_phase(project_root, status, session, "discovery"):
+                    if session.get("status") == PAUSED_STATUS:
+                        return None, {"paused": True, "workspace_status": status}
+                return "discovery", {
+                    "status": status,
+                    "scope": {
+                        "question_slugs": question_slugs,
+                        "request_ids": [request_id],
+                        "candidate_ids": [],
+                    },
+                    "request": request,
+                    "candidate_count_before": len(scoped),
+                    "discovery_providers": discovery_providers,
                 }
             if scoped:
                 route_failures.append(
@@ -1995,20 +3147,6 @@ def choose_route(
                     }
                 )
                 continue
-            if discovery_providers:
-                return "discovery", {
-                    "status": status,
-                    "scope": {
-                        "question_slugs": [
-                            str(value) for value in request.get("question_slugs", []) if isinstance(value, str)
-                        ],
-                        "request_ids": [request_id],
-                        "candidate_ids": [],
-                    },
-                    "request": request,
-                    "candidate_count_before": 0,
-                    "discovery_providers": discovery_providers,
-                }
             route_failures.append(
                 {
                     "request_id": request_id,
@@ -2055,11 +3193,17 @@ def action_spec(
     config = load_config(project_root)
     candidates_input = relative_workspace_path(project_root, candidate_store_path(project_root, config))
     effective_policy = session["provider_policy"]
+    budgets = work_order_budgets(status, session)
     run_id: str | None
     skill: str
     inputs = ["research.yml", "AGENTS.md"]
     postconditions: list[dict[str, Any]]
     if route == "research":
+        scoped_questions_before = scoped_question_snapshot(
+            project_root,
+            config,
+            [value for value in scope.get("question_slugs", []) if isinstance(value, str)],
+        )
         run_id = advance_child(project_root, session, "answering")
         skill = "research-run"
         inputs.extend(["wiki/questions", "sources/normalized", f"runs/{run_id}/run-state.json"])
@@ -2067,14 +3211,28 @@ def action_spec(
             {
                 "check": "workspace_readiness_changed",
                 "allowed_verdicts": ["in_progress", "blocked_on_sources", "complete"],
+                "scoped_questions_before": scoped_questions_before,
+                "question_file_fingerprints_before": question_file_fingerprint_snapshot(
+                    project_root,
+                    config,
+                ),
+                "source_request_record_fingerprints_before": source_request_record_fingerprint_snapshot(
+                    project_root,
+                    config,
+                ),
             },
             {"check": "child_run_state", "expected": "answering"},
         ]
     elif route == "discovery":
+        permitted = list(context.get("discovery_providers") or [])
+        candidates_before = load_candidates(project_root, config)
+        candidate_states_before = request_candidate_state_snapshot(
+            candidates_before,
+            [value for value in scope.get("request_ids", []) if isinstance(value, str)],
+        )
         run_id = advance_child(project_root, session, "discovering")
         skill = "research-discover"
         inputs.extend(["sources/source-requests.jsonl", candidates_input])
-        permitted = list(context.get("discovery_providers") or [])
         effective_policy = {
             "discovery": {"enabled": bool(permitted), "providers": permitted},
             "acquisition": dict(session["provider_policy"]["acquisition"]),
@@ -2082,7 +3240,11 @@ def action_spec(
         postconditions = [
             {
                 "check": "request_scoped_candidates_increased",
-                "before": int(context.get("candidate_count_before", 0) or 0),
+                "before": len(candidate_states_before),
+                "candidate_states_before": candidate_states_before,
+                "candidate_record_fingerprints_before": candidate_record_fingerprint_snapshot(
+                    candidates_before
+                ),
             },
             {
                 "check": "discovery_never_fetches",
@@ -2091,12 +3253,29 @@ def action_spec(
             },
             {"check": "raw_tree_unchanged", "before": raw_tree_snapshot(project_root, config)},
         ]
+        remaining_candidate_capacity = MAX_SCOPE_IDS - len(candidate_states_before)
+        budgets["max_discovery_results_per_run"] = min(
+            int(budgets.get("max_discovery_results_per_run", remaining_candidate_capacity) or 0),
+            remaining_candidate_capacity,
+        )
     elif route == "candidate_review":
+        candidates_before = load_candidates(project_root, config)
+        selected_candidate_ids_before = selected_candidate_id_snapshot(
+            candidates_before,
+            [value for value in scope.get("request_ids", []) if isinstance(value, str)],
+        )
         run_id = advance_child(project_root, session, "candidates_ready")
         skill = "research-discover"
         inputs.extend(["sources/source-requests.jsonl", candidates_input])
         postconditions = [
-            {"check": "selected_candidate_for_request", "selected_before": 0},
+            {
+                "check": "selected_candidate_for_request",
+                "selected_before": len(selected_candidate_ids_before),
+                "selected_candidate_ids_before": selected_candidate_ids_before,
+                "candidate_record_fingerprints_before": candidate_record_fingerprint_snapshot(
+                    candidates_before
+                ),
+            },
             {
                 "check": "selection_does_not_fetch",
                 "manifest_records_before": int(status.get("sources", {}).get("manifest_records", 0) or 0),
@@ -2105,15 +3284,56 @@ def action_spec(
             {"check": "raw_tree_unchanged", "before": raw_tree_snapshot(project_root, config)},
         ]
     elif route == "acquisition":
+        scoped_question_slugs = [
+            value for value in scope.get("question_slugs", []) if isinstance(value, str)
+        ]
+        scoped_request_ids = [value for value in scope.get("request_ids", []) if isinstance(value, str)]
+        scoped_candidate_ids = [value for value in scope.get("candidate_ids", []) if isinstance(value, str)]
+        blocked_questions_before = linked_blocked_questions_snapshot(
+            project_root,
+            config,
+            scoped_question_slugs,
+            scoped_request_ids,
+        )
+        matching_source_records_before = matching_normalized_source_records(
+            project_root,
+            config,
+            scoped_request_ids,
+            scoped_candidate_ids,
+        )
+        matching_source_ids_before = sorted(matching_source_records_before)
+        manifest_records_before = manifest_record_fingerprint_snapshot(project_root, config)
+        raw_tree_before = raw_tree_snapshot(project_root, config, include_entries=True)
+        candidate_records_before = candidate_record_fingerprint_snapshot(load_candidates(project_root, config))
         run_id = advance_child(project_root, session, "fetching")
         skill = "research-acquire"
         inputs.extend(["sources/source-requests.jsonl", candidates_input, "sources/manifest.jsonl"])
         postconditions = [
             {"check": "request_fulfilled_with_normalized_source"},
-            {"check": "linked_blocked_questions_reopened"},
+            {
+                "check": "linked_blocked_questions_reopened",
+                "blocked_questions_before": blocked_questions_before,
+            },
             {
                 "check": "manifest_records_increased",
                 "before": int(status.get("sources", {}).get("manifest_records", 0) or 0),
+                "matching_source_ids_before": matching_source_ids_before,
+                "matching_source_records_before": matching_source_records_before,
+                "manifest_record_fingerprints_before": manifest_records_before,
+                "raw_tree_before": raw_tree_before,
+                "candidate_record_fingerprints_before": candidate_records_before,
+                "source_request_record_fingerprints_before": source_request_record_fingerprint_snapshot(
+                    project_root,
+                    config,
+                ),
+                "normalized_file_fingerprints_before": normalized_file_fingerprint_snapshot(
+                    project_root,
+                    config,
+                ),
+                "question_file_fingerprints_before": question_file_fingerprint_snapshot(
+                    project_root,
+                    config,
+                ),
             },
         ]
     elif route == "verification":
@@ -2146,10 +3366,219 @@ def action_spec(
         "run_id": run_id,
         "scope": scope,
         "provider_policy": effective_policy,
-        "budgets": work_order_budgets(status, session),
+        "budgets": budgets,
         "inputs": sorted(set(inputs)),
         "required_postconditions": postconditions,
     }
+
+
+INTEGRITY_BASELINE_FIELDS = frozenset(
+    {
+        "scoped_questions_before",
+        "question_file_fingerprints_before",
+        "source_request_record_fingerprints_before",
+        "candidate_states_before",
+        "candidate_record_fingerprints_before",
+        "selected_candidate_ids_before",
+        "blocked_questions_before",
+        "matching_source_ids_before",
+        "matching_source_records_before",
+        "manifest_record_fingerprints_before",
+        "raw_tree_before",
+        "normalized_file_fingerprints_before",
+    }
+)
+
+
+def baseline_value_count(value: Any) -> int:
+    if isinstance(value, (dict, list)):
+        return len(value)
+    return 1
+
+
+def externalize_integrity_baselines(
+    project_root: Path,
+    work_order: dict[str, Any],
+) -> None:
+    """Move large pre-action guards into one protected controller-owned artifact."""
+    extracted: list[dict[str, Any]] = []
+    field_count = 0
+    entry_count = 0
+    for postcondition in work_order.get("required_postconditions", []):
+        if not isinstance(postcondition, dict):
+            continue
+        fields = {
+            field: postcondition.pop(field)
+            for field in sorted(INTEGRITY_BASELINE_FIELDS & set(postcondition))
+        }
+        if not fields:
+            continue
+        field_count += len(fields)
+        entry_count += sum(baseline_value_count(value) for value in fields.values())
+        extracted.append({"check": postcondition.get("check"), "fields": fields})
+    if not extracted:
+        return
+    orchestration_id = require_safe_id(work_order.get("orchestration_id"), "orchestration_id")
+    action_id = require_safe_id(work_order.get("action_id"), "action_id")
+    document = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "orchestration_integrity_baseline",
+        "orchestration_id": orchestration_id,
+        "action_id": action_id,
+        "phase": work_order.get("phase"),
+        "postconditions": extracted,
+    }
+    encoded_baseline = (json.dumps(document, indent=2, sort_keys=False) + "\n").encode("utf-8")
+    if len(encoded_baseline) > MAX_SCOPE_GUARD_BYTES:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_SCOPE_EXCEEDED",
+            "scope-integrity baseline exceeds the protected 8 MiB artifact limit",
+            recoverable=False,
+            remediation="Archive historical workspace records or reduce the bounded action scope before retrying.",
+            details={"encoded_bytes": len(encoded_baseline), "max_bytes": MAX_SCOPE_GUARD_BYTES},
+        )
+    baseline_path = scope_integrity_baseline_path(project_root, orchestration_id, action_id)
+    write_json_atomic(baseline_path, document)
+    fingerprint = file_digest(
+        baseline_path,
+        max_bytes=MAX_SCOPE_GUARD_BYTES,
+        containment_root=project_root,
+    )
+    if fingerprint is None:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_WRITE_FAILED",
+            "could not fingerprint the persisted scope-integrity baseline",
+            recoverable=True,
+        )
+    work_order["required_postconditions"].append(
+        {
+            "check": "controller_integrity_baseline",
+            "path": relative_workspace_path(project_root, baseline_path),
+            "fingerprint": fingerprint,
+            "field_count": field_count,
+            "entry_count": entry_count,
+        }
+    )
+
+
+def hydrate_integrity_baselines(
+    project_root: Path,
+    work_order: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate and merge one protected baseline artifact into an in-memory work order."""
+    phase = work_order.get("phase")
+    if phase == "verification":
+        return work_order
+    guards = [
+        item
+        for item in work_order.get("required_postconditions", [])
+        if isinstance(item, dict) and item.get("check") == "controller_integrity_baseline"
+    ]
+    if len(guards) != 1:
+        return work_order
+    guard = guards[0]
+    orchestration_id = require_safe_id(work_order.get("orchestration_id"), "orchestration_id")
+    action_id = require_safe_id(work_order.get("action_id"), "action_id")
+    expected_path = scope_integrity_baseline_path(project_root, orchestration_id, action_id)
+    expected_relative = relative_workspace_path(project_root, expected_path)
+    if (
+        guard.get("path") != expected_relative
+        or not valid_sha256_fingerprint(guard.get("fingerprint"))
+        or isinstance(guard.get("field_count"), bool)
+        or not isinstance(guard.get("field_count"), int)
+        or not 1 <= guard["field_count"] <= len(INTEGRITY_BASELINE_FIELDS)
+        or isinstance(guard.get("entry_count"), bool)
+        or not isinstance(guard.get("entry_count"), int)
+        or not 0 <= guard["entry_count"] <= MAX_SCOPE_GUARD_ENTRIES * len(INTEGRITY_BASELINE_FIELDS)
+    ):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_INTEGRITY_BASELINE_INVALID",
+            "work order contains an invalid controller integrity-baseline reference",
+            recoverable=False,
+            remediation="Preserve the orchestration for audit and start a fresh session.",
+        )
+    actual_fingerprint = file_digest(
+        expected_path,
+        max_bytes=MAX_SCOPE_GUARD_BYTES,
+        containment_root=project_root,
+    )
+    if actual_fingerprint != guard["fingerprint"]:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_INTEGRITY_BASELINE_CHANGED",
+            "controller-owned scope-integrity baseline is missing or changed",
+            recoverable=False,
+            remediation="Restore the protected baseline exactly or preserve this session and start a fresh one.",
+        )
+    document = load_json_object(
+        expected_path,
+        error_code="ORCHESTRATION_INTEGRITY_BASELINE_INVALID",
+        label="scope-integrity baseline",
+        max_bytes=MAX_SCOPE_GUARD_BYTES,
+        containment_root=project_root,
+    )
+    if (
+        set(document)
+        != {"schema_version", "artifact_type", "orchestration_id", "action_id", "phase", "postconditions"}
+        or document.get("schema_version") != SCHEMA_VERSION
+        or document.get("artifact_type") != "orchestration_integrity_baseline"
+        or document.get("orchestration_id") != orchestration_id
+        or document.get("action_id") != action_id
+        or document.get("phase") != phase
+        or not isinstance(document.get("postconditions"), list)
+    ):
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_INTEGRITY_BASELINE_INVALID",
+            "controller-owned scope-integrity baseline identity or shape is invalid",
+            recoverable=False,
+        )
+    hydrated = json.loads(json.dumps(work_order))
+    hydrated["required_postconditions"] = [
+        item
+        for item in hydrated["required_postconditions"]
+        if item.get("check") != "controller_integrity_baseline"
+    ]
+    by_check = {
+        item.get("check"): item
+        for item in hydrated["required_postconditions"]
+        if isinstance(item, dict) and isinstance(item.get("check"), str)
+    }
+    observed_fields = 0
+    observed_entries = 0
+    seen_checks: set[str] = set()
+    for item in document["postconditions"]:
+        if not isinstance(item, dict) or set(item) != {"check", "fields"}:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_INTEGRITY_BASELINE_INVALID",
+                "scope-integrity baseline contains an invalid postcondition entry",
+                recoverable=False,
+            )
+        check = item.get("check")
+        fields = item.get("fields")
+        target = by_check.get(check) if isinstance(check, str) else None
+        if (
+            not isinstance(target, dict)
+            or check in seen_checks
+            or not isinstance(fields, dict)
+            or not fields
+            or not set(fields) <= INTEGRITY_BASELINE_FIELDS
+            or set(fields) & set(target)
+        ):
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_INTEGRITY_BASELINE_INVALID",
+                "scope-integrity baseline does not match retained work-order postconditions",
+                recoverable=False,
+            )
+        seen_checks.add(check)
+        target.update(fields)
+        observed_fields += len(fields)
+        observed_entries += sum(baseline_value_count(value) for value in fields.values())
+    if observed_fields != guard["field_count"] or observed_entries != guard["entry_count"]:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_INTEGRITY_BASELINE_INVALID",
+            "scope-integrity baseline summary does not match its protected content",
+            recoverable=False,
+        )
+    return hydrated
 
 
 def issue_work_order(project_root: Path, session: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
@@ -2178,6 +3607,16 @@ def issue_work_order(project_root: Path, session: dict[str, Any], spec: dict[str
             "attempt": 1,
         },
     }
+    externalize_integrity_baselines(project_root, work_order)
+    encoded_order = (json.dumps(work_order, indent=2, sort_keys=False, ensure_ascii=False) + "\n").encode("utf-8")
+    if len(encoded_order) > MAX_WORK_ORDER_BYTES:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_SCOPE_EXCEEDED",
+            "work order exceeds the managed-run 256 KiB size limit after baseline externalization",
+            recoverable=False,
+            remediation="Reduce the bounded action scope before resuming orchestration.",
+            details={"encoded_bytes": len(encoded_order), "max_bytes": MAX_WORK_ORDER_BYTES},
+        )
     static_fingerprint = trusted_static_input_fingerprint(project_root)
     write_json_atomic(
         trusted_static_input_path(project_root, session["orchestration_id"], action_id),
@@ -2392,6 +3831,7 @@ def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
                 error_code="WORK_ORDER_INVALID",
                 label="work order",
             )
+            require_action_baselines(order, project_root)
             verify_runtime_guards(project_root, session, order)
             session = finalize_pending_submission(project_root, session, order)
         repair_last_completion_events(project_root, session)
@@ -2408,6 +3848,7 @@ def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
                 error_code="WORK_ORDER_INVALID",
                 label="work order",
             )
+            require_action_baselines(order, project_root)
             legacy_unbound = "pending_trusted_static_inputs" not in session
             if legacy_unbound:
                 # Only parse the declarative YAML authorization before the
@@ -2416,12 +3857,13 @@ def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
                 verify_provider_policy_unchanged(project_root, session, order)
                 bind_legacy_pending_trusted_inputs(project_root, session, order)
             verify_runtime_guards(project_root, session, order)
-            bind_legacy_immutability_postconditions(project_root, order)
             return replay_work_order(project_root, session, resume=args.resume, retained_order=order)
         if pause_if_limited(project_root, session):
             return session
         route, context = choose_route(project_root, session)
         if route is None:
+            if session.get("status") == PAUSED_STATUS:
+                return session
             return finish_session(project_root, session, context["terminal_status"], context["reason"])
         spec = action_spec(project_root, session, route, context)
         return issue_work_order(project_root, session, spec)
@@ -2431,11 +3873,36 @@ def selected_candidates_for_scope(
     project_root: Path,
     config: dict[str, Any],
     request_ids: list[str],
+    candidate_ids: list[str],
 ) -> list[dict[str, Any]]:
+    request_scope = set(request_ids)
+    candidate_scope = set(candidate_ids)
     return [
         candidate
         for candidate in load_candidates(project_root, config)
-        if candidate_request_id(candidate) in set(request_ids) and candidate_state(candidate) == "selected"
+        if candidate_request_id(candidate) in request_scope
+        and candidate.get("candidate_id") in candidate_scope
+        and candidate_state(candidate) == "selected"
+    ]
+
+
+def selected_candidates_outside_scope(
+    project_root: Path,
+    config: dict[str, Any],
+    request_ids: list[str],
+    candidate_ids: list[str],
+    selected_candidate_ids_before: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    request_scope = set(request_ids)
+    candidate_scope = set(candidate_ids)
+    historical_selected = set(selected_candidate_ids_before or [])
+    return [
+        candidate
+        for candidate in load_candidates(project_root, config)
+        if candidate_request_id(candidate) in request_scope
+        and candidate.get("candidate_id") not in candidate_scope
+        and candidate.get("candidate_id") not in historical_selected
+        and candidate_state(candidate) == "selected"
     ]
 
 
@@ -2565,6 +4032,7 @@ def verify_action_postconditions(
     *,
     apply_effects: bool = False,
 ) -> tuple[str | None, str | None]:
+    work_order = require_action_baselines(work_order, project_root)
     phase = work_order.get("phase")
     scope = work_order.get("scope") if isinstance(work_order.get("scope"), dict) else {}
     request_ids = [value for value in scope.get("request_ids", []) if isinstance(value, str)]
@@ -2616,6 +4084,131 @@ def verify_action_postconditions(
             verdict in {"in_progress", "blocked_on_sources", "complete"},
             "research produced an invalid readiness verdict",
         )
+        research_guard = recorded_postcondition("workspace_readiness_changed")
+        before_questions = research_guard.get("scoped_questions_before")
+        question_files_before = research_guard.get("question_file_fingerprints_before")
+        require(
+            isinstance(before_questions, dict)
+            and bool(before_questions)
+            and valid_question_file_fingerprint_snapshot(question_files_before),
+            "research work order lacks a scoped question baseline",
+            remediation=(
+                "This legacy pending action cannot be rebound safely. Preserve it for inspection and start a "
+                "fresh orchestration session after upgrading the workspace."
+            ),
+        )
+        scoped_slugs = [value for value in scope.get("question_slugs", []) if isinstance(value, str)]
+        current_question_files = question_file_fingerprint_snapshot(project_root, config)
+        question_scope_violations = fingerprint_scope_violations(
+            question_files_before,
+            current_question_files,
+            mutable_ids={f"{slug}.md" for slug in scoped_slugs},
+        )
+        require(
+            not any(question_scope_violations.values()),
+            "research changed a question file outside the persisted work-order scope",
+            {"question_scope_violations": question_scope_violations},
+            "Restore every out-of-scope question file and process only question slugs named by this work order.",
+        )
+        source_requests_before = research_guard.get("source_request_record_fingerprints_before")
+        require(
+            valid_record_fingerprint_snapshot(source_requests_before),
+            "research work order lacks a source-request integrity baseline",
+            remediation="Start a fresh orchestration session; never infer source-request creation after execution.",
+        )
+        source_requests = load_sibling_module("source_requests")
+        current_source_request_records = source_requests.load_requests(
+            source_requests.requests_path(project_root, config)
+        )
+        current_source_request_fingerprints = record_fingerprint_snapshot(
+            current_source_request_records,
+            id_field="request_id",
+            label="source-request store",
+        )
+        scoped_slug_set = set(scoped_slugs)
+        allowed_new_request_ids = {
+            str(record.get("request_id"))
+            for record in current_source_request_records
+            if isinstance(record.get("request_id"), str)
+            and record.get("request_id") not in source_requests_before
+            and record.get("status") == "open"
+            and isinstance(record.get("question_slugs"), list)
+            and bool(record.get("question_slugs"))
+            and {
+                slug for slug in record.get("question_slugs", []) if isinstance(slug, str)
+            }
+            <= scoped_slug_set
+        }
+        request_scope_violations = fingerprint_scope_violations(
+            source_requests_before,
+            current_source_request_fingerprints,
+            mutable_ids=set(),
+            allowed_new_ids=allowed_new_request_ids,
+        )
+        require(
+            not any(request_scope_violations.values()),
+            "research changed source requests outside append-only scoped-question creation",
+            {"source_request_scope_violations": request_scope_violations},
+            "Restore existing requests and keep each new open request linked only to scoped questions.",
+        )
+        after_questions = scoped_question_snapshot(project_root, config, scoped_slugs)
+        terminal_statuses = {"answered", "human_review", "blocked", "deferred", "rejected"}
+        progressed_slugs = sorted(
+            slug
+            for slug, before in before_questions.items()
+            if isinstance(before, dict)
+            and before.get("status") in {"open", "in_progress"}
+            and after_questions.get(slug, {}).get("status") in terminal_statuses
+        )
+        require(
+            bool(progressed_slugs),
+            "research completed without terminally processing a scoped question",
+            {
+                "question_slugs": scoped_slugs,
+                "before": before_questions,
+                "after": after_questions,
+            },
+            (
+                "Claim and resolve at least one scoped question as answered, blocked, deferred, or rejected; "
+                "a claim-only or unchanged backlog is not completed research."
+            ),
+        )
+        invalid_blocked_links: list[dict[str, Any]] = []
+        blocked_progressed_slugs = [
+            slug for slug in progressed_slugs if after_questions.get(slug, {}).get("status") == "blocked"
+        ]
+        if blocked_progressed_slugs:
+            requests_by_id = {
+                str(item.get("request_id")): item
+                for item in current_source_request_records
+                if isinstance(item, dict) and isinstance(item.get("request_id"), str)
+            }
+        else:
+            requests_by_id = {}
+        for slug in blocked_progressed_slugs:
+            question = after_questions.get(slug, {})
+            linked_ids = question.get("blocking_request_ids", [])
+            valid_ids = [
+                request_id
+                for request_id in linked_ids
+                if isinstance(request_id, str)
+                and isinstance(requests_by_id.get(request_id), dict)
+                and requests_by_id[request_id].get("status") == "open"
+                and slug in requests_by_id[request_id].get("question_slugs", [])
+            ]
+            if not valid_ids:
+                invalid_blocked_links.append(
+                    {"question_slug": slug, "blocking_request_ids": list(linked_ids)}
+                )
+        require(
+            not invalid_blocked_links,
+            "blocked research questions lack open request artifacts linked to the same scoped question",
+            {"invalid_blocked_links": invalid_blocked_links},
+            (
+                "Create a structured source request for each blocked scoped question, then block the question "
+                "with that request id before resubmitting."
+            ),
+        )
         if verdict == "blocked_on_sources":
             require(
                 current in {"answering", "blocked_on_sources"},
@@ -2635,16 +4228,59 @@ def verify_action_postconditions(
         return "research", None
 
     if phase == "discovery":
+        all_candidates = load_candidates(project_root, config)
         candidates = [
             candidate
-            for candidate in load_candidates(project_root, config)
+            for candidate in all_candidates
             if candidate_request_id(candidate) in set(request_ids)
         ]
-        before_candidates = int(recorded_postcondition("request_scoped_candidates_increased").get("before", 0) or 0)
+        candidate_guard = recorded_postcondition("request_scoped_candidates_increased")
+        before_candidates = int(candidate_guard.get("before", 0) or 0)
+        candidate_states_before = candidate_guard.get("candidate_states_before")
+        candidate_records_before = candidate_guard.get("candidate_record_fingerprints_before")
         require(
-            len(candidates) > before_candidates,
+            valid_candidate_state_baseline(candidate_states_before)
+            and valid_record_fingerprint_snapshot(candidate_records_before)
+            and set(candidate_states_before) <= set(candidate_records_before)
+            and len(candidate_states_before) == before_candidates,
+            "discovery work order lacks a valid bounded candidate-state baseline",
+            remediation="Start a fresh orchestration session; never infer candidate creation after execution.",
+        )
+        current_candidate_records = candidate_record_fingerprint_snapshot(all_candidates)
+        new_in_scope_ids = {
+            str(candidate.get("candidate_id"))
+            for candidate in candidates
+            if isinstance(candidate.get("candidate_id"), str)
+            and candidate.get("candidate_id") not in candidate_records_before
+        }
+        discovery_scope_violations = fingerprint_scope_violations(
+            candidate_records_before,
+            current_candidate_records,
+            mutable_ids=set(),
+            allowed_new_ids=new_in_scope_ids,
+        )
+        require(
+            not any(discovery_scope_violations.values()),
+            "discovery changed candidate records outside append-only request scope",
+            {"candidate_scope_violations": discovery_scope_violations},
+            "Restore all pre-existing and out-of-scope candidates; discovery may only append scoped candidates.",
+        )
+        current_candidate_states = request_candidate_state_snapshot(candidates, request_ids)
+        historical_candidate_changes = {
+            candidate_id: {"before": state, "after": current_candidate_states.get(candidate_id)}
+            for candidate_id, state in candidate_states_before.items()
+            if current_candidate_states.get(candidate_id) != state
+        }
+        require(
+            not historical_candidate_changes,
+            "discovery changed or removed a candidate that existed before the action",
+            {"historical_candidate_changes": historical_candidate_changes},
+            "Restore the pre-action candidate records; discovery may append new candidates but not review old ones.",
+        )
+        require(
+            len(current_candidate_states) > before_candidates,
             "discovery produced no new request-scoped candidate",
-            {"request_ids": request_ids, "before": before_candidates, "after": len(candidates)},
+            {"request_ids": request_ids, "before": before_candidates, "after": len(current_candidate_states)},
             "Refine the source request or enable a different composable discovery/acquisition provider pair.",
         )
         before_manifest = int(recorded_postcondition("discovery_never_fetches").get("manifest_records_before", 0) or 0)
@@ -2657,12 +4293,47 @@ def verify_action_postconditions(
         )
         require_raw_unchanged()
         acquisition = work_order.get("provider_policy", {}).get("acquisition", {})
-        enabled = set(acquisition.get("providers", [])) if acquisition.get("enabled") is True else set()
-        routable = [candidate for candidate in candidates if acquisition_route(candidate, enabled) is not None]
+        enabled_acquisition = set(acquisition.get("providers", [])) if acquisition.get("enabled") is True else set()
+        discovery = work_order.get("provider_policy", {}).get("discovery", {})
+        enabled_discovery = set(discovery.get("providers", [])) if discovery.get("enabled") is True else set()
+        newly_appended = [
+            candidate
+            for candidate in candidates
+            if isinstance(candidate.get("candidate_id"), str)
+            and candidate.get("candidate_id") not in candidate_records_before
+        ]
+        invalid_new_candidates = [
+            {
+                "candidate_id": candidate.get("candidate_id"),
+                "state": candidate_state(candidate),
+                "provider": candidate_provider(candidate),
+            }
+            for candidate in newly_appended
+            if candidate_state(candidate) not in DISCOVERY_APPEND_CANDIDATE_STATES
+            or not candidate_uses_permitted_discovery_provider(candidate, enabled_discovery)
+        ]
         require(
-            bool(routable),
-            "discovery candidates have no route through the work order's acquisition policy",
-            {"request_ids": request_ids, "enabled_acquisition_providers": sorted(enabled)},
+            not invalid_new_candidates,
+            "discovery appended candidates outside the enabled discovery-provider policy",
+            {"invalid_new_candidates": invalid_new_candidates},
+            "Remove candidates from disabled providers or invalid lifecycle states and replay scoped discovery.",
+        )
+        eligible_new = eligible_new_discovery_candidates(
+            candidates,
+            request_ids,
+            candidate_states_before,
+            enabled_discovery,
+            enabled_acquisition,
+        )
+        require(
+            bool(eligible_new),
+            "discovery produced no newly added, reviewable candidate through permitted end-to-end providers",
+            {
+                "request_ids": request_ids,
+                "new_candidate_ids": sorted(set(current_candidate_states) - set(candidate_states_before)),
+                "enabled_discovery_providers": sorted(enabled_discovery),
+                "enabled_acquisition_providers": sorted(enabled_acquisition),
+            },
             "Enable a matching acquisition provider, refine discovery, or deliver reviewed evidence manually.",
         )
         require(current in {"discovering", "candidates_ready"}, "discovery child run is in an invalid state")
@@ -2681,11 +4352,67 @@ def verify_action_postconditions(
         )
         require_raw_unchanged()
         require(current == "candidates_ready", "candidate-review child run is not in candidates_ready state")
-        selected = selected_candidates_for_scope(project_root, config, request_ids)
-        require(bool(selected), "candidate review did not select a candidate for the request")
+        candidate_ids = [value for value in scope.get("candidate_ids", []) if isinstance(value, str)]
+        selection_guard = recorded_postcondition("selected_candidate_for_request")
+        selected_candidate_ids_before = selection_guard.get("selected_candidate_ids_before")
+        candidate_records_before = selection_guard.get("candidate_record_fingerprints_before")
+        selected_before = selection_guard.get("selected_before")
+        require(
+            valid_scope_id_list(selected_candidate_ids_before)
+            and valid_record_fingerprint_snapshot(candidate_records_before)
+            and set(selected_candidate_ids_before) <= set(candidate_records_before)
+            and isinstance(selected_before, int)
+            and not isinstance(selected_before, bool)
+            and selected_before == len(selected_candidate_ids_before),
+            "candidate-review work order lacks a valid selected-candidate baseline",
+            remediation="Start a fresh orchestration session; never infer selection changes after execution.",
+        )
+        current_candidate_records = candidate_record_fingerprint_snapshot(load_candidates(project_root, config))
+        review_scope_violations = fingerprint_scope_violations(
+            candidate_records_before,
+            current_candidate_records,
+            mutable_ids=set(candidate_ids),
+        )
+        require(
+            not any(review_scope_violations.values()),
+            "candidate review changed records outside the persisted candidate scope",
+            {"candidate_scope_violations": review_scope_violations},
+            "Restore every out-of-scope candidate and review only candidate ids named by this work order.",
+        )
+        selected = selected_candidates_for_scope(project_root, config, request_ids, candidate_ids)
+        historical_selected = set(selected_candidate_ids_before)
+        newly_selected = [
+            candidate
+            for candidate in selected
+            if candidate.get("candidate_id") not in historical_selected
+        ]
+        selected_outside_scope = selected_candidates_outside_scope(
+            project_root,
+            config,
+            request_ids,
+            candidate_ids,
+            selected_candidate_ids_before,
+        )
+        require(
+            not selected_outside_scope,
+            "candidate review selected a candidate outside the persisted work-order scope",
+            {
+                "scoped_candidate_ids": candidate_ids,
+                "out_of_scope_candidate_ids": sorted(
+                    str(candidate.get("candidate_id"))
+                    for candidate in selected_outside_scope
+                    if candidate.get("candidate_id")
+                ),
+            },
+            "Reject or defer out-of-scope selections and select only a candidate id named by this work order.",
+        )
+        require(
+            bool(newly_selected),
+            "candidate review did not newly select a candidate from the persisted work-order scope",
+        )
         policy = provider_policy(config)
         enabled = set(policy["acquisition"]["providers"]) if policy["acquisition"]["enabled"] else set()
-        routable = [candidate for candidate in selected if acquisition_route(candidate, enabled) is not None]
+        routable = [candidate for candidate in newly_selected if acquisition_route(candidate, enabled) is not None]
         require(
             bool(routable),
             "selected candidates have no explicitly enabled acquisition route",
@@ -2712,6 +4439,11 @@ def verify_action_postconditions(
         manifest_relative, normalized_relative = normalize_sources.source_paths(config)
         manifest_records = normalize_sources.load_manifest(project_root / manifest_relative)
         by_source_id = normalize_sources.records_by_source_id(manifest_records)
+        current_manifest_fingerprints = record_fingerprint_snapshot(
+            manifest_records,
+            id_field="id",
+            label="evidence manifest",
+        )
         normalized_root = project_root / normalized_relative
         missing_normalized: list[str] = []
         for request in fulfilled:
@@ -2723,6 +4455,120 @@ def verify_action_postconditions(
             not missing_normalized,
             "fulfilled source requests do not have normalized evidence",
             {"source_ids": missing_normalized},
+        )
+        scoped_candidate_ids = {
+            value for value in scope.get("candidate_ids", []) if isinstance(value, str) and value
+        }
+        all_candidates = load_candidates(project_root, config)
+        candidates_by_id = {
+            str(candidate.get("candidate_id")): candidate
+            for candidate in all_candidates
+            if isinstance(candidate.get("candidate_id"), str)
+        }
+        correlation_failures: list[dict[str, Any]] = []
+        for request in fulfilled:
+            request_id = str(request.get("request_id") or "")
+            source_id = str(request.get("source_id") or "")
+            record = by_source_id.get(source_id)
+            provenance = record.get("provenance") if isinstance(record, dict) else None
+            provenance_request_id = provenance.get("request_id") if isinstance(provenance, dict) else None
+            provenance_candidate_id = provenance.get("candidate_id") if isinstance(provenance, dict) else None
+            candidate = (
+                candidates_by_id.get(provenance_candidate_id)
+                if isinstance(provenance_candidate_id, str)
+                else None
+            )
+            if (
+                provenance_request_id != request_id
+                or provenance_candidate_id not in scoped_candidate_ids
+                or not isinstance(candidate, dict)
+                or candidate_request_id(candidate) != request_id
+                or candidate_state(candidate) != "fetched"
+                or candidate.get("fetched_source_id") != source_id
+            ):
+                correlation_failures.append(
+                    {
+                        "request_id": request_id,
+                        "source_id": source_id,
+                        "provenance_request_id": provenance_request_id,
+                        "provenance_candidate_id": provenance_candidate_id,
+                        "candidate_state": candidate_state(candidate) if isinstance(candidate, dict) else None,
+                        "candidate_source_id": candidate.get("fetched_source_id")
+                        if isinstance(candidate, dict)
+                        else None,
+                    }
+                )
+        require(
+            not correlation_failures,
+            "acquired evidence is not linked from scoped request and candidate provenance to fetched source state",
+            {
+                "scoped_candidate_ids": sorted(scoped_candidate_ids),
+                "correlation_failures": correlation_failures,
+            },
+            (
+                "Acquire a scoped selected candidate with both --request-id and --candidate-id, inventory and "
+                "normalize it, then transition that candidate to fetched with the fulfilled manifest source id."
+            ),
+        )
+        fulfilled_by_request_id = {
+            str(item.get("request_id")): item
+            for item in fulfilled
+            if isinstance(item.get("request_id"), str)
+        }
+        question_guard = recorded_postcondition("linked_blocked_questions_reopened")
+        blocked_questions_before = question_guard.get("blocked_questions_before")
+        require(
+            valid_blocked_question_baseline(blocked_questions_before),
+            "acquisition work order lacks a valid blocked-question baseline",
+            remediation="Start a fresh orchestration session; never infer question transitions after execution.",
+        )
+        current_question_evidence = scoped_question_evidence_snapshot(
+            project_root,
+            config,
+            list(blocked_questions_before),
+        )
+        question_transition_failures: list[dict[str, Any]] = []
+        for slug, before in blocked_questions_before.items():
+            linked_request_ids = list(before.get("blocking_request_ids", []))
+            linked_fulfilled = [
+                fulfilled_by_request_id.get(request_id) for request_id in linked_request_ids
+            ]
+            expected_source_ids = {
+                str(request.get("source_id"))
+                for request in linked_fulfilled
+                if isinstance(request, dict) and isinstance(request.get("source_id"), str)
+            }
+            current_question = current_question_evidence.get(slug, {})
+            current_source_ids = set(current_question.get("source_ids", []))
+            current_blocking_ids = set(current_question.get("blocking_request_ids", []))
+            required_source_ids = set(before.get("source_ids_before", [])) | expected_source_ids
+            if (
+                any(not isinstance(request, dict) for request in linked_fulfilled)
+                or current_question.get("status") != "open"
+                or current_blocking_ids
+                or not required_source_ids <= current_source_ids
+            ):
+                question_transition_failures.append(
+                    {
+                        "question_slug": slug,
+                        "before": before,
+                        "after": current_question or None,
+                        "expected_source_ids": sorted(required_source_ids),
+                        "fulfilled_request_ids": sorted(
+                            request_id
+                            for request_id in linked_request_ids
+                            if isinstance(fulfilled_by_request_id.get(request_id), dict)
+                        ),
+                    }
+                )
+        require(
+            not question_transition_failures,
+            "acquisition did not reopen every scoped blocked question with fulfilled request/source linkage",
+            {"question_transition_failures": question_transition_failures},
+            (
+                "Fulfill each scoped request, then use question_resolve.py reopen so every baseline-blocked "
+                "question is exactly open, has the fulfilled source id, and has no remaining blocking links."
+            ),
         )
         linked_question_slugs = {
             str(slug)
@@ -2736,14 +4582,205 @@ def verify_action_postconditions(
             "questions linked to fulfilled evidence remain blocked",
             {"question_slugs": sorted(linked_question_slugs & blocked_slugs)},
         )
-        sources = status.get("sources") if isinstance(status.get("sources"), dict) else {}
-        before_manifest = 0
-        for item in work_order.get("required_postconditions", []):
-            if isinstance(item, dict) and item.get("check") == "manifest_records_increased":
-                before_manifest = int(item.get("before", 0) or 0)
+        manifest_guard = recorded_postcondition("manifest_records_increased")
+        before_manifest = int(manifest_guard.get("before", 0) or 0)
+        matching_source_ids_before = manifest_guard.get("matching_source_ids_before")
+        matching_source_records_before = manifest_guard.get("matching_source_records_before")
+        manifest_records_before = manifest_guard.get("manifest_record_fingerprints_before")
+        raw_tree_before = manifest_guard.get("raw_tree_before")
+        candidate_records_before = manifest_guard.get("candidate_record_fingerprints_before")
+        source_requests_before = manifest_guard.get("source_request_record_fingerprints_before")
+        normalized_files_before = manifest_guard.get("normalized_file_fingerprints_before")
+        question_files_before = manifest_guard.get("question_file_fingerprints_before")
         require(
-            int(sources.get("manifest_records", 0) or 0) > before_manifest,
-            "acquisition did not add manifest evidence",
+            valid_scope_id_list(matching_source_ids_before)
+            and valid_matching_source_record_snapshot(matching_source_records_before)
+            and set(matching_source_ids_before) == set(matching_source_records_before)
+            and valid_record_fingerprint_snapshot(manifest_records_before)
+            and set(matching_source_ids_before) <= set(manifest_records_before)
+            and before_manifest == len(manifest_records_before)
+            and valid_raw_tree_snapshot(raw_tree_before, include_entries=True)
+            and valid_record_fingerprint_snapshot(candidate_records_before)
+            and valid_record_fingerprint_snapshot(source_requests_before)
+            and valid_file_fingerprint_snapshot(normalized_files_before, prefix="sources/")
+            and valid_question_file_fingerprint_snapshot(question_files_before),
+            "acquisition work order lacks a valid bounded evidence integrity baseline",
+            remediation="Start a fresh orchestration session; never infer matching evidence after execution.",
+        )
+        current_source_request_fingerprints = record_fingerprint_snapshot(
+            all_requests,
+            id_field="request_id",
+            label="source-request store",
+        )
+        request_scope_violations = fingerprint_scope_violations(
+            source_requests_before,
+            current_source_request_fingerprints,
+            mutable_ids=set(request_ids),
+        )
+        require(
+            not any(request_scope_violations.values()),
+            "acquisition changed source requests outside the persisted request scope",
+            {"source_request_scope_violations": request_scope_violations},
+            "Restore every out-of-scope request and fulfill only request ids named by this work order.",
+        )
+        current_question_files = question_file_fingerprint_snapshot(project_root, config)
+        acquisition_question_scope_violations = fingerprint_scope_violations(
+            question_files_before,
+            current_question_files,
+            mutable_ids={f"{slug}.md" for slug in scope.get("question_slugs", []) if isinstance(slug, str)},
+        )
+        require(
+            not any(acquisition_question_scope_violations.values()),
+            "acquisition changed question files outside the persisted question scope",
+            {"question_scope_violations": acquisition_question_scope_violations},
+            "Restore every out-of-scope question and reopen only questions named by this work order.",
+        )
+        fulfilled_source_ids = {
+            str(item.get("source_id"))
+            for item in fulfilled
+            if isinstance(item.get("source_id"), str) and item.get("source_id")
+        }
+        manifest_scope_violations = fingerprint_scope_violations(
+            manifest_records_before,
+            current_manifest_fingerprints,
+            mutable_ids=set(),
+            allowed_new_ids=fulfilled_source_ids,
+        )
+        require(
+            not any(manifest_scope_violations.values()),
+            "acquisition changed, removed, or added evidence-manifest records outside fulfilled source scope",
+            {
+                "manifest_scope_violations": manifest_scope_violations,
+                "fulfilled_source_ids": sorted(fulfilled_source_ids),
+            },
+            "Restore existing and out-of-scope manifest records; only fulfilled scoped sources may be appended.",
+        )
+        expected_new_source_ids = fulfilled_source_ids - set(manifest_records_before)
+        actual_new_source_ids = set(current_manifest_fingerprints) - set(manifest_records_before)
+        require(
+            actual_new_source_ids == expected_new_source_ids,
+            "fulfilled sources are not exactly accounted for by pre-existing matches or new manifest ids",
+            {
+                "expected_new_source_ids": sorted(expected_new_source_ids),
+                "actual_new_source_ids": sorted(actual_new_source_ids),
+                "matching_source_ids_before": matching_source_ids_before,
+            },
+        )
+        preexisting_fulfilled = fulfilled_source_ids & set(manifest_records_before)
+        reconciliation_failures: list[dict[str, Any]] = []
+        for source_id in sorted(preexisting_fulfilled):
+            expected = matching_source_records_before.get(source_id)
+            record = by_source_id.get(source_id)
+            normalized_path = (
+                normalize_sources.normalized_output_path_for_record(record, normalized_root)
+                if isinstance(record, dict)
+                else None
+            )
+            normalized_fingerprint = (
+                file_digest(
+                    normalized_path,
+                    max_bytes=MAX_VERIFICATION_ARTIFACT_BYTES,
+                    containment_root=project_root,
+                )
+                if isinstance(normalized_path, Path) and normalized_path.is_file()
+                else None
+            )
+            if (
+                not isinstance(expected, dict)
+                or current_manifest_fingerprints.get(source_id) != expected.get("record_fingerprint")
+                or normalized_fingerprint != expected.get("normalized_fingerprint")
+            ):
+                reconciliation_failures.append(
+                    {
+                        "source_id": source_id,
+                        "was_scoped_match": isinstance(expected, dict),
+                        "record_unchanged": isinstance(expected, dict)
+                        and current_manifest_fingerprints.get(source_id) == expected.get("record_fingerprint"),
+                        "normalized_unchanged": isinstance(expected, dict)
+                        and normalized_fingerprint == expected.get("normalized_fingerprint"),
+                    }
+                )
+        require(
+            not reconciliation_failures,
+            "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+            {"reconciliation_failures": reconciliation_failures},
+            "Use only the unchanged scoped pre-existing source or acquire a genuinely new source id.",
+        )
+
+        current_normalized_files = normalized_file_fingerprint_snapshot(project_root, config)
+        allowed_new_normalized_paths: set[str] = set()
+        for source_id in expected_new_source_ids:
+            record = by_source_id.get(source_id)
+            if not isinstance(record, dict):
+                continue
+            normalized_path = normalize_sources.normalized_output_path_for_record(record, normalized_root)
+            allowed_new_normalized_paths.add(relative_workspace_path(project_root, normalized_path))
+        normalized_scope_violations = fingerprint_scope_violations(
+            normalized_files_before,
+            current_normalized_files,
+            mutable_ids=set(),
+            allowed_new_ids=allowed_new_normalized_paths,
+        )
+        require(
+            not any(normalized_scope_violations.values()),
+            "acquisition changed normalized evidence outside newly fulfilled source scope",
+            {"normalized_scope_violations": normalized_scope_violations},
+            "Restore existing normalized evidence and keep new outputs limited to newly fulfilled sources.",
+        )
+        require(
+            (set(current_normalized_files) - set(normalized_files_before)) == allowed_new_normalized_paths,
+            "new fulfilled sources do not map exactly to newly created normalized outputs",
+            {
+                "expected_new_normalized_paths": sorted(allowed_new_normalized_paths),
+                "actual_new_normalized_paths": sorted(
+                    set(current_normalized_files) - set(normalized_files_before)
+                ),
+            },
+        )
+
+        current_raw_tree = raw_tree_snapshot(project_root, config, include_entries=True)
+        before_raw_entries = raw_tree_before["entries"]
+        current_raw_entries = current_raw_tree["entries"]
+        raw_existing_changes = fingerprint_scope_violations(
+            before_raw_entries,
+            current_raw_entries,
+            mutable_ids=set(),
+            allowed_new_ids=set(current_raw_entries) - set(before_raw_entries),
+        )
+        allowed_new_raw_paths: set[str] = set()
+        for source_id in expected_new_source_ids:
+            record = by_source_id.get(source_id)
+            raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
+            if not isinstance(raw_paths, list):
+                continue
+            for raw_path in raw_paths:
+                if isinstance(raw_path, str) and raw_path.startswith("raw/") and safe_snapshot_relative_path(raw_path):
+                    allowed_new_raw_paths.add(raw_path)
+                    allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
+        actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
+        unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
+        require(
+            not any(raw_existing_changes.values()) and not unexpected_new_raw_paths,
+            "acquisition changed raw evidence outside newly fulfilled manifest source scope",
+            {
+                "raw_scope_violations": raw_existing_changes,
+                "unexpected_new_raw_paths": unexpected_new_raw_paths[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+                "allowed_new_raw_paths": sorted(allowed_new_raw_paths)[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+            },
+            "Restore existing raw evidence and remove deliveries not referenced by newly fulfilled scoped sources.",
+        )
+
+        current_candidate_fingerprints = candidate_record_fingerprint_snapshot(all_candidates)
+        candidate_scope_violations = fingerprint_scope_violations(
+            candidate_records_before,
+            current_candidate_fingerprints,
+            mutable_ids=scoped_candidate_ids,
+        )
+        require(
+            not any(candidate_scope_violations.values()),
+            "acquisition changed candidate records outside the persisted candidate scope",
+            {"candidate_scope_violations": candidate_scope_violations},
+            "Restore every out-of-scope candidate and transition only the scoped candidate to fetched.",
         )
         require(current in {"fetching", "evidence_ready"}, "acquisition child run is in an invalid state")
         if apply_effects and current == "fetching":
@@ -3085,6 +5122,7 @@ def submit_result(project_root: Path, args: argparse.Namespace) -> dict[str, Any
             error_code="WORK_ORDER_INVALID",
             label="work order",
         )
+        require_action_baselines(order, project_root)
         verify_runtime_guards(project_root, session, order)
         pending_submission = session.get("pending_submission")
         if pending_submission is not None:

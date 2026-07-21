@@ -29,12 +29,14 @@ evidence-wiki orchestrate resume --target /path/to/workspace \
   --orchestration-id ORCH_ID --runner codex --agent-id pm-agent
 ```
 
-Managed Codex execution requires Codex CLI 0.138 or newer. Managed Claude
-execution is unavailable on native Windows because the required per-path
+Managed Codex execution requires Codex CLI 0.138 or newer. User-local npm,
+pnpm, and bun launchers are supported by granting only their resolved native
+runtime tree read-only; install the runner outside the writable research
+workspace. Managed Claude execution is unavailable on native Windows because the required per-path
 isolation is not available there; use macOS, Linux, WSL2, or a container.
 Managed Claude also requires `bubblewrap` plus `socat` on Linux/WSL2, or
 `sandbox-exec` plus `touch` on macOS.
-EvidenceWiki checks runner isolation before launching a worker and
+EvidenceWiki checks runner isolation and runtime visibility before launching a worker and
 fails with `RUNNER_ISOLATION_UNAVAILABLE` when it cannot protect the host-owned
 `runs/orchestrations/<orchestration_id>/` tree.
 

@@ -24,6 +24,9 @@ Inputs:
   or write below `runs/orchestrations/`. Check the order's postconditions before
   making new changes; if an interrupted attempt already established them,
   report the existing artifacts as `completed` and do not duplicate the work.
+- Treat the managed order's question slugs and child `run_id` as hard
+  authorization and boundedness limits. Do not claim or resolve other backlog
+  questions during that action, even when they are open or higher priority.
 - Hold at most one claimed question at a time. Claim before working, release or resolve before claiming the next.
 - Never answer from raw files when normalized records exist; retrieve evidence through `query_index.py` and normalized records.
 - Never delete or downgrade another agent's claim. A refused claim (exit 3) means pick the next question. Stale-claim recovery (`--steal --if-older-than`) is orchestrator-mediated only.
@@ -89,7 +92,7 @@ python3 scripts/question_resolve.py block --slug <slug> --agent-id <agent-id> --
         Increment `source_requests_opened_this_run` for each new source request. Do not exceed `run.max_source_requests_per_run` new requests in one run.
 
         When you cannot name the exact source to fetch — the gap is too vague for a direct identifier, or it needs an official-source lookup (a law, regulation, agency guidance, or court opinion for a jurisdiction) — record the gap as a request and route it to discovery rather than guessing an identifier. Use the `research-discover` skill to propose, review, and explicitly select trustworthy candidates (official sources first for legal questions) before any acquisition; selection links candidates to the request without fetching. Discovery is optional and disabled by default, so when `integrations.discovery.enabled` is not true, leave the question blocked on the recorded request for a human or fetch agent.
-        Standards discovery follows the same rule: propose exact standards candidates first, then acquire only selected registry pages or metadata snapshots. Increment `discovery_results_this_run` for each discovery candidate/result proposed in this run. Increment `acquisition_downloads_this_run` for each provider-backed downloaded artifact, `github_archive_bytes_this_run` by the downloaded GitHub archive byte count, `academic_provider_requests_this_run` for each OpenAlex/arXiv provider request, `web_downloads_this_run` for each contracted `web get` capture including standards registry pages, and `manual_url_deliveries_this_run` for each manually delivered URL/file.
+        Standards discovery follows the same rule: propose exact standards candidates first, then acquire only selected standards registry pages or metadata snapshots. The deterministic scripts retain artifact-derived counters: academic discovery reserves every arXiv/OpenAlex transport attempt in `runs/<run-id>/academic-provider-requests.jsonl`, while acquisition provenance records downloads and byte counts. Never hand-edit or reset those records. If local operator telemetry is also being reported, increment `discovery_results_this_run` for each proposed result, `acquisition_downloads_this_run` for each provider-backed artifact, `github_archive_bytes_this_run` by the downloaded archive size, `academic_provider_requests_this_run` for each reserved OpenAlex/arXiv attempt, `web_downloads_this_run` for each contracted `web get` capture, and `manual_url_deliveries_this_run` for each manually delivered URL/file; `workspace_status.py --run-id` compares these claims with retained artifacts.
       - Wrong state to work on (out of scope, superseded): resolve as `rejected` or `deferred` with a short reason:
 
 ```bash

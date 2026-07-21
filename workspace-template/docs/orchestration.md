@@ -78,6 +78,7 @@ runs/orchestrations/<orchestration_id>/
   work-orders/<action_id>.json
   work-results/<action_id>.json
   trusted-inputs/<action_id>.json
+  trusted-inputs/<action_id>-scope-baseline.json
   attempts/<attempt_id>.json
   .host-results/<action_id>.json
   quarantine/<attempt_id>.json
@@ -88,10 +89,20 @@ runs/orchestration-guards/<orchestration_id>.json
 
 The `orchestration_session`, `orchestration_work_order`,
 `orchestration_result`, and `orchestration_attempt` schemas are version `1.0`.
-Query their supported versions with `evidence-wiki contract`.
+Query their supported versions with `evidence-wiki contract`. The existing
+`artifact_schemas` mapping remains the compact version-negotiation surface.
+The same response publishes complete, self-contained Draft 2020-12 JSON Schema
+documents for all four orchestration artifacts under
+`artifact_schema_documents`, so external protocol hosts can validate durable
+controller output without importing EvidenceWiki Python modules.
 
 `work-results/` contains only controller-accepted results. `trusted-inputs/`
-contains the controller's static-input fingerprint for each pending action.
+contains the controller's static-input fingerprint for each pending action and,
+for non-verification actions, an exact protected scope baseline referenced by
+the public work order. The sidecar stores pre-action question, request,
+candidate, manifest, raw, and normalized-evidence fingerprints; it is an
+internal controller artifact, not a fifth published protocol schema. It is
+capped at 8 MiB, while the persisted public work order is capped at 256 KiB.
 `attempts/` contains bounded host execution metadata without prompts,
 transcripts, diagnostics, secrets, or absolute paths. `.host-results/` is a
 private, transient submission stage used after a validated worker response;
@@ -119,6 +130,13 @@ A work order contains:
 - scoped question, source-request, and candidate IDs;
 - effective discovery/acquisition provider allow-lists and remaining budgets;
 - workspace-relative input artifacts and deterministic completion checks.
+
+Research, discovery, candidate-review, and acquisition orders contain exactly
+one `controller_integrity_baseline` completion check. It carries only the
+workspace-relative protected-sidecar path, SHA-256 fingerprint, and bounded
+field/entry counts. The controller validates and hydrates the private baseline
+in memory before replay or submission; workers neither receive its embedded
+maps nor own the artifact.
 
 A result contains the matching action ID, `completed`, `blocked`, or `failed`, a
 short summary, and workspace-relative artifact paths. Session artifacts must
@@ -157,6 +175,16 @@ request-scoped candidate, and review must select a scoped candidate with an
 enabled acquisition route. These phases may update candidate records and their
 audit trail, but they may not fetch evidence or alter existing raw or manifest
 content.
+
+All mutating phases also compare exact pre-action records. Research may change
+only scoped question files and append open requests linked only to those
+questions. Discovery may append only request-scoped candidates from enabled
+providers. Review may change only scoped candidate IDs. Acquisition may fulfill
+only scoped requests, transition only scoped candidates/questions, preserve all
+existing raw and normalized evidence, and create only outputs attributable to
+new fulfilled source IDs. An unchanged pre-existing source is reusable only
+when both its manifest record and normalized output exactly match the protected
+baseline.
 
 `blocked_on_sources`, `no_ship`, and `failed` remain terminal child-run states.
 The parent never reopens those records. For example, an initial research run
@@ -211,6 +239,21 @@ denials for the complete documentation tree, and WebFetch/WebSearch disabled.
 Network access is enabled only for a
 discovery or acquisition work order whose persisted provider policy permits it.
 
+The Codex preflight resolves the selected launcher before session creation.
+For an official npm, pnpm, or bun launcher (including a Windows npm shim), it
+locates the matching platform package and grants only the canonical native
+target tree containing `bin/`, `codex-resources/`, and `codex-path/` as an
+absolute read-only profile rule. Direct native/IDE layouts use their bounded
+runtime tree. The grant is identical in the enforcement probe and every worker
+action; it never widens to the operator's home, `CODEX_HOME`, or an npm prefix.
+A missing/malformed platform package or a runtime that overlaps the writable
+workspace fails with `RUNNER_ISOLATION_UNAVAILABLE` before a parent session is
+created. The official launcher remains the executed command so its supported
+runtime environment and signal handling are preserved, except on native
+Windows when `PATH` resolves an npm `.cmd`/`.bat`/`.ps1` shim: the host resolves
+and executes the validated packaged `codex.exe` directly to retain
+`shell=False` and avoid command-shell injection semantics.
+
 The host calls the semantic baseline the **tripwire-protected controls**. Its
 bounded snapshot covers the workspace contract and instructions
 (`research.yml`, `workspace-system.yml`, `AGENTS.md`, `CLAUDE.md`, `README.md`,
@@ -229,6 +272,18 @@ provider commands in its work order. For an untrusted or prompt-injected agent,
 add an operator-controlled network proxy/sandbox or drive the protocol from a
 host that executes provider calls itself. Direct protocol workers must likewise
 not edit `runs/orchestrations/` control artifacts.
+
+The append-only academic provider-call ledger under the active child run is
+restart-stable workspace accounting enforced by those protected scripts. New
+runs carry a versioned marker that binds them to their pre-created empty ledger.
+An active legacy run without that marker has an unknown prior call count and
+fails discovery and readiness closed; preserve it and start a fresh run rather
+than creating an empty ledger by hand. A missing or corrupt marked ledger also
+fails closed. Completed legacy runs remain inspectable. The ledger is not a
+host-level network quota against a malicious process that bypasses the provider
+commands. Deployments that need that stronger boundary must put provider
+traffic behind an operator-controlled proxy or execute provider calls in the
+host, in addition to the workspace ledger.
 
 The parent owns every file below
 `runs/orchestrations/<orchestration_id>/`. A worker must not invoke
@@ -271,8 +326,13 @@ candidate selection, or acquired source before it exited, the worker reports
 the existing artifacts as `completed` without repeating that work. The
 controller then verifies the real artifacts before advancing. Pre-0.2.1
 pending actions are bound to a controller-owned trusted-input fingerprint on
-their first successful `next --resume`, before a managed worker starts. A
-direct result submission is refused until that binding occurs. Do not hand-write
+their first successful `next --resume`, before a managed worker starts. That
+static-input migration cannot reconstruct a missing semantic pre-action
+baseline: a legacy pending research, discovery, candidate-review, or acquisition
+action without its scoped question, candidate, selection, or evidence baseline
+fails closed and must be preserved while a fresh parent session starts from
+reviewed workspace state. A direct result submission is refused until all
+required bindings exist. Do not hand-write
 `runs/orchestrations/<orchestration_id>/work-results/*.json`, edit
 `session.json`, or use `deploy --force` as recovery.
 
@@ -317,7 +377,8 @@ orchestration session from that state. Do not use the flag before inspecting
 the reported paths.
 
 After upgrading the package, refresh an existing workspace's managed scripts
-before resuming an affected session. Preview both steps first:
+and inspect the retained phase before deciding whether it is safe to resume.
+Preview both steps first:
 
 ```bash
 python -m pip install --upgrade evidence-wiki==0.2.1
@@ -325,6 +386,24 @@ evidence-wiki --version
 evidence-wiki upgrade --target . --dry-run
 evidence-wiki upgrade --target .
 evidence-wiki orchestrate status --target . --orchestration-id ORCH_ID --format json
+```
+
+If status shows a pending legacy action and resume reports
+`ORCHESTRATION_RESEARCH_BASELINE_UNAVAILABLE`,
+`ORCHESTRATION_DISCOVERY_BASELINE_UNAVAILABLE`,
+`ORCHESTRATION_CANDIDATE_REVIEW_BASELINE_UNAVAILABLE`, or
+`ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE`, preserve that session for
+audit and start a new orchestration. Otherwise resume the upgraded session:
+
+For current actions, `ORCHESTRATION_INTEGRITY_BASELINE_CHANGED` means the
+protected scope sidecar is missing or no longer has its issued digest, while
+`ORCHESTRATION_INTEGRITY_BASELINE_INVALID` means its identity, shape, or summary
+is inconsistent. Restore the exact controller-owned artifact or preserve the
+session and start a fresh one; never infer a replacement from post-action state.
+`ORCHESTRATION_SCOPE_EXCEEDED` means the 8 MiB sidecar or 256 KiB public order
+bound was exceeded and the action scope/history must be reduced.
+
+```bash
 evidence-wiki orchestrate resume \
   --target . \
   --orchestration-id ORCH_ID \

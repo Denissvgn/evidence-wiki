@@ -102,7 +102,13 @@ verification passes.
 
 Managed runner isolation is fail-closed. Codex requires Codex CLI 0.138 or
 newer so EvidenceWiki can apply its named `evidence_wiki_worker` permission
-profile. Managed Claude execution is unavailable on native Windows; use macOS,
+profile. User-local npm, pnpm, and bun installations are supported: the host
+resolves the selected launcher's platform-native runtime tree and grants that
+exact tree read-only inside the profile. It never grants the home directory,
+`CODEX_HOME`, or a package-manager prefix. Keep the runner installation outside
+the writable research workspace; an incomplete or overlapping runtime fails
+before session creation with `RUNNER_ISOLATION_UNAVAILABLE`. Managed Claude
+execution is unavailable on native Windows; use macOS,
 Linux, WSL2, a container, or the external `start` / `next` / `submit` protocol
 there. If the required boundary cannot be enforced, the host returns
 `RUNNER_ISOLATION_UNAVAILABLE` before starting a worker. The parent owns
@@ -142,6 +148,11 @@ subprocesses; every process started for an action must finish inside that
 action. The managed host cleans up the runner's process group, but this is not
 a hostile-process-tree containment guarantee. Put an untrusted agent in an
 operator-controlled container or VM with its own process and network limits.
+Provider allow-lists and the run-bound academic call ledger are enforced by the
+protected workspace scripts for this trusted-writer mode; they are not a
+host-level domain firewall or hostile-process quota. Put provider traffic
+behind an operator-controlled proxy, or execute it in the protocol host, when
+the worker itself is not trusted to follow those commands.
 
 If a runner exits after writing valid research artifacts, keep the durable
 session. The `orchestrate resume` recovery order is: an accepted canonical result,
@@ -184,18 +195,36 @@ worker-writable output surface. Reports already present under
 `docs/run-reports/` remain historical, read-only inputs.
 
 For a session created by 0.2.0, upgrade the package and managed workspace
-scripts before replaying its pending action:
+scripts, then inspect its phase before replay:
 
 ```bash
 python -m pip install --upgrade evidence-wiki==0.2.1
 evidence-wiki upgrade --target . --dry-run
 evidence-wiki upgrade --target .
-evidence-wiki orchestrate resume \
-  --target . \
-  --orchestration-id ORCH_ID \
-  --runner codex \
-  --agent-id ORIGINAL_AGENT_ID
+evidence-wiki orchestrate status --target . --orchestration-id ORCH_ID --format json
 ```
+
+A pending research, discovery, candidate-review, or acquisition action issued
+before the starter recorded its scoped pre-action baseline cannot be rebound
+safely after execution. Resume reports
+`ORCHESTRATION_RESEARCH_BASELINE_UNAVAILABLE`,
+`ORCHESTRATION_DISCOVERY_BASELINE_UNAVAILABLE`,
+`ORCHESTRATION_CANDIDATE_REVIEW_BASELINE_UNAVAILABLE`, or
+`ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE`. Preserve that parent session
+for audit and start a fresh orchestration from the current reviewed workspace
+state. If the upgraded session has no such pending legacy action, resume it
+normally with its original agent ID. Never hand-edit a work order to invent the
+missing baseline.
+
+Current work orders keep their bounded public contract small by referring to a
+controller-owned scope baseline below `runs/orchestrations/<id>/trusted-inputs/`.
+If that protected sidecar is missing, changed, or malformed, resume fails closed
+with `ORCHESTRATION_INTEGRITY_BASELINE_CHANGED` or
+`ORCHESTRATION_INTEGRITY_BASELINE_INVALID`. Preserve the affected session for
+audit and restore the exact controller-owned artifact; do not regenerate it from
+post-action workspace state. Scope baselines are capped at 8 MiB and persisted
+work orders at 256 KiB; `ORCHESTRATION_SCOPE_EXCEEDED` requires reducing or
+archiving the bounded workspace history before starting a fresh action.
 
 Inspect the durable parent session and export the answer:
 

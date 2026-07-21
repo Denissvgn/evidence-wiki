@@ -288,10 +288,12 @@ python3 scripts/source_requests.py add --kind paper --query-or-identifier "arXiv
   --rationale "Blocks the benchmark question." --priority high --question-slug which-benchmarks
 python3 scripts/source_requests.py list --status open --format json
 python3 scripts/source_requests.py plan-fetch --request-id req-1a2b3c4d5e --format json
+python3 scripts/source_requests.py plan-fetch --request-id req-1a2b3c4d5e \
+  --candidate-id cand-1a2b3c4d5e --format json
 python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id paper:2601.00001v1
 ```
 
-`plan-fetch` is read-only: it turns a request into candidate provider commands and records `network_io_executed: false`. A fetch agent's loop is: `list --status open --format json` → `plan-fetch --request-id ... --format json` → deliver files with sidecars (set `request_id` in the sidecar) → run inventory and normalization → `fulfill` each delivered request. Use `skills/research-acquire.md` for the optional provider-backed version of this loop, including disabled-acquisition refusal, sidecar verification, blocked-question reopening, and final status reporting. `add` and `fulfill` append one `source-request` entry to `log.md`; `list` and `plan-fetch` do not mutate the request artifact or `log.md`.
+`plan-fetch` is read-only: it turns a request into candidate provider commands and records `network_io_executed: false`. Repeating `--candidate-id` limits `candidate_routes` to exactly those selected candidates; an unknown, non-selected, or differently linked ID is rejected. Managed acquisition must pass the work order's candidate IDs so another selected candidate on the same request is never emitted accidentally. Omitting the flag retains the request-wide operator workflow. A fetch agent's loop is: `list --status open --format json` → scoped `plan-fetch --request-id ... --candidate-id ... --format json` → deliver files with sidecars (set `request_id` and `candidate_id` in the sidecar) → run inventory and normalization → `fulfill` each delivered request. Use `skills/research-acquire.md` for the optional provider-backed version of this loop, including disabled-acquisition refusal, sidecar verification, blocked-question reopening, and final status reporting. `add` and `fulfill` append one `source-request` entry to `log.md`; `list` and `plan-fetch` do not mutate the request artifact or `log.md`.
 
 ### Selected discovery candidates
 
@@ -304,14 +306,19 @@ type. Selections are authoritative, so when present they upgrade an
 `unsupported`/`ambiguous` request to `plan_status: ready`. Each route reuses real
 provider syntax; it never invents commands:
 
+When one or more `--candidate-id` values are supplied, this array contains only
+the requested selected records, in argument order. This is the managed
+work-order boundary; request-wide planning remains available only by omitting
+the filter deliberately.
+
 | Candidate | Route | Suggested command / target |
 |-----------|-------|----------------------------|
 | arXiv id (paper URL or `paper.arxiv_id`) | `arxiv download-source` / `search-by-id` | `fetch_sources.py arxiv ...` |
 | OpenAlex OA paper (`paper.provider_ids.openalex` plus `paper.pdf_url`) | `openalex download-pdf` | `fetch_sources.py openalex download-pdf --work-id ...` |
-| OpenAlex metadata-only or non-OA paper | `openalex get` | `fetch_sources.py openalex get --id-or-doi ... --output raw/papers/openalex-...-metadata.json --request-id ...` plus non-OA/manual-delivery warning |
+| OpenAlex metadata-only or non-OA paper | `openalex get` | `fetch_sources.py openalex get --id-or-doi ... --output raw/papers/openalex-...-metadata.json --request-id ... --candidate-id ...` plus non-OA/manual-delivery warning |
 | Uncertain paper title | `openalex resolve` | `fetch_sources.py openalex resolve --entity works --query ... --max-results 5` plus resolution warning |
-| DOI (paper URL or `paper.doi`) | `openalex get-by-doi` | `fetch_sources.py openalex get --id-or-doi ...` |
-| GitHub repo (`code_repository` or a github.com URL) | `github repo-metadata` | `fetch_sources.py github repo-metadata --url ... --request-id ...` |
+| DOI (paper URL or `paper.doi`) | `openalex get-by-doi` | `fetch_sources.py openalex get --id-or-doi ... --output raw/papers/openalex-...-metadata.json --request-id ... --candidate-id ...` |
+| GitHub repo (`code_repository` or a github.com URL) | `github repo-metadata` | `fetch_sources.py github repo-metadata --url ... --request-id ... --candidate-id ...` |
 | Official legal URL (`official_legal`) | `manual manual-delivery` | deliver the URL into `raw/links/` (or a snapshot into `raw/web/`) with a provenance sidecar |
 | Web/publisher/dataset/supplemental | `manual manual-delivery` | deliver into the matching `raw/` root with a provenance sidecar |
 

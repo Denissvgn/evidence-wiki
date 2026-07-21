@@ -109,6 +109,13 @@ ORCHESTRATION_ATTEMPT_STATUSES = {
     "result_staged",
     "submitted",
 }
+ACADEMIC_PROVIDER_ACCOUNTING_ERROR_CODES = frozenset(
+    {
+        "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED",
+        "ACADEMIC_PROVIDER_ACCOUNTING_INVALID",
+        "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+    }
+)
 ORCHESTRATION_ATTEMPT_ERRORS = {
     "RUNNER_FAILED",
     "RUNNER_TIMEOUT",
@@ -1549,6 +1556,25 @@ def artifact_budget_counters(
                 )
             retained_candidate_keys.add(identity)
     counters["discovery_results_this_run"] = len(retained_candidate_keys)
+    selected_run_id = run_controller.get("run_id")
+    if isinstance(selected_run_id, str) and selected_run_id.strip():
+        try:
+            counters["academic_provider_requests_this_run"] = (
+                discover_sources.academic_provider_request_count(
+                    project_root,
+                    selected_run_id.strip(),
+                    strict=True,
+                )
+            )
+        except Exception as exc:
+            # Completed legacy runs cannot issue another provider request and
+            # remain inspectable without fabricating a post-hoc marker. Active
+            # legacy runs fail closed so a fresh run owns all future calls.
+            if not (
+                run_controller.get("terminal")
+                and getattr(exc, "error_code", None) == "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED"
+            ):
+                raise
 
     query_index = load_sibling_module("query_index")
     try:
@@ -1568,7 +1594,6 @@ def artifact_budget_counters(
                 continue
             provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
             bound_run_id = provenance.get("acquisition_run_id")
-            selected_run_id = run_controller.get("run_id")
             if isinstance(bound_run_id, str) and bound_run_id.strip():
                 within_run = bound_run_id.strip() == selected_run_id
             else:
@@ -1599,8 +1624,6 @@ def artifact_budget_counters(
             retained_acquisition_keys.add(acquisition_key)
             counters["acquisition_downloads_this_run"] += 1
             lowered = retrieved_by.casefold()
-            if "openalex" in lowered or "arxiv" in lowered:
-                counters["academic_provider_requests_this_run"] += 1
             if "fetch_sources.py/web" in lowered or lowered.endswith("/web") or "/web/" in lowered:
                 counters["web_downloads_this_run"] += 1
             if "manual" in lowered:
@@ -2136,24 +2159,57 @@ def build_status_document(
     operational_debt = operational_debt_section(questions, candidates, sources, lint)
     readiness = readiness_section(smoke, questions, sources, lint, operational_debt)
     readiness["operational_debt"] = operational_debt
-    artifact_counters = (
-        artifact_budget_counters(project_root, config, run_controller)
-        if run_controller.get("present")
-        else None
-    )
-    budget_state = budget_state_section(
-        run,
-        questions_processed_this_run,
-        source_requests_opened_this_run,
-        releases_this_run,
-        discovery_results_this_run,
-        acquisition_downloads_this_run,
-        github_archive_bytes_this_run,
-        academic_provider_requests_this_run,
-        web_downloads_this_run,
-        manual_url_deliveries_this_run,
-        artifact_counters=artifact_counters,
-    )
+    artifact_counters: dict[str, int] | None = None
+    budget_accounting_error: BaseException | None = None
+    if run_controller.get("present"):
+        try:
+            artifact_counters = artifact_budget_counters(project_root, config, run_controller)
+        except Exception as exc:
+            if getattr(exc, "error_code", None) not in ACADEMIC_PROVIDER_ACCOUNTING_ERROR_CODES:
+                raise
+            budget_accounting_error = exc
+
+    if budget_accounting_error is None:
+        budget_state = budget_state_section(
+            run,
+            questions_processed_this_run,
+            source_requests_opened_this_run,
+            releases_this_run,
+            discovery_results_this_run,
+            acquisition_downloads_this_run,
+            github_archive_bytes_this_run,
+            academic_provider_requests_this_run,
+            web_downloads_this_run,
+            manual_url_deliveries_this_run,
+            artifact_counters=artifact_counters,
+        )
+    else:
+        budget_state = None
+        run_id_value = run_controller.get("run_id")
+        error_code = getattr(budget_accounting_error, "error_code", None)
+        reason_code = {
+            "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED": "academic_provider_accounting_uninitialized",
+            "ACADEMIC_PROVIDER_ACCOUNTING_INVALID": "academic_provider_accounting_invalid",
+            "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID": "academic_provider_request_ledger_invalid",
+        }.get(error_code, "academic_provider_accounting_invalid")
+        reason = f"Academic provider request accounting is invalid for run {run_id_value}."
+        readiness["verdict"] = VERDICT_ATTENTION_REQUIRED
+        readiness.setdefault("reasons", []).insert(0, reason)
+        readiness.setdefault("verdict_reasons", []).insert(
+            0,
+            {
+                "code": reason_code,
+                "severity": "attention",
+                "run_id": run_id_value,
+                "error_code": error_code,
+                "remediation": getattr(budget_accounting_error, "remediation", None),
+            },
+        )
+        readiness["budget_accounting"] = {
+            "status": "invalid",
+            "run_id": run_id_value,
+            "error_code": error_code,
+        }
     if budget_state is not None:
         readiness["budget_state"] = budget_state
     public_questions = {key: value for key, value in questions.items() if not key.startswith("_")}

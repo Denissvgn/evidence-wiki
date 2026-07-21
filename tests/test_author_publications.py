@@ -189,6 +189,33 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
             code = DISCOVER.main(argv)
         return int(code or 0), stdout.getvalue(), stderr.getvalue()
 
+    def start_run(self, workspace: Path, *, limit: int) -> str:
+        run_id = "run-author-provider-budget"
+        config_path = workspace / "research.yml"
+        with config_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"run:\n  max_academic_provider_requests_per_run: {limit}\n")
+        run_dir = workspace / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "academic-provider-requests.jsonl").write_text("", encoding="utf-8")
+        (run_dir / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "run_id": run_id,
+                    "started_at": "2026-07-20T00:00:00Z",
+                    "state": {"current": "discovering"},
+                    "_pending_event": None,
+                    "academic_provider_request_accounting": {
+                        "schema_version": "1.0",
+                        "ledger_path": f"runs/{run_id}/academic-provider-requests.jsonl",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return run_id
+
     # --- ORCID exact match ---------------------------------------------------
 
     def test_orcid_author_emits_high_confidence_related_candidates(self):
@@ -293,6 +320,64 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
         self.assertEqual("passed", identity_gate["status"])
         self.assertFalse(identity_gate["review_required"])
         self.assertTrue(report["candidates_path"].endswith("candidates.jsonl"))
+
+    def test_publication_expansion_uses_the_same_durable_openalex_call_budget(self):
+        calls: list[str] = []
+
+        def transport(url, _timeout, _headers):
+            calls.append(url)
+            return works_payload(make_work("W111", "Retrieval Augmented Generation Benchmarks"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.write_workspace(
+                Path(tmpdir),
+                manifest=[
+                    self.openalex_paper_record(
+                        "paper:ada",
+                        authors=[
+                            {
+                                "author": {
+                                    "display_name": "Ada Lovelace",
+                                    "orcid": ADA_ORCID_URL,
+                                }
+                            }
+                        ],
+                    )
+                ],
+                normalized={
+                    "paper--ada.md": self.frontmatter_doc(
+                        "paper:ada",
+                        title=SEED_TITLE,
+                        authors=["Ada Lovelace"],
+                    )
+                },
+            )
+            run_id = self.start_run(workspace, limit=1)
+            self.install_transport(transport)
+            first_code, _, first_stderr = self.run_authors(
+                workspace,
+                "--source-id",
+                "paper:ada",
+                "--discover-publications",
+                "--run-id",
+                run_id,
+            )
+            second_code, _, second_stderr = self.run_authors(
+                workspace,
+                "--source-id",
+                "paper:ada",
+                "--discover-publications",
+                "--run-id",
+                run_id,
+            )
+            ledger = DISCOVER.load_academic_provider_request_events(workspace, run_id)
+
+        self.assertEqual(0, first_code, first_stderr)
+        self.assertEqual(2, second_code)
+        self.assertEqual("ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED", json.loads(second_stderr)["error_code"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual("authors", ledger[0]["command"])
+        self.assertEqual("paper:ada", ledger[0]["scope_id"])
 
     # --- Unrelated publication rejection + ranking ---------------------------
 

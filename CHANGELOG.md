@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- Make managed Codex runtime visibility exact and portable: resolve the selected
+  executable and official platform package outside the writable workspace,
+  grant only its canonical runtime tree as read-only, and preserve the same
+  permission profile for capability probes and worker actions. Correct the
+  empty Claude MCP configuration document without weakening either runner's
+  sandbox or approval policy.
+- Require every research action to prove scoped question progress, enforce the
+  remaining per-run question budget, keep review and acquisition bound to the
+  persisted request/candidate IDs, and allow rediscovery after exhausted or
+  unroutable candidates without mutating terminal child runs.
+- Add durable pre-transport arXiv/OpenAlex request accounting, fail closed on
+  corrupt run accounting, and derive status counters from discovery requests
+  rather than acquisitions. GitHub and OpenAlex acquisitions now retain both
+  request and candidate provenance for deterministic orchestration checks.
+- Publish complete Draft 2020-12 schemas for orchestration sessions, work
+  orders, results, and managed attempts while keeping the existing schema
+  version map stable for compatibility.
+- Keep exact pre-action question, request, candidate, manifest, raw, and
+  normalized-evidence guards in protected controller sidecars, leaving public
+  work orders bounded to 256 KiB. Validate sidecar identity and content before
+  replay, reject every out-of-scope mutation, and accept acquisition only when
+  fulfilled evidence is either an unchanged scoped match or a genuinely new
+  provenance-linked source.
+- Roll an exhausted immutable child run into a fresh child for remaining
+  research, discovery, or acquisition work, including source-request budget
+  exhaustion while actionable questions remain.
+- Bump the managed workspace starter to `0.5.2`; the default upgrade refreshes
+  managed scripts while preserving existing research configuration, evidence,
+  and wiki content. Optional skills and documentation remain reviewable
+  `--include` groups and are never replaced silently.
+- Fail closed when a pending legacy research, discovery, candidate-review, or
+  acquisition action lacks the phase-specific pre-action baseline needed for
+  deterministic reconciliation. Preserve the old parent session and start a
+  fresh orchestration; never reconstruct these baselines after worker execution.
+  Active legacy runs without the new academic-provider accounting marker also
+  require a fresh run so an unknown prior call count cannot reset to zero.
+
 ## 0.2.1 - 2026-07-21
 
 - Fix the managed Codex result schema to use the supported Structured Outputs

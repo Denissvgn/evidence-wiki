@@ -451,7 +451,23 @@ class SourceRequestsTests(unittest.TestCase):
             route = payload["routes"][0]
             self.assertEqual("openalex", route["provider"])
             self.assertEqual("get-by-doi", route["route"])
-            self.assertEqual("10.5555/example", route["command_argv"][-1])
+            self.assertEqual(
+                [
+                    "python3",
+                    "scripts/fetch_sources.py",
+                    "--format",
+                    "json",
+                    "openalex",
+                    "get",
+                    "--id-or-doi",
+                    "10.5555/example",
+                    "--output",
+                    f"raw/papers/openalex-{request_id}-metadata.json",
+                    "--request-id",
+                    request_id,
+                ],
+                route["command_argv"],
+            )
             self.assertIn("openalex download-pdf", route["reason"])
 
     def test_plan_fetch_ambiguous_paper_query_suggests_candidate_routes(self):

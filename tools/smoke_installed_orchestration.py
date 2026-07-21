@@ -42,6 +42,28 @@ def main() -> int:
     args = parser.parse_args()
     cli = str(args.cli.resolve())
 
+    contract = json.loads(run([cli, "contract", "--format", "json"]).stdout)
+    if contract.get("starter_version") != "0.5.2":
+        raise SystemExit(f"installed CLI reported an unexpected starter version: {contract.get('starter_version')}")
+    schema_documents = contract.get("artifact_schema_documents")
+    expected_schemas = {
+        "orchestration_session",
+        "orchestration_work_order",
+        "orchestration_result",
+        "orchestration_attempt",
+    }
+    if not isinstance(schema_documents, dict) or set(schema_documents) != expected_schemas:
+        raise SystemExit("installed CLI did not publish the complete orchestration schema document set")
+    starter_assets = set(contract.get("required_asset_manifest", {}).get("starter", []))
+    required_provider_assets = {
+        "workspace-template/scripts/discover_sources.py",
+        "workspace-template/scripts/fetch_sources.py",
+        "workspace-template/scripts/run_controller.py",
+        "workspace-template/scripts/source_requests.py",
+    }
+    if not required_provider_assets <= starter_assets:
+        raise SystemExit("installed CLI contract omitted required provider workflow assets")
+
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-wheel-smoke-") as tmpdir:
         temporary_root = Path(tmpdir)
         workspace = temporary_root / "workspace with spaces"

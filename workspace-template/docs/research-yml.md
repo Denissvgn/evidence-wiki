@@ -134,7 +134,7 @@ Defines per-run budgets for unattended research loops (the `research-run` skill)
 - `max_source_requests_per_run`: maximum source requests one run should open (default 10).
 - `max_releases_per_run`: maximum successful claim releases one run should perform before stopping (default 3 x `max_questions_per_run`; template default 75).
 - `max_discovery_results_per_run`: maximum discovery candidate/result records one run should propose (default 50).
-- `max_academic_provider_requests_per_run`: maximum OpenAlex/arXiv provider requests one run should make (default 25).
+- `max_academic_provider_requests_per_run`: maximum arXiv/OpenAlex academic-discovery transport attempts one run may reserve, including retries and zero-result/error calls (default 25). Acquisition calls use the separate download budget.
 - `max_manual_url_deliveries_per_run`: maximum manual URL/file deliveries one run should count (default 10).
 - `max_web_downloads_per_run`: maximum contracted `web get` downloads one run should count. Defaults to `max_manual_url_deliveries_per_run` when unset.
 - `max_open_questions_total`: maximum currently `open` questions allowed after one intake batch (default 250).

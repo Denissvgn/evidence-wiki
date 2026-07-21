@@ -27,6 +27,10 @@ Inputs:
   or write below `runs/orchestrations/`. Check the order's postconditions before
   acquiring again; report already-delivered, provenance-backed normalized
   evidence as `completed` and do not duplicate downloads or fulfillment.
+- Treat the managed order's request and candidate IDs as hard authorization and
+  boundedness limits. Acquire only the selected scoped candidates for the
+  scoped request; do not substitute another open request or candidate because
+  it appears earlier, has higher priority, or is easier to fetch.
 - Read `research.yml` before choosing providers, target roots, request budgets, or question lifecycle states.
 - Acquisition is disabled by default. Do not run provider fetch commands when `integrations.acquisition.enabled` is absent or false, or when smoke validation reports acquisition config errors. Report the inert state and the `ACQUISITION_DISABLED` remediation instead.
 - Use only providers listed in `integrations.acquisition.providers`. Do not infer permission from domain-pack recommendations.
@@ -57,17 +61,38 @@ python3 scripts/smoke_validate_workspace.py --format json
 python3 scripts/source_requests.py list --status open --format json
 ```
 
-   Prefer fulfilling an open request with the highest priority and clearest identifier. If the user supplied an explicit provider identifier instead, record which request is being bypassed or that no request exists.
+   Outside managed execution, prefer the open request with the highest priority
+   and clearest identifier. For a managed work order, use only its scoped
+   request and candidates. If a direct user supplied an explicit provider
+   identifier instead, record which request is being bypassed or that no
+   request exists.
 
 3. Plan the provider command without network I/O:
 
 ```bash
-python3 scripts/source_requests.py plan-fetch --request-id req-1a2b3c4d5e --format json
+python3 scripts/source_requests.py plan-fetch \
+  --request-id req-1a2b3c4d5e \
+  --candidate-id cand-1a2b3c4d5e \
+  --format json
 ```
 
-   Treat the plan as a command suggestion, not authorization to fetch. If `allowed_by_config` is false or warnings say acquisition is disabled, stop until the workspace is explicitly configured for that provider. If the plan reports `policy_source: coverage_manifest`, use each route's `policy_alignment`, `policy_min_trust_tier`, and `policy_facets` to reject or review candidates that do not satisfy the linked facet policy before acquiring.
+   For a managed action, pass every candidate ID from the work order as a
+   repeated `--candidate-id`; never run an unscoped request-wide plan. The
+   planner refuses unknown, non-selected, or differently linked candidate IDs
+   and emits no route for another selected candidate on the same request.
+   Outside managed execution, omit `--candidate-id` only when intentionally
+   reviewing every selected candidate on the request. Treat the plan as a
+   command suggestion, not authorization to fetch. If `allowed_by_config` is
+   false or warnings say acquisition is disabled, stop until the workspace is
+   explicitly configured for that provider. If the plan reports
+   `policy_source: coverage_manifest`, use each route's `policy_alignment`,
+   `policy_min_trust_tier`, and `policy_facets` to reject or review candidates
+   that do not satisfy the linked facet policy before acquiring.
 
-4. Review and select candidates for the request before any fetch:
+4. Review and select candidates for the request before any fetch. In a managed
+   acquisition action, the scoped candidate was already selected by the prior
+   review action: verify its retained state, but do not select or reject another
+   candidate outside the work-order scope.
 
 ```bash
 python3 scripts/discover_sources.py --format json candidates list --request-id req-1a2b3c4d5e
@@ -85,7 +110,10 @@ python3 scripts/fetch_sources.py --format json arxiv download --id 2601.00001v1 
 python3 scripts/fetch_sources.py --format json arxiv download --id 2601.00001v1 --format source --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e
 python3 scripts/fetch_sources.py --format json openalex enrich --source-id paper:2601.00001v1 --request-id req-1a2b3c4d5e
 python3 scripts/fetch_sources.py --format json openalex resolve --entity works --query "<query>" --max-results 5
+python3 scripts/fetch_sources.py --format json openalex get --id-or-doi W260100001 --output raw/papers/openalex-W260100001-metadata.json --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e
 python3 scripts/fetch_sources.py --format json openalex download-pdf --work-id W260100001 --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e
+python3 scripts/fetch_sources.py --format json github repo-metadata --repo acme/project --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e
+python3 scripts/fetch_sources.py --format json github download-archive --repo acme/project --ref v1.0.0 --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e
 python3 scripts/fetch_sources.py --format json web get --url "https://official.example/page" --request-id req-1a2b3c4d5e --candidate-id cand-1a2b3c4d5e --publication-date 2026-05-06 --valid-for-year 2026 --date-note "Date verified from retrieved bytes."
 python3 scripts/fetch_sources.py --format json web get --url "https://www.iso.org/standard/77442.html" --request-id req-1a2b3c4d5e --candidate-id cand-iso-19131 --source-type standards_registry_entry --evidence-area standards_registry_reference --terms-url "https://www.iso.org/open-data.html" --standards-metadata sources/discovery/iso-19131-standards.json
 ```
@@ -111,13 +139,18 @@ python3 scripts/normalize_sources.py --all
 
    Identify the manifest `source_id` created or refreshed by the download. Confirm a normalized record exists under `sources/normalized/` for that source ID before unblocking any question.
 
-8. Fulfill the source request when applicable:
+8. Bind the selected candidate to the normalized manifest source, then fulfill
+   the request. For a managed action, pass the work order's exact run ID:
 
 ```bash
+python3 scripts/discover_sources.py --format json candidates transition --candidate-id cand-1a2b3c4d5e --expected-state selected --to-state fetched --reason "Provenance-backed evidence was inventoried and normalized." --source-id paper:2601.00001v1 --actor acquire-agent --run-id RUN_ID
 python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id paper:2601.00001v1
 ```
 
-   If the command refuses the source ID, rerun inventory and inspect the manifest instead of hand-editing the request artifact.
+   The candidate transition records `fetched_source_id`; it must use the same
+   scoped candidate ID carried in the acquisition provenance. If either command
+   refuses the source ID, rerun inventory and inspect the manifest instead of
+   hand-editing the candidate or request artifacts.
 
 9. Reopen linked blocked questions only when evidence is ready. Use the
    deterministic `reopen` verb (do not hand-edit question frontmatter) for each
@@ -164,6 +197,7 @@ python3 scripts/workspace_status.py --format json
 - Standards captures include `provenance.standards` with registry provider, standards body, designation, edition or year, status, registry URL, and terms or dataset-license metadata; `license: null` remains explicit uncertainty when reuse rights are not reviewed.
 - `source_inventory.py --report` and `normalize_sources.py --all` completed successfully.
 - Fulfilled requests point at real manifest source IDs.
+- The scoped selected candidate is `fetched` and its `fetched_source_id` equals the fulfilled manifest source ID.
 - Blocked questions were reopened only when fulfilled and normalized evidence exists.
 - `log.md` has an `acquire` entry.
 - Final output lists retrieved-paper URLs, target paths, manifest source IDs, normalized records, and license status or uncertainty.

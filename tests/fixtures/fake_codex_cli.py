@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,12 +70,58 @@ def execute(arguments: list[str]) -> int:
         with control_path.open("a", encoding="utf-8") as handle:
             handle.write("\n# fake semantic tamper\n")
 
+    artifacts: list[str] = []
+    if order.get("phase") == "research" and order.get("scope", {}).get("question_slugs"):
+        slug = order["scope"]["question_slugs"][0]
+        agent_id = order.get("agent_id") or "installed-wheel-fake"
+
+        def workspace_command(script: str, *command: str) -> dict:
+            process = subprocess.run(  # noqa: S603 - fixed workspace script and bounded fixture arguments.
+                [sys.executable, "-B", str(root / "scripts" / script), *command, "--format", "json"],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if process.returncode != 0:
+                raise SystemExit(
+                    f"fake codex: {script} failed with {process.returncode}: {process.stderr or process.stdout}"
+                )
+            return json.loads(process.stdout)
+
+        workspace_command("question_claim.py", "claim", "--slug", slug, "--agent-id", agent_id)
+        request = workspace_command(
+            "source_requests.py",
+            "add",
+            "--kind",
+            "paper",
+            "--query-or-identifier",
+            f"evidence required for {slug}",
+            "--rationale",
+            "Installed-wheel fake runner needs evidence to exercise blocked research progress.",
+            "--question-slug",
+            slug,
+        )["request"]
+        workspace_command(
+            "question_resolve.py",
+            "block",
+            "--slug",
+            slug,
+            "--agent-id",
+            agent_id,
+            "--blocked-reason",
+            "The installed-wheel smoke intentionally starts without evidence.",
+            "--request-id",
+            request["request_id"],
+        )
+        artifacts.extend([f"wiki/questions/{slug}.md", "sources/source-requests.jsonl"])
+
     result = {
         "schema_version": "1.0",
         "action_id": order["action_id"],
         "outcome": "completed",
         "summary": "Installed-wheel fake runner completed the persisted research action.",
-        "artifacts": [],
+        "artifacts": artifacts,
     }
     Path(option_value(arguments, "--output-last-message")).write_text(
         json.dumps(result),

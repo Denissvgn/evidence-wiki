@@ -60,12 +60,17 @@ work can provide evidence for a new run. Use
 `docs/orchestration.md` for the operating model and
 `docs/orchestrator-handoff.md` for the protocol and artifact schemas.
 
-Codex managed runs require Codex CLI 0.138 or newer. Managed Claude execution
-is unavailable on native Windows; use macOS, Linux, WSL2, or a container.
+Codex managed runs require Codex CLI 0.138 or newer. For user-local npm, pnpm,
+or bun installs, the host exposes only the resolved platform-native Codex
+runtime tree as read-only; it does not expose the home directory,
+`CODEX_HOME`, or the package-manager prefix. Install the runner outside this
+writable workspace. Managed Claude execution is unavailable on native Windows;
+use macOS, Linux, WSL2, or a container.
 Claude also requires `bubblewrap` and `socat` on Linux/WSL2, or
 `sandbox-exec` and `touch` on macOS.
-Runner isolation is checked before a worker is launched; an unavailable permission profile fails with
-`RUNNER_ISOLATION_UNAVAILABLE`. The parent alone owns
+Runner isolation and runtime visibility are checked before a worker is
+launched; an unavailable profile, incomplete runtime, or overlapping runner
+installation fails with `RUNNER_ISOLATION_UNAVAILABLE`. The parent alone owns
 `runs/orchestrations/<orchestration_id>/`. Only one managed host may drive that
 parent session; a competing process receives
 `ORCHESTRATION_ALREADY_RUNNING` before a worker starts. External protocol hosts
