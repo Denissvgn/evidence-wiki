@@ -204,7 +204,9 @@ class OrchestrationHostTests(unittest.TestCase):
                 )
             output_path = Path(argv[argv.index("--output-last-message") + 1])
             document = result()
-            document["artifacts"] = []
+            document["artifacts"] = [
+                "runs/orchestrations/model-reported/work-results/action-0001.json"
+            ]
             output_path.write_text(json.dumps(document), encoding="utf-8")
             return orchestration.ProcessResult(0, "", "")
 
@@ -266,6 +268,10 @@ class OrchestrationHostTests(unittest.TestCase):
 
     def test_runner_argv_is_structured_and_contains_no_bypass_flags(self):
         root = Path("/tmp/workspace with spaces")
+        managed_python = orchestration._ManagedPythonRuntime(
+            executable=root / ".venv" / "bin" / "python",
+            read_paths=("/opt/python runtime",),
+        )
         codex = orchestration._codex_argv(
             "/tmp/fake tools/codex",
             root,
@@ -274,6 +280,7 @@ class OrchestrationHostTests(unittest.TestCase):
             "gpt-test",
             allow_network=True,
             runtime_read_paths=("/opt/codex runtime",),
+            managed_python=managed_python,
         )
         claude = orchestration._claude_argv(
             "/tmp/fake tools/claude",
@@ -289,6 +296,7 @@ class OrchestrationHostTests(unittest.TestCase):
             None,
             allow_network=False,
             runtime_read_paths=("/opt/codex runtime",),
+            managed_python=managed_python,
         )
         claude_offline = orchestration._claude_argv(
             "/tmp/fake tools/claude",
@@ -308,8 +316,19 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertIn("mcp_servers={}", codex)
         self.assertIn('web_search="disabled"', codex)
         self.assertIn('default_permissions="evidence_wiki_worker"', codex)
+        self.assertIn("allow_login_shell=false", codex)
         codex_config = "\n".join(codex)
         self.assertIn('"/opt/codex runtime"="read"', codex_config)
+        self.assertIn('"/opt/python runtime"="read"', codex_config)
+        self.assertIn('shell_environment_policy={inherit="core"', codex_config)
+        self.assertIn(
+            f'{json.dumps(orchestration.MANAGED_PYTHON_ENV)}={json.dumps(str(managed_python.executable))}',
+            codex_config,
+        )
+        self.assertIn(
+            f'{json.dumps("PATH")}={json.dumps(orchestration._managed_python_search_path(managed_python))}',
+            codex_config,
+        )
         self.assertIn('"."="write"', codex_config)
         for protected_path in orchestration.PROTECTED_WORKSPACE_PATHS:
             self.assertIn(f'"{protected_path}"="read"', codex_config)
@@ -385,6 +404,230 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertIn(f'{json.dumps(runtime_paths[0])}="read"', config)
         self.assertNotIn(f'{json.dumps(str(prefix.resolve()))}="read"', config)
         self.assertNotIn(f'{json.dumps(str(package_root.resolve()))}="read"', config)
+
+    @unittest.skipIf(os.name == "nt", "macOS/Linux virtual environments use symlinked launchers")
+    def test_managed_python_resolves_framework_runtime_with_spaces(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            workspace = temporary_root / "workspace with spaces"
+            interpreter = workspace / ".venv" / "bin" / "python"
+            framework = temporary_root / "External Python" / "Python.framework" / "Versions" / "3.14"
+            framework_interpreter = framework / "bin" / "python3.14"
+            framework_interpreter.parent.mkdir(parents=True)
+            framework_interpreter.write_bytes(b"python")
+            interpreter.parent.mkdir(parents=True)
+            interpreter.symlink_to(framework_interpreter)
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), mock.patch.object(
+                orchestration.sys, "prefix", str(workspace / ".venv")
+            ), mock.patch.object(orchestration.sys, "base_prefix", str(framework)):
+                runtime = orchestration._managed_python_runtime(workspace)
+
+        self.assertEqual(interpreter.parent.resolve() / interpreter.name, runtime.executable)
+        self.assertEqual((str(framework.resolve()),), runtime.read_paths)
+
+    @unittest.skipIf(os.name == "nt", "POSIX-style runtime layout")
+    def test_managed_python_resolves_linux_style_runtime_without_broad_prefix_grant(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            workspace = temporary_root / "workspace with spaces"
+            interpreter = workspace / ".venv" / "bin" / "python"
+            external_prefix = temporary_root / "External Python"
+            external_interpreter = external_prefix / "bin" / "python3.14"
+            stdlib = external_prefix / "lib" / "python3.14"
+            shared_library = external_prefix / "lib" / "libpython3.14.so"
+            site_packages = stdlib / "site-packages"
+            external_interpreter.parent.mkdir(parents=True)
+            external_interpreter.write_bytes(b"python")
+            site_packages.mkdir(parents=True)
+            shared_library.write_bytes(b"python library")
+            interpreter.parent.mkdir(parents=True)
+            interpreter.symlink_to(external_interpreter)
+            configured_paths = {
+                "stdlib": str(stdlib),
+                "platstdlib": str(workspace / ".venv" / "lib" / "python3.14"),
+                "purelib": str(site_packages),
+                "platlib": str(site_packages),
+            }
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), mock.patch.object(
+                orchestration.sys, "prefix", str(workspace / ".venv")
+            ), mock.patch.object(orchestration.sys, "base_prefix", str(external_prefix)), mock.patch.object(
+                orchestration.sysconfig, "get_path", side_effect=configured_paths.get
+            ), mock.patch.object(
+                orchestration.sysconfig,
+                "get_config_var",
+                side_effect=lambda name: {
+                    "LIBDIR": str(shared_library.parent),
+                    "LDLIBRARY": shared_library.name,
+                }.get(name),
+            ):
+                runtime = orchestration._managed_python_runtime(workspace)
+
+        self.assertEqual(interpreter.parent.resolve() / interpreter.name, runtime.executable)
+        self.assertEqual(
+            {
+                str(external_interpreter.resolve()),
+                str(stdlib.resolve()),
+                str(shared_library.resolve()),
+            },
+            set(runtime.read_paths),
+        )
+        self.assertNotIn(str(external_prefix.resolve()), runtime.read_paths)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows virtual-environment layout")
+    def test_managed_python_resolves_windows_base_runtime(self):  # pragma: no cover - Windows CI
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            workspace = temporary_root / "workspace with spaces"
+            interpreter = workspace / ".venv" / "Scripts" / "python.exe"
+            base_prefix = temporary_root / "External Python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_bytes(b"python")
+            base_prefix.mkdir()
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), mock.patch.object(
+                orchestration.sys, "prefix", str(workspace / ".venv")
+            ), mock.patch.object(orchestration.sys, "base_prefix", str(base_prefix)):
+                runtime = orchestration._managed_python_runtime(workspace)
+
+        self.assertEqual(interpreter.parent.resolve() / interpreter.name, runtime.executable)
+        self.assertEqual((str(base_prefix.resolve()),), runtime.read_paths)
+
+    def test_managed_python_rejects_unprotected_workspace_interpreter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            interpreter = workspace / "tools" / "python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_bytes(b"python")
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "RUNNER_ISOLATION_UNAVAILABLE.*outside the protected",
+            ):
+                orchestration._managed_python_runtime(workspace)
+
+    def test_managed_python_rejects_workspace_runtime_files_outside_protected_venv(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            workspace = temporary_root / "workspace"
+            interpreter = workspace / ".venv" / "bin" / "python"
+            unprotected_stdlib = workspace / "Lib"
+            external_base = temporary_root / "External Python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_bytes(b"python")
+            unprotected_stdlib.mkdir()
+            external_base.mkdir()
+            configured_paths = {
+                "stdlib": str(unprotected_stdlib),
+                "platstdlib": str(workspace / ".venv" / "lib"),
+                "purelib": str(workspace / ".venv" / "site-packages"),
+                "platlib": str(workspace / ".venv" / "site-packages"),
+            }
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), mock.patch.object(
+                orchestration.sys, "prefix", str(workspace / ".venv")
+            ), mock.patch.object(orchestration.sys, "base_prefix", str(external_base)), mock.patch.object(
+                orchestration.sysconfig, "get_path", side_effect=configured_paths.get
+            ), mock.patch.object(
+                orchestration.sysconfig, "get_config_var", return_value=None
+            ), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "RUNNER_ISOLATION_UNAVAILABLE.*runtime files outside the protected",
+            ):
+                orchestration._managed_python_runtime(workspace)
+
+    def test_managed_python_validates_windows_sysconfig_paths_against_workspace(self):
+        """Windows grants base_prefix, but must still reject a workspace Lib."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            workspace = temporary_root / "workspace"
+            interpreter = workspace / ".venv" / "Scripts" / "python.exe"
+            unprotected_stdlib = workspace / "Lib"
+            external_base = temporary_root / "External Python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_bytes(b"python")
+            unprotected_stdlib.mkdir()
+            external_base.mkdir()
+            configured_paths = {
+                "stdlib": str(unprotected_stdlib),
+                "platstdlib": str(workspace / ".venv" / "Lib"),
+                "purelib": str(workspace / ".venv" / "Lib" / "site-packages"),
+                "platlib": str(workspace / ".venv" / "Lib" / "site-packages"),
+            }
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), mock.patch.object(
+                orchestration.sys, "prefix", str(workspace / ".venv")
+            ), mock.patch.object(orchestration.sys, "base_prefix", str(external_base)), mock.patch.object(
+                orchestration.sysconfig, "get_path", side_effect=configured_paths.get
+            ), mock.patch.object(
+                orchestration.sysconfig, "get_config_var", return_value=None
+            ), mock.patch.object(
+                orchestration, "_is_native_windows", return_value=True
+            ), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "RUNNER_ISOLATION_UNAVAILABLE.*runtime files outside the protected",
+            ):
+                orchestration._managed_python_runtime(workspace)
+
+    @unittest.skipIf(os.name == "nt", "Windows workspace profile matching is case-insensitive")
+    def test_managed_python_rejects_case_variant_venv_on_posix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            interpreter = workspace / ".VENV" / "bin" / "python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_bytes(b"python")
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "RUNNER_ISOLATION_UNAVAILABLE.*outside the protected",
+            ):
+                orchestration._managed_python_runtime(workspace)
+
+    def test_managed_python_rejects_runtime_path_containing_home(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            workspace = temporary_root / "workspace"
+            workspace.mkdir()
+            home_parent = temporary_root / "Users"
+            fake_home = home_parent / "operator"
+            fake_home.mkdir(parents=True)
+            framework = temporary_root / "External" / "Python.framework" / "Versions" / "3.14"
+            interpreter = framework / "bin" / "python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_bytes(b"python")
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), mock.patch.object(
+                orchestration.sys, "prefix", str(home_parent)
+            ), mock.patch.object(orchestration.sys, "base_prefix", str(framework)), mock.patch.object(
+                orchestration.Path, "home", return_value=fake_home
+            ), mock.patch.dict(os.environ, {"CODEX_HOME": ""}, clear=False), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "RUNNER_ISOLATION_UNAVAILABLE.*over-broad Python runtime read path",
+            ):
+                orchestration._managed_python_runtime(workspace)
+
+    @unittest.skipIf(os.name == "nt", "POSIX PATH separator behavior")
+    def test_managed_python_rejects_path_separator_in_interpreter_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace:unsafe"
+            interpreter = workspace / ".venv" / "bin" / "python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_bytes(b"python")
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "RUNNER_ISOLATION_UNAVAILABLE.*represented safely on PATH",
+            ):
+                orchestration._managed_python_runtime(workspace)
+
+    def test_runner_prompt_uses_native_windows_managed_python_syntax(self):
+        with mock.patch.object(orchestration, "_is_native_windows", return_value=True):
+            prompt = orchestration._runner_prompt(work_order())
+
+        self.assertIn(f'& "$env:{orchestration.MANAGED_PYTHON_ENV}" -B scripts/...', prompt)
+        self.assertIn(f'"%{orchestration.MANAGED_PYTHON_ENV}%" -B scripts/...', prompt)
+        self.assertIn("replace only that executable", prompt)
 
     def test_runner_executable_canonicalizes_a_relative_path_before_workspace_cwd_changes(self):
         with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmpdir:
@@ -727,12 +970,25 @@ class OrchestrationHostTests(unittest.TestCase):
 
     def test_codex_capability_probe_requires_supported_version_and_enforces_profile(self):
         observed = []
+        managed_python = orchestration._ManagedPythonRuntime(
+            executable=Path("/opt/python runtime/bin/python"),
+            read_paths=("/opt/python runtime",),
+        )
 
         def capability(argv, *, cwd):
             observed.append((argv, cwd))
             if argv[1:] == ["--version"]:
                 return orchestration.ProcessResult(0, "codex-cli 0.144.6\n", "")
             self.assertEqual("sandbox", argv[1])
+            if argv[-5:] == [
+                str(managed_python.executable),
+                "-I",
+                "-B",
+                "-c",
+                orchestration.MANAGED_PYTHON_PROBE,
+            ]:
+                self.assertEqual(REPO_ROOT, cwd)
+                return orchestration.ProcessResult(0, "", "")
             self.assertEqual("trusted\n", (cwd / "protected" / "sentinel.txt").read_text(encoding="utf-8"))
             if os.name != "nt" and not (hasattr(os, "geteuid") and os.geteuid() == 0):
                 protected = cwd / "protected"
@@ -764,11 +1020,13 @@ class OrchestrationHostTests(unittest.TestCase):
         with mock.patch.object(
             orchestration, "_codex_runtime_resolution", return_value=runtime_resolution
         ), mock.patch.object(
+            orchestration, "_managed_python_runtime", return_value=managed_python
+        ), mock.patch.object(
             orchestration, "_validate_codex_runtime_workspace_boundary"
         ), mock.patch.object(orchestration, "_run_runner_capability_command", side_effect=capability):
             orchestration._validate_runner_capability("codex", "/tmp/fake codex", REPO_ROOT)
 
-        self.assertEqual(2, len(observed))
+        self.assertEqual(3, len(observed))
         probe_argv = observed[1][0]
         self.assertIn("--permission-profile", probe_argv)
         self.assertEqual(
@@ -780,12 +1038,35 @@ class OrchestrationHostTests(unittest.TestCase):
             f'{json.dumps(str(runtime_resolution.runtime_root))}="read"',
             "\n".join(probe_argv),
         )
+        self.assertIn(
+            f'{json.dumps(managed_python.read_paths[0])}="read"',
+            "\n".join(probe_argv),
+        )
         if os.name != "nt":
             self.assertEqual("/bin/sh", probe_argv[-3])
             self.assertNotIn(sys.executable, probe_argv)
+        python_probe_argv = observed[2][0]
+        self.assertIn("allow_login_shell=false", python_probe_argv)
+        self.assertIn("shell_environment_policy={inherit=\"core\"", "\n".join(python_probe_argv))
+        self.assertEqual(
+            [
+                str(managed_python.executable),
+                "-I",
+                "-B",
+                "-c",
+                orchestration.MANAGED_PYTHON_PROBE,
+            ],
+            python_probe_argv[-5:],
+        )
+        self.assertIn('"."="read"', "\n".join(python_probe_argv))
+        self.assertNotIn('"."="write"', "\n".join(python_probe_argv))
+        self.assertIn("ssl.create_default_context()", python_probe_argv[-1])
+        self.assertIn(orchestration.MANAGED_PYTHON_ENV, python_probe_argv[-1])
 
         with mock.patch.object(
             orchestration, "_codex_runtime_resolution", return_value=runtime_resolution
+        ), mock.patch.object(
+            orchestration, "_managed_python_runtime", return_value=managed_python
         ), mock.patch.object(
             orchestration, "_validate_codex_runtime_workspace_boundary"
         ), mock.patch.object(
@@ -794,6 +1075,41 @@ class OrchestrationHostTests(unittest.TestCase):
             return_value=orchestration.ProcessResult(0, "codex-cli 0.137.9\n", ""),
         ), self.assertRaisesRegex(orchestration.OrchestrationHostError, "RUNNER_ISOLATION_UNAVAILABLE.*0.138.0"):
             orchestration._validate_runner_capability("codex", "/tmp/fake codex", REPO_ROOT)
+
+    def test_codex_capability_probe_fails_before_launch_when_managed_python_is_unavailable(self):
+        managed_python = orchestration._ManagedPythonRuntime(
+            executable=Path("/opt/python runtime/bin/python"),
+            read_paths=("/opt/python runtime",),
+        )
+        failed = orchestration.ProcessResult(1, "", "dyld: library not loaded")
+
+        with mock.patch.object(
+            orchestration,
+            "_run_runner_capability_command",
+            return_value=failed,
+        ) as capability, self.assertRaisesRegex(
+            orchestration.OrchestrationHostError,
+            "RUNNER_ISOLATION_UNAVAILABLE.*selected Python interpreter.*PyYAML.*TLS.*recreate",
+        ) as caught:
+            orchestration._probe_codex_managed_python(
+                "/tmp/fake codex",
+                REPO_ROOT,
+                ("/opt/codex runtime", *managed_python.read_paths),
+                managed_python,
+            )
+
+        argv = capability.call_args.args[0]
+        self.assertEqual(
+            [
+                str(managed_python.executable),
+                "-I",
+                "-B",
+                "-c",
+                orchestration.MANAGED_PYTHON_PROBE,
+            ],
+            argv[-5:],
+        )
+        self.assertIn("dyld: library not loaded", str(caught.exception))
 
     def test_codex_capability_probe_fails_closed_when_profile_is_not_enforced(self):
         def capability(argv, *, cwd):
@@ -1085,6 +1401,50 @@ class OrchestrationHostTests(unittest.TestCase):
             ):
                 orchestration._validate_result(document, "action-0001")
 
+    def test_managed_result_canonicalization_drops_only_host_owned_artifacts(self):
+        document = result()
+        document["artifacts"] = [
+            "wiki/questions/question-1.md",
+            "runs/orchestrations/orch-1/session.json",
+            "./RUNS/ORCHESTRATIONS/orch-1/work-results/action-0001.json",
+        ]
+
+        canonical = orchestration._canonicalize_managed_result(document)
+
+        self.assertEqual(["wiki/questions/question-1.md"], canonical["artifacts"])
+        self.assertEqual(3, len(document["artifacts"]))
+        self.assertEqual(canonical, orchestration._validate_result(canonical, "action-0001"))
+
+    def test_managed_result_canonicalization_does_not_hide_other_invalid_artifacts(self):
+        invalid_documents = []
+
+        unsafe = result()
+        unsafe["artifacts"] = ["runs/orchestrations/orch-1/session.json", "../outside.md"]
+        invalid_documents.append(unsafe)
+
+        duplicate = result()
+        duplicate["artifacts"] = [
+            "runs/orchestrations/orch-1/session.json",
+            "runs/orchestrations/orch-1/session.json",
+        ]
+        invalid_documents.append(duplicate)
+
+        over_limit = result()
+        over_limit["artifacts"] = [
+            *[f"wiki/results/{index}.md" for index in range(256)],
+            "runs/orchestrations/orch-1/session.json",
+        ]
+        invalid_documents.append(over_limit)
+
+        for document in invalid_documents:
+            with self.subTest(artifacts=document["artifacts"][-2:]), self.assertRaises(
+                orchestration.OrchestrationHostError
+            ):
+                orchestration._validate_result(
+                    orchestration._canonicalize_managed_result(document),
+                    "action-0001",
+                )
+
     def test_result_validation_rejects_environment_credentials(self):
         document = result()
         document["summary"] = "accidentally copied secret-value-123"
@@ -1129,6 +1489,10 @@ class OrchestrationHostTests(unittest.TestCase):
 
     def test_runner_policy_argv_never_serializes_environment_credentials(self):
         root = Path("/tmp/workspace")
+        managed_python = orchestration._ManagedPythonRuntime(
+            executable=root / ".venv" / "bin" / "python",
+            read_paths=("/opt/python-runtime",),
+        )
         with mock.patch.dict(
             os.environ,
             {"OPENALEX_API_KEY": "openalex-secret-value", "GITHUB_TOKEN": "github-secret-value"},
@@ -1142,6 +1506,7 @@ class OrchestrationHostTests(unittest.TestCase):
                 None,
                 allow_network=True,
                 runtime_read_paths=("/opt/codex-runtime",),
+                managed_python=managed_python,
             )
             claude = orchestration._claude_argv("/tmp/claude", root, None, allow_network=True)
 
@@ -1155,6 +1520,7 @@ class OrchestrationHostTests(unittest.TestCase):
         def fake_execute(argv, **kwargs):
             observed["argv"] = argv
             observed["prompt"] = kwargs["stdin_text"]
+            observed["environment"] = kwargs["environment"]
             schema_path = Path(argv[argv.index("--output-schema") + 1])
             observed["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
             output_path = Path(argv[argv.index("--output-last-message") + 1])
@@ -1183,9 +1549,17 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertIn("hard authorization and boundedness limits", observed["prompt"])
         self.assertIn("never duplicate downloads", observed["prompt"])
         self.assertIn("entire runs/orchestrations/ tree", observed["prompt"])
+        self.assertIn("Never include runs/orchestrations or any descendant in artifacts", observed["prompt"])
+        self.assertIn("use an empty artifacts list", observed["prompt"])
         self.assertIn("Generated run reports belong under runs/run-reports/", observed["prompt"])
         self.assertIn("Do not start background processes", observed["prompt"])
+        self.assertIn(orchestration.MANAGED_PYTHON_ENV, observed["prompt"])
+        self.assertIn("never use bare python, python3, or py", observed["prompt"])
         self.assertNotIn(str(REPO_ROOT), observed["prompt"])
+        self.assertEqual(
+            sys.executable,
+            observed["environment"][orchestration.MANAGED_PYTHON_ENV],
+        )
 
         schema = observed["schema"]
         self.assertEqual(orchestration.ORCHESTRATION_RESULT_SCHEMA, schema)
@@ -1217,6 +1591,10 @@ class OrchestrationHostTests(unittest.TestCase):
 
         self.assertEqual(result(), document)
         argv = execute.call_args.args[0]
+        self.assertEqual(
+            sys.executable,
+            execute.call_args.kwargs["environment"][orchestration.MANAGED_PYTHON_ENV],
+        )
         self.assertEqual("/tmp/fake claude", argv[0])
         self.assertIn("--json-schema", argv)
         self.assertEqual(
@@ -1596,6 +1974,71 @@ class OrchestrationHostTests(unittest.TestCase):
             serialized = json.dumps(attempts[0])
             self.assertNotIn(str(root), serialized)
             self.assertNotIn("Managed codex action exited", serialized)
+
+    def test_resume_retries_failed_action_and_canonicalizes_managed_artifacts(self):
+        terminal = {"orchestration_id": "orch-1", "status": "complete", "verdict": "complete"}
+        active = {"orchestration_id": "orch-1", "status": "active", "phase": "research"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            control_workspace(root)
+            original = work_order()
+            failed_attempt = orchestration._start_attempt(root, original, "codex")
+            orchestration._update_attempt(
+                root,
+                failed_attempt,
+                status_value="runner_failed",
+                error_code="RUNNER_FAILED",
+            )
+            replayed = json.loads(json.dumps(original))
+            replayed["issued_at"] = "2026-07-20T00:02:00Z"
+            replayed["lease"]["attempt"] = 2
+
+            def controller(_root, command, arguments):
+                if command == "status":
+                    return active
+                if command == "next":
+                    self.assertIn("--resume", arguments)
+                    return replayed
+                raise AssertionError(command)
+
+            def fake_execute(argv, **_kwargs):
+                output_path = Path(argv[argv.index("--output-last-message") + 1])
+                document = result()
+                document["artifacts"] = ["runs/orchestrations/orch-1/session.json"]
+                output_path.write_text(json.dumps(document), encoding="utf-8")
+                return orchestration.ProcessResult(0, "", "")
+
+            with mock.patch.object(
+                orchestration, "_runner_executable", return_value="/tmp/fake codex"
+            ), mock.patch.object(
+                orchestration,
+                "_validate_runner_capability",
+                return_value=("/opt/codex-runtime",),
+            ), mock.patch.object(
+                orchestration, "_controller_json", side_effect=controller
+            ), mock.patch.object(
+                orchestration, "_execute_bounded", side_effect=fake_execute
+            ), mock.patch.object(
+                orchestration, "_submit_result", return_value=terminal
+            ) as submit:
+                final = orchestration.drive_session(
+                    root,
+                    "orch-1",
+                    runner="codex",
+                    agent_id="agent-1",
+                    model="gpt-test",
+                    action_timeout_seconds=60,
+                    resume=True,
+                )
+
+            self.assertEqual(terminal, final)
+            submitted_result = submit.call_args.args[3]
+            self.assertEqual([], submitted_result["artifacts"])
+            attempts = [
+                orchestration._load_attempt(path)
+                for path in (root / "runs" / "orchestrations" / "orch-1" / "attempts").glob("*.json")
+            ]
+            self.assertCountEqual(["runner_failed", "submitted"], [attempt["status"] for attempt in attempts])
 
     def test_malformed_claude_output_is_refused(self):
         completed = orchestration.ProcessResult(0, "not-json", "")

@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 FAKE_CODEX_WORKSPACE_PYTHON = "EVIDENCE_WIKI_FAKE_CODEX_WORKSPACE_PYTHON"
+MANAGED_WORKSPACE_PYTHON = "EVIDENCE_WIKI_PYTHON"
 
 
 def workspace_python() -> str:
@@ -23,6 +24,19 @@ def option_value(arguments: list[str], name: str) -> str:
         raise SystemExit(f"fake codex: missing {name}") from exc
 
 
+def config_values(arguments: list[str]) -> list[str]:
+    return [arguments[index + 1] for index, value in enumerate(arguments[:-1]) if value == "--config"]
+
+
+def require_managed_python_config(arguments: list[str]) -> None:
+    configs = config_values(arguments)
+    if "allow_login_shell=false" not in configs:
+        raise SystemExit("fake codex: managed login shells were not disabled")
+    shell_configs = [value for value in configs if value.startswith("shell_environment_policy=")]
+    if len(shell_configs) != 1 or MANAGED_WORKSPACE_PYTHON not in shell_configs[0]:
+        raise SystemExit("fake codex: managed workspace Python was not pinned")
+
+
 def capability_probe(arguments: list[str]) -> int:
     root = Path(option_value(arguments, "--cd"))
     if option_value(arguments, "--permission-profile") != "evidence_wiki_worker":
@@ -30,8 +44,24 @@ def capability_probe(arguments: list[str]) -> int:
     if os.environ.get("EVIDENCE_WIKI_FAKE_CODEX_PROBE_FAIL"):
         print("fake codex: permission profile unavailable", file=sys.stderr)
         return 73
-    (root / "allowed.txt").write_text("allowed", encoding="utf-8")
-    return 0
+    if (root / "protected" / "sentinel.txt").is_file():
+        (root / "allowed.txt").write_text("allowed", encoding="utf-8")
+        return 0
+
+    require_managed_python_config(arguments)
+    command = arguments[-5:]
+    if command[1:4] != ["-I", "-B", "-c"] or "yaml" not in command[4]:
+        raise SystemExit("fake codex: unexpected managed Python probe")
+    if Path(command[0]).resolve() != Path(workspace_python()).resolve():
+        raise SystemExit("fake codex: managed Python probe used the wrong interpreter")
+    environment = os.environ.copy()
+    environment[MANAGED_WORKSPACE_PYTHON] = command[0]
+    return subprocess.run(  # noqa: S603 - exact host-generated dependency probe.
+        command,
+        cwd=root,
+        check=False,
+        env=environment,
+    ).returncode
 
 
 def execute(arguments: list[str]) -> int:
@@ -47,9 +77,13 @@ def execute(arguments: list[str]) -> int:
         raise SystemExit(f"fake codex: missing managed flags: {', '.join(missing)}")
     if "--sandbox" in arguments or "workspace-write" in arguments:
         raise SystemExit("fake codex: legacy sandbox arguments are forbidden")
-    configs = [arguments[index + 1] for index, value in enumerate(arguments[:-1]) if value == "--config"]
+    configs = config_values(arguments)
     if 'default_permissions="evidence_wiki_worker"' not in configs:
         raise SystemExit("fake codex: named permission profile was not selected")
+    require_managed_python_config(arguments)
+    configured_python = os.environ.get(MANAGED_WORKSPACE_PYTHON)
+    if configured_python is None or Path(configured_python).resolve() != Path(workspace_python()).resolve():
+        raise SystemExit("fake codex: managed process environment used the wrong workspace Python")
 
     prompt = sys.stdin.read()
     marker = "WORK ORDER (trusted orchestration data):\n"
