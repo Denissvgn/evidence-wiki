@@ -282,6 +282,28 @@ class OrchestrationHostTests(unittest.TestCase):
 
         self.assertEqual((str(config_root.resolve()),), paths)
 
+    @unittest.skipIf(os.name == "nt", "system configuration symlink coverage requires POSIX symlinks")
+    def test_codex_network_read_paths_preserve_lexical_and_resolved_system_configuration_roots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            config_root = temporary_root / "etc"
+            resolved_config_root = temporary_root / "system-etc"
+            resolved_config_root.mkdir()
+            (resolved_config_root / "resolv.conf").write_text(
+                "nameserver 192.0.2.1\n",
+                encoding="utf-8",
+            )
+            config_root.symlink_to(resolved_config_root, target_is_directory=True)
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"):
+                paths = orchestration._codex_network_read_paths(
+                    system_config_root=config_root,
+                    resolver_path=config_root / "resolv.conf",
+                    allowed_resolver_roots=(),
+                )
+
+        self.assertEqual((str(config_root), str(resolved_config_root.resolve())), paths)
+
     @unittest.skipIf(os.name == "nt", "resolver symlink coverage requires POSIX symlinks")
     def test_codex_network_read_paths_add_only_supported_external_resolver_target(self):
         for relative_root in (Path("run/systemd/resolve"), Path("mnt/wsl")):

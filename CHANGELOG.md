@@ -8,9 +8,10 @@
   required dependency in workspace health checks, returning a typed finding
   instead of raising an inspection error.
 - Restore DNS and HTTPS for provider-enabled managed Codex actions on
-  Linux/WSL2 by adding bounded read-only system resolver configuration to the
-  named permission profile, while keeping offline actions unchanged and
-  rejecting unexpected external resolver targets.
+  Linux/WSL2, including symlinked `/etc` layouts, by adding bounded read-only
+  system resolver configuration to the named permission profile, while keeping
+  offline actions unchanged and rejecting unexpected external resolver
+  targets.
 - Bump the reusable managed workspace starter to `0.5.4`; `evidence-wiki
   upgrade` refreshes its health-check and orchestration guidance while
   preserving project evidence and configuration.

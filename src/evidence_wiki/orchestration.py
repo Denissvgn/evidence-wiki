@@ -1617,7 +1617,8 @@ def _codex_network_read_paths(
     if not sys.platform.startswith("linux"):
         return ()
     try:
-        config_root = system_config_root.resolve(strict=True)
+        lexical_config_root = Path(os.path.abspath(system_config_root))
+        config_root = lexical_config_root.resolve(strict=True)
         resolver_target = resolver_path.resolve(strict=True)
         config_metadata = config_root.stat()
         resolver_metadata = resolver_target.stat()
@@ -1630,7 +1631,12 @@ def _codex_network_read_paths(
             "Managed Codex requires a system configuration directory and regular resolver configuration file."
         )
 
-    paths = [config_root]
+    # Bubblewrap materializes grants at their named destination. Preserve the
+    # lexical system root (normally /etc) when it is a symlink, while retaining
+    # the validated canonical root for callers that resolve the path first.
+    paths = [lexical_config_root]
+    if config_root != lexical_config_root:
+        paths.append(config_root)
     if not resolver_target.is_relative_to(config_root):
         resolved_roots: list[Path] = []
         for root in allowed_resolver_roots:

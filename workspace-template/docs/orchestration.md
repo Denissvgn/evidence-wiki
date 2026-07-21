@@ -276,14 +276,15 @@ settings with fail-if-unavailable behavior, OS-level write denials, Edit-tool
 denials for the complete documentation tree, and WebFetch/WebSearch disabled.
 Network access is enabled only for a
 discovery or acquisition work order whose persisted provider policy permits it.
-For those provider-enabled Codex actions on Linux/WSL2, the profile grants
-`/etc` read-only because Codex's bubblewrap `:minimal` filesystem does not
-materialize the resolver symlink or the NSS and CA configuration needed by
-normal HTTPS clients. If `/etc/resolv.conf` resolves outside `/etc`, its
-canonical target must be under a bounded supported system resolver directory
-and receives one exact read-only grant. Offline actions receive neither grant;
-an unexpected resolver target fails closed with
-`RUNNER_ISOLATION_UNAVAILABLE`.
+For those provider-enabled Codex actions on Linux/WSL2, the profile preserves
+the lexical `/etc` path read-only because Codex's bubblewrap `:minimal`
+filesystem does not materialize the resolver symlink or the NSS and CA
+configuration needed by normal HTTPS clients. If `/etc` is itself a symlink,
+its canonical directory target is also granted read-only. If
+`/etc/resolv.conf` resolves outside that directory, its canonical target must
+be under a bounded supported system resolver directory and receives one exact
+read-only grant. Offline actions receive none of these grants; an unexpected
+resolver target fails closed with `RUNNER_ISOLATION_UNAVAILABLE`.
 
 The Codex preflight resolves the selected launcher before session creation.
 For an official npm, pnpm, or bun launcher (including a Windows npm shim), it
