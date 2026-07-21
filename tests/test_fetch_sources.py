@@ -2179,6 +2179,8 @@ class FetchSourcesTests(unittest.TestCase):
                 "raw/papers/openalex-W260100003-metadata.json",
                 "--request-id",
                 "req-openalex-metadata",
+                "--candidate-id",
+                "cand-openalex-metadata",
             )
             target = workspace / "raw" / "papers" / "openalex-W260100003-metadata.json"
             sidecar = workspace / "raw" / "papers" / "openalex-W260100003-metadata.json.provenance.yml"
@@ -2212,6 +2214,7 @@ class FetchSourcesTests(unittest.TestCase):
         self.assertEqual("W260100003", provenance["openalex_work_id"])
         self.assertEqual("10.5555/openalex", provenance["doi"])
         self.assertEqual("req-openalex-metadata", provenance["request_id"])
+        self.assertEqual("cand-openalex-metadata", provenance["candidate_id"])
         self.assertEqual(0, inventory_code)
         record = next(
             item for item in records if item["raw_paths"] == ["raw/papers/openalex-W260100003-metadata.json"]
@@ -2838,6 +2841,8 @@ class GithubAcquisitionTests(unittest.TestCase):
             code, stdout, stderr = self.run_fetch(
                 "--project-root", str(workspace), "--format", "json",
                 "github", "repo-metadata", "--repo", "acme/tool",
+                "--request-id", "req-github-metadata",
+                "--candidate-id", "cand-github-metadata",
             )
             target = workspace / "raw" / "code" / "github-acme-tool-metadata.json"
             snapshot = json.loads(target.read_text(encoding="utf-8"))
@@ -2862,6 +2867,8 @@ class GithubAcquisitionTests(unittest.TestCase):
         self.assertEqual("acme/tool", provenance["repository_full_name"])
         self.assertEqual("repository_metadata", provenance["repository_artifact_kind"])
         self.assertEqual("main", provenance["repository_ref"])
+        self.assertEqual("req-github-metadata", provenance["request_id"])
+        self.assertEqual("cand-github-metadata", provenance["candidate_id"])
         self.assertEqual("MIT", provenance["license"])
         self.assertRegex(provenance["checksum"], r"^sha256:[0-9a-f]{64}$")
 
@@ -2890,6 +2897,8 @@ class GithubAcquisitionTests(unittest.TestCase):
             code, stdout, stderr = self.run_fetch(
                 "--project-root", str(workspace), "--format", "json",
                 "github", "release-metadata", "--repo", "acme/tool",
+                "--request-id", "req-github-release",
+                "--candidate-id", "cand-github-release",
             )
             snapshot = json.loads(
                 (workspace / "raw" / "code" / "github-acme-tool-release-latest.json").read_text(encoding="utf-8")
@@ -2908,6 +2917,8 @@ class GithubAcquisitionTests(unittest.TestCase):
         self.assertEqual("acme/tool", provenance["repository_full_name"])
         self.assertEqual("release_metadata", provenance["repository_artifact_kind"])
         self.assertEqual("v1.0.0", provenance["repository_ref"])
+        self.assertEqual("req-github-release", provenance["request_id"])
+        self.assertEqual("cand-github-release", provenance["candidate_id"])
         # Release metadata is a snapshot only; no asset bytes are downloaded.
         self.assertEqual(4096, snapshot["assets"][0]["size"])
 
@@ -2942,6 +2953,7 @@ class GithubAcquisitionTests(unittest.TestCase):
                 "--project-root", str(workspace), "--format", "json",
                 "github", "download-archive", "--repo", "acme/tool", "--ref", "main",
                 "--request-id", "req-1a2b3c4d5e",
+                "--candidate-id", "cand-github-archive",
             )
             target = workspace / "raw" / "code" / "github-acme-tool-main.tar.gz"
             target_bytes = target.read_bytes()
@@ -2971,6 +2983,7 @@ class GithubAcquisitionTests(unittest.TestCase):
         self.assertEqual("c" * 40, provenance["commit_sha"])
         self.assertEqual("Apache-2.0", provenance["license"])
         self.assertEqual("req-1a2b3c4d5e", provenance["request_id"])
+        self.assertEqual("cand-github-archive", provenance["candidate_id"])
         self.assertRegex(provenance["checksum"], r"^sha256:[0-9a-f]{64}$")
         # tarball endpoint was used; no /contents/ or /git/ file reads.
         urls = [url for url, _ in calls]

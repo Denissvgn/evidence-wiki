@@ -46,6 +46,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -75,6 +78,59 @@ EXIT_NOT_COMPLETE = 1
 EXIT_WORKSPACE_UNREADABLE = 2
 EXIT_BLOCKED_ON_SOURCES = 3
 EXIT_ATTENTION_REQUIRED = 4
+MAX_ORCHESTRATION_ATTEMPTS_INSPECTED = 1000
+MAX_ORCHESTRATION_ATTEMPT_BYTES = 64 * 1024
+ORCHESTRATION_ATTEMPT_KEYS = {
+    "schema_version",
+    "artifact_type",
+    "orchestration_id",
+    "attempt_id",
+    "action_id",
+    "lease_attempt",
+    "runner",
+    "phase",
+    "run_id",
+    "started_at",
+    "updated_at",
+    "status",
+    "work_order_identity",
+    "result_digest",
+    "error_code",
+}
+ORCHESTRATION_ATTEMPT_RUNNERS = {"codex", "claude"}
+ORCHESTRATION_ATTEMPT_PHASES = {"research", "discovery", "candidate_review", "acquisition", "verification"}
+ORCHESTRATION_ATTEMPT_STATUSES = {
+    "running",
+    "runner_failed",
+    "timed_out",
+    "interrupted",
+    "control_tampered",
+    "repair_acknowledged",
+    "result_staged",
+    "submitted",
+}
+ACADEMIC_PROVIDER_ACCOUNTING_ERROR_CODES = frozenset(
+    {
+        "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED",
+        "ACADEMIC_PROVIDER_ACCOUNTING_INVALID",
+        "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+    }
+)
+ORCHESTRATION_ATTEMPT_ERRORS = {
+    "RUNNER_FAILED",
+    "RUNNER_TIMEOUT",
+    "RUNNER_INTERRUPTED",
+    "CONTROL_ARTIFACT_TAMPERED",
+}
+ORCHESTRATION_ATTEMPT_EXPECTED_ERRORS = {
+    "runner_failed": "RUNNER_FAILED",
+    "timed_out": "RUNNER_TIMEOUT",
+    "interrupted": "RUNNER_INTERRUPTED",
+    "control_tampered": "CONTROL_ARTIFACT_TAMPERED",
+    "repair_acknowledged": "CONTROL_ARTIFACT_TAMPERED",
+}
+ORCHESTRATION_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+ORCHESTRATION_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CHECK_COMPLETE_EXIT_CODES = {
     VERDICT_COMPLETE: EXIT_REPORTED,
     VERDICT_BLOCKED_ON_SOURCES: EXIT_BLOCKED_ON_SOURCES,
@@ -1500,6 +1556,25 @@ def artifact_budget_counters(
                 )
             retained_candidate_keys.add(identity)
     counters["discovery_results_this_run"] = len(retained_candidate_keys)
+    selected_run_id = run_controller.get("run_id")
+    if isinstance(selected_run_id, str) and selected_run_id.strip():
+        try:
+            counters["academic_provider_requests_this_run"] = (
+                discover_sources.academic_provider_request_count(
+                    project_root,
+                    selected_run_id.strip(),
+                    strict=True,
+                )
+            )
+        except Exception as exc:
+            # Completed legacy runs cannot issue another provider request and
+            # remain inspectable without fabricating a post-hoc marker. Active
+            # legacy runs fail closed so a fresh run owns all future calls.
+            if not (
+                run_controller.get("terminal")
+                and getattr(exc, "error_code", None) == "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED"
+            ):
+                raise
 
     query_index = load_sibling_module("query_index")
     try:
@@ -1519,7 +1594,6 @@ def artifact_budget_counters(
                 continue
             provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
             bound_run_id = provenance.get("acquisition_run_id")
-            selected_run_id = run_controller.get("run_id")
             if isinstance(bound_run_id, str) and bound_run_id.strip():
                 within_run = bound_run_id.strip() == selected_run_id
             else:
@@ -1550,8 +1624,6 @@ def artifact_budget_counters(
             retained_acquisition_keys.add(acquisition_key)
             counters["acquisition_downloads_this_run"] += 1
             lowered = retrieved_by.casefold()
-            if "openalex" in lowered or "arxiv" in lowered:
-                counters["academic_provider_requests_this_run"] += 1
             if "fetch_sources.py/web" in lowered or lowered.endswith("/web") or "/web/" in lowered:
                 counters["web_downloads_this_run"] += 1
             if "manual" in lowered:
@@ -1704,6 +1776,254 @@ def run_controller_section(project_root: Path, run_id: str | None, stale_thresho
     )
 
 
+def orchestration_attempt_summary(project_root: Path, orchestration_id: str) -> dict[str, Any]:
+    """Return bounded non-sensitive metadata for retained host attempts."""
+    root = project_root / "runs" / "orchestrations" / orchestration_id / "attempts"
+    summary: dict[str, Any] = {
+        "count": 0,
+        "invalid_records": 0,
+        "truncated": False,
+        "latest": None,
+    }
+    try:
+        root_metadata = root.lstat()
+    except FileNotFoundError:
+        return summary
+    except OSError:
+        summary["invalid_records"] = 1
+        return summary
+    if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
+        summary["invalid_records"] = 1
+        return summary
+
+    documents: list[dict[str, Any]] = []
+    inspected = 0
+    try:
+        entries = root.iterdir()
+        for path in entries:
+            if inspected >= MAX_ORCHESTRATION_ATTEMPTS_INSPECTED:
+                summary["truncated"] = True
+                break
+            inspected += 1
+            if path.suffix != ".json":
+                summary["invalid_records"] += 1
+                continue
+            try:
+                metadata = path.lstat()
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or stat.S_ISLNK(metadata.st_mode)
+                    or int(getattr(metadata, "st_nlink", 1) or 1) != 1
+                    or metadata.st_size > MAX_ORCHESTRATION_ATTEMPT_BYTES
+                ):
+                    summary["invalid_records"] += 1
+                    continue
+                flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(path, flags)
+                try:
+                    opened = os.fstat(descriptor)
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or int(getattr(opened, "st_nlink", 1) or 1) != 1
+                        or (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino)
+                    ):
+                        raise OSError("attempt changed while it was opened")
+                    chunks: list[bytes] = []
+                    observed = 0
+                    while observed <= MAX_ORCHESTRATION_ATTEMPT_BYTES:
+                        chunk = os.read(descriptor, min(64 * 1024, MAX_ORCHESTRATION_ATTEMPT_BYTES + 1 - observed))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        observed += len(chunk)
+                    after = os.fstat(descriptor)
+                finally:
+                    os.close(descriptor)
+                if (
+                    observed > MAX_ORCHESTRATION_ATTEMPT_BYTES
+                    or observed != metadata.st_size
+                    or (opened.st_dev, opened.st_ino, opened.st_size) != (after.st_dev, after.st_ino, after.st_size)
+                ):
+                    raise OSError("attempt changed while it was read")
+                document = json.loads(b"".join(chunks).decode("utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                summary["invalid_records"] += 1
+                continue
+            result_digest = document.get("result_digest") if isinstance(document, dict) else None
+            error_code = document.get("error_code") if isinstance(document, dict) else None
+            run_id = document.get("run_id") if isinstance(document, dict) else None
+            if (
+                not isinstance(document, dict)
+                or set(document) != ORCHESTRATION_ATTEMPT_KEYS
+                or document.get("schema_version") != "1.0"
+                or document.get("artifact_type") != "orchestration_attempt"
+                or document.get("orchestration_id") != orchestration_id
+                or not isinstance(document.get("attempt_id"), str)
+                or ORCHESTRATION_SAFE_ID_RE.fullmatch(document["attempt_id"]) is None
+                or not isinstance(document.get("action_id"), str)
+                or ORCHESTRATION_SAFE_ID_RE.fullmatch(document["action_id"]) is None
+                or not isinstance(document.get("lease_attempt"), int)
+                or isinstance(document.get("lease_attempt"), bool)
+                or document["lease_attempt"] <= 0
+                or document.get("runner") not in ORCHESTRATION_ATTEMPT_RUNNERS
+                or document.get("phase") not in ORCHESTRATION_ATTEMPT_PHASES
+                or (
+                    run_id is not None
+                    and (not isinstance(run_id, str) or ORCHESTRATION_SAFE_ID_RE.fullmatch(run_id) is None)
+                )
+                or any(
+                    not isinstance(document.get(key), str)
+                    or not document[key]
+                    or len(document[key]) > 64
+                    for key in ("started_at", "updated_at")
+                )
+                or document.get("status") not in ORCHESTRATION_ATTEMPT_STATUSES
+                or not isinstance(document.get("work_order_identity"), str)
+                or ORCHESTRATION_DIGEST_RE.fullmatch(document["work_order_identity"]) is None
+                or (
+                    result_digest is not None
+                    and (not isinstance(result_digest, str) or ORCHESTRATION_DIGEST_RE.fullmatch(result_digest) is None)
+                )
+                or (error_code is not None and error_code not in ORCHESTRATION_ATTEMPT_ERRORS)
+                or (document.get("status") in {"result_staged", "submitted"} and result_digest is None)
+                or (document.get("status") in {"running", "result_staged", "submitted"} and error_code is not None)
+                or (
+                    document.get("status") in ORCHESTRATION_ATTEMPT_EXPECTED_ERRORS
+                    and error_code != ORCHESTRATION_ATTEMPT_EXPECTED_ERRORS[document["status"]]
+                )
+            ):
+                summary["invalid_records"] += 1
+                continue
+            documents.append(document)
+    except OSError:
+        summary["invalid_records"] += 1
+
+    summary["count"] = len(documents)
+    if not documents:
+        return summary
+    latest = max(documents, key=lambda item: (item["updated_at"], item["attempt_id"]))
+    summary["latest"] = {
+        "attempt_id": latest.get("attempt_id"),
+        "action_id": latest.get("action_id"),
+        "lease_attempt": latest.get("lease_attempt"),
+        "runner": latest.get("runner"),
+        "phase": latest.get("phase"),
+        "run_id": latest.get("run_id"),
+        "status": latest.get("status"),
+        "started_at": latest.get("started_at"),
+        "updated_at": latest.get("updated_at"),
+        "error_code": latest.get("error_code"),
+    }
+    return summary
+
+
+def orchestration_control_repair_summary(project_root: Path, orchestration_id: str) -> dict[str, Any]:
+    """Expose the durable repair gate without its protected-control fingerprint."""
+    path = project_root / "runs" / "orchestration-guards" / f"{orchestration_id}.json"
+    absent = {"present": False, "repair_required": False, "invalid": False}
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return absent
+    except OSError:
+        return {"present": True, "repair_required": True, "invalid": True}
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or int(getattr(metadata, "st_nlink", 1) or 1) != 1
+        or metadata.st_size > MAX_ORCHESTRATION_ATTEMPT_BYTES
+    ):
+        return {"present": True, "repair_required": True, "invalid": True}
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or int(getattr(opened, "st_nlink", 1) or 1) != 1
+                or (metadata.st_dev, metadata.st_ino, metadata.st_size)
+                != (opened.st_dev, opened.st_ino, opened.st_size)
+            ):
+                raise OSError("control-repair marker changed while it was opened")
+            chunks: list[bytes] = []
+            observed = 0
+            while observed <= MAX_ORCHESTRATION_ATTEMPT_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(64 * 1024, MAX_ORCHESTRATION_ATTEMPT_BYTES + 1 - observed),
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                observed += len(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if (
+            observed > MAX_ORCHESTRATION_ATTEMPT_BYTES
+            or observed != metadata.st_size
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+        ):
+            raise OSError("control-repair marker changed while it was read")
+        document = json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {"present": True, "repair_required": True, "invalid": True}
+    required_keys = {
+        "schema_version",
+        "artifact_type",
+        "orchestration_id",
+        "status",
+        "reason_code",
+        "detected_at",
+        "acknowledged_at",
+        "attempt_ids",
+        "expected_control_fingerprint",
+    }
+    attempt_ids = document.get("attempt_ids") if isinstance(document, dict) else None
+    status = document.get("status") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or set(document) != required_keys
+        or document.get("schema_version") != "1.0"
+        or document.get("artifact_type") != "orchestration_control_repair"
+        or document.get("orchestration_id") != orchestration_id
+        or status not in {"required", "acknowledged"}
+        or document.get("reason_code") != "CONTROL_ARTIFACT_TAMPERED"
+        or not isinstance(document.get("detected_at"), str)
+        or not document["detected_at"]
+        or len(document["detected_at"]) > 64
+        or not isinstance(attempt_ids, list)
+        or not attempt_ids
+        or len(attempt_ids) > 64
+        or len(attempt_ids) != len(set(attempt_ids))
+        or any(not isinstance(value, str) or ORCHESTRATION_SAFE_ID_RE.fullmatch(value) is None for value in attempt_ids)
+        or not isinstance(document.get("expected_control_fingerprint"), str)
+        or ORCHESTRATION_DIGEST_RE.fullmatch(document["expected_control_fingerprint"]) is None
+        or (status == "required" and document.get("acknowledged_at") is not None)
+        or (
+            status == "acknowledged"
+            and (
+                not isinstance(document.get("acknowledged_at"), str)
+                or not document["acknowledged_at"]
+                or len(document["acknowledged_at"]) > 64
+            )
+        )
+    ):
+        return {"present": True, "repair_required": True, "invalid": True}
+    return {
+        "present": True,
+        "repair_required": status == "required",
+        "invalid": False,
+        "status": status,
+        "reason_code": document["reason_code"],
+        "detected_at": document["detected_at"],
+        "acknowledged_at": document["acknowledged_at"],
+        "attempt_ids": attempt_ids,
+    }
+
+
 def summarize_orchestration_session(
     project_root: Path,
     document: dict[str, Any],
@@ -1713,6 +2033,8 @@ def summarize_orchestration_session(
     """Return the bounded read-only parent-session summary exposed to agents."""
     orchestration_id = document.get("orchestration_id")
     status = document.get("status")
+    pending_submission = document.get("pending_submission")
+    recovery = document.get("recovery")
     terminal = status in {"complete", "blocked_on_sources", "no_ship", "failed"}
     session_file = (
         project_root / "runs" / "orchestrations" / orchestration_id / "session.json"
@@ -1729,6 +2051,20 @@ def summarize_orchestration_session(
         "verdict": document.get("verdict"),
         "pause_reason": document.get("pause_reason"),
         "pending_action_id": document.get("pending_action_id"),
+        "pending_submission_action_id": (
+            pending_submission.get("action_id") if isinstance(pending_submission, dict) else None
+        ),
+        "recovery": (
+            {
+                "state": recovery.get("state"),
+                "action_id": recovery.get("action_id"),
+                "attempt": recovery.get("attempt"),
+                "reason_code": recovery.get("reason_code"),
+                "recorded_at": recovery.get("recorded_at"),
+            }
+            if isinstance(recovery, dict)
+            else None
+        ),
         "active_run_id": document.get("active_run_id"),
         "child_run_ids": list(document.get("child_run_ids") or []),
         "action_count": int(document.get("action_count", 0) or 0),
@@ -1736,6 +2072,16 @@ def summarize_orchestration_session(
         "started_at": document.get("started_at"),
         "updated_at": document.get("updated_at"),
         "completed_at": document.get("completed_at"),
+        "attempts": (
+            orchestration_attempt_summary(project_root, orchestration_id)
+            if isinstance(orchestration_id, str)
+            else {"count": 0, "invalid_records": 0, "truncated": False, "latest": None}
+        ),
+        "control_repair": (
+            orchestration_control_repair_summary(project_root, orchestration_id)
+            if isinstance(orchestration_id, str)
+            else {"present": False, "repair_required": False, "invalid": False}
+        ),
         "session_path": relative_workspace_path(project_root, session_file) if session_file is not None else None,
     }
 
@@ -1845,24 +2191,57 @@ def build_status_document(
     operational_debt = operational_debt_section(questions, candidates, sources, lint)
     readiness = readiness_section(smoke, questions, sources, lint, operational_debt)
     readiness["operational_debt"] = operational_debt
-    artifact_counters = (
-        artifact_budget_counters(project_root, config, run_controller)
-        if run_controller.get("present")
-        else None
-    )
-    budget_state = budget_state_section(
-        run,
-        questions_processed_this_run,
-        source_requests_opened_this_run,
-        releases_this_run,
-        discovery_results_this_run,
-        acquisition_downloads_this_run,
-        github_archive_bytes_this_run,
-        academic_provider_requests_this_run,
-        web_downloads_this_run,
-        manual_url_deliveries_this_run,
-        artifact_counters=artifact_counters,
-    )
+    artifact_counters: dict[str, int] | None = None
+    budget_accounting_error: BaseException | None = None
+    if run_controller.get("present"):
+        try:
+            artifact_counters = artifact_budget_counters(project_root, config, run_controller)
+        except Exception as exc:
+            if getattr(exc, "error_code", None) not in ACADEMIC_PROVIDER_ACCOUNTING_ERROR_CODES:
+                raise
+            budget_accounting_error = exc
+
+    if budget_accounting_error is None:
+        budget_state = budget_state_section(
+            run,
+            questions_processed_this_run,
+            source_requests_opened_this_run,
+            releases_this_run,
+            discovery_results_this_run,
+            acquisition_downloads_this_run,
+            github_archive_bytes_this_run,
+            academic_provider_requests_this_run,
+            web_downloads_this_run,
+            manual_url_deliveries_this_run,
+            artifact_counters=artifact_counters,
+        )
+    else:
+        budget_state = None
+        run_id_value = run_controller.get("run_id")
+        error_code = getattr(budget_accounting_error, "error_code", None)
+        reason_code = {
+            "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED": "academic_provider_accounting_uninitialized",
+            "ACADEMIC_PROVIDER_ACCOUNTING_INVALID": "academic_provider_accounting_invalid",
+            "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID": "academic_provider_request_ledger_invalid",
+        }.get(error_code, "academic_provider_accounting_invalid")
+        reason = f"Academic provider request accounting is invalid for run {run_id_value}."
+        readiness["verdict"] = VERDICT_ATTENTION_REQUIRED
+        readiness.setdefault("reasons", []).insert(0, reason)
+        readiness.setdefault("verdict_reasons", []).insert(
+            0,
+            {
+                "code": reason_code,
+                "severity": "attention",
+                "run_id": run_id_value,
+                "error_code": error_code,
+                "remediation": getattr(budget_accounting_error, "remediation", None),
+            },
+        )
+        readiness["budget_accounting"] = {
+            "status": "invalid",
+            "run_id": run_id_value,
+            "error_code": error_code,
+        }
     if budget_state is not None:
         readiness["budget_state"] = budget_state
     public_questions = {key: value for key, value in questions.items() if not key.startswith("_")}

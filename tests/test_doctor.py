@@ -44,7 +44,7 @@ def make_workspace(root: Path) -> Path:
         (workspace / relative).write_text(f"# {relative}\n", encoding="utf-8")
     (workspace / "workspace-system.yml").write_text(
         "workspace_system:\n"
-        "  starter_version: \"0.5.0\"\n"
+        "  starter_version: \"0.5.2\"\n"
         "  schema_version: \"0.1\"\n"
         "  compatible_research_yml_contract: \"0.1\"\n"
     )
@@ -99,7 +99,7 @@ class DoctorScriptTests(unittest.TestCase):
         self.assertEqual("ok", checks["contract"]["status"])
         self.assertEqual("ok", checks["semantic_retrieval"]["status"])
         self.assertEqual("ok", checks["secret_exposure"]["status"])
-        self.assertEqual("0.5.0", checks["contract"]["details"]["starter_version"])
+        self.assertEqual("0.5.2", checks["contract"]["details"]["starter_version"])
         self.assertEqual("0.1", checks["contract"]["details"]["schema_version"])
         self.assertEqual("0.1", checks["contract"]["details"]["compatible_research_yml_contract"])
         self.assertEqual(

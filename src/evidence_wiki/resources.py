@@ -21,6 +21,7 @@ ORCHESTRATOR_DIR = "orchestrator"
 ORCHESTRATOR_SKILL = "research-orchestrate"
 REQUIRED_STARTER_ASSETS = (
     "AGENTS.md",
+    "README.md",
     "index.md",
     "log.md",
     "research.yml",
@@ -29,9 +30,25 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/init_research_workspace.py",
     "scripts/lint.py",
     "scripts/_provider_registry.py",
+    "scripts/discover_sources.py",
+    "scripts/fetch_sources.py",
     "scripts/orchestration_controller.py",
+    "scripts/run_controller.py",
+    "scripts/source_requests.py",
     "scripts/smoke_validate_workspace.py",
     "scripts/workspace_status.py",
+    "docs/acquisition.md",
+    "docs/orchestration.md",
+    "docs/orchestrator-handoff.md",
+    "docs/run-controller.md",
+    "docs/source-discovery.md",
+    "docs/source-delivery.md",
+    "docs/workspace-status.md",
+    "docs/workspace-system.md",
+    "skills/research-acquire.md",
+    "skills/research-discover.md",
+    "skills/research-run.md",
+    "skills/research-verify.md",
 )
 REQUIRED_DOMAIN_PACKS = (
     "general-science",

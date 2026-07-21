@@ -93,6 +93,23 @@ class PackageCliTests(unittest.TestCase):
         )
         required_assets = payload["required_asset_manifest"]
         self.assertIn("workspace-template/AGENTS.md", required_assets["starter"])
+        self.assertIn("workspace-template/README.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/orchestration.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/orchestrator-handoff.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/run-controller.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/acquisition.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/source-discovery.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/source-delivery.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/workspace-status.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/workspace-system.md", required_assets["starter"])
+        self.assertIn("workspace-template/scripts/discover_sources.py", required_assets["starter"])
+        self.assertIn("workspace-template/scripts/fetch_sources.py", required_assets["starter"])
+        self.assertIn("workspace-template/scripts/run_controller.py", required_assets["starter"])
+        self.assertIn("workspace-template/scripts/source_requests.py", required_assets["starter"])
+        self.assertIn("workspace-template/skills/research-run.md", required_assets["starter"])
+        self.assertIn("workspace-template/skills/research-discover.md", required_assets["starter"])
+        self.assertIn("workspace-template/skills/research-acquire.md", required_assets["starter"])
+        self.assertIn("workspace-template/skills/research-verify.md", required_assets["starter"])
         self.assertIn(
             "domain-packs/standards-compliance/research.overlay.yml",
             required_assets["domain_packs"],
@@ -109,6 +126,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual("1.0", payload["artifact_schemas"]["mcp_server"])
         self.assertEqual("1.0", payload["artifact_schemas"]["question_resolve"])
         self.assertEqual("1.0", payload["artifact_schemas"]["run_state"])
+        self.assertEqual("1.0", payload["artifact_schemas"]["orchestration_attempt"])
         self.assertEqual("1.0", payload["artifact_schemas"]["coverage_manifest"])
         self.assertEqual("1.0", payload["artifact_schemas"]["publication_readiness"])
         self.assertEqual("1.0", payload["artifact_schemas"]["error_envelope"])

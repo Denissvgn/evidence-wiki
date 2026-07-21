@@ -77,6 +77,7 @@ ARXIV_ID_RE = re.compile(r"\b\d{4}\.\d{4,5}(?:v\d+)?\b", re.IGNORECASE)
 ARXIV_VERSIONED_ID_RE = re.compile(r"^\d{4}\.\d{4,5}v\d+$", re.IGNORECASE)
 DOI_RE = re.compile(r"^10\.\S+/.+", re.IGNORECASE)
 OPENALEX_WORK_ID_RE = re.compile(r"\b(W\d+)\b", re.IGNORECASE)
+SAFE_OUTPUT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
@@ -160,6 +161,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     plan_parser = subparsers.add_parser("plan-fetch", help="Plan provider commands for one source request.")
     plan_parser.add_argument("--request-id", required=True, help="Open source request to plan.")
+    plan_parser.add_argument(
+        "--candidate-id",
+        action="append",
+        default=[],
+        help=(
+            "Limit the plan to one selected candidate linked to the request. Repeat for an explicitly bounded "
+            "managed work-order scope. When omitted, all selected request candidates are planned."
+        ),
+    )
     plan_parser.add_argument(
         "--format",
         choices=("text", "json"),
@@ -723,15 +733,29 @@ def load_selected_candidates(
     project_root: Path,
     config: dict[str, Any],
     request_id: str,
+    candidate_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return discovery candidates selected for this request (status "selected"
     and selected_for_request_id == request_id, accepting legacy selected_request_id).
-    Read-only and lenient: plan-fetch never rewrites the store, so a malformed
-    line is skipped rather than fatal."""
+    Unscoped planning stays lenient because it never rewrites the store. An
+    explicit managed candidate scope is strict and must resolve unambiguously."""
+    requested: list[str] = []
+    for raw_candidate_id in candidate_ids or []:
+        candidate_id = raw_candidate_id.strip() if isinstance(raw_candidate_id, str) else ""
+        if not candidate_id or candidate_id != raw_candidate_id:
+            raise SystemExit("--candidate-id must be a non-empty identifier without surrounding whitespace")
+        if candidate_id in requested:
+            raise SystemExit(f"Duplicate --candidate-id: {candidate_id}")
+        requested.append(candidate_id)
+    if len(requested) > 256:
+        raise SystemExit("plan-fetch accepts at most 256 explicitly scoped --candidate-id values")
+
     path = candidate_store_path(project_root, config)
     if not path.exists():
+        if requested:
+            raise SystemExit(f"Unknown candidate id: {requested[0]}")
         return []
-    selected: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped:
@@ -742,8 +766,44 @@ def load_selected_candidates(
             continue
         if not isinstance(record, dict):
             continue
-        if record.get("status") == "selected" and selected_candidate_request_id(record) == request_id:
-            selected.append(record)
+        records.append(record)
+
+    if not requested:
+        return [
+            record
+            for record in records
+            if record.get("status") == "selected" and selected_candidate_request_id(record) == request_id
+        ]
+
+    records_by_id: dict[str, dict[str, Any]] = {}
+    duplicate_ids: set[str] = set()
+    for record in records:
+        candidate_id = record.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            continue
+        if candidate_id in records_by_id:
+            duplicate_ids.add(candidate_id)
+        else:
+            records_by_id[candidate_id] = record
+
+    selected: list[dict[str, Any]] = []
+    for candidate_id in requested:
+        if candidate_id in duplicate_ids:
+            raise SystemExit(f"Candidate id is ambiguous in the candidate store: {candidate_id}")
+        record = records_by_id.get(candidate_id)
+        if record is None:
+            raise SystemExit(f"Unknown candidate id: {candidate_id}")
+        if record.get("status") != "selected":
+            raise SystemExit(
+                f"Candidate {candidate_id} has status {record.get('status')!r}; plan-fetch requires selected candidates"
+            )
+        linked_request_id = selected_candidate_request_id(record)
+        if linked_request_id != request_id:
+            linked = linked_request_id or "none"
+            raise SystemExit(
+                f"Candidate {candidate_id} is linked to request {linked}, not requested plan {request_id}"
+            )
+        selected.append(record)
     return selected
 
 
@@ -896,6 +956,17 @@ def linked_policy_facets(project_root: Path, config: dict[str, Any], request_id:
     return facets
 
 
+def candidate_metadata_output_id(route: dict[str, Any], request_id: str, provider_identity: str) -> str:
+    """Return a deterministic, path-safe identifier for one candidate route."""
+    candidate_id = route.get("candidate_id")
+    normalized = candidate_id.strip() if isinstance(candidate_id, str) else ""
+    if not normalized or SAFE_OUTPUT_ID_RE.fullmatch(normalized) is None:
+        identity = normalized or provider_identity.strip()
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        normalized = f"candidate-{digest}"
+    return f"{request_id}-{normalized}"
+
+
 def candidate_acquisition_route(
     candidate: dict[str, Any], acquisition: dict[str, Any], request_id: str
 ) -> dict[str, Any]:
@@ -962,10 +1033,14 @@ def candidate_acquisition_route(
         return _finish_provider_route(route, acquisition, argv)
 
     if doi is not None:
+        output_id = candidate_metadata_output_id(route, request_id, doi)
         argv = [
             "python3", "scripts/fetch_sources.py", "--format", "json", "openalex",
             "get", "--id-or-doi", doi,
+            "--output", f"raw/papers/openalex-{output_id}-metadata.json",
+            "--request-id", request_id,
         ]
+        append_candidate_id_arg(argv, route)
         route.update(provider="openalex", provider_backed=True, route="get-by-doi", confidence="high",
                      reason="Selected candidate carries a DOI; inspect the OpenAlex work, then download-pdf if open access.")
         return _finish_provider_route(route, acquisition, argv)
@@ -975,6 +1050,7 @@ def candidate_acquisition_route(
             "python3", "scripts/fetch_sources.py", "--format", "json", "github",
             "repo-metadata", "--url", url, "--request-id", request_id,
         ]
+        append_candidate_id_arg(argv, route)
         route.update(provider="github", provider_backed=True, route="repo-metadata", confidence="high",
                      reason="Selected repository candidate; snapshot repo metadata (add release-metadata or "
                             "download-archive --ref for release/source evidence). No clone, no code execution.")
@@ -1035,7 +1111,18 @@ def paper_acquisition_route(
     request_id: str,
 ) -> dict[str, Any] | None:
     arxiv_match = paper_arxiv_match(paper)
-    if arxiv_match is not None:
+    work_id = paper_openalex_work_id(paper)
+    doi = paper_doi(paper)
+    arxiv_allowed = provider_allowed(acquisition, "arxiv")
+    openalex_allowed = provider_allowed(acquisition, "openalex")
+
+    # Prefer the arXiv source+PDF path when it is authorized. When a merged
+    # candidate retains both identities but only OpenAlex is authorized, route
+    # through the retained OpenAlex/DOI identity instead of emitting a command
+    # the same plan marks disallowed.
+    if arxiv_match is not None and (
+        arxiv_allowed or not (openalex_allowed and (work_id is not None or doi is not None))
+    ):
         arxiv_id, is_versioned = arxiv_match
         if is_versioned:
             candidate_id = route.get("candidate_id")
@@ -1057,7 +1144,6 @@ def paper_acquisition_route(
                          reason="Selected paper metadata carries an unversioned arXiv id; search by id and pick the version.")
         return _finish_provider_route(route, acquisition, argv)
 
-    work_id = paper_openalex_work_id(paper)
     if work_id is not None:
         if paper.get("open_access") is True and isinstance(paper.get("pdf_url"), str) and paper["pdf_url"].strip():
             argv = [
@@ -1074,16 +1160,20 @@ def paper_acquisition_route(
                 "--output", f"raw/papers/openalex-{work_id}-metadata.json",
                 "--request-id", request_id,
             ]
+            append_candidate_id_arg(argv, route)
             route.update(provider="openalex", provider_backed=True, route="get", confidence="high",
                          reason="Selected OpenAlex paper metadata is metadata-only or not open access; snapshot the work metadata before manual delivery or alternate acquisition.")
         return _finish_provider_route(route, acquisition, argv)
 
-    doi = paper_doi(paper)
     if doi is not None:
+        output_id = candidate_metadata_output_id(route, request_id, doi)
         argv = [
             "python3", "scripts/fetch_sources.py", "--format", "json", "openalex",
             "get", "--id-or-doi", doi,
+            "--output", f"raw/papers/openalex-{output_id}-metadata.json",
+            "--request-id", request_id,
         ]
+        append_candidate_id_arg(argv, route)
         route.update(provider="openalex", provider_backed=True, route="get-by-doi", confidence="high",
                      reason="Selected paper metadata carries a DOI; inspect the OpenAlex work, then download-pdf if open access.")
         return _finish_provider_route(route, acquisition, argv)
@@ -1328,6 +1418,10 @@ def plan_routes_for_request(record: dict[str, Any], acquisition: dict[str, Any])
                 "get",
                 "--id-or-doi",
                 doi,
+                "--output",
+                f"raw/papers/openalex-{request_id}-metadata.json",
+                "--request-id",
+                request_id,
             ],
         )
         return "ready", [route], plan_warnings(acquisition, [route])
@@ -1543,7 +1637,7 @@ def run_plan_fetch(args: argparse.Namespace) -> dict[str, Any]:
     # Fold in explicitly selected discovery candidates (E36-T02). These are
     # authoritative — a reviewer picked them — so when present they supersede the
     # heuristic query routing for an unsupported/ambiguous request.
-    selected = load_selected_candidates(project_root, config, request_id)
+    selected = load_selected_candidates(project_root, config, request_id, args.candidate_id)
     candidate_routes = [
         candidate_acquisition_route(candidate, acquisition, request_id) for candidate in selected
     ]
@@ -1558,6 +1652,10 @@ def run_plan_fetch(args: argparse.Namespace) -> dict[str, Any]:
     )
     warnings = list(warnings)
     if candidate_routes:
+        # Selected candidate routes are the only executable acquisition plan.
+        # Heuristic request-level routes intentionally lack candidate
+        # provenance and must not remain as competing commands after review.
+        routes = []
         if plan_status in ("unsupported", "ambiguous"):
             plan_status = "ready"
         # The "no provider-backed plan / use manual delivery" note is stale once
@@ -1592,6 +1690,7 @@ def run_plan_fetch(args: argparse.Namespace) -> dict[str, Any]:
         "policy_source": policy_source,
         "policy_facets": policy_facets,
         "selected_candidate_count": len(selected),
+        "routing_basis": "selected_candidates" if candidate_routes else "request_heuristic",
         "routes": routes,
         "candidate_routes": candidate_routes,
         "warnings": warnings,

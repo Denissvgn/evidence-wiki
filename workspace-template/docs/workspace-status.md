@@ -90,7 +90,7 @@ Budget values from the `research.yml` `run` block; absent or invalid values fall
 | `max_source_requests_per_run` | integer | Maximum source requests one run should open (default 10). |
 | `max_releases_per_run` | integer | Maximum successful claim releases one run should perform before stopping (default 3 x `max_questions_per_run`; template default 75). |
 | `max_discovery_results_per_run` | integer | Maximum discovery candidate/result records one run should propose (default 50). |
-| `max_academic_provider_requests_per_run` | integer | Maximum OpenAlex/arXiv provider requests one run should make (default 25). |
+| `max_academic_provider_requests_per_run` | integer | Maximum arXiv/OpenAlex academic-discovery transport attempts one run may reserve, including retries and zero-result/error calls (default 25); acquisition calls are counted separately. |
 | `max_web_downloads_per_run` | integer | Maximum contracted `web get` downloads one run should count; defaults to `max_manual_url_deliveries_per_run` when unset. |
 | `max_manual_url_deliveries_per_run` | integer | Maximum manual URL/file deliveries one run should count (default 10). |
 | `max_acquisition_downloads_per_run` | integer | Maximum provider-backed downloads one run should count, derived from `integrations.acquisition.max_downloads_per_run` (default 10). |
@@ -154,10 +154,57 @@ submits work. With no readable session it returns:
 ```
 
 When present, the block includes `orchestration_id`, `status`, `phase`,
-`terminal`, `verdict`, `pause_reason`, `pending_action_id`, `active_run_id`,
+`terminal`, `verdict`, `pause_reason`, `pending_action_id`,
+`pending_submission_action_id`, bounded `recovery` metadata, `active_run_id`,
 `child_run_ids`, action counters, lifecycle timestamps, and the
-workspace-relative `session_path`. Use `evidence-wiki orchestrate status` for the
-complete version 1.0 session artifact.
+workspace-relative `session_path`. It also reports an `attempts` summary with a
+hard limit of 1,000 inspected directory entries and 64 KiB per record. The
+summary contains the valid `orchestration_attempt` version 1.0 record count,
+invalid-record count, truncation flag, and only the latest valid attempt's safe
+identifiers, runner, phase, status, timestamps, and error code. It never exposes
+a result digest, work-order fingerprint, prompt, transcript, diagnostic,
+secret, or absolute path. Use
+`evidence-wiki orchestrate status` for the complete version 1.0 session
+artifact.
+
+`control_repair` reports whether the durable managed-host marker at
+`runs/orchestration-guards/<orchestration_id>.json` is present,
+required, acknowledged, or invalid, plus its bounded reason, timestamps, and
+attempt IDs. It never exposes the retained
+`expected_control_fingerprint` for the tripwire-protected controls. The guard is
+outside the parent-session tree and is a preventive-only read-only root. A
+required marker makes the managed host stop with `CONTROL_REPAIR_REQUIRED` and
+makes controller `next` and `submit` stop with
+`ORCHESTRATION_CONTROL_REPAIR_REQUIRED`; an acknowledgement whose
+tripwire-protected controls do not match fails with
+`CONTROL_REPAIR_MISMATCH`. An invalid marker is also fail-closed even if the
+parent session itself still says `active`.
+
+The tripwire-protected controls are the bounded workspace contract and
+instructions, `scripts/`, `skills/`, `docs/`, and current parent-session tree.
+The sandbox separately keeps `.git/`, `.codex/`, `.claude/`, `.agents/`,
+`.venv/`, `venv/`, and `runs/orchestration-guards/` preventive-only and
+read-only; their contents are not recursively hashed into the semantic
+tripwire. If a retained `control_tampered` attempt exists without its durable
+guard baseline, managed acknowledgement fails with
+`CONTROL_REPAIR_BASELINE_MISSING`; status does not invent a replacement
+fingerprint.
+
+Attempt status is durable metadata, not proof that a process is still alive.
+When a fresh worker is needed, the host caps its timeout to the work order's
+remaining absolute lease. It reports `ORCHESTRATION_LEASE_INVALID` for a
+malformed expiry, `ORCHESTRATION_LEASE_EXPIRED` when no lease time remains, and
+`ORCHESTRATION_LEASE_ACTIVE` when a retained `running` attempt still owns the
+same lease attempt. Wait for expiry and resume the same action so the controller
+can increment the lease attempt. A managed work order must never leave a
+daemon, background job, or detached process; status cannot establish process
+containment, so untrusted process trees require an operator-controlled
+container or equivalent lifecycle boundary.
+
+`workspace_status.py` only observes these artifacts. One managed host at a time
+may drive a session; a second returns `ORCHESTRATION_ALREADY_RUNNING`. External
+protocol hosts must coordinate a single writer and not interleave `next` or
+`submit` with an active managed host. Status polling itself remains read-only.
 
 ### `smoke`
 
@@ -308,6 +355,17 @@ Stable request, candidate, and source identities are counted once even if a
 worker restarts and replays an identical JSONL record. Persisted timestamps are
 compared as UTC instants, so local display offsets and daylight-saving changes
 cannot reset, inflate, or reorder a run budget.
+Academic arXiv/OpenAlex transport attempts are counted from the active run's
+append-only `runs/<run-id>/academic-provider-requests.jsonl` reservations, not
+from acquisition records. If that ledger is unreadable or malformed, readiness
+changes to `attention_required`, `budget_state` is omitted rather than reported
+as zero, and `budget_accounting.status: invalid` plus the
+`academic_provider_request_ledger_invalid` reason identify the repair boundary.
+The same fail-closed output applies when an active legacy run lacks the
+versioned `academic_provider_request_accounting` marker: the reason is
+`academic_provider_accounting_uninitialized`, and remediation requires a fresh
+run rather than a hand-created empty ledger. Completed legacy runs remain
+inspectable without mutating retained state.
 Without a selected run, supplied counter flags remain the source of truth and
 missing counterparts are treated as zero.
 
@@ -322,7 +380,7 @@ missing counterparts are treated as zero.
 | `discovery_results_this_run`, `discovery_results_remaining_this_run` | integer | Discovery candidates/results used and remaining for the current run. |
 | `acquisition_downloads_this_run`, `acquisition_downloads_remaining_this_run` | integer | Provider-backed downloads used and remaining for the current run. |
 | `github_archive_bytes_this_run`, `github_archive_bytes_remaining_this_run` | integer | GitHub archive bytes used and remaining for the current run. |
-| `academic_provider_requests_this_run`, `academic_provider_requests_remaining_this_run` | integer | OpenAlex/arXiv provider requests used and remaining for the current run. |
+| `academic_provider_requests_this_run`, `academic_provider_requests_remaining_this_run` | integer | arXiv/OpenAlex academic-discovery transport reservations used and remaining for the current run; acquisition calls are not included. |
 | `web_downloads_this_run`, `web_downloads_remaining_this_run` | integer | Contracted `web get` downloads used and remaining for the current run. |
 | `manual_url_deliveries_this_run`, `manual_url_deliveries_remaining_this_run` | integer | Manual URL/file deliveries used and remaining for the current run. |
 | `counter_source` | string, optional | `artifact_derived` when a run-controller window was used. |
@@ -330,6 +388,10 @@ missing counterparts are treated as zero.
 | `counter_divergence` | list, optional | Per-counter differences between runner-reported and artifact-derived values. |
 | `stop_reasons` | list | Stable reason codes for each exhausted budget: `questions_exhausted`, `source_requests_exhausted`, `releases_exhausted`, `discovery_results_exhausted`, `acquisition_downloads_exhausted`, `github_archive_bytes_exhausted`, `academic_provider_requests_exhausted`, `web_downloads_exhausted`, or `manual_url_deliveries_exhausted`. |
 | `should_stop` | boolean | `true` when `stop_reasons` is non-empty; otherwise `false`. |
+
+When retained accounting is invalid, `readiness.budget_accounting` replaces
+`budget_state` with `status`, `run_id`, and `error_code`; an orchestrator must
+stop and repair or restore the ledger before issuing more provider work.
 
 ### Status Cache
 

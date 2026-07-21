@@ -55,6 +55,12 @@ def test_release_gate_checks_identity_quality_and_built_wheel() -> None:
         "git diff --check",
         "-m twine check",
         "pip install dist/*.whl",
+        "ORCHESTRATION_RESULT_SCHEMA",
+        'properties["schema_version"]',
+        "workspace-template/docs/orchestration.md",
+        "orchestrator/skills/research-orchestrate.md",
+        "tools/smoke_installed_orchestration.py",
+        "--cli .wheel-venv/bin/evidence-wiki",
     ):
         assert required in text
 

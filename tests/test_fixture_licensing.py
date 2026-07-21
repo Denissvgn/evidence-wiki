@@ -27,6 +27,18 @@ REQUIRED_FIELDS = {
 }
 
 
+def distributed_fixture_files() -> list[Path]:
+    """Return fixture inputs, excluding generated interpreter caches."""
+
+    return sorted(
+        path
+        for path in FIXTURES_ROOT.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+    )
+
+
 def load_catalog() -> dict:
     payload = yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8"))
     assert isinstance(payload, dict)
@@ -48,7 +60,7 @@ def test_every_distributed_fixture_has_exactly_one_rights_record() -> None:
         assert record["shipped_paths"], record["stable_id"]
         assert (REPO_ROOT / record["license_url"]).is_file(), record["stable_id"]
 
-    fixture_files = sorted(path for path in FIXTURES_ROOT.rglob("*") if path.is_file())
+    fixture_files = distributed_fixture_files()
     assert fixture_files
     for path in fixture_files:
         relative = path.relative_to(REPO_ROOT).as_posix()

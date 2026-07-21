@@ -323,14 +323,15 @@ Discovery routes may append candidate metadata, and candidate lifecycle commands
 may review or select those records, but no discovery command downloads, scrapes,
 clones, or ingests candidate contents as evidence.
 
-Seven read-only subcommands cover discovery providers and strategies:
+Eight bounded subcommands cover discovery providers, strategies, and
+read-only jurisdiction inspection:
 
 ```bash
-python3 scripts/discover_sources.py academic   --request-id ID --provider arxiv [--provider openalex] [--query TEXT] --max-results N --format json
+python3 scripts/discover_sources.py academic   --request-id ID [--run-id RUN_ID] --provider arxiv [--provider openalex] [--query TEXT] --max-results N --format json
 python3 scripts/discover_sources.py search     --query TEXT [--intent paper|code|dataset|legal|web] [--request-id ID] [--domain-allow DOMAIN] [--domain-block DOMAIN] [--jurisdiction TEXT] [--execute] --max-results N
 python3 scripts/discover_sources.py legal      --jurisdiction TEXT --topic TEXT --max-results N
 python3 scripts/discover_sources.py github     --query TEXT --max-results N
-python3 scripts/discover_sources.py authors    --source-id SOURCE_ID [--discover-publications] --max-results N
+python3 scripts/discover_sources.py authors    --source-id SOURCE_ID [--discover-publications] [--run-id RUN_ID] --max-results N
 python3 scripts/discover_sources.py companions --source-id SOURCE_ID [--request-id ID] [--no-github] [--no-search] --max-results N
 python3 scripts/discover_sources.py standards  iso-open-data | eu-product-requirements | uk-geospatial-register | nist [provider flags] --max-results N
 python3 scripts/discover_sources.py jurisdictions  validate | list | show --jurisdiction ID
@@ -411,7 +412,13 @@ Fatal error codes for this command surface are `DEPENDENCY_MISSING`,
 `DISCOVERY_RESPONSE_INVALID`, `SEARCH_PROVIDER_DISABLED`,
 `SEARCH_PROVIDER_FAILED`, `GITHUB_AUTH_REQUIRED`, `GITHUB_RATE_LIMITED`,
 `JURISDICTION_INVALID`, `JURISDICTION_UNKNOWN`, `REQUEST_UNKNOWN`,
-`REQUEST_NOT_OPEN`, `SOURCE_UNKNOWN`, and `WORKSPACE_UNREADABLE`.
+`REQUEST_NOT_OPEN`, `SOURCE_UNKNOWN`, `DISCOVERY_RUN_STATE_INVALID`,
+`DISCOVERY_RUN_RECOVERY_REQUIRED`, `DISCOVERY_RUN_ID_INVALID`,
+`DISCOVERY_RUN_UNKNOWN`, `DISCOVERY_RUN_TERMINAL`,
+`DISCOVERY_RUN_ID_REQUIRED`, `ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED`,
+`ACADEMIC_PROVIDER_ACCOUNTING_INVALID`, `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID`,
+`ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED`,
+`ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED`, and `WORKSPACE_UNREADABLE`.
 
 ## Request-Backed Academic Discovery
 
@@ -420,6 +427,7 @@ Fatal error codes for this command surface are `DEPENDENCY_MISSING`,
 ```bash
 python3 scripts/discover_sources.py academic \
   --request-id req-paper-1234567890 \
+  --run-id run-2026-07-20T202810Z-research \
   --provider arxiv \
   --provider openalex \
   --max-results 15 \
@@ -434,6 +442,18 @@ mapping consumed by `source_requests.py plan-fetch`. arXiv results are preprints
 and OpenAlex results are index records; neither provider proves peer-review
 status. `OPENALEX_API_KEY`, when used, is read only from the process environment
 and is never written into candidates, reports, or URLs returned by the command.
+Provider-backed managed actions pass their work order's exact `--run-id`, which
+binds every transport attempt (including errors and retries) to that child
+run's durable request budget. Omitting it is a manual compatibility convenience:
+the command may infer the owner only when exactly one active run exists.
+Run-bound discovery requires the versioned accounting marker written by
+`run_controller.py start` and its pre-created empty ledger before the first
+transport. An active run created by an older workspace version has no verifiable
+zero-call baseline and therefore fails before network I/O with
+`ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED`; preserve it and start a fresh run
+rather than constructing accounting artifacts by hand. Discovery without any
+selected or active run retains the local/manual compatibility behavior and does
+not create a ledger implicitly.
 
 Discovery ends after writing reviewable candidates. An agent must still review
 and select candidates before acquisition can retrieve evidence.
@@ -1235,6 +1255,10 @@ an `arxiv search --id-list` inspection command; an OpenAlex work with an
 open-access PDF becomes `openalex download-pdf`; metadata-only, non-open-access,
 or uncertain OpenAlex candidates become explicit `openalex get` or `resolve`
 commands plus warnings. Planning remains read-only and records no new evidence.
+When at least one candidate is selected, `candidate_routes` is the sole
+executable plan, `routing_basis` is `selected_candidates`, and heuristic
+request-level `routes` is empty. This prevents an unscoped command without
+`--candidate-id` from competing with the reviewed route.
 
 ## Related Documents
 

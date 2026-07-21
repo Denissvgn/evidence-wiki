@@ -25,6 +25,12 @@ fixtures:
     shipped_paths:
       - tests/fixtures/fixture-provenance.yml
   - <<: *synthetic_defaults
+    stable_id: managed-codex-cli
+    source_work: Synthetic network-free Codex CLI for installed-wheel orchestration smoke tests
+    created_at: 2026-07-21
+    shipped_paths:
+      - tests/fixtures/fake_codex_cli.py
+  - <<: *synthetic_defaults
     stable_id: academic-replay
     source_work: Synthetic arXiv and OpenAlex response replay
     shipped_paths:

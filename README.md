@@ -100,6 +100,132 @@ normalizes it, fulfills the request, reopens the question, and starts a later
 bounded research run. It declares completion only after deterministic
 verification passes.
 
+Managed runner isolation is fail-closed. Codex requires Codex CLI 0.138 or
+newer so EvidenceWiki can apply its named `evidence_wiki_worker` permission
+profile. User-local npm, pnpm, and bun installations are supported: the host
+resolves the selected launcher's platform-native runtime tree and grants that
+exact tree read-only inside the profile. It never grants the home directory,
+`CODEX_HOME`, or a package-manager prefix. Keep the runner installation outside
+the writable research workspace; an incomplete or overlapping runtime fails
+before session creation with `RUNNER_ISOLATION_UNAVAILABLE`. Managed Claude
+execution is unavailable on native Windows; use macOS,
+Linux, WSL2, a container, or the external `start` / `next` / `submit` protocol
+there. If the required boundary cannot be enforced, the host returns
+`RUNNER_ISOLATION_UNAVAILABLE` before starting a worker. The parent owns
+`runs/orchestrations/<orchestration_id>/`, and workers must never write that
+tree or invoke `evidence-wiki orchestrate` themselves.
+
+The semantic baseline is the set of **tripwire-protected controls**: the
+workspace contract and instruction files (`research.yml`,
+`workspace-system.yml`, `AGENTS.md`, `CLAUDE.md`, `README.md`, and
+`.gitignore`), plus bounded snapshots of `scripts/`, `skills/`, `docs/`, and
+the current parent session. Snapshotting is capped at 10,000 entries and 32 MiB
+of regular-file content. The runner also makes `.git/`, `.codex/`,
+`.claude/`, `.agents/`, `.venv/`, and `venv/` read-only preventively, but those
+potentially large roots are not post-action tripwire snapshots. The durable
+host guard root is likewise preventive-only and lives outside the parent tree at
+`runs/orchestration-guards/<orchestration_id>.json` and is read-only to the
+worker.
+
+Only one managed host may drive a parent session at a time. A competing managed
+drive for the same session fails before launching a worker with
+`ORCHESTRATION_ALREADY_RUNNING`. Hosts built on the external
+`start` / `next` / `submit` / `status` protocol must provide equivalent
+session-wide coordination; the command-level locks do not replace that host
+ownership boundary.
+
+Managed Claude additionally requires `bubblewrap` and `socat` on Linux/WSL2,
+or the built-in `sandbox-exec` and `touch` tools on macOS. These are checked
+before a worker is launched. A retained running attempt with the same lease
+fails with `ORCHESTRATION_LEASE_ACTIVE`; wait for expiry and resume so the
+controller can renew the same action. An invalid or already-expired absolute
+lease fails before worker launch with `ORCHESTRATION_LEASE_INVALID` or
+`ORCHESTRATION_LEASE_EXPIRED`. The worker timeout is capped by the lease's
+remaining lifetime, even when the configured action timeout is longer.
+
+Workers must not start daemons, hooks, background jobs, or detached
+subprocesses; every process started for an action must finish inside that
+action. The managed host cleans up the runner's process group, but this is not
+a hostile-process-tree containment guarantee. Put an untrusted agent in an
+operator-controlled container or VM with its own process and network limits.
+Provider allow-lists and the run-bound academic call ledger are enforced by the
+protected workspace scripts for this trusted-writer mode; they are not a
+host-level domain firewall or hostile-process quota. Put provider traffic
+behind an operator-controlled proxy, or execute it in the protocol host, when
+the worker itself is not trusted to follow those commands.
+
+If a runner exits after writing valid research artifacts, keep the durable
+session. The `orchestrate resume` recovery order is: an accepted canonical result,
+an identical clean staged result, then the same persisted action in a fresh
+worker only when neither checkpoint exists. The worker checks its
+postconditions before doing more work, and the controller still verifies the
+artifacts before advancing. Host-owned
+`attempts/<attempt_id>.json` records describe bounded execution state;
+`.host-results/<action_id>.json` is a private submission checkpoint, not a
+canonical result.
+
+Do not fabricate a work-result, edit `session.json`, or redeploy over the
+workspace. `CONTROL_ARTIFACT_TAMPERED` records bounded path diagnostics, marks
+the attempt, writes
+`runs/orchestration-guards/<orchestration_id>.json`, and, when a validated
+worker result exists, retains it under `quarantine/` without submitting it.
+EvidenceWiki does not automatically restore or roll changes back. A later
+managed resume fails with `CONTROL_REPAIR_REQUIRED` before any controller
+command or worker starts. After inspection and restoration, resume with
+`--acknowledge-control-repair`. Acknowledgement succeeds only when all
+tripwire-protected controls match the pre-action fingerprint; otherwise it
+fails with
+`CONTROL_REPAIR_MISMATCH`. The flag does not accept quarantine or bypass the
+controller's per-action trusted-input fingerprint. Start a new session for an
+intentional static-control change. If a retained tampered attempt has no
+durable baseline, acknowledgement fails closed with
+`CONTROL_REPAIR_BASELINE_MISSING`; preserve that session for inspection and
+start a new orchestration from reviewed workspace state. See
+`workspace-template/docs/orchestration.md` for the upgrade and recovery steps.
+
+Discovery and candidate review are metadata-only phases. At issuance and
+submission, the controller compares a bounded SHA-256 content snapshot of the
+configured raw roots (at most 10,000 files and 2 GiB) and both the record count
+and exact content digest of the evidence manifest (`sources/manifest.jsonl`, at
+most 32 MiB). The candidate store may change; the raw evidence tree and
+evidence manifest may not change until acquisition.
+
+Generated run reports now belong under `runs/run-reports/`, which remains a
+worker-writable output surface. Reports already present under
+`docs/run-reports/` remain historical, read-only inputs.
+
+For a session created by 0.2.0, upgrade the package and managed workspace
+scripts, then inspect its phase before replay:
+
+```bash
+python -m pip install --upgrade evidence-wiki==0.2.1
+evidence-wiki upgrade --target . --dry-run
+evidence-wiki upgrade --target .
+evidence-wiki orchestrate status --target . --orchestration-id ORCH_ID --format json
+```
+
+A pending research, discovery, candidate-review, or acquisition action issued
+before the starter recorded its scoped pre-action baseline cannot be rebound
+safely after execution. Resume reports
+`ORCHESTRATION_RESEARCH_BASELINE_UNAVAILABLE`,
+`ORCHESTRATION_DISCOVERY_BASELINE_UNAVAILABLE`,
+`ORCHESTRATION_CANDIDATE_REVIEW_BASELINE_UNAVAILABLE`, or
+`ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE`. Preserve that parent session
+for audit and start a fresh orchestration from the current reviewed workspace
+state. If the upgraded session has no such pending legacy action, resume it
+normally with its original agent ID. Never hand-edit a work order to invent the
+missing baseline.
+
+Current work orders keep their bounded public contract small by referring to a
+controller-owned scope baseline below `runs/orchestrations/<id>/trusted-inputs/`.
+If that protected sidecar is missing, changed, or malformed, resume fails closed
+with `ORCHESTRATION_INTEGRITY_BASELINE_CHANGED` or
+`ORCHESTRATION_INTEGRITY_BASELINE_INVALID`. Preserve the affected session for
+audit and restore the exact controller-owned artifact; do not regenerate it from
+post-action workspace state. Scope baselines are capped at 8 MiB and persisted
+work orders at 256 KiB; `ORCHESTRATION_SCOPE_EXCEEDED` requires reducing or
+archiving the bounded workspace history before starting a fresh action.
+
 Inspect the durable parent session and export the answer:
 
 ```bash
@@ -242,7 +368,9 @@ Required:
 Optional:
 
 - Poppler `pdftotext` for PDF-only normalization.
-- Codex CLI or Claude Code for `evidence-wiki orchestrate run`; the
+- Codex CLI 0.138 or newer, or Claude Code on macOS, Linux, WSL2, or in a
+  container, for
+  `evidence-wiki orchestrate run`; the
   model-neutral `start` / `next` / `submit` / `status` protocol does not require
   either built-in runner.
 - `agent-wiki-cli` / `llm-wiki` for manually generated codebase-analysis artifacts. The repository does not install or run this adapter automatically.

@@ -159,6 +159,7 @@ def _contract_payload() -> dict:
     import yaml
 
     from . import orchestration
+    from .orchestration_schemas import public_orchestration_schema_documents
 
     with assets_root() as root:
         starter_root = root / STARTER_DIR
@@ -282,12 +283,14 @@ def _contract_payload() -> dict:
                 "orchestration_session": orchestration.ORCHESTRATION_SESSION_SCHEMA_VERSION,
                 "orchestration_work_order": orchestration.ORCHESTRATION_WORK_ORDER_SCHEMA_VERSION,
                 "orchestration_result": orchestration.ORCHESTRATION_RESULT_SCHEMA_VERSION,
+                "orchestration_attempt": orchestration.ORCHESTRATION_ATTEMPT_SCHEMA_VERSION,
                 "run_report": run_report_module.SCHEMA_VERSION,
                 "coverage_manifest": coverage_manifest_module.SCHEMA_VERSION,
                 "publication_readiness": publication_readiness_module.SCHEMA_VERSION,
                 "fleet_status": fleet_status_module.SCHEMA_VERSION,
                 "error_envelope": script_errors_module.SCHEMA_VERSION,
             },
+            "artifact_schema_documents": public_orchestration_schema_documents(),
             "policy_vocabularies": policy_vocabularies,
             "policy_vocabulary_definitions": {
                 "base": base_policy_definitions,

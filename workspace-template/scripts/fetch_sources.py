@@ -349,6 +349,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional workspace-relative metadata snapshot path under integrations.acquisition.target_root.",
     )
     openalex_get.add_argument("--request-id", help="Optional source request id satisfied by this snapshot.")
+    openalex_get.add_argument("--candidate-id", help="Optional discovery candidate id satisfied by this snapshot.")
     openalex_download = openalex_commands.add_parser("download-pdf", help="Download an OpenAlex work PDF.")
     openalex_download.add_argument("--work-id", required=True, help="OpenAlex work ID.")
     openalex_download.add_argument("--output", help="Optional workspace-relative output path for the PDF.")
@@ -371,6 +372,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     add_github_repo_selector(github_repo)
     github_repo.add_argument("--request-id", help="Optional source request id satisfied by this snapshot.")
+    github_repo.add_argument("--candidate-id", help="Optional discovery candidate id satisfied by this snapshot.")
     github_release = github_commands.add_parser(
         "release-metadata",
         help="Snapshot release asset metadata (latest release, or --tag).",
@@ -378,6 +380,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_github_repo_selector(github_release)
     github_release.add_argument("--tag", help="Release tag to snapshot. Omit for the latest release.")
     github_release.add_argument("--request-id", help="Optional source request id satisfied by this snapshot.")
+    github_release.add_argument("--candidate-id", help="Optional discovery candidate id satisfied by this snapshot.")
     github_archive = github_commands.add_parser(
         "download-archive",
         help="Download a source archive for an explicit ref (no extraction, no code execution).",
@@ -385,6 +388,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_github_repo_selector(github_archive)
     github_archive.add_argument("--ref", required=True, help="Branch, tag, or commit SHA to archive.")
     github_archive.add_argument("--request-id", help="Optional source request id satisfied by this download.")
+    github_archive.add_argument("--candidate-id", help="Optional discovery candidate id satisfied by this download.")
 
     web = providers.add_parser("web", help="Bounded HTTPS web acquisition commands.")
     web_commands = web.add_subparsers(dest="command", required=True)
@@ -2606,6 +2610,7 @@ def run_openalex_get(project_root: Path, context: dict[str, Any], args: argparse
                 license_value=license_value,
                 retrieved_by="fetch_sources.py/openalex",
                 request_id=args.request_id,
+                candidate_id=args.candidate_id,
                 terms_url=origin_url if provider_license_slug and spdx_license is None else None,
                 notes=license_note,
                 extra={
@@ -3765,6 +3770,7 @@ def run_github_repo_metadata(project_root: Path, context: dict[str, Any], args: 
             repository_artifact_kind="repository_metadata",
             repository_ref=default_branch,
             request_id=args.request_id,
+            candidate_id=args.candidate_id,
             notes=None if license_value else "License not detected by GitHub metadata.",
             extra=acquisition_provenance_fields(context, byte_count=len(rendered_snapshot.encode("utf-8"))),
         )
@@ -3817,6 +3823,7 @@ def run_github_release_metadata(project_root: Path, context: dict[str, Any], arg
             repository_artifact_kind="release_metadata",
             repository_ref=snapshot.get("tag_name") if isinstance(snapshot.get("tag_name"), str) else tag,
             request_id=args.request_id,
+            candidate_id=args.candidate_id,
             notes="Release asset metadata snapshot; assets are not downloaded.",
             extra=acquisition_provenance_fields(context, byte_count=len(rendered_snapshot.encode("utf-8"))),
         )
@@ -3899,6 +3906,7 @@ def run_github_download_archive(project_root: Path, context: dict[str, Any], arg
             repository_ref=ref,
             commit_sha=commit_sha,
             request_id=args.request_id,
+            candidate_id=args.candidate_id,
             notes=None if license_value else "License not detected by GitHub metadata.",
             extra=acquisition_provenance_fields(context, byte_count=len(payload)),
         )

@@ -351,7 +351,7 @@ class UpgradeUnitTests(unittest.TestCase):
             log_text = (workspace / "log.md").read_text(encoding="utf-8")
             self.assertIn(prior_log, log_text)
             self.assertIn("] upgrade |", log_text)
-            self.assertIn('starter_version: "0.5.0"', (workspace / "workspace-system.yml").read_text())
+            self.assertIn('starter_version: "0.5.2"', (workspace / "workspace-system.yml").read_text())
 
     def test_unsupported_contract_refuses_before_any_mutation(self):
         with tempfile.TemporaryDirectory() as tmpdir:

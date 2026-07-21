@@ -20,6 +20,7 @@ REQUIRED_TOP_LEVEL_FIELDS = {
     "state",
     "state_history",
     "workspace_baseline",
+    "academic_provider_request_accounting",
     "question_counts",
     "source_counts",
     "candidate_counts",
@@ -99,6 +100,15 @@ class RunControllerContractTests(unittest.TestCase):
         self.assertEqual("1.0", document["schema_version"])
         self.assertEqual("run-2026-06-28T120000Z-sample", document["run_id"])
         self.assertEqual("agent-pm", document["agent_id"])
+        self.assertEqual(
+            {
+                "schema_version": "1.0",
+                "ledger_path": (
+                    "runs/run-2026-06-28T120000Z-sample/academic-provider-requests.jsonl"
+                ),
+            },
+            document["academic_provider_request_accounting"],
+        )
 
         state = document["state"]
         self.assertEqual({"current", "entered_at", "allowed_next_states", "blocking_reason"}, set(state))

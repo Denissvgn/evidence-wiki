@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -70,6 +72,9 @@ RUN_STATE_FILENAME = "run-state.json"
 EVENTS_FILENAME = "events.jsonl"
 STATUS_BASELINE_FILENAME = "workspace-status-initial.json"
 RUN_REPORT_BASELINE_FILENAME = "run-report-baseline.json"
+ACADEMIC_PROVIDER_REQUESTS_FILENAME = "academic-provider-requests.jsonl"
+ACADEMIC_PROVIDER_ACCOUNTING_FIELD = "academic_provider_request_accounting"
+ACADEMIC_PROVIDER_ACCOUNTING_SCHEMA_VERSION = "1.0"
 PENDING_EVENT_FIELD = "_pending_event"
 MUTATION_RECOVERY_DIR = ".recovery"
 
@@ -354,6 +359,10 @@ def events_path(project_root: Path, run_id: str) -> Path:
     return run_dir(project_root, run_id) / EVENTS_FILENAME
 
 
+def academic_provider_requests_path(project_root: Path, run_id: str) -> Path:
+    return run_dir(project_root, run_id) / ACADEMIC_PROVIDER_REQUESTS_FILENAME
+
+
 def run_lock_path(project_root: Path, run_id: str) -> Path:
     return run_dir(project_root, run_id) / ".locks" / "run-state.lock"
 
@@ -367,6 +376,52 @@ def relative_workspace_path(project_root: Path, path: Path) -> str:
 
 def compact_json(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def initialize_academic_provider_accounting(project_root: Path, run_id: str) -> dict[str, str]:
+    """Create the run-owned provider-call ledger before publishing run state.
+
+    A prior interrupted start may have left the empty ledger behind. Reusing
+    that exact empty regular file is safe; truncating any other retained object
+    would erase accounting evidence and therefore fails closed.
+    """
+
+    path = academic_provider_requests_path(project_root, run_id)
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise mutation_write_error(path, "academic_provider_accounting_inspect", exc) from exc
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or int(getattr(metadata, "st_nlink", 1) or 1) != 1
+            or metadata.st_size != 0
+        ):
+            raise RunControllerError(
+                "RUN_ACADEMIC_PROVIDER_ACCOUNTING_EXISTS",
+                (
+                    "Refusing to initialize academic provider accounting over a retained "
+                    f"non-empty or non-regular artifact: {relative_workspace_path(project_root, path)}"
+                ),
+                recoverable=False,
+                remediation=(
+                    "Preserve the retained artifact for audit, choose a fresh run id, and start a new run. "
+                    "Do not truncate or replace provider accounting by hand."
+                ),
+                details={"run_id": run_id, "artifact": relative_workspace_path(project_root, path)},
+            ) from None
+    except OSError as exc:
+        raise mutation_write_error(path, "academic_provider_accounting_create", exc) from exc
+
+    return {
+        "schema_version": ACADEMIC_PROVIDER_ACCOUNTING_SCHEMA_VERSION,
+        "ledger_path": relative_workspace_path(project_root, path),
+    }
 
 
 def mutation_write_error(path: Path, boundary: str, error: OSError) -> RunControllerError:
@@ -993,6 +1048,7 @@ def run_start(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
         now = timestamp_utc()
         status = status_document(project_root)
         baseline = capture_baseline_artifacts(project_root, run_id, status)
+        academic_provider_accounting = initialize_academic_provider_accounting(project_root, run_id)
         project = status.get("project") if isinstance(status.get("project"), dict) else {}
         handoff = project.get("handoff") if isinstance(project.get("handoff"), dict) else None
         document: dict[str, Any] = {
@@ -1014,6 +1070,7 @@ def run_start(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
                 }
             ],
             "workspace_baseline": baseline,
+            ACADEMIC_PROVIDER_ACCOUNTING_FIELD: academic_provider_accounting,
             "question_counts": {},
             "source_counts": {},
             "candidate_counts": {},

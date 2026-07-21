@@ -751,6 +751,175 @@ summary: Curation status fixture.
             self.assertEqual(newest_active, document["run_controller"]["run_id"])
             self.assertFalse(document["run_controller"]["terminal"])
 
+    def test_orchestration_summary_exposes_only_bounded_recovery_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir)
+            summary = STATUS.summarize_orchestration_session(
+                target,
+                {
+                    "orchestration_id": "orch-recovery",
+                    "status": "active",
+                    "phase": "research",
+                    "verdict": None,
+                    "pause_reason": None,
+                    "pending_action_id": "action-0004",
+                    "pending_submission": {
+                        "action_id": "action-0004",
+                        "result": {"summary": "private retained worker result"},
+                    },
+                    "recovery": {
+                        "state": "finalizing_submission",
+                        "action_id": "action-0004",
+                        "attempt": 2,
+                        "reason_code": "accepted_result_pending_finalization",
+                        "recorded_at": "2026-07-21T10:00:00Z",
+                    },
+                    "active_run_id": "run-orch-recovery-001",
+                    "child_run_ids": ["run-orch-recovery-001"],
+                    "action_count": 4,
+                    "completed_action_count": 3,
+                    "started_at": "2026-07-21T09:00:00Z",
+                    "updated_at": "2026-07-21T10:00:00Z",
+                    "completed_at": None,
+                },
+                selection="newest_active",
+            )
+
+        self.assertEqual("action-0004", summary["pending_submission_action_id"])
+        self.assertEqual(
+            {
+                "state": "finalizing_submission",
+                "action_id": "action-0004",
+                "attempt": 2,
+                "reason_code": "accepted_result_pending_finalization",
+                "recorded_at": "2026-07-21T10:00:00Z",
+            },
+            summary["recovery"],
+        )
+        self.assertNotIn("private retained worker result", json.dumps(summary))
+        self.assertEqual(
+            {"count": 0, "invalid_records": 0, "truncated": False, "latest": None},
+            summary["attempts"],
+        )
+        self.assertEqual(
+            {"present": False, "repair_required": False, "invalid": False},
+            summary["control_repair"],
+        )
+
+    def test_orchestration_summary_exposes_only_latest_safe_attempt_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir)
+            attempts = target / "runs" / "orchestrations" / "orch-attempts" / "attempts"
+            attempts.mkdir(parents=True)
+            base = {
+                "schema_version": "1.0",
+                "artifact_type": "orchestration_attempt",
+                "orchestration_id": "orch-attempts",
+                "action_id": "action-0001",
+                "lease_attempt": 1,
+                "runner": "codex",
+                "phase": "research",
+                "run_id": "run-1",
+                "started_at": "2026-07-21T10:00:00Z",
+                "work_order_identity": "sha256:" + "a" * 64,
+                "result_digest": None,
+                "error_code": None,
+            }
+            for attempt_id, updated_at, status in (
+                ("attempt-one", "2026-07-21T10:01:00Z", "runner_failed"),
+                ("attempt-two", "2026-07-21T10:02:00Z", "submitted"),
+            ):
+                document = {
+                    **base,
+                    "attempt_id": attempt_id,
+                    "updated_at": updated_at,
+                    "status": status,
+                    "result_digest": "sha256:" + "b" * 64 if status == "submitted" else None,
+                    "error_code": "RUNNER_FAILED" if status == "runner_failed" else None,
+                }
+                (attempts / f"{attempt_id}.json").write_text(json.dumps(document), encoding="utf-8")
+            (attempts / "invalid.json").write_text("not json", encoding="utf-8")
+            repair_guards = target / "runs" / "orchestration-guards"
+            repair_guards.mkdir(parents=True)
+            (repair_guards / "orch-attempts.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "artifact_type": "orchestration_control_repair",
+                        "orchestration_id": "orch-attempts",
+                        "status": "required",
+                        "reason_code": "CONTROL_ARTIFACT_TAMPERED",
+                        "detected_at": "2026-07-21T10:03:00Z",
+                        "acknowledged_at": None,
+                        "attempt_ids": ["attempt-two"],
+                        "expected_control_fingerprint": "sha256:" + "c" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = STATUS.summarize_orchestration_session(
+                target,
+                {
+                    "orchestration_id": "orch-attempts",
+                    "status": "active",
+                    "phase": "research",
+                },
+                selection="newest_active",
+            )
+
+        self.assertEqual(2, summary["attempts"]["count"])
+        self.assertEqual(1, summary["attempts"]["invalid_records"])
+        self.assertFalse(summary["attempts"]["truncated"])
+        self.assertEqual("attempt-two", summary["attempts"]["latest"]["attempt_id"])
+        self.assertEqual("submitted", summary["attempts"]["latest"]["status"])
+        serialized = json.dumps(summary["attempts"])
+        self.assertNotIn("work_order_identity", serialized)
+        self.assertNotIn("result_digest", serialized)
+        self.assertTrue(summary["control_repair"]["present"])
+        self.assertTrue(summary["control_repair"]["repair_required"])
+        self.assertEqual(["attempt-two"], summary["control_repair"]["attempt_ids"])
+        self.assertNotIn("expected_control_fingerprint", json.dumps(summary["control_repair"]))
+
+    def test_orchestration_control_repair_summary_rejects_path_swap_before_open(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir)
+            guard_root = target / "runs" / "orchestration-guards"
+            guard_root.mkdir(parents=True)
+            marker = guard_root / "orch-swap.json"
+            document = {
+                "schema_version": "1.0",
+                "artifact_type": "orchestration_control_repair",
+                "orchestration_id": "orch-swap",
+                "status": "required",
+                "reason_code": "CONTROL_ARTIFACT_TAMPERED",
+                "detected_at": "2026-07-21T10:03:00Z",
+                "acknowledged_at": None,
+                "attempt_ids": ["attempt-one"],
+                "expected_control_fingerprint": "sha256:" + "c" * 64,
+            }
+            marker.write_text(json.dumps(document), encoding="utf-8")
+            replacement = guard_root / "replacement.json"
+            replacement.write_text(json.dumps(document), encoding="utf-8")
+            real_open = STATUS.os.open
+            swapped = False
+
+            def swap_then_open(path: Path, flags: int) -> int:
+                nonlocal swapped
+                if not swapped and Path(path) == marker:
+                    replacement.replace(marker)
+                    swapped = True
+                return real_open(path, flags)
+
+            with mock.patch.object(STATUS.os, "open", side_effect=swap_then_open):
+                summary = STATUS.orchestration_control_repair_summary(target, "orch-swap")
+
+        self.assertTrue(swapped)
+        self.assertEqual(
+            {"present": True, "repair_required": True, "invalid": True},
+            summary,
+        )
+
     def test_active_run_reports_stale_after_liveness_threshold(self):
         stale_at = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -936,6 +1105,160 @@ summary: Curation status fixture.
                 "web_downloads_this_run",
             ):
                 self.assertEqual(1, restarted_budget[counter], counter)
+
+    def test_academic_provider_budget_uses_discovery_call_ledger_not_acquisitions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.update_run_config(target, {"max_academic_provider_requests_per_run": 3})
+            run_id = "run-academic-provider-ledger"
+            self.start_run(target, run_id)
+
+            ledger_path = target / "runs" / run_id / "academic-provider-requests.jsonl"
+            ledger_path.write_text(
+                "".join(
+                    json.dumps(
+                        {
+                            "schema_version": "1.0",
+                            "event_type": "academic_provider_request",
+                            "call_id": f"academic-call-{index}",
+                            "run_id": run_id,
+                            "command": "academic",
+                            "scope_id": "req-budget",
+                            "provider": provider,
+                            "attempt": 1,
+                            "reserved_at": f"2999-01-01T00:00:0{index}Z",
+                            "budget_consumed": True,
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                    for index, provider in enumerate(("arxiv", "openalex"), start=1)
+                ),
+                encoding="utf-8",
+            )
+            raw_path = target / "raw" / "papers" / "acquired.pdf"
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_bytes(b"%PDF-1.4\n")
+            (target / "sources" / "manifest.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "paper:acquired",
+                        "kind": "pdf",
+                        "raw_paths": ["raw/papers/acquired.pdf"],
+                        "status": "integrated",
+                        "provenance": {
+                            "retrieved_at": "2999-01-01T00:00:03Z",
+                            "retrieved_by": "fetch_sources.py/arxiv",
+                            "acquisition_run_id": run_id,
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            code, document = self.status_json(target, "--run-id", run_id, "--no-cache")
+
+        self.assertEqual(0, code)
+        budget = document["readiness"]["budget_state"]
+        self.assertEqual(2, budget["academic_provider_requests_this_run"])
+        self.assertEqual(1, budget["academic_provider_requests_remaining_this_run"])
+        self.assertEqual(1, budget["acquisition_downloads_this_run"])
+
+    def test_corrupt_academic_provider_ledger_requires_attention_and_hides_budget_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            run_id = "run-corrupt-academic-provider-ledger"
+            self.start_run(target, run_id)
+            ledger_path = target / "runs" / run_id / "academic-provider-requests.jsonl"
+            ledger_path.write_text("{not valid json\n", encoding="utf-8")
+
+            code, document = self.status_json(target, "--run-id", run_id, "--no-cache")
+            check_code, check_stdout, check_stderr = self.run_status(
+                "--project-root",
+                str(target),
+                "--format",
+                "json",
+                "--run-id",
+                run_id,
+                "--no-cache",
+                "--check-complete",
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual("attention_required", document["readiness"]["verdict"])
+        self.assertNotIn("budget_state", document["readiness"])
+        self.assertEqual(
+            {
+                "status": "invalid",
+                "run_id": run_id,
+                "error_code": "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+            },
+            document["readiness"]["budget_accounting"],
+        )
+        self.assertEqual(
+            "academic_provider_request_ledger_invalid",
+            document["readiness"]["verdict_reasons"][0]["code"],
+        )
+        self.assertEqual(4, check_code, check_stderr)
+        self.assertEqual("attention_required", json.loads(check_stdout)["readiness"]["verdict"])
+
+    def test_legacy_active_run_without_accounting_marker_requires_fresh_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            run_id = "run-legacy-academic-provider-accounting"
+            self.start_run(target, run_id)
+            state_path = target / "runs" / run_id / "run-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            del state["academic_provider_request_accounting"]
+            state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+
+            code, document = self.status_json(target, "--run-id", run_id, "--no-cache")
+
+        self.assertEqual(0, code)
+        readiness = document["readiness"]
+        self.assertEqual("attention_required", readiness["verdict"])
+        self.assertNotIn("budget_state", readiness)
+        self.assertEqual(
+            {
+                "status": "invalid",
+                "run_id": run_id,
+                "error_code": "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED",
+            },
+            readiness["budget_accounting"],
+        )
+        reason = readiness["verdict_reasons"][0]
+        self.assertEqual("academic_provider_accounting_uninitialized", reason["code"])
+        self.assertEqual(
+            "This active run predates durable academic provider accounting. Preserve it for audit, "
+            "start a fresh run with `python3 scripts/run_controller.py start --run-id <new-run-id> "
+            "--agent-id <agent-id>`, and retry discovery with the new run ID. Do not create the marker "
+            "or ledger by hand.",
+            reason["remediation"],
+        )
+
+    def test_completed_legacy_run_without_accounting_marker_remains_inspectable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            run_id = "run-completed-legacy-accounting"
+            self.start_run(target, run_id)
+            self.finish_run(target, run_id, "failed")
+            state_path = target / "runs" / run_id / "run-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            del state["academic_provider_request_accounting"]
+            state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+
+            code, document = self.status_json(target, "--run-id", run_id, "--no-cache")
+
+        self.assertEqual(0, code)
+        self.assertTrue(document["run_controller"]["terminal"])
+        self.assertIn("budget_state", document["readiness"])
+        self.assertNotIn("budget_accounting", document["readiness"])
+        self.assertEqual(
+            0,
+            document["readiness"]["budget_state"]["academic_provider_requests_this_run"],
+        )
 
     def test_status_reports_terminal_run_controller_states(self):
         cases = {

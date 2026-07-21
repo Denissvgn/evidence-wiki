@@ -23,6 +23,16 @@ Inputs:
 
 ## Operating Rules
 
+- When executing a managed work order, never invoke `evidence-wiki orchestrate`
+  or write below `runs/orchestrations/`. Check the order's postconditions before
+  discovering or selecting again; report already-materialized candidates as
+  `completed` and do not duplicate provider requests.
+- Treat the managed order's `phase`, request IDs, and candidate IDs as hard
+  authorization and boundedness limits. A `discovery` order may create only
+  candidates for its scoped requests; it must not review or select them. A
+  `candidate_review` order may review/select only its scoped candidates and
+  must not run another provider search. Do not process a different open request
+  merely because it appears earlier or has higher priority.
 - Read `research.yml` before running anything. Discovery is **disabled by default**: when `integrations.discovery.enabled` is absent or false, every provider-backed command refuses with `DISCOVERY_DISABLED` before any network I/O. `enabled: true` requires a non-empty concrete provider allow-list. Report the inert state and stop; do not work around the gate.
 - Treat `arxiv`, `openalex`, `github`, `search`, `standards`, and scoped `standards:*` values as provider permissions. `legal`, `authors`, and `companions` are strategies, not network authorization: legal execution requires `search`, author publication expansion requires `openalex`, and companion GitHub/search phases run only when those providers are allowed. Legacy strategy values remain readable for one compatibility release but never enable transport.
 - Discovery proposes; it never fetches. A candidate is not evidence until `research-acquire` delivers a *selected* candidate into `raw/` with a provenance sidecar.
@@ -74,13 +84,14 @@ python3 scripts/discover_sources.py --format json companions --source-id paper:2
 ```bash
 python3 scripts/discover_sources.py academic \
   --request-id req-1a2b3c4d5e \
+  --run-id <work-order-run-id> \
   --provider arxiv \
   --provider openalex \
   --max-results 15 \
   --format json
 python3 scripts/discover_sources.py --format json legal --jurisdiction us-federal --topic "emissions reporting" --execute
 python3 scripts/discover_sources.py --format json search --query "emissions reporting rule" --jurisdiction us-federal --execute
-python3 scripts/discover_sources.py --format json authors --source-id paper:2601.00001v1 --discover-publications --max-results 10
+python3 scripts/discover_sources.py --format json authors --source-id paper:2601.00001v1 --discover-publications --run-id <work-order-run-id> --max-results 10
 python3 scripts/discover_sources.py --format json companions --source-id paper:2601.00001v1 --max-results 10
 ```
 
@@ -91,6 +102,9 @@ python3 scripts/discover_sources.py --format json companions --source-id paper:2
    `SEARCH_PROVIDER_DISABLED`; `authors --discover-publications` resolves each
    seed author to an OpenAlex identity and sets `network_io_executed: true`,
    clearly flagging ambiguous name matches and rejecting out-of-scope works.
+   In a managed action, always pass the exact child `run_id` from the work
+   order to `academic` and `authors --discover-publications`; automatic
+   selection is only a manual convenience when exactly one active run exists.
    `companions` composes inline paper/provider links (no network) with GitHub and
    search phases only when those concrete providers are allowed. All candidate
    records are written to the configured `candidate_store_path`; discovery still

@@ -39,6 +39,10 @@
     "status_path": "runs/run-2026-06-28T120000Z-sample/workspace-status-initial.json",
     "run_report_baseline_path": "runs/run-2026-06-28T120000Z-sample/run-report-baseline.json"
   },
+  "academic_provider_request_accounting": {
+    "schema_version": "1.0",
+    "ledger_path": "runs/run-2026-06-28T120000Z-sample/academic-provider-requests.jsonl"
+  },
   "question_counts": {
     "total": 4,
     "open": 3,

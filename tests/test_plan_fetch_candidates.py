@@ -102,13 +102,35 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         store.write_text("".join(json.dumps(c) + "\n" for c in candidates), encoding="utf-8")
         return workspace, request_id
 
-    def plan(self, workspace: Path, request_id: str) -> dict:
+    def run_plan(
+        self,
+        workspace: Path,
+        request_id: str,
+        *,
+        candidate_ids: list[str] | None = None,
+    ) -> tuple[int, str, str]:
         argv = ["--project-root", str(workspace), "plan-fetch", "--request-id", request_id, "--format", "json"]
+        for candidate_id in candidate_ids or []:
+            argv.extend(["--candidate-id", candidate_id])
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = REQUESTS.main(argv)
-        self.assertEqual(0, code, stderr.getvalue())
-        return json.loads(stdout.getvalue())
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def plan(
+        self,
+        workspace: Path,
+        request_id: str,
+        *,
+        candidate_ids: list[str] | None = None,
+    ) -> dict:
+        code, stdout, stderr = self.run_plan(
+            workspace,
+            request_id,
+            candidate_ids=candidate_ids,
+        )
+        self.assertEqual(0, code, stderr)
+        return json.loads(stdout)
 
     def routes_by_id(self, report: dict) -> dict:
         return {route["candidate_id"]: route for route in report["candidate_routes"]}
@@ -158,13 +180,16 @@ class PlanFetchCandidatesTests(unittest.TestCase):
             )
             report = self.plan(workspace, request_id)
         route = self.routes_by_id(report)["cand-gh"]
+        self.assertEqual([], report["routes"])
+        self.assertEqual("selected_candidates", report["routing_basis"])
         self.assertEqual("github", route["provider"])
         self.assertEqual("repo-metadata", route["route"])
         self.assertTrue(route["provider_backed"])
         self.assertTrue(route["allowed_by_config"])
         self.assertEqual(
             ["python3", "scripts/fetch_sources.py", "--format", "json", "github",
-             "repo-metadata", "--url", "https://github.com/acme/rag-toolkit", "--request-id", request_id],
+             "repo-metadata", "--url", "https://github.com/acme/rag-toolkit", "--request-id", request_id,
+             "--candidate-id", "cand-gh"],
             route["command_argv"],
         )
         self.assertIsNone(route["manual_delivery"])
@@ -271,7 +296,13 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         route = self.routes_by_id(report)["cand-doi"]
         self.assertEqual("openalex", route["provider"])
         self.assertEqual("get-by-doi", route["route"])
-        self.assertIn("10.1234/abcd.efgh", route["command"])
+        self.assertEqual(
+            ["python3", "scripts/fetch_sources.py", "--format", "json", "openalex",
+             "get", "--id-or-doi", "10.1234/abcd.efgh",
+             "--output", f"raw/papers/openalex-{request_id}-cand-doi-metadata.json", "--request-id", request_id,
+             "--candidate-id", "cand-doi"],
+            route["command_argv"],
+        )
 
     def test_openalex_oa_paper_metadata_suggests_pdf_download(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -311,6 +342,49 @@ class PlanFetchCandidatesTests(unittest.TestCase):
             route["command_argv"],
         )
         self.assertEqual(cand["paper"], route["paper"])
+
+    def test_merged_paper_uses_the_authorized_retained_provider_identity(self):
+        merged = candidate(
+            "cand-merged-paper",
+            "req-test01",
+            provider="arxiv",
+            source_type="paper",
+            url="https://arxiv.org/abs/2601.00001v2",
+            paper={
+                "provider_ids": {
+                    "arxiv": "2601.00001v2",
+                    "openalex": "W260100001",
+                    "doi": "10.5555/example",
+                },
+                "title": "Merged Provider Paper",
+                "authors": ["Ada Lovelace"],
+                "publication_year": 2026,
+                "doi": "10.5555/example",
+                "arxiv_id": "2601.00001v2",
+                "open_access": True,
+                "oa_status": "green",
+                "license": "cc-by",
+                "landing_page_url": "https://arxiv.org/abs/2601.00001v2",
+                "pdf_url": "https://arxiv.org/pdf/2601.00001v2",
+                "resolution_status": "resolved",
+            },
+        )
+        for enabled_provider, expected_route in (
+            ("arxiv", "download-source"),
+            ("openalex", "download-pdf"),
+        ):
+            with self.subTest(provider=enabled_provider), tempfile.TemporaryDirectory() as tmpdir:
+                workspace, request_id = self.write_workspace(
+                    Path(tmpdir),
+                    candidates=[merged],
+                    acquisition_enabled=True,
+                    providers=[enabled_provider],
+                )
+                route = self.routes_by_id(self.plan(workspace, request_id))["cand-merged-paper"]
+
+            self.assertEqual(enabled_provider, route["provider"])
+            self.assertEqual(expected_route, route["route"])
+            self.assertTrue(route["allowed_by_config"])
 
     def test_openalex_metadata_only_paper_suggests_get_and_warns(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -357,6 +431,8 @@ class PlanFetchCandidatesTests(unittest.TestCase):
                 "raw/papers/openalex-W260100002-metadata.json",
                 "--request-id",
                 request_id,
+                "--candidate-id",
+                "cand-openalex-metadata",
             ],
             route["command_argv"],
         )
@@ -464,6 +540,64 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         ids = set(self.routes_by_id(report))
         self.assertEqual({"cand-mine"}, ids)
         self.assertEqual(1, report["selected_candidate_count"])
+
+    def test_explicit_candidate_scope_emits_only_the_authorized_selected_route(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            authorized = candidate(
+                "cand-authorized",
+                "req-test01",
+                source_type="paper",
+                url="https://arxiv.org/abs/2601.00001v2",
+            )
+            out_of_scope = candidate(
+                "cand-out-of-scope",
+                "req-test01",
+                source_type="paper",
+                url="https://arxiv.org/abs/2601.00002v1",
+            )
+            workspace, request_id = self.write_workspace(
+                Path(tmpdir),
+                candidates=[authorized, out_of_scope],
+                acquisition_enabled=True,
+                providers=["arxiv"],
+            )
+
+            report = self.plan(
+                workspace,
+                request_id,
+                candidate_ids=["cand-authorized"],
+            )
+
+        self.assertEqual(["cand-authorized"], [route["candidate_id"] for route in report["candidate_routes"]])
+        self.assertEqual(1, report["selected_candidate_count"])
+        self.assertNotIn("cand-out-of-scope", json.dumps(report, sort_keys=True))
+
+    def test_explicit_candidate_scope_rejects_unknown_unselected_and_request_mismatched_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            selected = candidate("cand-selected", "req-test01")
+            unselected = candidate("cand-unselected", "req-test01")
+            unselected["status"] = "new"
+            mismatched = candidate("cand-other-request", "req-other")
+            workspace, request_id = self.write_workspace(
+                Path(tmpdir),
+                candidates=[selected, unselected, mismatched],
+            )
+
+            cases = (
+                ("cand-missing", "Unknown candidate id"),
+                ("cand-unselected", "requires selected candidates"),
+                ("cand-other-request", "linked to request req-other"),
+            )
+            for candidate_id, expected in cases:
+                with self.subTest(candidate_id=candidate_id):
+                    code, stdout, stderr = self.run_plan(
+                        workspace,
+                        request_id,
+                        candidate_ids=[candidate_id],
+                    )
+                    self.assertEqual(REQUESTS.EXIT_INVALID, code)
+                    payload = json.loads(stdout or stderr)
+                    self.assertIn(expected, payload["message"])
 
     def test_selected_for_request_id_is_canonical_selection_link(self):
         with tempfile.TemporaryDirectory() as tmpdir:
