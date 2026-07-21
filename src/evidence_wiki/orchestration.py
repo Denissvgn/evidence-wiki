@@ -56,6 +56,13 @@ WINDOWS_TRANSIENT_REPLACE_ERRORS = frozenset({5, 32, 33})
 CODEX_MIN_PERMISSION_PROFILE_VERSION = (0, 138, 0)
 CODEX_PERMISSION_PROFILE_NAME = "evidence_wiki_worker"
 CODEX_NPM_PACKAGE_NAME = "@openai/codex"
+CODEX_LINUX_RESOLVER_TARGET_ROOTS = (
+    Path("/run/systemd/resolve"),
+    Path("/run/NetworkManager"),
+    Path("/run/resolvconf"),
+    Path("/usr/lib/systemd"),
+    Path("/mnt/wsl"),
+)
 MANAGED_PYTHON_ENV = "EVIDENCE_WIKI_PYTHON"
 MANAGED_PYTHON_PROBE = (
     "import os,pathlib,pypdf,ssl,sys,yaml;"
@@ -400,6 +407,41 @@ def _write_stdin(handle: Any, content: bytes) -> None:
             pass
 
 
+def _darwin_process_group_is_quiescent(process_group_id: int) -> bool:
+    """Return whether Darwin reports no live members in a process group."""
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed Darwin utility and numeric group identifier
+            ["/bin/ps", "-axo", "pgid=,state="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            shell=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if completed.returncode != 0:
+        return False
+
+    saw_record = False
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if len(fields) != 2:
+            return False
+        try:
+            observed_group_id = int(fields[0])
+        except ValueError:
+            return False
+        saw_record = True
+        if observed_group_id == process_group_id and not fields[1].startswith("Z"):
+            return False
+    return saw_record
+
+
 def _terminate_process_group(process: subprocess.Popen[bytes], *, force: bool) -> None:
     """Terminate the runner's initial process group and ordinary descendants."""
     if os.name == "posix":
@@ -407,6 +449,16 @@ def _terminate_process_group(process: subprocess.Popen[bytes], *, force: bool) -
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # Darwin can report EPERM when a reaped leader leaves a zombie-only
+            # group, but EPERM also covers unsignalable live processes. Treat it
+            # as complete only after an independent process-table check.
+            if (
+                sys.platform != "darwin"
+                or process.poll() is None
+                or not _darwin_process_group_is_quiescent(process.pid)
+            ):
+                raise
         return
     if os.name == "nt":  # pragma: no cover - exercised on Windows CI
         if force:
@@ -497,7 +549,10 @@ def _execute_bounded(
         # runner-native filesystem/network isolation remains their safety boundary.
         _terminate_process_group(process, force=True)
     except BaseException:
-        _terminate_process_group(process, force=True)
+        # Preserve the primary execution/cleanup failure if a best-effort retry
+        # encounters the same OS-level denial, then still perform the bounded wait.
+        with contextlib.suppress(OSError):
+            _terminate_process_group(process, force=True)
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -1600,6 +1655,53 @@ def _codex_runtime_read_paths(executable: str) -> tuple[str, ...]:
     return (str(_codex_runtime_resolution(executable).runtime_root),)
 
 
+def _codex_network_read_paths(
+    *,
+    system_config_root: Path = Path("/etc"),
+    resolver_path: Path = Path("/etc/resolv.conf"),
+    allowed_resolver_roots: tuple[Path, ...] = CODEX_LINUX_RESOLVER_TARGET_ROOTS,
+) -> tuple[str, ...]:
+    """Return Linux system paths required for DNS and TLS in a Codex profile."""
+    if not sys.platform.startswith("linux"):
+        return ()
+    try:
+        lexical_config_root = Path(os.path.abspath(system_config_root))
+        lexical_config_metadata = lexical_config_root.lstat()
+        config_root = lexical_config_root.resolve(strict=True)
+        resolver_target = resolver_path.resolve(strict=True)
+        config_metadata = config_root.stat()
+        resolver_metadata = resolver_target.stat()
+    except OSError as exc:
+        raise _runner_isolation_error(
+            "Managed Codex could not resolve the Linux system configuration required for network access."
+        ) from exc
+    if not stat.S_ISDIR(config_metadata.st_mode) or not stat.S_ISREG(resolver_metadata.st_mode):
+        raise _runner_isolation_error(
+            "Managed Codex requires a system configuration directory and regular resolver configuration file."
+        )
+
+    # Canonicalization can rewrite an ancestor alias (for example macOS /var or
+    # a Windows 8.3 path) even when the final root is an ordinary directory.
+    # Bubblewrap needs both names only when that final entry itself is a symlink.
+    paths = [config_root]
+    if stat.S_ISLNK(lexical_config_metadata.st_mode):
+        paths.insert(0, lexical_config_root)
+    if not resolver_target.is_relative_to(config_root):
+        resolved_roots: list[Path] = []
+        for root in allowed_resolver_roots:
+            with contextlib.suppress(OSError):
+                resolved_roots.append(root.resolve(strict=True))
+        if not any(resolver_target.is_relative_to(root) for root in resolved_roots):
+            raise _runner_isolation_error(
+                "Managed Codex refused a Linux resolver target outside the supported system resolver roots."
+            )
+        # Codex's Linux bubblewrap profile needs /etc itself to materialize the
+        # resolv.conf symlink, but the external target can remain an exact file
+        # grant instead of exposing its containing runtime directory.
+        paths.append(resolver_target)
+    return tuple(str(path) for path in dict.fromkeys(paths))
+
+
 def _managed_python_runtime(root: Path) -> _ManagedPythonRuntime:
     """Resolve the host interpreter and its narrow read-only runtime roots."""
     try:
@@ -1841,7 +1943,10 @@ def _codex_argv(
     managed_python = managed_python or _managed_python_runtime(root)
     if runtime_read_paths is None:
         runtime_read_paths = _codex_runtime_read_paths(executable)
-    runtime_read_paths = tuple(dict.fromkeys((*runtime_read_paths, *managed_python.read_paths)))
+    network_read_paths = _codex_network_read_paths() if allow_network else ()
+    runtime_read_paths = tuple(
+        dict.fromkeys((*runtime_read_paths, *managed_python.read_paths, *network_read_paths))
+    )
     argv = [
         executable,
         "--ask-for-approval",

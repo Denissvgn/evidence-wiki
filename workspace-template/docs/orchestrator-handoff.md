@@ -179,8 +179,8 @@ The output is JSON. This abridged example omits the large
 {
   "schema_version": "1.0",
   "package": "evidence-wiki",
-  "package_version": "0.2.3",
-  "starter_version": "0.5.3",
+  "package_version": "0.2.4",
+  "starter_version": "0.5.4",
   "starter_schema_version": "0.1",
   "compatible_research_yml_contract": "0.1",
   "profile_schema_versions": ["0.1"],

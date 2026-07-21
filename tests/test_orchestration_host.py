@@ -266,37 +266,195 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertTrue(all(document["status"] == "submitted" for document in attempt_documents))
         self.assertTrue(all(document["artifact_type"] == "orchestration_attempt" for document in attempt_documents))
 
+    def test_codex_network_read_paths_use_linux_system_configuration_for_regular_resolver(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_root = Path(tmpdir) / "etc"
+            config_root.mkdir()
+            resolver = config_root / "resolv.conf"
+            resolver.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"):
+                paths = orchestration._codex_network_read_paths(
+                    system_config_root=config_root,
+                    resolver_path=resolver,
+                    allowed_resolver_roots=(),
+                )
+
+        self.assertEqual((str(config_root.resolve()),), paths)
+
+    @unittest.skipIf(os.name == "nt", "system configuration symlink coverage requires POSIX symlinks")
+    def test_codex_network_read_paths_preserve_lexical_and_resolved_system_configuration_roots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            config_root = temporary_root / "etc"
+            resolved_config_root = temporary_root / "system-etc"
+            resolved_config_root.mkdir()
+            (resolved_config_root / "resolv.conf").write_text(
+                "nameserver 192.0.2.1\n",
+                encoding="utf-8",
+            )
+            config_root.symlink_to(resolved_config_root, target_is_directory=True)
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"):
+                paths = orchestration._codex_network_read_paths(
+                    system_config_root=config_root,
+                    resolver_path=config_root / "resolv.conf",
+                    allowed_resolver_roots=(),
+                )
+
+        self.assertEqual((str(config_root), str(resolved_config_root.resolve())), paths)
+
+    @unittest.skipIf(os.name == "nt", "ancestor symlink coverage requires POSIX symlinks")
+    def test_codex_network_read_paths_canonicalize_an_aliased_ancestor_without_an_extra_grant(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            physical_parent = temporary_root / "physical"
+            config_root = physical_parent / "etc"
+            config_root.mkdir(parents=True)
+            resolver = config_root / "resolv.conf"
+            resolver.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+            aliased_parent = temporary_root / "alias"
+            aliased_parent.symlink_to(physical_parent, target_is_directory=True)
+            aliased_config_root = aliased_parent / "etc"
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"):
+                paths = orchestration._codex_network_read_paths(
+                    system_config_root=aliased_config_root,
+                    resolver_path=aliased_config_root / "resolv.conf",
+                    allowed_resolver_roots=(),
+                )
+
+        self.assertEqual((str(config_root.resolve()),), paths)
+
+    def test_codex_network_read_paths_do_not_treat_a_canonical_alias_as_a_final_symlink(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            lexical_config_root = temporary_root / "lexical" / "etc"
+            canonical_config_root = temporary_root / "canonical" / "etc"
+            lexical_config_root.mkdir(parents=True)
+            canonical_config_root.mkdir(parents=True)
+            lexical_resolver = lexical_config_root / "resolv.conf"
+            canonical_resolver = canonical_config_root / "resolv.conf"
+            lexical_resolver.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+            canonical_resolver.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+            concrete_path_type = type(lexical_config_root)
+            real_resolve = concrete_path_type.resolve
+
+            def aliased_resolve(path, strict=False):
+                if path == lexical_config_root:
+                    return canonical_config_root
+                if path == lexical_resolver:
+                    return canonical_resolver
+                return real_resolve(path, strict=strict)
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"), mock.patch.object(
+                concrete_path_type,
+                "resolve",
+                autospec=True,
+                side_effect=aliased_resolve,
+            ):
+                paths = orchestration._codex_network_read_paths(
+                    system_config_root=lexical_config_root,
+                    resolver_path=lexical_resolver,
+                    allowed_resolver_roots=(),
+                )
+
+        self.assertEqual((str(canonical_config_root),), paths)
+
+    @unittest.skipIf(os.name == "nt", "resolver symlink coverage requires POSIX symlinks")
+    def test_codex_network_read_paths_add_only_supported_external_resolver_target(self):
+        for relative_root in (Path("run/systemd/resolve"), Path("mnt/wsl")):
+            with self.subTest(relative_root=relative_root), tempfile.TemporaryDirectory() as tmpdir:
+                temporary_root = Path(tmpdir)
+                config_root = temporary_root / "etc"
+                target_root = temporary_root / relative_root
+                config_root.mkdir()
+                target_root.mkdir(parents=True)
+                target = target_root / "resolv.conf"
+                target.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+                resolver = config_root / "resolv.conf"
+                resolver.symlink_to(target)
+
+                with mock.patch.object(orchestration.sys, "platform", "linux"):
+                    paths = orchestration._codex_network_read_paths(
+                        system_config_root=config_root,
+                        resolver_path=resolver,
+                        allowed_resolver_roots=(target_root,),
+                    )
+
+                self.assertEqual((str(config_root.resolve()), str(target.resolve())), paths)
+
+    @unittest.skipIf(os.name == "nt", "resolver symlink coverage requires POSIX symlinks")
+    def test_codex_network_read_paths_reject_unsupported_external_resolver_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            config_root = temporary_root / "etc"
+            supported_root = temporary_root / "run" / "systemd" / "resolve"
+            unsupported_root = temporary_root / "operator-data"
+            config_root.mkdir()
+            supported_root.mkdir(parents=True)
+            unsupported_root.mkdir()
+            target = unsupported_root / "resolv.conf"
+            target.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+            resolver = config_root / "resolv.conf"
+            resolver.symlink_to(target)
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "outside the supported system resolver roots",
+            ):
+                orchestration._codex_network_read_paths(
+                    system_config_root=config_root,
+                    resolver_path=resolver,
+                    allowed_resolver_roots=(supported_root,),
+                )
+
+    def test_codex_network_read_paths_are_linux_specific(self):
+        for platform_name in ("darwin", "win32"):
+            with self.subTest(platform=platform_name), mock.patch.object(
+                orchestration.sys, "platform", platform_name
+            ):
+                self.assertEqual(
+                    (),
+                    orchestration._codex_network_read_paths(
+                        system_config_root=Path("/missing/system/config"),
+                        resolver_path=Path("/missing/resolv.conf"),
+                    ),
+                )
+
     def test_runner_argv_is_structured_and_contains_no_bypass_flags(self):
         root = Path("/tmp/workspace with spaces")
         managed_python = orchestration._ManagedPythonRuntime(
             executable=root / ".venv" / "bin" / "python",
             read_paths=("/opt/python runtime",),
         )
-        codex = orchestration._codex_argv(
-            "/tmp/fake tools/codex",
-            root,
-            Path("/tmp/schema.json"),
-            Path("/tmp/result.json"),
-            "gpt-test",
-            allow_network=True,
-            runtime_read_paths=("/opt/codex runtime",),
-            managed_python=managed_python,
-        )
+        resolver_paths = ("/etc", "/run/systemd/resolve/stub-resolv.conf")
+        with mock.patch.object(orchestration, "_codex_network_read_paths", return_value=resolver_paths) as network:
+            codex = orchestration._codex_argv(
+                "/tmp/fake tools/codex",
+                root,
+                Path("/tmp/schema.json"),
+                Path("/tmp/result.json"),
+                "gpt-test",
+                allow_network=True,
+                runtime_read_paths=("/opt/codex runtime",),
+                managed_python=managed_python,
+            )
+            codex_offline = orchestration._codex_argv(
+                "/tmp/fake tools/codex",
+                root,
+                Path("/tmp/schema.json"),
+                Path("/tmp/result.json"),
+                None,
+                allow_network=False,
+                runtime_read_paths=("/opt/codex runtime",),
+                managed_python=managed_python,
+            )
         claude = orchestration._claude_argv(
             "/tmp/fake tools/claude",
             root,
             "claude-test",
             allow_network=True,
-        )
-        codex_offline = orchestration._codex_argv(
-            "/tmp/fake tools/codex",
-            root,
-            Path("/tmp/schema.json"),
-            Path("/tmp/result.json"),
-            None,
-            allow_network=False,
-            runtime_read_paths=("/opt/codex runtime",),
-            managed_python=managed_python,
         )
         claude_offline = orchestration._claude_argv(
             "/tmp/fake tools/claude",
@@ -318,8 +476,13 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertIn('default_permissions="evidence_wiki_worker"', codex)
         self.assertIn("allow_login_shell=false", codex)
         codex_config = "\n".join(codex)
+        offline_codex_config = "\n".join(codex_offline)
         self.assertIn('"/opt/codex runtime"="read"', codex_config)
         self.assertIn('"/opt/python runtime"="read"', codex_config)
+        for resolver_path in resolver_paths:
+            self.assertIn(f'{json.dumps(resolver_path)}="read"', codex_config)
+            self.assertNotIn(f'{json.dumps(resolver_path)}="read"', offline_codex_config)
+        network.assert_called_once_with()
         self.assertIn('shell_environment_policy={inherit="core"', codex_config)
         self.assertIn(
             f'{json.dumps(orchestration.MANAGED_PYTHON_ENV)}={json.dumps(str(managed_python.executable))}',
@@ -335,7 +498,7 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertIn('"runs/run-reports"="write"', codex_config)
         self.assertIn('\":tmpdir\"=\"write\"', codex_config)
         self.assertIn("enabled=true", codex_config)
-        self.assertIn("enabled=false", "\n".join(codex_offline))
+        self.assertIn("enabled=false", offline_codex_config)
         self.assertIn("gpt-test", codex)
         self.assertEqual("/tmp/fake tools/claude", claude[0])
         self.assertIn("dontAsk", claude)
@@ -1310,6 +1473,113 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertTrue(completed.stdout.startswith("x" * 1024))
         self.assertLessEqual(len(completed.stdout), 1100)
         self.assertIn("<output truncated>", completed.stdout)
+
+    def test_darwin_process_group_quiescence_requires_valid_process_table_without_live_members(self):
+        cases = (
+            ("4321 S\n1234 Z\n1234 Z+\n", True),
+            ("4321 S\n1234 S\n", False),
+            ("malformed\n", False),
+            ("", False),
+        )
+        for output, expected in cases:
+            with self.subTest(output=output), mock.patch.object(
+                orchestration.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=output, stderr=""),
+            ):
+                self.assertEqual(expected, orchestration._darwin_process_group_is_quiescent(1234))
+
+    def test_darwin_process_group_quiescence_fails_closed_when_process_table_is_unavailable(self):
+        with mock.patch.object(
+            orchestration.subprocess,
+            "run",
+            side_effect=PermissionError("denied"),
+        ):
+            self.assertFalse(orchestration._darwin_process_group_is_quiescent(1234))
+
+    @unittest.skipUnless(os.name == "posix", "process-group signaling is POSIX-specific")
+    def test_process_group_cleanup_ignores_permission_error_after_runner_exit(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = -1
+
+        with mock.patch.object(orchestration.sys, "platform", "darwin"), mock.patch.object(
+            orchestration.os,
+            "killpg",
+            side_effect=PermissionError("denied"),
+        ), mock.patch.object(
+            orchestration,
+            "_darwin_process_group_is_quiescent",
+            return_value=True,
+        ) as quiescent:
+            orchestration._terminate_process_group(process, force=True)
+
+        process.poll.assert_called_once_with()
+        quiescent.assert_called_once_with(1234)
+
+    @unittest.skipUnless(os.name == "posix", "process-group signaling is POSIX-specific")
+    def test_process_group_cleanup_propagates_permission_error_for_live_runner(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = None
+
+        with mock.patch.object(orchestration.sys, "platform", "darwin"), mock.patch.object(
+            orchestration.os,
+            "killpg",
+            side_effect=PermissionError("denied"),
+        ), mock.patch.object(
+            orchestration,
+            "_darwin_process_group_is_quiescent",
+        ) as quiescent, self.assertRaises(PermissionError):
+            orchestration._terminate_process_group(process, force=True)
+
+        quiescent.assert_not_called()
+
+    @unittest.skipUnless(os.name == "posix", "process-group signaling is POSIX-specific")
+    def test_process_group_cleanup_propagates_permission_error_with_live_darwin_descendants(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = -1
+
+        with mock.patch.object(orchestration.sys, "platform", "darwin"), mock.patch.object(
+            orchestration.os,
+            "killpg",
+            side_effect=PermissionError("denied"),
+        ), mock.patch.object(
+            orchestration,
+            "_darwin_process_group_is_quiescent",
+            return_value=False,
+        ), self.assertRaises(PermissionError):
+            orchestration._terminate_process_group(process, force=True)
+
+    @unittest.skipUnless(os.name == "posix", "process-group signaling is POSIX-specific")
+    def test_process_group_cleanup_propagates_post_exit_permission_error_off_macos(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = -1
+
+        with mock.patch.object(orchestration.sys, "platform", "linux"), mock.patch.object(
+            orchestration.os,
+            "killpg",
+            side_effect=PermissionError("denied"),
+        ), self.assertRaises(PermissionError):
+            orchestration._terminate_process_group(process, force=True)
+
+        process.poll.assert_not_called()
+
+    def test_bounded_execution_preserves_primary_process_group_cleanup_error(self):
+        primary = PermissionError("primary cleanup failure")
+        retry = PermissionError("retry cleanup failure")
+
+        with mock.patch.object(
+            orchestration,
+            "_terminate_process_group",
+            side_effect=(primary, retry),
+        ) as terminate, self.assertRaisesRegex(PermissionError, "primary cleanup failure"):
+            orchestration._execute_bounded(
+                [sys.executable, "-c", "pass"],
+                cwd=REPO_ROOT,
+                stdin_text="",
+                timeout_seconds=10,
+            )
+
+        self.assertEqual(2, terminate.call_count)
 
     @unittest.skipUnless(os.name == "posix", "process-group liveness assertion is POSIX-specific")
     def test_timeout_terminates_spawned_runner_descendants(self):

@@ -10,7 +10,7 @@ The file uses one top-level mapping:
 
 ```yaml
 workspace_system:
-  starter_version: "0.5.3"
+  starter_version: "0.5.4"
   schema_version: "0.1"
   created: "2026-05-10"
   compatible_research_yml_contract: "0.1"

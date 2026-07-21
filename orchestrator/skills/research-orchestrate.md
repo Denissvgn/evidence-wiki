@@ -527,7 +527,7 @@ pages or unknown source ids surface as `warnings[]`, never crashes.
   refreshing starter-managed tooling:
 
 ```bash
-python -m pip install --upgrade evidence-wiki==0.2.3
+python -m pip install --upgrade evidence-wiki==0.2.4
 evidence-wiki --version
 evidence-wiki upgrade --target my-research-workspace --dry-run
 evidence-wiki upgrade --target my-research-workspace
