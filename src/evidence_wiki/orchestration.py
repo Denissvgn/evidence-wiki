@@ -58,7 +58,7 @@ CODEX_PERMISSION_PROFILE_NAME = "evidence_wiki_worker"
 CODEX_NPM_PACKAGE_NAME = "@openai/codex"
 MANAGED_PYTHON_ENV = "EVIDENCE_WIKI_PYTHON"
 MANAGED_PYTHON_PROBE = (
-    "import os,pathlib,ssl,sys,yaml;"
+    "import os,pathlib,pypdf,ssl,sys,yaml;"
     f"expected=os.environ.get({MANAGED_PYTHON_ENV!r});"
     "same=bool(expected) and pathlib.Path(expected).resolve()==pathlib.Path(sys.executable).resolve();"
     "ssl.create_default_context();"
@@ -1164,7 +1164,11 @@ def _runner_prompt(work_order: dict[str, Any]) -> str:
         "- completed: this bounded action established its required postconditions. A research action that honestly "
         "leaves workspace readiness blocked_on_sources after creating structured source requests is completed, because "
         "the parent must continue into discovery and acquisition.\n"
-        "- blocked: the work order itself cannot make progress; this asks the parent to stop as blocked_on_sources.\n"
+        "- blocked: the bounded action cannot currently complete. A missing dependency or other retryable tooling "
+        "condition must leave a scoped acquisition candidate selected so the parent pauses and replays the same action. "
+        "A candidate-specific acquisition or normalization failure must transition only that scoped candidate from "
+        "selected to failed, with its normal audit record, so the parent can try another retained route. The controller "
+        "alone declares blocked_on_sources after proving that every permitted route is exhausted.\n"
         "- failed: execution failed and the parent should stop as failed.\n\n"
         "WORK ORDER (trusted orchestration data):\n"
         f"{json.dumps(work_order, ensure_ascii=False, indent=2, sort_keys=False)}\n"
@@ -2137,7 +2141,7 @@ def _probe_codex_managed_python(
     process = _run_runner_capability_command(argv, cwd=root)
     if process.returncode != 0:
         raise _runner_isolation_error(
-            "Managed Codex cannot execute the selected Python interpreter with its PyYAML and TLS dependencies "
+            "Managed Codex cannot execute the selected Python interpreter with its PyYAML, pypdf, and TLS dependencies "
             "inside the read-only permission profile; recreate a dedicated workspace virtual environment and retry.",
             process,
         )

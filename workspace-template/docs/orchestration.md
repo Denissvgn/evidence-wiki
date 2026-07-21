@@ -51,10 +51,13 @@ for workspace scripts instead of resolving `python`, `python3`, or `py` from
 a minimal deterministic `PATH`, and adds read-only permission rules for only
 the selected virtual environment and its external Python runtime. Its
 preflight executes that interpreter inside a stricter read-only variant of the
-worker profile and imports PyYAML. An unreadable macOS framework, Windows base
+worker profile and imports the required PyYAML and pypdf packages before it
+initializes the TLS context. An unreadable macOS framework, Windows base
 installation, missing dependency, or unavailable interpreter therefore fails
 before a new parent is created by `run` and before a worker is launched by
-`resume`.
+`resume`. Poppler is not a managed-run prerequisite: pypdf is the portable
+default PDF backend. A workspace that explicitly selects the Poppler
+compatibility backend must provide `pdftotext` on the worker-visible `PATH`.
 
 Any agent harness can drive the same model-neutral protocol:
 
@@ -171,11 +174,23 @@ Result outcomes describe the work order, not the child run's research verdict:
   that creates structured source requests and ends its child run as
   `blocked_on_sources` must return `completed`; that is the expected handoff to
   parent discovery/acquisition.
-- `blocked` means the work order itself cannot make progress. It terminates the
-  parent session as `blocked_on_sources` and therefore must not be used for the
-  normal research-to-source-request transition.
-- `failed` means the work order or tooling failed and terminates the parent as
-  `failed`.
+- `blocked` means the current bounded attempt cannot complete. The controller
+  classifies the durable post-action state instead of trusting the summary. A
+  non-acquisition action, or an acquisition action whose scoped candidate
+  remains `selected`, pauses the parent with the same pending action; `resume`
+  replays that action. A candidate-specific acquisition failure must make the
+  one canonical `selected` → `failed` transition and append its audit event.
+  That completes only the failed route action and returns the parent to
+  planning so another retained or discoverable route can be tried.
+- `failed` means execution is unrecoverable and terminates the parent as
+  `failed`. A repairable dependency, local tool, or transient provider failure
+  is `blocked`, not `failed`, and must leave the acquisition candidate
+  `selected`.
+
+A worker's `blocked` result never directly assigns terminal `blocked_on_sources`.
+Only the controller's route exhaustion decision on the next routing pass may do
+so, after artifact-derived routing proves that every permitted route for the
+open source requests is exhausted.
 
 ## Routing And Run Boundaries
 
@@ -183,7 +198,9 @@ The controller prioritizes health failures, an existing pending action,
 actionable questions, selected acquisition routes, candidate review, enabled
 discovery, verification, and export in that order. It declares
 `blocked_on_sources` only when open source requests remain and no configured
-provider route can progress them.
+provider route can progress them. A failed candidate route therefore does not
+terminate the parent by itself: the controller first considers another selected
+candidate, reviewable candidates, and an enabled composable discovery route.
 
 Discovery and candidate-review work orders make their no-fetch boundary
 content-based. At issue time the controller records a SHA-256 fingerprint of
@@ -282,9 +299,10 @@ runtime (including `Python.framework` on macOS) receives only a read-only
 grant. Login shells are disabled and the worker shell inherits only the core
 environment plus the pinned interpreter and system-tool path. The final probe
 runs that exact interpreter in isolated, no-bytecode mode inside a read-only
-workspace profile, verifies the environment binding, imports PyYAML, and
-initializes the TLS context. A developer-tools shim, dependency shadowing, or
-inaccessible framework therefore cannot reach the model action.
+workspace profile, verifies the environment binding, imports the required
+PyYAML and pypdf packages, and initializes the TLS context. A developer-tools
+shim, dependency shadowing, or inaccessible framework therefore cannot reach
+the model action.
 
 The host calls the semantic baseline the **tripwire-protected controls**. Its
 bounded snapshot covers the workspace contract and instructions
@@ -338,12 +356,19 @@ recovered after its lease expires; a runner crash leaves the same action pending
 for `resume`. Re-submitting an identical accepted result is idempotent, while a
 different result for the same completed action is a conflict.
 
-A host-side runner failure is resumable because no result was accepted. By
-contrast, a schema-valid worker result with `outcome: failed` is an accepted
+A host-side runner failure is resumable because no result was accepted. A
+schema-valid `blocked` result normally pauses with the action still pending;
+`resume` replays that same action after the dependency, tool, provider, or other
+temporary condition is repaired. The bounded exception is an acquisition
+candidate already transitioned from `selected` to `failed` with the exact new
+canonical audit event: the controller retains that result as a completed route
+attempt and continues planning instead of replaying it.
+
+By contrast, a schema-valid worker result with `outcome: failed` is an accepted
 terminal result: it records the failure, completes the pending action, and
 closes the parent session as `failed`. `resume` never reopens that session.
-After repairing the environment, preserve the failed session for audit, review
-any partial worker outputs, and start a fresh parent without the old ID:
+After repairing an unrecoverable environment failure, preserve the failed
+session for audit. Review any partial worker outputs, then start a fresh parent without the old ID:
 
 ```bash
 evidence-wiki orchestrate run \
@@ -428,7 +453,7 @@ and inspect the retained phase before deciding whether it is safe to resume.
 Preview both steps first:
 
 ```bash
-python -m pip install --upgrade evidence-wiki==0.2.2
+python -m pip install --upgrade evidence-wiki==0.2.3
 evidence-wiki --version
 evidence-wiki upgrade --target . --dry-run
 evidence-wiki upgrade --target .

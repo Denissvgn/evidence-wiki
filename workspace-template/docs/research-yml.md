@@ -29,6 +29,9 @@ Defines generated source metadata locations and lifecycle states.
 
 - `manifest_path`: JSONL manifest written by inventory tooling.
 - `normalized_dir`: Markdown records generated from raw sources.
+- `pdf_extractor`: PDF text backend. `pypdf` is the portable canonical default
+  installed with EvidenceWiki. `poppler` selects the optional `pdftotext`
+  compatibility backend and requires the Poppler system package on `PATH`.
 - `cards_dir`: compact source cards or summaries.
 - `source_requests_path`: JSONL source-request artifact managed by `scripts/source_requests.py` (see `docs/source-delivery.md`).
 - `sources.coverage_dir`: directory for per-question coverage manifests, defaulting to `sources/coverage` (see `docs/coverage-manifest.md`).

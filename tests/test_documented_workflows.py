@@ -548,6 +548,12 @@ class DocumentedWorkflowTests(unittest.TestCase):
             "ACQUISITION_DISABLED",
             "retrieved-paper URLs",
             "license: unresolved",
+            "--expected-state selected",
+            "--to-state failed",
+            "--actor acquire-agent",
+            "--run-id RUN_ID",
+            '"outcome": "blocked"',
+            "route-exhaustion decision",
         ):
             self.assertIn(expected, skill)
 
@@ -940,7 +946,8 @@ class DocumentedWorkflowTests(unittest.TestCase):
         for text in (readme, handoff):
             self.assertIn("evidence-wiki doctor --format json", text)
             self.assertIn("python3 scripts/doctor.py --format json", text)
-            self.assertIn("PDF normalization degrades", text)
+            self.assertIn("pypdf", text)
+            self.assertIn("Poppler compatibility", text)
 
     def test_mcp_threat_model_is_documented(self):
         mcp_doc = " ".join(MCP_DOC.read_text().split())
@@ -1445,6 +1452,13 @@ class DocumentedWorkflowTests(unittest.TestCase):
         self.assertIn("No recovery path requires a human-authored result document", handoff)
         self.assertIn("EvidenceWiki host", run_controller)
         self.assertIn("alone owns `runs/orchestrations/", run_controller)
+
+        for label, text in (("orchestration.md", orchestration), ("orchestrator-handoff.md", handoff)):
+            with self.subTest(blocked_result_contract=label):
+                self.assertIn("same pending action", text)
+                self.assertIn("`selected` → `failed`", text)
+                self.assertIn("route exhaustion", text)
+                self.assertIn("terminal `blocked_on_sources`", text)
 
         for skill_path in (RUN_SKILL, RESEARCH_DISCOVER_SKILL, RESEARCH_ACQUIRE_SKILL, VERIFY_SKILL):
             skill = skill_path.read_text(encoding="utf-8")

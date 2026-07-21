@@ -4,12 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evidence-wiki"
-version = "0.2.2"
+version = "0.2.3"
 description = "Verifiable autonomous research workspaces: agent-driven research where every answer cites provenance-tracked sources or blocks with a structured evidence request."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
+  "pypdf>=6.14,<7",
   "PyYAML>=6.0",
 ]
 keywords = [

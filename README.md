@@ -60,6 +60,11 @@ evidence-wiki deploy \
 cd solid-state-batteries
 ```
 
+The wheel installs both required Python dependencies, PyYAML and pypdf. The
+portable pypdf backend is therefore available to PDF-only acquisition and
+normalization without installing Poppler separately. The agent CLI remains an
+operator-managed system tool.
+
 The repeated provider flags are explicit network authorization. The
 `general-science` pack recommends these providers but does not enable them by
 itself. arXiv needs no credential; OpenAlex can use `OPENALEX_API_KEY` from the
@@ -198,7 +203,7 @@ For a session created by 0.2.0, upgrade the package and managed workspace
 scripts, then inspect its phase before replay:
 
 ```bash
-python -m pip install --upgrade evidence-wiki==0.2.2
+python -m pip install --upgrade evidence-wiki==0.2.3
 evidence-wiki upgrade --target . --dry-run
 evidence-wiki upgrade --target .
 evidence-wiki orchestrate status --target . --orchestration-id ORCH_ID --format json
@@ -363,11 +368,13 @@ The template separates three evidence layers:
 Required:
 
 - Python 3.10 or newer.
-- PyYAML, importable as `yaml`.
+- PyYAML, importable as `yaml`, and pypdf 6.14 or newer within major version 6.
+  Both are installed by `python3 -m pip install evidence-wiki`.
 
 Optional:
 
-- Poppler `pdftotext` for PDF-only normalization.
+- Poppler `pdftotext` for the explicit Poppler compatibility backend. The
+  portable pypdf backend is the default and does not require Poppler.
 - Codex CLI 0.138 or newer, or Claude Code on macOS, Linux, WSL2, or in a
   container, for
   `evidence-wiki orchestrate run`; the
@@ -375,6 +382,22 @@ Optional:
   either built-in runner.
 - `agent-wiki-cli` / `llm-wiki` for manually generated codebase-analysis artifacts. The repository does not install or run this adapter automatically.
 - Git, for normal version-control workflows and optional user-edit snapshots.
+
+Python package requirements and operating-system tools have different install
+paths. pip installs EvidenceWiki, PyYAML, and pypdf. It cannot install the
+Poppler executable, Git, agent CLIs, `bubblewrap`, or `socat`. Install only the
+system capabilities required by the workflows you enable:
+
+| Capability | Linux / WSL2 | macOS | Windows |
+|------------|--------------|-------|---------|
+| Optional Poppler compatibility backend | `sudo apt install poppler-utils` | `brew install poppler` | `conda install conda-forge::poppler` |
+| Git snapshots | Install `git` with the OS package manager | Install Git or Xcode Command Line Tools | Install Git for Windows |
+| Managed Claude sandbox | Install `bubblewrap` and `socat` | Uses built-in `sandbox-exec` and `touch` | Use WSL2, a container, or the external protocol |
+
+The PyPI package named `pdftotext` is a native Python binding that still needs
+Poppler development libraries; it is not a portable substitute for the
+`pdftotext` executable. Use the default pypdf backend unless Poppler
+compatibility is specifically required.
 
 Quick dependency check:
 
@@ -389,8 +412,13 @@ the package entry point:
 python3 scripts/doctor.py --format json
 ```
 
-The doctor report is machine-readable and explains degraded optional
-capabilities. For example, if Poppler is missing, it reports that PDF normalization degrades to stubs for PDF-only records.
+The doctor report is machine-readable and distinguishes required Python
+dependencies from optional system capabilities. Missing pypdf is a required
+failure. Missing Poppler is informational because the portable pypdf backend
+remains available by default. It becomes a required failure when
+`sources.pdf_extractor: poppler` explicitly selects the Poppler compatibility
+backend. Doctor includes the corresponding installation or configuration
+remediation.
 
 ## Workspace Commands
 
@@ -649,6 +677,11 @@ Normalize pending eligible sources:
 ```bash
 python3 scripts/normalize_sources.py
 ```
+
+`sources.pdf_extractor: pypdf` is the portable default. A reviewed
+compatibility run can select `poppler` in `research.yml` or pass
+`--pdf-extractor poppler`; that explicit backend requires the separately
+installed `pdftotext` executable.
 
 Regenerate a selected source:
 

@@ -44,6 +44,17 @@ Inputs:
 - For every arXiv paper, use dual-format arXiv acquisition: fetch the PDF as the archival/checksum citation artifact and fetch the source bundle as the preferred normalization input, passing the same `--request-id` and `--candidate-id` to both commands.
 - For standards registry captures, require selected candidates, provider allowlists, reviewed terms notes, and a standards metadata sidecar passed with `web get --standards-metadata`. Never download or store full ISO, IEC, BSI, CEN/CENELEC, ETSI, or other restricted standards text unless a reviewed license explicitly allows it.
 - Reopen affected blocked questions only after the source request is fulfilled and normalized evidence exists for the delivered source ID.
+- Classify a managed acquisition failure from durable artifacts before
+  returning a result. A repairable dependency, unavailable local tool,
+  temporary provider/network condition, or other retryable failure must leave
+  the scoped candidate `selected` and return `outcome: blocked`; the parent
+  pauses and `resume` replays the same action.
+- Mark a scoped candidate `failed` only when that candidate's acquisition or
+  normalization route is definitively unusable. Use the exact work-order
+  candidate ID, request ID, run ID, and agent ID in the canonical transition,
+  then return `outcome: blocked`. The controller completes that route attempt
+  and plans another route. Never use a candidate failure to fulfill a request or
+  reopen a question, and never declare terminal `blocked_on_sources` yourself.
 
 ## Workflow
 
@@ -121,6 +132,44 @@ python3 scripts/fetch_sources.py --format json web get --url "https://www.iso.or
    Keep search output small or write it to a file when it is large. Do not fabricate IDs, DOIs, or exact matches.
    For arXiv papers, PDF-only degradation is allowed only when the source bundle is unavailable or withdrawn; leave the warning visible, continue with PDF normalization, and report the degraded state. Size `max_downloads_per_run` for `2 x papers + web deliveries` because each arXiv paper now consumes one PDF download and one source-bundle download. If re-normalizing an already answered workspace changes PDF records to `methods.latex`, rerun `verify_quotes.py --slug <slug> --write` for every grounded answer before the next readiness evaluation.
    For OA academic works, prefer `openalex download-pdf` before raw `web get` when OpenAlex metadata provides a PDF route; provider-native failure artifacts are more auditable than publisher bot-wall failures. Do not bypass bot walls, spoof headers, or disable TLS certificate verification. For `web get`, fetch only HTTPS URLs whose domain appears in `integrations.acquisition.web.allowed_domains`; use `--publication-date`, `--effective-date`, `--validity-period`, `--valid-for-year`, and `--date-note` only after verifying currentness from retrieved bytes or authoritative metadata. DNS uncertainty, unsafe redirects, non-2xx status, unexpected media type, and TLS failure must remain acquisition refusals.
+
+   If a managed fetch or normalization cannot complete, distinguish a
+   retryable execution condition from a definitive candidate-route failure:
+
+   - For a missing or unavailable dependency (including pypdf or an explicitly
+     selected `pdftotext` backend), unavailable local runtime, temporary network
+     or provider failure, or other repairable condition, do not mutate the
+     candidate lifecycle. Leave it `selected`, do not fulfill the request or
+     reopen questions, and return a structured result with
+     `"outcome": "blocked"`. The controller pauses with this action pending;
+     `orchestrate resume` replays the same action after repair.
+   - Only when the exact candidate route is definitively unable to yield usable
+     evidence—for example, its stable identifier was withdrawn or its bytes are
+     intrinsically corrupt or unsupported—record the route failure with the
+     work order's exact correlations:
+
+```bash
+python3 scripts/discover_sources.py --format json candidates transition \
+  --candidate-id cand-1a2b3c4d5e \
+  --expected-state selected \
+  --to-state failed \
+  --request-id req-1a2b3c4d5e \
+  --reason "The selected provider route cannot yield a usable evidence artifact." \
+  --actor acquire-agent \
+  --run-id RUN_ID
+```
+
+   Re-read the candidate list and command response. They must show exactly one
+   new `candidate_transition` audit event with `prior_state: selected`,
+   `new_state: failed`, and the same candidate, request, run, actor, reason, and
+   timestamp correlations. Keep the source request open and linked questions
+   unchanged, then return `"outcome": "blocked"`. The controller accepts this
+   route attempt, clears the action, and continues planning; it declares
+   terminal `blocked_on_sources` only after it proves every permitted route is
+   exhausted. Do not return `failed` for either a retryable condition or a
+   candidate-specific route failure. A PDF source-bundle refusal is only a
+   degraded dual-format result when the acquired PDF can still be normalized;
+   it is not by itself a failed candidate route.
 
 6. Verify the downloaded artifact:
 
@@ -202,3 +251,12 @@ python3 scripts/workspace_status.py --format json
 - `log.md` has an `acquire` entry.
 - Final output lists retrieved-paper URLs, target paths, manifest source IDs, normalized records, and license status or uncertainty.
 - Final `workspace_status.py --format json` output was checked before handoff.
+- Any retryable managed failure left the scoped candidate `selected`, left its
+  request and questions unchanged, and returned `outcome: blocked` so `resume`
+  replays the same action.
+- Any definitive candidate-route failure made exactly one audited `selected` →
+  `failed` transition with the work-order candidate, request, run, actor, and
+  reason correlations; it left the request open, did not reopen questions, and
+  returned `outcome: blocked` so planning can continue.
+- No worker result claimed terminal `blocked_on_sources`; only the controller's
+  route-exhaustion decision may terminate the parent with that status.

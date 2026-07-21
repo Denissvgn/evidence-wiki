@@ -1060,6 +1060,7 @@ class OrchestrationHostTests(unittest.TestCase):
         )
         self.assertIn('"."="read"', "\n".join(python_probe_argv))
         self.assertNotIn('"."="write"', "\n".join(python_probe_argv))
+        self.assertIn("pypdf", python_probe_argv[-1])
         self.assertIn("ssl.create_default_context()", python_probe_argv[-1])
         self.assertIn(orchestration.MANAGED_PYTHON_ENV, python_probe_argv[-1])
 
@@ -1089,7 +1090,7 @@ class OrchestrationHostTests(unittest.TestCase):
             return_value=failed,
         ) as capability, self.assertRaisesRegex(
             orchestration.OrchestrationHostError,
-            "RUNNER_ISOLATION_UNAVAILABLE.*selected Python interpreter.*PyYAML.*TLS.*recreate",
+            "RUNNER_ISOLATION_UNAVAILABLE.*selected Python interpreter.*PyYAML.*pypdf.*TLS.*recreate",
         ) as caught:
             orchestration._probe_codex_managed_python(
                 "/tmp/fake codex",
@@ -1544,7 +1545,9 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertIn("--output-schema", observed["argv"])
         self.assertIn('"action_id": "action-0001"', observed["prompt"])
         self.assertIn("blocked_on_sources after creating structured source requests is completed", observed["prompt"])
-        self.assertIn("blocked: the work order itself cannot make progress", observed["prompt"])
+        self.assertIn("blocked: the bounded action cannot currently complete", observed["prompt"])
+        self.assertIn("leave a scoped acquisition candidate selected", observed["prompt"])
+        self.assertIn("selected to failed", observed["prompt"])
         self.assertIn("This action may be a replay after interruption", observed["prompt"])
         self.assertIn("hard authorization and boundedness limits", observed["prompt"])
         self.assertIn("never duplicate downloads", observed["prompt"])

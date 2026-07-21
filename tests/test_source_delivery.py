@@ -340,6 +340,8 @@ class SourceDeliveryTests(unittest.TestCase):
                     workspace,
                     "--source-id",
                     "paper:2601.00001v1",
+                    "--pdf-extractor",
+                    "poppler",
                     "--format",
                     "json",
                 )
@@ -349,6 +351,27 @@ class SourceDeliveryTests(unittest.TestCase):
         envelope = json.loads(stderr)
         self.assertEqual("DEPENDENCY_MISSING", envelope["error_code"])
         self.assertIn("pdftotext", envelope["message"])
+
+    def test_normalize_json_missing_pypdf_uses_error_envelope(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            self.inventory_workspace(workspace)
+            self.force_pdf_fallback_manifest(workspace)
+
+            with mock.patch.object(NORMALIZE.importlib.util, "find_spec", return_value=None):
+                code, stdout, stderr = self.run_normalize_capture(
+                    workspace,
+                    "--source-id",
+                    "paper:2601.00001v1",
+                    "--format",
+                    "json",
+                )
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout)
+        envelope = json.loads(stderr)
+        self.assertEqual("DEPENDENCY_MISSING", envelope["error_code"])
+        self.assertIn("pypdf", envelope["message"])
 
     def test_normalize_dry_run_json_report_shape(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -421,6 +444,8 @@ class SourceDeliveryTests(unittest.TestCase):
                         workspace,
                         "--source-id",
                         "paper:2601.00001v1",
+                        "--pdf-extractor",
+                        "poppler",
                         "--format",
                         "json",
                     )

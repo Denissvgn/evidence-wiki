@@ -55,6 +55,8 @@ def test_release_gate_checks_identity_quality_and_built_wheel() -> None:
         "git diff --check",
         "-m twine check",
         "pip install dist/*.whl",
+        "import pypdf",
+        "pypdf.__version__",
         "ORCHESTRATION_RESULT_SCHEMA",
         'properties["schema_version"]',
         "workspace-template/docs/orchestration.md",

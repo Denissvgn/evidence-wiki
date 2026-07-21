@@ -195,6 +195,10 @@ class ErrorEnvelopeTests(unittest.TestCase):
                 "PDF text extraction requires `pdftotext` from Poppler. "
                 "Install Poppler or poppler-utils, then rerun normalize_sources.py."
             ): "DEPENDENCY_MISSING",
+            (
+                "PDF text extraction requires the `pypdf` Python package. "
+                "Install the EvidenceWiki package dependencies, then rerun normalize_sources.py."
+            ): "DEPENDENCY_MISSING",
             "Missing baseline file: /tmp/run-baseline.json": "BASELINE_MISSING",
             "Baseline must be question_status.py --format json output or a run_report.py baseline artifact": "BASELINE_INVALID",
             "Provide one or more query terms.": "QUERY_MISSING",

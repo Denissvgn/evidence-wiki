@@ -50,7 +50,7 @@ raw_paths:
 manifest_path: sources/manifest.jsonl
 normalizer:
   name: normalize_sources.py
-  version: 1
+  version: 2
 parse_warnings: []
 ---
 ```
@@ -145,6 +145,7 @@ Optional field meanings:
 | `provider` | Inferred provider for link stubs, such as `github` or a URL host. |
 | `fetch_status` | Fetch or artifact state for link and codebase stubs. Use `not_fetched` when no network content has been fetched and `artifact_recorded` when a local codebase artifact was normalized. |
 | `extraction_method` | Method used, such as `latex`, `pdf_text`, `html_text`, `table_text`, `link_stub`, `manual`, `web_stub`, `codebase_context`, or `codebase_stub`. |
+| `pdf_extractor` | PDF records only: the selected backend `name` (`pypdf` or `poppler`) and resolved backend `version`. Changing the configured backend makes an existing PDF record stale and regenerates it. |
 | `content_hash` | Hash of normalized extracted content for reproducibility. |
 | `raw_fingerprint` | Content hash of the raw inputs (paper bundle, PDF, HTML page, or CSV/TSV file) copied from the manifest. Re-running normalization compares it to the manifest to re-generate only records whose raw source changed. Absent for links and codebase records. |
 | `references_source_ids` | Matched citation-graph neighbors from local BibTeX bibliographies. v1 matches only arXiv IDs and DOI strings against existing manifest records; no title, author, or fuzzy matching is performed. |
@@ -163,21 +164,68 @@ coverage policies reject it. The normalizer copies inventory usability reasons
 from the manifest and adds conservative HTML reasons for obvious 404/not-found
 pages, official unavailable/error pages, and sparse JavaScript shells.
 
-## PDF Text Fallback Dependency
+## PDF Text Extraction Backends
 
-PDF-only records may be normalized with `extraction_method: pdf_text` when no usable LaTeX entrypoint exists. The fallback uses the local Poppler `pdftotext` command for reading-order source text:
+PDF-only records use `extraction_method: pdf_text` when no usable LaTeX
+entrypoint exists. `sources.pdf_extractor` selects the backend for a workspace;
+the template default is `pypdf`. One command can override that reviewed setting
+with `--pdf-extractor pypdf|poppler`. The selected backend and version are
+recorded in `pdf_extractor` frontmatter and in the JSON action report. Changing
+the selection makes existing PDF records stale so they are regenerated instead
+of silently retaining text produced by another backend.
+
+### Portable pypdf backend
+
+pypdf 6.14 or newer within major version 6 is a required EvidenceWiki Python
+dependency and is installed by pip with the package. Extraction runs in a
+separate isolated invocation of the exact Python interpreter. It performs two
+bounded passes per page:
+
+- the plain `page.extract_text()` pass supplies reading-order source text;
+- `page.extract_text(extraction_mode="layout",
+  layout_mode_space_vertically=False)` supplies layout text used only for
+  media and table captions.
+
+The helper has a 120-second timeout and refuses PDFs larger than 100 MiB, more
+than 2,000 pages, or more than 20,000,000 extracted characters per pass. Its
+structured result is validated before normalization. A missing pypdf install is
+a fatal setup error and, under `--format json`, is emitted on stderr through the
+shared error envelope. A corrupt, timed-out, or otherwise failed individual PDF
+is retained as a failed action in the normalization report, and the command
+exits non-zero; no stub is presented as normalized evidence.
+
+### Explicit Poppler compatibility backend
+
+`poppler` is opt-in and uses the local Poppler executable for equivalent
+reading-order and layout passes:
 
 ```text
 pdftotext -enc UTF-8 <pdf> -
+pdftotext -enc UTF-8 -layout <pdf> -
 ```
 
-Normalization also runs a separate `pdftotext -layout -enc UTF-8 <pdf> -` pass for media/table captions only. The layout pass is not used for the main extracted text because two-column academic PDFs can interleave columns on shared physical lines. The fallback strips arXiv sidebar watermark lines, joins simple mid-word hyphenation breaks, handles ICML-style abstract boxes that appear after an Introduction heading, and lowers title confidence when it collapses letter-spaced small-caps title fragments. When the ICML-style abstract fallback fires, normalized frontmatter records `abstract_confidence: low` and a parse warning names the recovery heuristic. If `pdftotext` is not installed, normalization must fail with an action message instead of silently adding or downloading a dependency. Install Poppler through the operating system package manager, such as `poppler-utils` on Debian/Ubuntu.
+pip cannot install this system executable. Install it separately with
+`poppler-utils` on Debian/Ubuntu, `brew install poppler` on macOS, or
+`conda install conda-forge::poppler` on Windows. Selecting `poppler` when
+`pdftotext` is not on `PATH` is a fatal setup error; missing Poppler has no
+effect when the default pypdf backend is selected.
+
+Both backends feed the same deterministic cleanup and metadata heuristics. The
+normalizer strips arXiv sidebar watermark lines, joins simple mid-word
+hyphenation breaks, handles ICML-style abstract boxes that appear after an
+Introduction heading, and lowers title confidence when it collapses
+letter-spaced small-caps title fragments. When the ICML-style abstract fallback
+fires, normalized frontmatter records `abstract_confidence: low` and a parse
+warning names the recovery heuristic.
 
 PDF extraction changes normalized evidence text. After changing PDF extraction behavior or regenerating PDF-fallback normalized records, rerun `verify_quotes.py --slug <slug> --write` for every grounded question that cites those records before the next readiness evaluation.
 
 ## Scanned PDFs and OCR
 
-When `pdftotext` runs successfully but extracts fewer than 100 characters per page (`PDF_MIN_CHARS_PER_PAGE` in `normalize_sources.py`), the PDF is likely scanned or image-only. The record is still written, clearly degraded:
+When the selected PDF extractor runs successfully but extracts fewer than 100
+characters per page (`PDF_MIN_CHARS_PER_PAGE` in `normalize_sources.py`), the
+PDF is likely scanned or image-only. The record is still written, clearly
+degraded:
 
 - frontmatter gains `needs_ocr: true` and a parse warning naming the character and page counts;
 - record `status` is `partial` (not `failed`), so orchestrators can distinguish "needs OCR" from broken extraction;
@@ -185,7 +233,12 @@ When `pdftotext` runs successfully but extracts fewer than 100 characters per pa
 
 `workspace_status.py` reports the count of such records as `sources.needs_ocr`, and lint raises a LOW `pdf_needs_ocr` notice per record, so an orchestrator can route an OCR task.
 
-OCR itself is out of scope: no OCR dependency is bundled. The supported route is external — a user or agent runs OCR out of band and delivers the extracted text alongside the PDF (for example as a Markdown file under the same raw root, or as a `manual:` normalized record). Environment or execution failures (missing `pdftotext`, timeouts, non-zero exits) never set `needs_ocr`; those remain `failed`.
+OCR itself is out of scope: no OCR dependency is bundled. The supported route
+is external — a user or agent runs OCR out of band and delivers the extracted
+text alongside the PDF (for example as a Markdown file under the same raw root,
+or as a `manual:` normalized record). Environment or execution failures
+(missing selected backend, timeout, corrupt PDF, or non-zero extractor exit)
+never set `needs_ocr`; those remain failed actions.
 
 ## HTML Records
 
@@ -263,6 +316,7 @@ Common controls:
 | `python3 scripts/normalize_sources.py --all --force` | Regenerate every eligible source, even unchanged ones. |
 | `python3 scripts/normalize_sources.py --all --dry-run` | Print planned actions without extraction or writes. |
 | `python3 scripts/normalize_sources.py --all --format json` | Print one machine-readable normalization report object to stdout. |
+| `python3 scripts/normalize_sources.py --pdf-extractor poppler` | Explicitly use the optional Poppler compatibility backend for this run. |
 | `python3 scripts/normalize_sources.py --append-log` | Append a compact run summary to `log.md`. |
 
 Unchanged existing records are not overwritten unless `--force` is supplied. A
@@ -290,10 +344,12 @@ method counts, top-level warnings, and one action record per selected source
 that was skipped, planned, created, updated, partially extracted, or failed.
 Action warnings include unusable-evidence reasons when normalization detects an
 obvious official error page or sparse JavaScript shell.
-Fatal setup and tooling errors under JSON mode, including a missing manifest or
-missing Poppler `pdftotext`, are written to stderr as the shared error envelope.
-Partial per-source extraction failures remain nonfatal report actions so an
-orchestrator can route them to OCR or manual review without scraping text.
+Fatal setup and tooling errors under JSON mode, including a missing manifest,
+missing required pypdf package, or missing `pdftotext` after explicitly
+selecting Poppler, are written to stderr as the shared error envelope.
+Per-source extraction failures remain structured failed report actions so an
+orchestrator can route them to repair or manual review without scraping text;
+the normalization command exits non-zero when any action failed.
 
 ## Required Sections
 
@@ -372,7 +428,7 @@ raw_paths:
 manifest_path: sources/manifest.jsonl
 normalizer:
   name: normalize_sources.py
-  version: 1
+  version: 2
 parse_warnings: []
 title: Toward Long-Horizon Engineering for ML Research
 authors: []
@@ -443,13 +499,16 @@ raw_paths:
 manifest_path: sources/manifest.jsonl
 normalizer:
   name: normalize_sources.py
-  version: 1
+  version: 2
 parse_warnings:
   - PDF text extraction may have lost reading order.
 title:
 authors: []
 raw_pdf: raw/pdf/example.pdf
 extraction_method: pdf_text
+pdf_extractor:
+  name: pypdf
+  version: 6.14.2
 confidence: medium
 ---
 
@@ -503,7 +562,7 @@ raw_paths:
 manifest_path: sources/manifest.jsonl
 normalizer:
   name: normalize_sources.py
-  version: 1
+  version: 2
 parse_warnings: []
 title: AweAI-Team/AiScientist
 url: https://github.com/AweAI-Team/AiScientist
@@ -566,7 +625,7 @@ raw_paths:
 manifest_path: sources/manifest.jsonl
 normalizer:
   name: normalize_sources.py
-  version: 1
+  version: 2
 parse_warnings: []
 title: example.org/research/path
 url: https://example.org/research/path
@@ -626,7 +685,7 @@ raw_paths: []
 manifest_path: sources/manifest.jsonl
 normalizer:
   name: manual
-  version: 1
+  version: 2
 parse_warnings: []
 title: Lab Notes on Agent Evaluations
 authors:

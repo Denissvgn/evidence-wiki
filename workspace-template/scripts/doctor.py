@@ -40,6 +40,11 @@ class DoctorEnvironment:
 
         return yaml
 
+    def import_pypdf(self):
+        import pypdf
+
+        return pypdf
+
     def which(self, name: str) -> str | None:
         return shutil.which(name)
 
@@ -155,6 +160,33 @@ def pyyaml_check(env: DoctorEnvironment) -> tuple[dict[str, Any], Any | None]:
     )
 
 
+def pypdf_check(env: DoctorEnvironment) -> dict[str, Any]:
+    try:
+        pypdf = env.import_pypdf()
+    except ImportError as exc:
+        return check_item(
+            "pypdf",
+            "pypdf import",
+            "missing",
+            True,
+            f"pypdf is not importable: {exc}",
+            "The portable PDF normalization backend cannot run.",
+            "Reinstall EvidenceWiki so its required pypdf dependency is present, for example with "
+            "`python3 -m pip install --upgrade evidence-wiki`.",
+        )
+    version = getattr(pypdf, "__version__", "unknown")
+    return check_item(
+        "pypdf",
+        "pypdf import",
+        "ok",
+        True,
+        "pypdf is importable.",
+        "PDF-only records can use the portable Python normalization backend.",
+        "No action required.",
+        version=str(version),
+    )
+
+
 def tool_check(
     env: DoctorEnvironment,
     *,
@@ -187,6 +219,58 @@ def tool_check(
         "No action required.",
         version=version,
         details={"path": path},
+    )
+
+
+def poppler_check(env: DoctorEnvironment, *, required: bool = False) -> dict[str, Any]:
+    path = env.which("pdftotext")
+    if not path:
+        remediation = (
+            "Install Poppler with `apt install poppler-utils` on Debian/Ubuntu, `brew install poppler` on macOS, "
+            "or `conda install conda-forge::poppler` on Windows, and expose `pdftotext` on PATH; "
+            "or set sources.pdf_extractor to pypdf. pip does not install the Poppler executable."
+            if required
+            else "No action is required. To enable the explicit Poppler compatibility backend, install Poppler "
+            "with `apt install poppler-utils` on Debian/Ubuntu, `brew install poppler` on macOS, or "
+            "`conda install conda-forge::poppler` on Windows. pip does not install the Poppler executable."
+        )
+        return check_item(
+            "pdftotext",
+            "Poppler pdftotext",
+            "missing" if required else "ok",
+            required,
+            (
+                "Configured Poppler PDF extractor requires `pdftotext`, but it was not found on PATH."
+                if required
+                else "Optional `pdftotext` compatibility backend was not found on PATH."
+            ),
+            (
+                "PDF normalization cannot run until the configured backend is available."
+                if required
+                else "The required pypdf backend remains available for PDF-only normalization."
+            ),
+            remediation,
+            details={"available": False, "selected": required},
+        )
+    version = env.command_version([path, "-v"])
+    return check_item(
+        "pdftotext",
+        "Poppler pdftotext",
+        "ok",
+        required,
+        (
+            f"Configured Poppler PDF extractor is available at {path}."
+            if required
+            else f"Optional `pdftotext` compatibility backend is available at {path}."
+        ),
+        (
+            "PDF-only records can use the configured Poppler backend."
+            if required
+            else "The explicit Poppler compatibility backend can be selected."
+        ),
+        "No action required.",
+        version=version,
+        details={"available": True, "path": path, "selected": required},
     )
 
 
@@ -413,23 +497,23 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
     env = env or DoctorEnvironment()
     project_root = project_root.expanduser().resolve()
     pyyaml, yaml_module = pyyaml_check(env)
+    pypdf = pypdf_check(env)
+    config = load_research_config(project_root, yaml_module)
+    sources = config.get("sources") if isinstance(config.get("sources"), dict) else {}
+    poppler_required = sources.get("pdf_extractor", "pypdf") == "poppler"
     workspace_health = evaluate_workspace_health(
         project_root,
-        optional_tool_availability={"pdftotext": env.which("pdftotext") is not None},
+        optional_tool_availability={
+            "pypdf": pypdf["status"] == "ok",
+            "pdftotext": env.which("pdftotext") is not None,
+        },
     )
     health_codes = ", ".join(workspace_health["finding_codes"]) or "none"
     checks = [
         python_check(env),
         pyyaml,
-        tool_check(
-            env,
-            name="pdftotext",
-            label="Poppler pdftotext",
-            version_args=["-v"],
-            missing_implication="PDF normalization degrades to stubs for PDF-only records.",
-            ok_implication="PDF-only records can be normalized through Poppler text extraction.",
-            remediation="Install Poppler, such as `poppler-utils` on Debian/Ubuntu.",
-        ),
+        pypdf,
+        poppler_check(env, required=poppler_required),
         tool_check(
             env,
             name="git",

@@ -713,6 +713,45 @@ class CandidateLifecycleTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(1, event_count)
 
+    def test_failed_transition_validates_explicit_request_correlation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.write_workspace(
+                Path(tmpdir),
+                [canonical_candidate("cand-failure-route", "selected")],
+            )
+            store = workspace / "sources" / "discovery" / "candidates.jsonl"
+            before = store.read_bytes()
+            code, stdout, stderr = self.run_cli(
+                [
+                    "--project-root",
+                    str(workspace),
+                    "--format",
+                    "json",
+                    "candidates",
+                    "transition",
+                    "--candidate-id",
+                    "cand-failure-route",
+                    "--expected-state",
+                    "selected",
+                    "--to-state",
+                    "failed",
+                    "--request-id",
+                    "req-wrong-correlation",
+                    "--reason",
+                    "definitive candidate route failure",
+                    "--actor",
+                    "acquire-agent",
+                    "--run-id",
+                    "run-acquisition",
+                ]
+            )
+
+            self.assertEqual(2, code)
+            self.assertEqual("", stdout)
+            self.assertEqual("CANDIDATE_CORRELATION_CONFLICT", json.loads(stderr)["error_code"])
+            self.assertEqual(before, store.read_bytes())
+            self.assertEqual([], self.audit_events(workspace))
+
     def test_stale_and_illegal_transitions_fail_without_rewriting_store_or_audit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), [canonical_candidate("cand-guard0000", "reviewed")])

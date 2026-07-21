@@ -374,6 +374,42 @@ class OrchestrationControllerTests(unittest.TestCase):
         )
         return request["request_id"]
 
+    def append_selected_acquisition_candidates(
+        self,
+        target: Path,
+        request_id: str,
+        candidate_ids: list[str],
+    ) -> None:
+        config = DISCOVER.load_config(target)
+        candidates = [
+            {
+                "schema_version": "1.0",
+                "candidate_id": candidate_id,
+                "request_id": request_id,
+                "source_request_id": request_id,
+                "selected_for_request_id": request_id,
+                "selected_request_id": request_id,
+                "provider": "arxiv",
+                "discovery_providers": ["arxiv"],
+                "source_type": "paper",
+                "paper": {"provider_ids": {"arxiv": f"2601.{12345 + index:05d}v2"}},
+                "lifecycle_schema_version": "2.0",
+                "lifecycle_state": "selected",
+                "status": "selected",
+                "selection_status": "selected",
+                "fetch_status": "planned",
+                "selected_at": "2026-07-21T00:00:00Z",
+                "selected_by": "agent-test",
+                "selection_reason": "Selected as a test acquisition route.",
+                "lifecycle_updated_at": "2026-07-21T00:00:00Z",
+                "lifecycle_updated_by": "agent-test",
+                "lifecycle_reason": "Selected as a test acquisition route.",
+            }
+            for index, candidate_id in enumerate(candidate_ids)
+        ]
+        written = DISCOVER.append_candidates(DISCOVER.candidate_store_path(target, config), candidates)
+        self.assertEqual(candidate_ids, written)
+
     def submit(
         self,
         root: Path,
@@ -1097,7 +1133,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual("complete", completed["status"])
             self.assertTrue(retained.is_file())
 
-    def test_blocked_result_preserves_immutable_terminal_child_run(self):
+    def test_blocked_result_pauses_without_completing_and_resume_replays_same_action(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root, question=True)
@@ -1110,10 +1146,36 @@ class OrchestrationControllerTests(unittest.TestCase):
                 outcome="blocked",
                 summary="No permitted evidence route remains.",
             )
-            self.assertEqual(CONTROLLER.EXIT_BLOCKED, code)
-            self.assertEqual("blocked_on_sources", session["status"])
+            self.assertEqual(CONTROLLER.EXIT_PAUSED, code)
+            self.assertEqual("paused", session["status"])
+            self.assertEqual(order["action_id"], session["pending_action_id"])
+            self.assertEqual(0, session["completed_action_count"])
+            self.assertIsNone(session["last_completed_action_id"])
+            self.assertFalse(
+                CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists()
+            )
             child = RUN_CONTROLLER.load_run_state(target, order["run_id"])
-            self.assertEqual("blocked_on_sources", child["state"]["current"])
+            self.assertEqual("answering", child["state"]["current"])
+
+            code, still_paused, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+            )
+            self.assertEqual(CONTROLLER.EXIT_PAUSED, code, stderr)
+            self.assertEqual("paused", still_paused["status"])
+
+            code, replayed, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--resume",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(order["action_id"], replayed["action_id"])
+            self.assertEqual(order["run_id"], replayed["run_id"])
 
             duplicate = self.submit(
                 root,
@@ -1122,27 +1184,240 @@ class OrchestrationControllerTests(unittest.TestCase):
                 outcome="blocked",
                 summary="No permitted evidence route remains.",
             )
-            self.assertEqual(CONTROLLER.EXIT_BLOCKED, duplicate[0])
-            self.assertEqual("blocked_on_sources", duplicate[1]["status"])
+            self.assertEqual(CONTROLLER.EXIT_PAUSED, duplicate[0])
+            self.assertEqual("paused", duplicate[1]["status"])
+            self.assertEqual(0, duplicate[1]["completed_action_count"])
+            self.assertFalse(
+                CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists()
+            )
 
-            code, _, stderr = self.run_module(
-                RUN_CONTROLLER,
+    def test_blocked_acquisition_preserves_correlated_partial_delivery_for_same_action_replay(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            request_id = self.block_question(target)
+            candidate_id = "cand-retryable-pdf"
+            self.append_selected_acquisition_candidates(target, request_id, [candidate_id])
+            self.start(target)
+
+            code, order, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("acquisition", order["phase"])
+            raw_relative = self.write_mock_acquired_paper(
+                target,
+                request_id=request_id,
+                candidate_id=candidate_id,
+            )
+            inventory = self.assert_json_script_ok(
+                INVENTORY,
+                ["--project-root", str(target), "--report", "--format", "json"],
+            )
+            self.assertEqual("ready_for_normalization", inventory["readiness"])
+            self.assertEqual(1, len(self.manifest_records(target)))
+
+            summary = "The configured PDF extractor dependency is temporarily unavailable."
+            code, paused, stderr = self.submit(
+                root,
+                target,
+                order["action_id"],
+                outcome="blocked",
+                summary=summary,
+                artifacts=[
+                    raw_relative,
+                    f"{raw_relative}.provenance.yml",
+                    "sources/manifest.jsonl",
+                ],
+            )
+            self.assertEqual(CONTROLLER.EXIT_PAUSED, code, stderr)
+            self.assertEqual("paused", paused["status"])
+            self.assertEqual(summary, paused["pause_reason"])
+            self.assertEqual(order["action_id"], paused["pending_action_id"])
+            self.assertEqual(0, paused["completed_action_count"])
+            self.assertIsNone(paused["last_completed_action_id"])
+            self.assertFalse(
+                CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists()
+            )
+            self.assertEqual(
+                "selected",
+                CONTROLLER.candidate_state(CONTROLLER.load_candidates(target, CONTROLLER.load_config(target))[0]),
+            )
+            self.assertEqual("fetching", RUN_CONTROLLER.load_run_state(target, order["run_id"])["state"]["current"])
+
+            code, replayed, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--resume",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(order["action_id"], replayed["action_id"])
+            self.assertEqual([candidate_id], replayed["scope"]["candidate_ids"])
+            self.assertEqual(1, len(self.manifest_records(target)))
+
+    def test_blocked_failed_acquisition_route_completes_attempt_and_selects_next_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            request_id = self.block_question(target)
+            candidate_ids = ["cand-first-route", "cand-second-route"]
+            self.append_selected_acquisition_candidates(target, request_id, candidate_ids)
+            self.start(target)
+            _, first_order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual("acquisition", first_order["phase"])
+            self.assertEqual([candidate_ids[0]], first_order["scope"]["candidate_ids"])
+
+            transition = self.assert_json_script_ok(
+                DISCOVER,
                 [
                     "--project-root",
                     str(target),
-                    "transition",
-                    "--run-id",
-                    order["run_id"],
-                    "--agent-id",
-                    "agent-test",
-                    "--to-state",
-                    "verifying",
                     "--format",
                     "json",
+                    "candidates",
+                    "transition",
+                    "--candidate-id",
+                    candidate_ids[0],
+                    "--expected-state",
+                    "selected",
+                    "--to-state",
+                    "failed",
+                    "--reason",
+                    "The first provider route returned an unusable source artifact.",
+                    "--actor",
+                    "agent-test",
+                    "--run-id",
+                    first_order["run_id"],
                 ],
             )
-            self.assertEqual(RUN_CONTROLLER.EXIT_INVALID, code)
-            self.assertEqual("RUN_TERMINAL", json.loads(stderr)["error_code"])
+            self.assertTrue(transition["updated"])
+
+            code, continued, stderr = self.submit(
+                root,
+                target,
+                first_order["action_id"],
+                outcome="blocked",
+                summary="The first candidate-specific route failed.",
+                artifacts=[
+                    "sources/discovery/candidates.jsonl",
+                    "sources/discovery/audit.jsonl",
+                ],
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("active", continued["status"])
+            self.assertEqual("planning", continued["phase"])
+            self.assertEqual(1, continued["completed_action_count"])
+            self.assertEqual(first_order["action_id"], continued["last_completed_action_id"])
+            self.assertTrue(
+                CONTROLLER.work_result_path(target, "orch-test", first_order["action_id"]).is_file()
+            )
+            self.assertEqual(
+                "fetching",
+                RUN_CONTROLLER.load_run_state(target, first_order["run_id"])["state"]["current"],
+            )
+
+            code, second_order, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("acquisition", second_order["phase"])
+            self.assertEqual([candidate_ids[1]], second_order["scope"]["candidate_ids"])
+            self.assertNotEqual(first_order["action_id"], second_order["action_id"])
+
+    def test_blocked_acquisition_cannot_reuse_historical_candidate_failure_audit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            request_id = self.block_question(target)
+            candidate_id = "cand-historical-failure"
+            self.append_selected_acquisition_candidates(target, request_id, [candidate_id])
+            predicted_run_id = "run-orch-test-001"
+
+            self.assert_json_script_ok(
+                DISCOVER,
+                [
+                    "--project-root",
+                    str(target),
+                    "--format",
+                    "json",
+                    "candidates",
+                    "transition",
+                    "--candidate-id",
+                    candidate_id,
+                    "--expected-state",
+                    "selected",
+                    "--to-state",
+                    "failed",
+                    "--reason",
+                    "Historical route failure.",
+                    "--actor",
+                    "agent-test",
+                    "--run-id",
+                    predicted_run_id,
+                ],
+            )
+            failed_record = DISCOVER.load_all_candidates(
+                DISCOVER.candidate_store_path(target, DISCOVER.load_config(target))
+            )[0]
+            self.assert_json_script_ok(
+                DISCOVER,
+                [
+                    "--project-root",
+                    str(target),
+                    "--format",
+                    "json",
+                    "candidates",
+                    "transition",
+                    "--candidate-id",
+                    candidate_id,
+                    "--expected-state",
+                    "failed",
+                    "--to-state",
+                    "selected",
+                    "--request-id",
+                    request_id,
+                    "--reason",
+                    "Retry the candidate in a later bounded action.",
+                    "--actor",
+                    "agent-test",
+                    "--run-id",
+                    predicted_run_id,
+                ],
+            )
+
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(predicted_run_id, order["run_id"])
+            DISCOVER.rewrite_candidates(
+                DISCOVER.candidate_store_path(target, DISCOVER.load_config(target)),
+                [failed_record],
+            )
+
+            code, error, _ = self.submit(
+                root,
+                target,
+                order["action_id"],
+                outcome="blocked",
+                summary="Attempted to reuse a historical candidate failure.",
+                artifacts=["sources/discovery/candidates.jsonl"],
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
+            self.assertIn("exactly one audit event", error["message"])
+            self.assertFalse(
+                CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists()
+            )
 
     def test_failed_result_is_terminal_and_resume_does_not_reopen(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2114,6 +2389,62 @@ class OrchestrationControllerTests(unittest.TestCase):
         self.assertIsNone(CONTROLLER.acquisition_route(unofficial_web, {"web"}))
         self.assertIsNone(CONTROLLER.acquisition_route(manual_dataset, {"web"}))
 
+    def test_normalized_acquisition_quality_rejects_unusable_or_empty_pdf_records(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir)
+            path = target / "sources" / "normalized" / "paper.md"
+            path.parent.mkdir(parents=True)
+            record = {"id": "paper:test", "kind": "pdf", "raw_pdf": "raw/papers/test.pdf"}
+
+            def write_record(*, status: str, evidence_usable: str, extracted_text: str) -> None:
+                path.write_text(
+                    "---\n"
+                    "type: normalized_source\n"
+                    "source_id: paper:test\n"
+                    "source_kind: pdf\n"
+                    f"status: {status}\n"
+                    f"evidence_usable: {evidence_usable}\n"
+                    "extraction_method: pdf_text\n"
+                    "---\n\n"
+                    "# Test paper\n\n"
+                    "## Extracted Text\n\n"
+                    f"{extracted_text}\n",
+                    encoding="utf-8",
+                )
+
+            for unusable_status in ("failed", "stubbed"):
+                with self.subTest(status=unusable_status):
+                    write_record(
+                        status=unusable_status,
+                        evidence_usable="true",
+                        extracted_text="Extracted research content.",
+                    )
+                    failure = CONTROLLER.normalized_source_quality_failure(target, path, record)
+                    self.assertIn("unusable extraction status", failure["reason"])
+
+            write_record(
+                status="content_extracted",
+                evidence_usable="false",
+                extracted_text="An official error page was extracted.",
+            )
+            failure = CONTROLLER.normalized_source_quality_failure(target, path, record)
+            self.assertIn("not explicitly marked usable", failure["reason"])
+
+            write_record(
+                status="partial",
+                evidence_usable="true",
+                extracted_text="None extracted.",
+            )
+            failure = CONTROLLER.normalized_source_quality_failure(target, path, record)
+            self.assertIn("contains no extracted text", failure["reason"])
+
+            write_record(
+                status="content_extracted",
+                evidence_usable="true",
+                extracted_text="Extracted research content.",
+            )
+            self.assertIsNone(CONTROLLER.normalized_source_quality_failure(target, path, record))
+
     def test_only_end_to_end_composable_provider_pairs_can_issue_discovery(self):
         self.assertEqual(
             ["search"],
@@ -2211,7 +2542,18 @@ class OrchestrationControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             normalized_path = Path(tmpdir) / "sources" / "normalized" / "existing.md"
             normalized_path.parent.mkdir(parents=True)
-            normalized_path.write_text("normalized evidence\n", encoding="utf-8")
+            normalized_path.write_text(
+                "---\n"
+                "type: normalized_source\n"
+                f"source_id: {source_id}\n"
+                "source_kind: html\n"
+                "status: content_extracted\n"
+                "evidence_usable: true\n"
+                "---\n\n"
+                "# Existing evidence\n\n"
+                "Normalized evidence.\n",
+                encoding="utf-8",
+            )
             normalize_sources.normalized_output_path_for_record.return_value = normalized_path
             raw_baseline = {
                 "algorithm": "sha256-content-v1",
@@ -2249,6 +2591,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                     "candidate_record_fingerprints_before": (
                         CONTROLLER.candidate_record_fingerprint_snapshot([selected_candidate])
                     ),
+                    "candidate_audit_record_fingerprints_before": {},
                     "source_request_record_fingerprints_before": CONTROLLER.record_fingerprint_snapshot(
                         [open_request],
                         id_field="request_id",
@@ -2439,7 +2782,6 @@ class OrchestrationControllerTests(unittest.TestCase):
 
     def test_terminal_submit_recovers_after_child_finalization_precedes_session_write(self):
         cases = (
-            ("blocked", "blocked_on_sources", CONTROLLER.EXIT_BLOCKED),
             ("failed", "failed", CONTROLLER.EXIT_INVALID),
         )
         for outcome, expected_status, expected_exit_code in cases:

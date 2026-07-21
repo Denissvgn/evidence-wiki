@@ -165,6 +165,8 @@ def classify_error_code(message: str) -> str:
     lower = text.lower()
     if "pyyaml is required" in lower:
         return "DEPENDENCY_MISSING"
+    if "pypdf" in lower and "pdf text extraction requires" in lower:
+        return "DEPENDENCY_MISSING"
     if "pdftotext" in lower and ("poppler" in lower or "pdf text extraction requires" in lower):
         return "DEPENDENCY_MISSING"
     if text.startswith("Missing config:") or text.startswith("Missing research.yml:"):

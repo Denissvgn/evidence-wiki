@@ -973,7 +973,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     cand_transition.add_argument("--reason", required=True)
     cand_transition.add_argument("--actor", default=CANDIDATES_ACTOR)
     cand_transition.add_argument("--run-id")
-    cand_transition.add_argument("--request-id", help="Required when transitioning to selected.")
+    cand_transition.add_argument(
+        "--request-id",
+        help=(
+            "Required when transitioning to selected; for other transitions, validates the "
+            "candidate's existing request correlation when provided."
+        ),
+    )
     cand_transition.add_argument("--source-id", help="Required when transitioning to fetched.")
     cand_transition.add_argument(
         "--superseded-by-candidate-id",
@@ -2431,6 +2437,10 @@ def run_candidates_transition(
         run_id = args.run_id or target.get("discovery_run_id")
 
         request_id = selected_request_id(target)
+        if new_state != "selected" and args.request_id is not None:
+            requested_id = require_non_empty(args.request_id, "--request-id")
+            if request_id != requested_id:
+                candidate_correlation_conflict(target, "request_id", request_id, requested_id)
         source_id = None
         superseded_by = None
         if new_state == "selected":

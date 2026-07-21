@@ -120,6 +120,7 @@ jobs:
           from pathlib import Path
 
           import evidence_wiki
+          import pypdf
           from evidence_wiki import resources
           from evidence_wiki.orchestration import ORCHESTRATION_RESULT_SCHEMA
 
@@ -131,6 +132,8 @@ jobs:
           installed_path = Path(evidence_wiki.__file__).resolve()
           if "site-packages" not in installed_path.parts:
               raise SystemExit(f"EvidenceWiki was not imported from the installed wheel: {installed_path}")
+          if not pypdf.__version__.startswith("6."):
+              raise SystemExit(f"Installed wheel resolved unsupported pypdf version {pypdf.__version__!r}")
 
           properties = ORCHESTRATION_RESULT_SCHEMA["properties"]
           if properties["schema_version"] != {"type": "string", "enum": ["1.0"]}:
