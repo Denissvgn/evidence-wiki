@@ -56,6 +56,13 @@ WINDOWS_TRANSIENT_REPLACE_ERRORS = frozenset({5, 32, 33})
 CODEX_MIN_PERMISSION_PROFILE_VERSION = (0, 138, 0)
 CODEX_PERMISSION_PROFILE_NAME = "evidence_wiki_worker"
 CODEX_NPM_PACKAGE_NAME = "@openai/codex"
+CODEX_LINUX_RESOLVER_TARGET_ROOTS = (
+    Path("/run/systemd/resolve"),
+    Path("/run/NetworkManager"),
+    Path("/run/resolvconf"),
+    Path("/usr/lib/systemd"),
+    Path("/mnt/wsl"),
+)
 MANAGED_PYTHON_ENV = "EVIDENCE_WIKI_PYTHON"
 MANAGED_PYTHON_PROBE = (
     "import os,pathlib,pypdf,ssl,sys,yaml;"
@@ -1600,6 +1607,46 @@ def _codex_runtime_read_paths(executable: str) -> tuple[str, ...]:
     return (str(_codex_runtime_resolution(executable).runtime_root),)
 
 
+def _codex_network_read_paths(
+    *,
+    system_config_root: Path = Path("/etc"),
+    resolver_path: Path = Path("/etc/resolv.conf"),
+    allowed_resolver_roots: tuple[Path, ...] = CODEX_LINUX_RESOLVER_TARGET_ROOTS,
+) -> tuple[str, ...]:
+    """Return Linux system paths required for DNS and TLS in a Codex profile."""
+    if not sys.platform.startswith("linux"):
+        return ()
+    try:
+        config_root = system_config_root.resolve(strict=True)
+        resolver_target = resolver_path.resolve(strict=True)
+        config_metadata = config_root.stat()
+        resolver_metadata = resolver_target.stat()
+    except OSError as exc:
+        raise _runner_isolation_error(
+            "Managed Codex could not resolve the Linux system configuration required for network access."
+        ) from exc
+    if not stat.S_ISDIR(config_metadata.st_mode) or not stat.S_ISREG(resolver_metadata.st_mode):
+        raise _runner_isolation_error(
+            "Managed Codex requires a system configuration directory and regular resolver configuration file."
+        )
+
+    paths = [config_root]
+    if not resolver_target.is_relative_to(config_root):
+        resolved_roots: list[Path] = []
+        for root in allowed_resolver_roots:
+            with contextlib.suppress(OSError):
+                resolved_roots.append(root.resolve(strict=True))
+        if not any(resolver_target.is_relative_to(root) for root in resolved_roots):
+            raise _runner_isolation_error(
+                "Managed Codex refused a Linux resolver target outside the supported system resolver roots."
+            )
+        # Codex's Linux bubblewrap profile needs /etc itself to materialize the
+        # resolv.conf symlink, but the external target can remain an exact file
+        # grant instead of exposing its containing runtime directory.
+        paths.append(resolver_target)
+    return tuple(str(path) for path in dict.fromkeys(paths))
+
+
 def _managed_python_runtime(root: Path) -> _ManagedPythonRuntime:
     """Resolve the host interpreter and its narrow read-only runtime roots."""
     try:
@@ -1841,7 +1888,10 @@ def _codex_argv(
     managed_python = managed_python or _managed_python_runtime(root)
     if runtime_read_paths is None:
         runtime_read_paths = _codex_runtime_read_paths(executable)
-    runtime_read_paths = tuple(dict.fromkeys((*runtime_read_paths, *managed_python.read_paths)))
+    network_read_paths = _codex_network_read_paths() if allow_network else ()
+    runtime_read_paths = tuple(
+        dict.fromkeys((*runtime_read_paths, *managed_python.read_paths, *network_read_paths))
+    )
     argv = [
         executable,
         "--ask-for-approval",

@@ -266,37 +266,116 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertTrue(all(document["status"] == "submitted" for document in attempt_documents))
         self.assertTrue(all(document["artifact_type"] == "orchestration_attempt" for document in attempt_documents))
 
+    def test_codex_network_read_paths_use_linux_system_configuration_for_regular_resolver(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_root = Path(tmpdir) / "etc"
+            config_root.mkdir()
+            resolver = config_root / "resolv.conf"
+            resolver.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"):
+                paths = orchestration._codex_network_read_paths(
+                    system_config_root=config_root,
+                    resolver_path=resolver,
+                    allowed_resolver_roots=(),
+                )
+
+        self.assertEqual((str(config_root.resolve()),), paths)
+
+    @unittest.skipIf(os.name == "nt", "resolver symlink coverage requires POSIX symlinks")
+    def test_codex_network_read_paths_add_only_supported_external_resolver_target(self):
+        for relative_root in (Path("run/systemd/resolve"), Path("mnt/wsl")):
+            with self.subTest(relative_root=relative_root), tempfile.TemporaryDirectory() as tmpdir:
+                temporary_root = Path(tmpdir)
+                config_root = temporary_root / "etc"
+                target_root = temporary_root / relative_root
+                config_root.mkdir()
+                target_root.mkdir(parents=True)
+                target = target_root / "resolv.conf"
+                target.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+                resolver = config_root / "resolv.conf"
+                resolver.symlink_to(target)
+
+                with mock.patch.object(orchestration.sys, "platform", "linux"):
+                    paths = orchestration._codex_network_read_paths(
+                        system_config_root=config_root,
+                        resolver_path=resolver,
+                        allowed_resolver_roots=(target_root,),
+                    )
+
+                self.assertEqual((str(config_root.resolve()), str(target.resolve())), paths)
+
+    @unittest.skipIf(os.name == "nt", "resolver symlink coverage requires POSIX symlinks")
+    def test_codex_network_read_paths_reject_unsupported_external_resolver_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            config_root = temporary_root / "etc"
+            supported_root = temporary_root / "run" / "systemd" / "resolve"
+            unsupported_root = temporary_root / "operator-data"
+            config_root.mkdir()
+            supported_root.mkdir(parents=True)
+            unsupported_root.mkdir()
+            target = unsupported_root / "resolv.conf"
+            target.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+            resolver = config_root / "resolv.conf"
+            resolver.symlink_to(target)
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "outside the supported system resolver roots",
+            ):
+                orchestration._codex_network_read_paths(
+                    system_config_root=config_root,
+                    resolver_path=resolver,
+                    allowed_resolver_roots=(supported_root,),
+                )
+
+    def test_codex_network_read_paths_are_linux_specific(self):
+        for platform_name in ("darwin", "win32"):
+            with self.subTest(platform=platform_name), mock.patch.object(
+                orchestration.sys, "platform", platform_name
+            ):
+                self.assertEqual(
+                    (),
+                    orchestration._codex_network_read_paths(
+                        system_config_root=Path("/missing/system/config"),
+                        resolver_path=Path("/missing/resolv.conf"),
+                    ),
+                )
+
     def test_runner_argv_is_structured_and_contains_no_bypass_flags(self):
         root = Path("/tmp/workspace with spaces")
         managed_python = orchestration._ManagedPythonRuntime(
             executable=root / ".venv" / "bin" / "python",
             read_paths=("/opt/python runtime",),
         )
-        codex = orchestration._codex_argv(
-            "/tmp/fake tools/codex",
-            root,
-            Path("/tmp/schema.json"),
-            Path("/tmp/result.json"),
-            "gpt-test",
-            allow_network=True,
-            runtime_read_paths=("/opt/codex runtime",),
-            managed_python=managed_python,
-        )
+        resolver_paths = ("/etc", "/run/systemd/resolve/stub-resolv.conf")
+        with mock.patch.object(orchestration, "_codex_network_read_paths", return_value=resolver_paths) as network:
+            codex = orchestration._codex_argv(
+                "/tmp/fake tools/codex",
+                root,
+                Path("/tmp/schema.json"),
+                Path("/tmp/result.json"),
+                "gpt-test",
+                allow_network=True,
+                runtime_read_paths=("/opt/codex runtime",),
+                managed_python=managed_python,
+            )
+            codex_offline = orchestration._codex_argv(
+                "/tmp/fake tools/codex",
+                root,
+                Path("/tmp/schema.json"),
+                Path("/tmp/result.json"),
+                None,
+                allow_network=False,
+                runtime_read_paths=("/opt/codex runtime",),
+                managed_python=managed_python,
+            )
         claude = orchestration._claude_argv(
             "/tmp/fake tools/claude",
             root,
             "claude-test",
             allow_network=True,
-        )
-        codex_offline = orchestration._codex_argv(
-            "/tmp/fake tools/codex",
-            root,
-            Path("/tmp/schema.json"),
-            Path("/tmp/result.json"),
-            None,
-            allow_network=False,
-            runtime_read_paths=("/opt/codex runtime",),
-            managed_python=managed_python,
         )
         claude_offline = orchestration._claude_argv(
             "/tmp/fake tools/claude",
@@ -318,8 +397,13 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertIn('default_permissions="evidence_wiki_worker"', codex)
         self.assertIn("allow_login_shell=false", codex)
         codex_config = "\n".join(codex)
+        offline_codex_config = "\n".join(codex_offline)
         self.assertIn('"/opt/codex runtime"="read"', codex_config)
         self.assertIn('"/opt/python runtime"="read"', codex_config)
+        for resolver_path in resolver_paths:
+            self.assertIn(f'{json.dumps(resolver_path)}="read"', codex_config)
+            self.assertNotIn(f'{json.dumps(resolver_path)}="read"', offline_codex_config)
+        network.assert_called_once_with()
         self.assertIn('shell_environment_policy={inherit="core"', codex_config)
         self.assertIn(
             f'{json.dumps(orchestration.MANAGED_PYTHON_ENV)}={json.dumps(str(managed_python.executable))}',
@@ -335,7 +419,7 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertIn('"runs/run-reports"="write"', codex_config)
         self.assertIn('\":tmpdir\"=\"write\"', codex_config)
         self.assertIn("enabled=true", codex_config)
-        self.assertIn("enabled=false", "\n".join(codex_offline))
+        self.assertIn("enabled=false", offline_codex_config)
         self.assertIn("gpt-test", codex)
         self.assertEqual("/tmp/fake tools/claude", claude[0])
         self.assertIn("dontAsk", claude)

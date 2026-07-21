@@ -110,9 +110,14 @@ newer so EvidenceWiki can apply its named `evidence_wiki_worker` permission
 profile. User-local npm, pnpm, and bun installations are supported: the host
 resolves the selected launcher's platform-native runtime tree and grants that
 exact tree read-only inside the profile. It never grants the home directory,
-`CODEX_HOME`, or a package-manager prefix. Keep the runner installation outside
-the writable research workspace; an incomplete or overlapping runtime fails
-before session creation with `RUNNER_ISOLATION_UNAVAILABLE`. Managed Claude
+`CODEX_HOME`, or a package-manager prefix. For provider-enabled actions on
+Linux/WSL2, the profile also grants `/etc` read-only so DNS, NSS, and TLS system
+configuration remain available inside Codex's bubblewrap sandbox; when
+`/etc/resolv.conf` is a symlink to a supported system resolver directory, only
+its canonical target file receives an additional read grant. Offline actions
+do not receive those paths. Keep the runner installation outside the writable
+research workspace; an incomplete or overlapping runtime fails before session
+creation with `RUNNER_ISOLATION_UNAVAILABLE`. Managed Claude
 execution is unavailable on native Windows; use macOS,
 Linux, WSL2, a container, or the external `start` / `next` / `submit` protocol
 there. If the required boundary cannot be enforced, the host returns
@@ -203,7 +208,7 @@ For a session created by 0.2.0, upgrade the package and managed workspace
 scripts, then inspect its phase before replay:
 
 ```bash
-python -m pip install --upgrade evidence-wiki==0.2.3
+python -m pip install --upgrade evidence-wiki==0.2.4
 evidence-wiki upgrade --target . --dry-run
 evidence-wiki upgrade --target .
 evidence-wiki orchestrate status --target . --orchestration-id ORCH_ID --format json

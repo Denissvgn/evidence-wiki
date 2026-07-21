@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.2.4 - 2026-07-21
+
+- Treat broken or partially initialized pypdf import-spec lookups as a missing
+  required dependency in workspace health checks, returning a typed finding
+  instead of raising an inspection error.
+- Restore DNS and HTTPS for provider-enabled managed Codex actions on
+  Linux/WSL2 by adding bounded read-only system resolver configuration to the
+  named permission profile, while keeping offline actions unchanged and
+  rejecting unexpected external resolver targets.
+- Bump the reusable managed workspace starter to `0.5.4`; `evidence-wiki
+  upgrade` refreshes its health-check and orchestration guidance while
+  preserving project evidence and configuration.
+
 ## 0.2.3 - 2026-07-21
 
 - Install pypdf as the portable, canonical PDF normalization backend so a

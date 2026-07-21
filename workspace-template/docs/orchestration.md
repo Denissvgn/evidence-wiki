@@ -276,6 +276,14 @@ settings with fail-if-unavailable behavior, OS-level write denials, Edit-tool
 denials for the complete documentation tree, and WebFetch/WebSearch disabled.
 Network access is enabled only for a
 discovery or acquisition work order whose persisted provider policy permits it.
+For those provider-enabled Codex actions on Linux/WSL2, the profile grants
+`/etc` read-only because Codex's bubblewrap `:minimal` filesystem does not
+materialize the resolver symlink or the NSS and CA configuration needed by
+normal HTTPS clients. If `/etc/resolv.conf` resolves outside `/etc`, its
+canonical target must be under a bounded supported system resolver directory
+and receives one exact read-only grant. Offline actions receive neither grant;
+an unexpected resolver target fails closed with
+`RUNNER_ISOLATION_UNAVAILABLE`.
 
 The Codex preflight resolves the selected launcher before session creation.
 For an official npm, pnpm, or bun launcher (including a Windows npm shim), it
@@ -453,7 +461,7 @@ and inspect the retained phase before deciding whether it is safe to resume.
 Preview both steps first:
 
 ```bash
-python -m pip install --upgrade evidence-wiki==0.2.3
+python -m pip install --upgrade evidence-wiki==0.2.4
 evidence-wiki --version
 evidence-wiki upgrade --target . --dry-run
 evidence-wiki upgrade --target .
