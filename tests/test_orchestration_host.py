@@ -304,6 +304,63 @@ class OrchestrationHostTests(unittest.TestCase):
 
         self.assertEqual((str(config_root), str(resolved_config_root.resolve())), paths)
 
+    @unittest.skipIf(os.name == "nt", "ancestor symlink coverage requires POSIX symlinks")
+    def test_codex_network_read_paths_canonicalize_an_aliased_ancestor_without_an_extra_grant(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            physical_parent = temporary_root / "physical"
+            config_root = physical_parent / "etc"
+            config_root.mkdir(parents=True)
+            resolver = config_root / "resolv.conf"
+            resolver.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+            aliased_parent = temporary_root / "alias"
+            aliased_parent.symlink_to(physical_parent, target_is_directory=True)
+            aliased_config_root = aliased_parent / "etc"
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"):
+                paths = orchestration._codex_network_read_paths(
+                    system_config_root=aliased_config_root,
+                    resolver_path=aliased_config_root / "resolv.conf",
+                    allowed_resolver_roots=(),
+                )
+
+        self.assertEqual((str(config_root.resolve()),), paths)
+
+    def test_codex_network_read_paths_do_not_treat_a_canonical_alias_as_a_final_symlink(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            lexical_config_root = temporary_root / "lexical" / "etc"
+            canonical_config_root = temporary_root / "canonical" / "etc"
+            lexical_config_root.mkdir(parents=True)
+            canonical_config_root.mkdir(parents=True)
+            lexical_resolver = lexical_config_root / "resolv.conf"
+            canonical_resolver = canonical_config_root / "resolv.conf"
+            lexical_resolver.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+            canonical_resolver.write_text("nameserver 192.0.2.1\n", encoding="utf-8")
+            concrete_path_type = type(lexical_config_root)
+            real_resolve = concrete_path_type.resolve
+
+            def aliased_resolve(path, strict=False):
+                if path == lexical_config_root:
+                    return canonical_config_root
+                if path == lexical_resolver:
+                    return canonical_resolver
+                return real_resolve(path, strict=strict)
+
+            with mock.patch.object(orchestration.sys, "platform", "linux"), mock.patch.object(
+                concrete_path_type,
+                "resolve",
+                autospec=True,
+                side_effect=aliased_resolve,
+            ):
+                paths = orchestration._codex_network_read_paths(
+                    system_config_root=lexical_config_root,
+                    resolver_path=lexical_resolver,
+                    allowed_resolver_roots=(),
+                )
+
+        self.assertEqual((str(canonical_config_root),), paths)
+
     @unittest.skipIf(os.name == "nt", "resolver symlink coverage requires POSIX symlinks")
     def test_codex_network_read_paths_add_only_supported_external_resolver_target(self):
         for relative_root in (Path("run/systemd/resolve"), Path("mnt/wsl")):
@@ -1416,6 +1473,113 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertTrue(completed.stdout.startswith("x" * 1024))
         self.assertLessEqual(len(completed.stdout), 1100)
         self.assertIn("<output truncated>", completed.stdout)
+
+    def test_darwin_process_group_quiescence_requires_valid_process_table_without_live_members(self):
+        cases = (
+            ("4321 S\n1234 Z\n1234 Z+\n", True),
+            ("4321 S\n1234 S\n", False),
+            ("malformed\n", False),
+            ("", False),
+        )
+        for output, expected in cases:
+            with self.subTest(output=output), mock.patch.object(
+                orchestration.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=output, stderr=""),
+            ):
+                self.assertEqual(expected, orchestration._darwin_process_group_is_quiescent(1234))
+
+    def test_darwin_process_group_quiescence_fails_closed_when_process_table_is_unavailable(self):
+        with mock.patch.object(
+            orchestration.subprocess,
+            "run",
+            side_effect=PermissionError("denied"),
+        ):
+            self.assertFalse(orchestration._darwin_process_group_is_quiescent(1234))
+
+    @unittest.skipUnless(os.name == "posix", "process-group signaling is POSIX-specific")
+    def test_process_group_cleanup_ignores_permission_error_after_runner_exit(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = -1
+
+        with mock.patch.object(orchestration.sys, "platform", "darwin"), mock.patch.object(
+            orchestration.os,
+            "killpg",
+            side_effect=PermissionError("denied"),
+        ), mock.patch.object(
+            orchestration,
+            "_darwin_process_group_is_quiescent",
+            return_value=True,
+        ) as quiescent:
+            orchestration._terminate_process_group(process, force=True)
+
+        process.poll.assert_called_once_with()
+        quiescent.assert_called_once_with(1234)
+
+    @unittest.skipUnless(os.name == "posix", "process-group signaling is POSIX-specific")
+    def test_process_group_cleanup_propagates_permission_error_for_live_runner(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = None
+
+        with mock.patch.object(orchestration.sys, "platform", "darwin"), mock.patch.object(
+            orchestration.os,
+            "killpg",
+            side_effect=PermissionError("denied"),
+        ), mock.patch.object(
+            orchestration,
+            "_darwin_process_group_is_quiescent",
+        ) as quiescent, self.assertRaises(PermissionError):
+            orchestration._terminate_process_group(process, force=True)
+
+        quiescent.assert_not_called()
+
+    @unittest.skipUnless(os.name == "posix", "process-group signaling is POSIX-specific")
+    def test_process_group_cleanup_propagates_permission_error_with_live_darwin_descendants(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = -1
+
+        with mock.patch.object(orchestration.sys, "platform", "darwin"), mock.patch.object(
+            orchestration.os,
+            "killpg",
+            side_effect=PermissionError("denied"),
+        ), mock.patch.object(
+            orchestration,
+            "_darwin_process_group_is_quiescent",
+            return_value=False,
+        ), self.assertRaises(PermissionError):
+            orchestration._terminate_process_group(process, force=True)
+
+    @unittest.skipUnless(os.name == "posix", "process-group signaling is POSIX-specific")
+    def test_process_group_cleanup_propagates_post_exit_permission_error_off_macos(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = -1
+
+        with mock.patch.object(orchestration.sys, "platform", "linux"), mock.patch.object(
+            orchestration.os,
+            "killpg",
+            side_effect=PermissionError("denied"),
+        ), self.assertRaises(PermissionError):
+            orchestration._terminate_process_group(process, force=True)
+
+        process.poll.assert_not_called()
+
+    def test_bounded_execution_preserves_primary_process_group_cleanup_error(self):
+        primary = PermissionError("primary cleanup failure")
+        retry = PermissionError("retry cleanup failure")
+
+        with mock.patch.object(
+            orchestration,
+            "_terminate_process_group",
+            side_effect=(primary, retry),
+        ) as terminate, self.assertRaisesRegex(PermissionError, "primary cleanup failure"):
+            orchestration._execute_bounded(
+                [sys.executable, "-c", "pass"],
+                cwd=REPO_ROOT,
+                stdin_text="",
+                timeout_seconds=10,
+            )
+
+        self.assertEqual(2, terminate.call_count)
 
     @unittest.skipUnless(os.name == "posix", "process-group liveness assertion is POSIX-specific")
     def test_timeout_terminates_spawned_runner_descendants(self):

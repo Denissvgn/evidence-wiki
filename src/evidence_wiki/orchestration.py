@@ -407,6 +407,41 @@ def _write_stdin(handle: Any, content: bytes) -> None:
             pass
 
 
+def _darwin_process_group_is_quiescent(process_group_id: int) -> bool:
+    """Return whether Darwin reports no live members in a process group."""
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed Darwin utility and numeric group identifier
+            ["/bin/ps", "-axo", "pgid=,state="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            shell=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if completed.returncode != 0:
+        return False
+
+    saw_record = False
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if len(fields) != 2:
+            return False
+        try:
+            observed_group_id = int(fields[0])
+        except ValueError:
+            return False
+        saw_record = True
+        if observed_group_id == process_group_id and not fields[1].startswith("Z"):
+            return False
+    return saw_record
+
+
 def _terminate_process_group(process: subprocess.Popen[bytes], *, force: bool) -> None:
     """Terminate the runner's initial process group and ordinary descendants."""
     if os.name == "posix":
@@ -414,6 +449,16 @@ def _terminate_process_group(process: subprocess.Popen[bytes], *, force: bool) -
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # Darwin can report EPERM when a reaped leader leaves a zombie-only
+            # group, but EPERM also covers unsignalable live processes. Treat it
+            # as complete only after an independent process-table check.
+            if (
+                sys.platform != "darwin"
+                or process.poll() is None
+                or not _darwin_process_group_is_quiescent(process.pid)
+            ):
+                raise
         return
     if os.name == "nt":  # pragma: no cover - exercised on Windows CI
         if force:
@@ -504,7 +549,10 @@ def _execute_bounded(
         # runner-native filesystem/network isolation remains their safety boundary.
         _terminate_process_group(process, force=True)
     except BaseException:
-        _terminate_process_group(process, force=True)
+        # Preserve the primary execution/cleanup failure if a best-effort retry
+        # encounters the same OS-level denial, then still perform the bounded wait.
+        with contextlib.suppress(OSError):
+            _terminate_process_group(process, force=True)
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -1618,6 +1666,7 @@ def _codex_network_read_paths(
         return ()
     try:
         lexical_config_root = Path(os.path.abspath(system_config_root))
+        lexical_config_metadata = lexical_config_root.lstat()
         config_root = lexical_config_root.resolve(strict=True)
         resolver_target = resolver_path.resolve(strict=True)
         config_metadata = config_root.stat()
@@ -1631,12 +1680,12 @@ def _codex_network_read_paths(
             "Managed Codex requires a system configuration directory and regular resolver configuration file."
         )
 
-    # Bubblewrap materializes grants at their named destination. Preserve the
-    # lexical system root (normally /etc) when it is a symlink, while retaining
-    # the validated canonical root for callers that resolve the path first.
-    paths = [lexical_config_root]
-    if config_root != lexical_config_root:
-        paths.append(config_root)
+    # Canonicalization can rewrite an ancestor alias (for example macOS /var or
+    # a Windows 8.3 path) even when the final root is an ordinary directory.
+    # Bubblewrap needs both names only when that final entry itself is a symlink.
+    paths = [config_root]
+    if stat.S_ISLNK(lexical_config_metadata.st_mode):
+        paths.insert(0, lexical_config_root)
     if not resolver_target.is_relative_to(config_root):
         resolved_roots: list[Path] = []
         for root in allowed_resolver_roots:
