@@ -470,6 +470,59 @@ class SourceRequestsTests(unittest.TestCase):
             )
             self.assertIn("openalex download-pdf", route["reason"])
 
+    def test_plan_fetch_selected_doi_candidates_use_distinct_metadata_outputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            request_id = self.add_request(target, query="Selected DOI candidates")["request"]["request_id"]
+            candidates = [
+                {
+                    "schema_version": "1.0",
+                    "candidate_id": "cand-url-doi",
+                    "status": "selected",
+                    "selected_for_request_id": request_id,
+                    "url": "https://doi.org/10.5555/url-candidate",
+                    "title": "URL DOI candidate",
+                    "source_type": "supplemental_material",
+                    "trust_tier": "publisher_primary",
+                },
+                {
+                    "schema_version": "1.0",
+                    "candidate_id": "cand-paper-doi",
+                    "status": "selected",
+                    "selected_for_request_id": request_id,
+                    "url": "https://example.org/paper",
+                    "title": "Paper DOI candidate",
+                    "source_type": "paper",
+                    "trust_tier": "publisher_primary",
+                    "paper": {"doi": "10.5555/paper-candidate"},
+                },
+            ]
+            store = target / "sources" / "discovery" / "candidates.jsonl"
+            store.parent.mkdir(parents=True, exist_ok=True)
+            store.write_text(
+                "".join(json.dumps(candidate, sort_keys=True) + "\n" for candidate in candidates),
+                encoding="utf-8",
+            )
+
+            code, payload, stderr = self.requests_json(target, "plan-fetch", "--request-id", request_id)
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual(2, payload["selected_candidate_count"])
+        routes = {route["candidate_id"]: route for route in payload["candidate_routes"]}
+        outputs = {
+            candidate_id: route["command_argv"][route["command_argv"].index("--output") + 1]
+            for candidate_id, route in routes.items()
+        }
+        self.assertEqual(
+            f"raw/papers/openalex-{request_id}-cand-url-doi-metadata.json",
+            outputs["cand-url-doi"],
+        )
+        self.assertEqual(
+            f"raw/papers/openalex-{request_id}-cand-paper-doi-metadata.json",
+            outputs["cand-paper-doi"],
+        )
+        self.assertEqual(2, len(set(outputs.values())))
+
     def test_plan_fetch_ambiguous_paper_query_suggests_candidate_routes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))

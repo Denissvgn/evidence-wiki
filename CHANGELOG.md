@@ -51,7 +51,7 @@
 - Bind legacy pending actions to controller-owned static-input fingerprints on
   their first replay, and recompute authoritative verification/export outputs
   before accepting completion.
-- Bump the managed workspace starter to `0.5.1` with explicit parent-control
+- Bump the managed workspace starter to `0.5.2` with explicit parent-control
   ownership and recovery guidance for research, discovery, acquisition, and
   verification workers.
 - Make managed Codex runtime visibility exact and portable: resolve the selected

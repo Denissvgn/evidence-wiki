@@ -9,6 +9,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+FAKE_CODEX_WORKSPACE_PYTHON = "EVIDENCE_WIKI_FAKE_CODEX_WORKSPACE_PYTHON"
+
+
+def workspace_python() -> str:
+    return os.environ.get(FAKE_CODEX_WORKSPACE_PYTHON, sys.executable)
+
 
 def option_value(arguments: list[str], name: str) -> str:
     try:
@@ -77,7 +83,7 @@ def execute(arguments: list[str]) -> int:
 
         def workspace_command(script: str, *command: str) -> dict:
             process = subprocess.run(  # noqa: S603 - fixed workspace script and bounded fixture arguments.
-                [sys.executable, "-B", str(root / "scripts" / script), *command, "--format", "json"],
+                [workspace_python(), "-B", str(root / "scripts" / script), *command, "--format", "json"],
                 cwd=root,
                 check=False,
                 capture_output=True,

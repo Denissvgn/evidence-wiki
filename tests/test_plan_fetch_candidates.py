@@ -299,7 +299,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertEqual(
             ["python3", "scripts/fetch_sources.py", "--format", "json", "openalex",
              "get", "--id-or-doi", "10.1234/abcd.efgh",
-             "--output", f"raw/papers/openalex-{request_id}-metadata.json", "--request-id", request_id,
+             "--output", f"raw/papers/openalex-{request_id}-cand-doi-metadata.json", "--request-id", request_id,
              "--candidate-id", "cand-doi"],
             route["command_argv"],
         )

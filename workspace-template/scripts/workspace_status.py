@@ -1935,7 +1935,39 @@ def orchestration_control_repair_summary(project_root: Path, orchestration_id: s
     ):
         return {"present": True, "repair_required": True, "invalid": True}
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or int(getattr(opened, "st_nlink", 1) or 1) != 1
+                or (metadata.st_dev, metadata.st_ino, metadata.st_size)
+                != (opened.st_dev, opened.st_ino, opened.st_size)
+            ):
+                raise OSError("control-repair marker changed while it was opened")
+            chunks: list[bytes] = []
+            observed = 0
+            while observed <= MAX_ORCHESTRATION_ATTEMPT_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(64 * 1024, MAX_ORCHESTRATION_ATTEMPT_BYTES + 1 - observed),
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                observed += len(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if (
+            observed > MAX_ORCHESTRATION_ATTEMPT_BYTES
+            or observed != metadata.st_size
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+        ):
+            raise OSError("control-repair marker changed while it was read")
+        document = json.loads(b"".join(chunks).decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return {"present": True, "repair_required": True, "invalid": True}
     required_keys = {

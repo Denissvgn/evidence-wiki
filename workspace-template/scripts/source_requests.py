@@ -77,6 +77,7 @@ ARXIV_ID_RE = re.compile(r"\b\d{4}\.\d{4,5}(?:v\d+)?\b", re.IGNORECASE)
 ARXIV_VERSIONED_ID_RE = re.compile(r"^\d{4}\.\d{4,5}v\d+$", re.IGNORECASE)
 DOI_RE = re.compile(r"^10\.\S+/.+", re.IGNORECASE)
 OPENALEX_WORK_ID_RE = re.compile(r"\b(W\d+)\b", re.IGNORECASE)
+SAFE_OUTPUT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
@@ -955,6 +956,17 @@ def linked_policy_facets(project_root: Path, config: dict[str, Any], request_id:
     return facets
 
 
+def candidate_metadata_output_id(route: dict[str, Any], request_id: str, provider_identity: str) -> str:
+    """Return a deterministic, path-safe identifier for one candidate route."""
+    candidate_id = route.get("candidate_id")
+    normalized = candidate_id.strip() if isinstance(candidate_id, str) else ""
+    if not normalized or SAFE_OUTPUT_ID_RE.fullmatch(normalized) is None:
+        identity = normalized or provider_identity.strip()
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        normalized = f"candidate-{digest}"
+    return f"{request_id}-{normalized}"
+
+
 def candidate_acquisition_route(
     candidate: dict[str, Any], acquisition: dict[str, Any], request_id: str
 ) -> dict[str, Any]:
@@ -1021,10 +1033,11 @@ def candidate_acquisition_route(
         return _finish_provider_route(route, acquisition, argv)
 
     if doi is not None:
+        output_id = candidate_metadata_output_id(route, request_id, doi)
         argv = [
             "python3", "scripts/fetch_sources.py", "--format", "json", "openalex",
             "get", "--id-or-doi", doi,
-            "--output", f"raw/papers/openalex-{request_id}-metadata.json",
+            "--output", f"raw/papers/openalex-{output_id}-metadata.json",
             "--request-id", request_id,
         ]
         append_candidate_id_arg(argv, route)
@@ -1153,10 +1166,11 @@ def paper_acquisition_route(
         return _finish_provider_route(route, acquisition, argv)
 
     if doi is not None:
+        output_id = candidate_metadata_output_id(route, request_id, doi)
         argv = [
             "python3", "scripts/fetch_sources.py", "--format", "json", "openalex",
             "get", "--id-or-doi", doi,
-            "--output", f"raw/papers/openalex-{request_id}-metadata.json",
+            "--output", f"raw/papers/openalex-{output_id}-metadata.json",
             "--request-id", request_id,
         ]
         append_candidate_id_arg(argv, route)

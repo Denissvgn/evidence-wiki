@@ -8,11 +8,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_CODEX = REPO_ROOT / "tests" / "fixtures" / "fake_codex_cli.py"
+FAKE_CODEX_WORKSPACE_PYTHON = "EVIDENCE_WIKI_FAKE_CODEX_WORKSPACE_PYTHON"
 
 
 def run(
@@ -34,6 +36,14 @@ def run(
             f"stdout:\n{process.stdout}\nstderr:\n{process.stderr}"
         )
     return process
+
+
+def fake_codex_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    # The copied fixture starts through /usr/bin/env and may therefore run under a
+    # different Python. Keep deployed workspace scripts inside the wheel venv.
+    environment[FAKE_CODEX_WORKSPACE_PYTHON] = sys.executable
+    return environment
 
 
 def main() -> int:
@@ -97,7 +107,7 @@ def main() -> int:
         run([cli, "questions", "add", "--target", str(workspace), "--from-file", str(batch)])
 
         failure_marker = temporary_root / "fail-once.marker"
-        environment = os.environ.copy()
+        environment = fake_codex_environment()
         environment["PATH"] = os.pathsep.join((str(fake_bin), environment.get("PATH", "")))
         environment["EVIDENCE_WIKI_FAKE_CODEX_FAIL_ONCE"] = str(failure_marker)
         environment["EVIDENCE_WIKI_FAKE_CODEX_FAILURE_BYTES"] = str(256 * 1024)

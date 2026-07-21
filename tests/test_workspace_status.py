@@ -881,6 +881,45 @@ summary: Curation status fixture.
         self.assertEqual(["attempt-two"], summary["control_repair"]["attempt_ids"])
         self.assertNotIn("expected_control_fingerprint", json.dumps(summary["control_repair"]))
 
+    def test_orchestration_control_repair_summary_rejects_path_swap_before_open(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir)
+            guard_root = target / "runs" / "orchestration-guards"
+            guard_root.mkdir(parents=True)
+            marker = guard_root / "orch-swap.json"
+            document = {
+                "schema_version": "1.0",
+                "artifact_type": "orchestration_control_repair",
+                "orchestration_id": "orch-swap",
+                "status": "required",
+                "reason_code": "CONTROL_ARTIFACT_TAMPERED",
+                "detected_at": "2026-07-21T10:03:00Z",
+                "acknowledged_at": None,
+                "attempt_ids": ["attempt-one"],
+                "expected_control_fingerprint": "sha256:" + "c" * 64,
+            }
+            marker.write_text(json.dumps(document), encoding="utf-8")
+            replacement = guard_root / "replacement.json"
+            replacement.write_text(json.dumps(document), encoding="utf-8")
+            real_open = STATUS.os.open
+            swapped = False
+
+            def swap_then_open(path: Path, flags: int) -> int:
+                nonlocal swapped
+                if not swapped and Path(path) == marker:
+                    replacement.replace(marker)
+                    swapped = True
+                return real_open(path, flags)
+
+            with mock.patch.object(STATUS.os, "open", side_effect=swap_then_open):
+                summary = STATUS.orchestration_control_repair_summary(target, "orch-swap")
+
+        self.assertTrue(swapped)
+        self.assertEqual(
+            {"present": True, "repair_required": True, "invalid": True},
+            summary,
+        )
+
     def test_active_run_reports_stale_after_liveness_threshold(self):
         stale_at = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
         with tempfile.TemporaryDirectory() as tmpdir:
