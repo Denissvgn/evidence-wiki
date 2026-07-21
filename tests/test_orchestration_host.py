@@ -537,6 +537,39 @@ class OrchestrationHostTests(unittest.TestCase):
             ):
                 orchestration._managed_python_runtime(workspace)
 
+    def test_managed_python_validates_windows_sysconfig_paths_against_workspace(self):
+        """Windows grants base_prefix, but must still reject a workspace Lib."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary_root = Path(tmpdir)
+            workspace = temporary_root / "workspace"
+            interpreter = workspace / ".venv" / "Scripts" / "python.exe"
+            unprotected_stdlib = workspace / "Lib"
+            external_base = temporary_root / "External Python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_bytes(b"python")
+            unprotected_stdlib.mkdir()
+            external_base.mkdir()
+            configured_paths = {
+                "stdlib": str(unprotected_stdlib),
+                "platstdlib": str(workspace / ".venv" / "Lib"),
+                "purelib": str(workspace / ".venv" / "Lib" / "site-packages"),
+                "platlib": str(workspace / ".venv" / "Lib" / "site-packages"),
+            }
+
+            with mock.patch.object(orchestration.sys, "executable", str(interpreter)), mock.patch.object(
+                orchestration.sys, "prefix", str(workspace / ".venv")
+            ), mock.patch.object(orchestration.sys, "base_prefix", str(external_base)), mock.patch.object(
+                orchestration.sysconfig, "get_path", side_effect=configured_paths.get
+            ), mock.patch.object(
+                orchestration.sysconfig, "get_config_var", return_value=None
+            ), mock.patch.object(
+                orchestration, "_is_native_windows", return_value=True
+            ), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "RUNNER_ISOLATION_UNAVAILABLE.*runtime files outside the protected",
+            ):
+                orchestration._managed_python_runtime(workspace)
+
     @unittest.skipIf(os.name == "nt", "Windows workspace profile matching is case-insensitive")
     def test_managed_python_rejects_case_variant_venv_on_posix(self):
         with tempfile.TemporaryDirectory() as tmpdir:

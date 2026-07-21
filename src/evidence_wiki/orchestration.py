@@ -1624,30 +1624,39 @@ def _managed_python_runtime(root: Path) -> _ManagedPythonRuntime:
         if not relative.parts:
             return False
         first = relative.parts[0]
-        return first.casefold() in protected_venv_names if os.name == "nt" else first in protected_venv_names
+        return first.casefold() in protected_venv_names if _is_native_windows() else first in protected_venv_names
 
     if relative_executable is not None and not protected_workspace_runtime(relative_executable):
         raise _runner_isolation_error(
             "Managed execution found a workspace-local Python interpreter outside the protected .venv/venv roots."
         )
 
-    candidates: list[Path] = [resolved_executable]
+    # Keep validation separate from read-path selection.  Windows needs its
+    # base installation as one read-only root, while POSIX runtimes can grant
+    # narrower individual components.  In both cases every sysconfig location
+    # must be checked: a workspace-local ``Lib`` would otherwise be readable
+    # through the worker's workspace grant and could shadow trusted runtime
+    # modules.
+    candidates: list[tuple[Path, bool]] = [(resolved_executable, True)]
     prefix = Path(sys.prefix)
     base_prefix = Path(sys.base_prefix)
     if os.path.normcase(str(prefix)) != os.path.normcase(str(base_prefix)):
-        candidates.append(prefix)
+        candidates.append((prefix, True))
     base_parts = {part.casefold() for part in base_prefix.parts}
-    if os.name == "nt" or "python.framework" in base_parts:
-        candidates.append(base_prefix)
-    else:
-        for name in ("stdlib", "platstdlib", "purelib", "platlib"):
-            configured = sysconfig.get_path(name)
-            if configured:
-                candidates.append(Path(configured))
-        library_dir = sysconfig.get_config_var("LIBDIR")
-        library_name = sysconfig.get_config_var("LDLIBRARY")
-        if isinstance(library_dir, str) and library_dir and isinstance(library_name, str) and library_name:
-            candidates.append(Path(library_dir) / library_name)
+    broad_base_runtime = _is_native_windows() or "python.framework" in base_parts
+    if broad_base_runtime:
+        candidates.append((base_prefix, True))
+    for name in ("stdlib", "platstdlib", "purelib", "platlib"):
+        configured = sysconfig.get_path(name)
+        if configured:
+            # Windows and framework installs are granted through base_prefix,
+            # but their configured paths still need the workspace-boundary
+            # check described above.
+            candidates.append((Path(configured), not broad_base_runtime))
+    library_dir = sysconfig.get_config_var("LIBDIR")
+    library_name = sysconfig.get_config_var("LDLIBRARY")
+    if isinstance(library_dir, str) and library_dir and isinstance(library_name, str) and library_name:
+        candidates.append((Path(library_dir) / library_name, not broad_base_runtime))
 
     retained: list[Path] = []
     sensitive_paths: set[Path] = set()
@@ -1657,7 +1666,7 @@ def _managed_python_runtime(root: Path) -> _ManagedPythonRuntime:
     if codex_home:
         with contextlib.suppress(OSError):
             sensitive_paths.add(Path(codex_home).resolve(strict=True))
-    for candidate in candidates:
+    for candidate, retain_read_path in candidates:
         try:
             resolved = candidate.resolve(strict=True)
         except OSError:
@@ -1686,6 +1695,8 @@ def _managed_python_runtime(root: Path) -> _ManagedPythonRuntime:
             raise _runner_isolation_error(
                 "Managed execution refused a Python runtime path that contains the research workspace."
             )
+        if not retain_read_path:
+            continue
         if any(resolved == existing or resolved.is_relative_to(existing) for existing in retained):
             continue
         retained = [existing for existing in retained if not existing.is_relative_to(resolved)]

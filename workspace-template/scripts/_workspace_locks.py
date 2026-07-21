@@ -210,14 +210,22 @@ def _acquire_msvcrt(lock_path: Path, deadline: float, poll_interval_seconds: flo
     if msvcrt is None:
         raise _BackendUnsupported("msvcrt unavailable")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+b")
+    # Keep this handle unbuffered. A buffered ``a+b`` handle can defer the
+    # first sentinel-byte write until ``flush()``. If another process acquires
+    # byte zero between the write and that flush, Windows reports a transient
+    # sharing/permission error outside the normal ``msvcrt.locking`` retry
+    # loop. An unbuffered write makes initialization safely retryable too.
+    handle = lock_path.open("a+b", buffering=0)
     try:
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
         while True:
             try:
+                # msvcrt locks byte ranges, so seed a persistent byte before
+                # locking byte zero. Concurrent initializers either append
+                # the same harmless sentinel or receive a transient sharing
+                # error; both cases use this bounded retry loop.
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                 return _AcquiredBackend("msvcrt", handle=handle, path=lock_path)

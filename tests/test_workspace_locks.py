@@ -1,3 +1,4 @@
+import errno
 import importlib.util
 import json
 import os
@@ -73,6 +74,81 @@ class WorkspaceLockTests(unittest.TestCase):
 
             with locks.workspace_lock(lock_path, purpose="unit test reacquire"):
                 self.assertTrue(lock_path.exists())
+
+    def test_msvcrt_initialization_retries_transient_windows_sharing_contention(self):
+        """A delayed first-byte write must use the same bounded retry as locking."""
+        locks = load_locks_module()
+
+        class FakeHandle:
+            def __init__(self):
+                self.closed = False
+                self.position = 0
+                self.size = 0
+                self.write_attempts = 0
+
+            def seek(self, offset, whence=os.SEEK_SET):
+                if whence == os.SEEK_SET:
+                    self.position = offset
+                elif whence == os.SEEK_END:
+                    self.position = self.size + offset
+                else:  # pragma: no cover - the lock only uses these modes
+                    raise AssertionError(f"unexpected seek mode: {whence}")
+                return self.position
+
+            def tell(self):
+                return self.position
+
+            def write(self, data):
+                self.write_attempts += 1
+                if self.write_attempts == 1:
+                    error = PermissionError(errno.EACCES, "synthetic Windows sharing violation")
+                    error.winerror = 32  # type: ignore[attr-defined]
+                    raise error
+                self.position += len(data)
+                self.size = max(self.size, self.position)
+                return len(data)
+
+            def fileno(self):
+                return 42
+
+            def close(self):
+                self.closed = True
+
+        class FakeMsvcrt:
+            LK_NBLCK = 1
+            LK_UNLCK = 2
+
+            def __init__(self):
+                self.locking_calls = []
+
+            def locking(self, file_descriptor, mode, byte_count):
+                self.locking_calls.append((file_descriptor, mode, byte_count))
+
+        fake_handle = FakeHandle()
+        fake_msvcrt = FakeMsvcrt()
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
+            locks,
+            "msvcrt",
+            fake_msvcrt,
+        ), mock.patch.object(Path, "open", return_value=fake_handle) as open_file, mock.patch.object(
+            locks,
+            "_sleep_until",
+        ) as sleep:
+            acquired = locks._acquire_msvcrt(
+                Path(tmpdir) / "workspace.lock",
+                deadline=time.monotonic() + 1.0,
+                poll_interval_seconds=0.01,
+            )
+            locks._release_msvcrt(acquired)
+
+        open_file.assert_called_once_with("a+b", buffering=0)
+        self.assertEqual(2, fake_handle.write_attempts)
+        self.assertTrue(fake_handle.closed)
+        self.assertEqual(
+            [(42, fake_msvcrt.LK_NBLCK, 1), (42, fake_msvcrt.LK_UNLCK, 1)],
+            fake_msvcrt.locking_calls,
+        )
+        sleep.assert_called_once()
 
     def test_competing_subprocess_cannot_acquire_held_lock(self):
         locks = load_locks_module()
