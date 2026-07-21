@@ -230,7 +230,8 @@ class RunControllerTests(unittest.TestCase):
             run_dir = target / "runs" / run_id
             run_dir.mkdir(parents=True)
             ledger = run_dir / "academic-provider-requests.jsonl"
-            ledger.write_text('{"retained":true}\n', encoding="utf-8")
+            retained_content = b'{"retained":true}\n'
+            ledger.write_bytes(retained_content)
 
             code, stdout, stderr = self.run_module(
                 controller,
@@ -250,7 +251,7 @@ class RunControllerTests(unittest.TestCase):
             self.assertEqual(2, code)
             self.assertEqual("", stdout)
             self.assertEqual("RUN_ACADEMIC_PROVIDER_ACCOUNTING_EXISTS", json.loads(stderr)["error_code"])
-            self.assertEqual(b'{"retained":true}\n', ledger.read_bytes())
+            self.assertEqual(retained_content, ledger.read_bytes())
             self.assertFalse((run_dir / "run-state.json").exists())
 
     def test_start_reuses_empty_provider_ledger_left_by_interrupted_start(self):

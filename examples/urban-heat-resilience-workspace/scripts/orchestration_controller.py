@@ -315,6 +315,46 @@ def result_digest(document: dict[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def contained_path(
+    path: Path,
+    *,
+    containment_root: Path,
+    error_code: str,
+    label: str,
+    missing_ok: bool,
+) -> Path | None:
+    """Re-anchor a lexical child path beneath a canonical, link-free root."""
+    lexical_root = Path(os.path.abspath(containment_root))
+    lexical_path = Path(os.path.abspath(path))
+    try:
+        relative = lexical_path.relative_to(lexical_root)
+    except ValueError as exc:
+        raise OrchestrationControllerError(error_code, f"{label} escapes the workspace") from exc
+
+    root = lexical_root.resolve()
+    anchored = root.joinpath(*relative.parts)
+    current = root
+    for part in relative.parts[:-1]:
+        current /= part
+        try:
+            ancestor = current.lstat()
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise OrchestrationControllerError(error_code, f"{label} is missing: {anchored}") from None
+        except OSError as exc:
+            raise OrchestrationControllerError(
+                error_code,
+                f"could not inspect {label} ancestor: {current}",
+            ) from exc
+        if not stat.S_ISDIR(ancestor.st_mode) or path_is_link_like(current, ancestor):
+            raise OrchestrationControllerError(
+                error_code,
+                f"{label} ancestor is not a real directory: {current}",
+            )
+    return anchored
+
+
 def bounded_regular_bytes(
     path: Path,
     *,
@@ -326,21 +366,15 @@ def bounded_regular_bytes(
 ) -> bytes | None:
     """Read one bounded, singly linked regular file without following links."""
     if containment_root is not None:
-        root = containment_root.resolve()
-        absolute = Path(os.path.abspath(path))
-        try:
-            relative = absolute.relative_to(root)
-        except ValueError as exc:
-            raise OrchestrationControllerError(error_code, f"{label} escapes the workspace") from exc
-        current = root
-        for part in relative.parts[:-1]:
-            current /= part
-            try:
-                ancestor = current.lstat()
-            except OSError as exc:
-                raise OrchestrationControllerError(error_code, f"could not inspect {label} ancestor: {current}") from exc
-            if not stat.S_ISDIR(ancestor.st_mode) or path_is_link_like(current, ancestor):
-                raise OrchestrationControllerError(error_code, f"{label} ancestor is not a real directory: {current}")
+        path = contained_path(
+            path,
+            containment_root=containment_root,
+            error_code=error_code,
+            label=label,
+            missing_ok=missing_ok,
+        )
+        if path is None:
+            return None
     try:
         before = path.lstat()
     except FileNotFoundError:
@@ -397,6 +431,16 @@ def file_digest(
     max_bytes: int = MAX_VERIFICATION_ARTIFACT_BYTES,
     containment_root: Path | None = None,
 ) -> str | None:
+    if containment_root is not None:
+        path = contained_path(
+            path,
+            containment_root=containment_root,
+            error_code="ORCHESTRATION_POSTCONDITION_FAILED",
+            label="verification artifact",
+            missing_ok=True,
+        )
+        if path is None:
+            return None
     try:
         before = path.lstat()
     except FileNotFoundError:
@@ -406,31 +450,6 @@ def file_digest(
             "ORCHESTRATION_POSTCONDITION_FAILED",
             f"could not inspect verification artifact: {path}",
         ) from exc
-    if containment_root is not None:
-        root = containment_root.resolve()
-        absolute = Path(os.path.abspath(path))
-        try:
-            relative = absolute.relative_to(root)
-        except ValueError as exc:
-            raise OrchestrationControllerError(
-                "ORCHESTRATION_POSTCONDITION_FAILED",
-                "verification artifact escapes the workspace",
-            ) from exc
-        current = root
-        for part in relative.parts[:-1]:
-            current /= part
-            try:
-                ancestor = current.lstat()
-            except OSError as exc:
-                raise OrchestrationControllerError(
-                    "ORCHESTRATION_POSTCONDITION_FAILED",
-                    f"could not inspect verification artifact ancestor: {current}",
-                ) from exc
-            if not stat.S_ISDIR(ancestor.st_mode) or path_is_link_like(current, ancestor):
-                raise OrchestrationControllerError(
-                    "ORCHESTRATION_POSTCONDITION_FAILED",
-                    f"verification artifact ancestor is not a real directory: {current}",
-                )
     if (
         not stat.S_ISREG(before.st_mode)
         or path_is_link_like(path, before)

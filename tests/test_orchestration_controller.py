@@ -717,6 +717,37 @@ class OrchestrationControllerTests(unittest.TestCase):
                     containment_root=target,
                 )
 
+    def test_verification_artifact_reads_accept_an_aliased_containment_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            actual = root / "actual"
+            nested = actual / "nested"
+            nested.mkdir(parents=True)
+            artifact = nested / "artifact.json"
+            content = b'{"ok": true}\n'
+            artifact.write_bytes(content)
+            alias = root / "alias"
+            try:
+                alias.symlink_to(actual, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symbolic links are unavailable on this platform")
+
+            aliased_artifact = alias / "nested" / "artifact.json"
+            self.assertEqual(
+                content,
+                CONTROLLER.bounded_regular_bytes(
+                    aliased_artifact,
+                    max_bytes=1024,
+                    error_code="ORCHESTRATION_POSTCONDITION_FAILED",
+                    label="verification artifact",
+                    containment_root=alias,
+                ),
+            )
+            self.assertEqual(
+                f"sha256:{hashlib.sha256(content).hexdigest()}",
+                CONTROLLER.file_digest(aliased_artifact, containment_root=alias),
+            )
+
     def test_trusted_static_fingerprint_rejects_hardlinks_and_invalid_persisted_shape(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
@@ -819,7 +850,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                 nonlocal crashed
                 if (
                     not crashed
-                    and path == CONTROLLER.session_path(target, "orch-test")
+                    and path == CONTROLLER.session_path(target.resolve(), "orch-test")
                     and "pending_trusted_static_inputs" in document
                 ):
                     crashed = True
@@ -837,6 +868,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                     "orch-test",
                     "--resume",
                 )
+            self.assertTrue(crashed, "fault injection did not reach the session write")
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
             self.assertEqual("INJECTED_CRASH", error["error_code"])
             self.assertTrue(fingerprint_path.is_file())

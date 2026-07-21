@@ -575,7 +575,7 @@ class OrchestrationHostTests(unittest.TestCase):
 
     def test_codex_runtime_resolver_supports_direct_ide_tree_and_quotes_toml_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            runtime_root = Path(tmpdir) / 'Codex "preview" runtime'
+            runtime_root = Path(tmpdir) / "Codex preview runtime"
             runtime_root.mkdir()
             (runtime_root / "codex-resources").mkdir()
             (runtime_root / "codex-path").mkdir()
@@ -590,6 +590,67 @@ class OrchestrationHostTests(unittest.TestCase):
         windows_path = 'C:\\Users\\Mike Doe\\Codex "preview"\\runtime'
         windows_config = orchestration._codex_permission_profile_config(runtime_read_paths=(windows_path,))
         self.assertIn(f'{json.dumps(windows_path)}="read"', windows_config)
+
+    def test_bounded_codex_manifest_read_accepts_descriptor_timestamp_representation_differences(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = Path(tmpdir) / "package.json"
+            expected = b'{"name":"@openai/codex"}'
+            manifest.write_bytes(expected)
+            real_fstat = os.fstat
+
+            def shifted_descriptor_stat(descriptor):
+                metadata = real_fstat(descriptor)
+                return mock.Mock(
+                    st_mode=metadata.st_mode,
+                    st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino,
+                    st_size=metadata.st_size,
+                    st_mtime_ns=metadata.st_mtime_ns + 1,
+                    st_ctime_ns=metadata.st_ctime_ns + 1,
+                )
+
+            with mock.patch.object(orchestration.os, "fstat", side_effect=shifted_descriptor_stat):
+                observed = orchestration._bounded_regular_file_bytes(
+                    manifest,
+                    max_bytes=orchestration.MAX_CODEX_PACKAGE_JSON_BYTES,
+                    label="test package manifest",
+                )
+
+        self.assertEqual(expected, observed)
+
+    def test_bounded_codex_manifest_read_rejects_same_descriptor_metadata_mutation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = Path(tmpdir) / "package.json"
+            manifest.write_bytes(b'{"name":"@openai/codex"}')
+            real_fstat = os.fstat
+            calls = 0
+
+            def changing_descriptor_stat(descriptor):
+                nonlocal calls
+                metadata = real_fstat(descriptor)
+                calls += 1
+                return mock.Mock(
+                    st_mode=metadata.st_mode,
+                    st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino,
+                    st_size=metadata.st_size,
+                    st_mtime_ns=metadata.st_mtime_ns + (1 if calls > 1 else 0),
+                    st_ctime_ns=metadata.st_ctime_ns,
+                )
+
+            with mock.patch.object(
+                orchestration.os,
+                "fstat",
+                side_effect=changing_descriptor_stat,
+            ), self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "RUNNER_ISOLATION_UNAVAILABLE.*changed while it was read",
+            ):
+                orchestration._bounded_regular_file_bytes(
+                    manifest,
+                    max_bytes=orchestration.MAX_CODEX_PACKAGE_JSON_BYTES,
+                    label="test package manifest",
+                )
 
     def test_codex_runtime_resolver_grants_only_an_unknown_direct_executable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -715,7 +776,10 @@ class OrchestrationHostTests(unittest.TestCase):
             probe_argv[probe_argv.index("--permission-profile") + 1],
         )
         self.assertNotIn("--sandbox", probe_argv)
-        self.assertIn('"/opt/codex-runtime"="read"', "\n".join(probe_argv))
+        self.assertIn(
+            f'{json.dumps(str(runtime_resolution.runtime_root))}="read"',
+            "\n".join(probe_argv),
+        )
         if os.name != "nt":
             self.assertEqual("/bin/sh", probe_argv[-3])
             self.assertNotIn(sys.executable, probe_argv)
@@ -776,7 +840,9 @@ class OrchestrationHostTests(unittest.TestCase):
                 "",
             )
 
-        with mock.patch.object(orchestration.sys, "platform", "linux"), mock.patch.object(
+        with mock.patch.object(orchestration, "_is_native_windows", return_value=False), mock.patch.object(
+            orchestration.sys, "platform", "linux"
+        ), mock.patch.object(
             orchestration.shutil, "which", side_effect=which
         ), mock.patch.object(orchestration, "_run_runner_capability_command", side_effect=capability):
             orchestration._validate_runner_capability("claude", "/tmp/fake claude", REPO_ROOT)
@@ -794,7 +860,9 @@ class OrchestrationHostTests(unittest.TestCase):
             (cwd / "protected" / "sentinel.txt").write_text("tampered", encoding="utf-8")
             return orchestration.ProcessResult(0, "", "")
 
-        with mock.patch.object(orchestration.sys, "platform", "linux"), mock.patch.object(
+        with mock.patch.object(orchestration, "_is_native_windows", return_value=False), mock.patch.object(
+            orchestration.sys, "platform", "linux"
+        ), mock.patch.object(
             orchestration.shutil, "which", side_effect=which
         ), mock.patch.object(
             orchestration, "_run_runner_capability_command", side_effect=capability
@@ -805,7 +873,7 @@ class OrchestrationHostTests(unittest.TestCase):
             orchestration._validate_runner_capability("claude", "/tmp/fake claude", REPO_ROOT)
 
     def test_claude_capability_fails_closed_on_native_windows_or_missing_primitives(self):
-        with mock.patch.object(orchestration.os, "name", "nt"), mock.patch.object(
+        with mock.patch.object(orchestration, "_is_native_windows", return_value=True), mock.patch.object(
             orchestration, "_run_runner_capability_command"
         ) as capability, self.assertRaisesRegex(
             orchestration.OrchestrationHostError,
@@ -814,7 +882,7 @@ class OrchestrationHostTests(unittest.TestCase):
             orchestration._validate_runner_capability("claude", "C:/fake/claude.exe", REPO_ROOT)
         capability.assert_not_called()
 
-        with mock.patch.object(orchestration.os, "name", "posix"), mock.patch.object(
+        with mock.patch.object(orchestration, "_is_native_windows", return_value=False), mock.patch.object(
             orchestration.sys, "platform", "linux"
         ), mock.patch.object(
             orchestration.shutil,
@@ -2084,6 +2152,25 @@ class OrchestrationHostTests(unittest.TestCase):
 
             controller.assert_not_called()
             runner.assert_not_called()
+
+    def test_control_snapshot_excludes_only_the_held_managed_host_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent = control_workspace(root)
+            with orchestration._managed_session_lock(root, "orch-1"):
+                snapshot = orchestration._capture_control_artifacts(root, "orch-1")
+                parent_entries = snapshot.roots["runs/orchestrations/orch-1"]
+                self.assertIn(".locks", parent_entries)
+                self.assertNotIn(orchestration.MANAGED_HOST_LOCK_CONTROL_PATH, parent_entries)
+
+                orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+                (parent / ".locks" / "unexpected.lock").write_text("unexpected\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    orchestration.OrchestrationHostError,
+                    r"CONTROL_ARTIFACT_TAMPERED.*\.locks/unexpected\.lock \[added\]",
+                ):
+                    orchestration._verify_control_artifacts_unchanged(root, snapshot)
 
     def test_control_snapshot_ignores_mtime_only_changes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

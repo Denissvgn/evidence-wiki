@@ -169,6 +169,7 @@ PROTECTED_WORKSPACE_FILES = frozenset(
     {"research.yml", "workspace-system.yml", "AGENTS.md", "CLAUDE.md", "README.md", ".gitignore"}
 )
 WORKER_WRITABLE_CONTROL_PATHS = ("runs/run-reports",)
+MANAGED_HOST_LOCK_CONTROL_PATH = ".locks/managed-host.lock"
 
 EXIT_OK = 0
 EXIT_INVALID = 2
@@ -718,7 +719,7 @@ def _control_roots(root: Path, orchestration_id: str) -> tuple[tuple[str, Path, 
         (
             f"runs/orchestrations/{orchestration_id}",
             root / "runs" / "orchestrations" / orchestration_id,
-            frozenset(),
+            frozenset({MANAGED_HOST_LOCK_CONTROL_PATH}),
         ),
     )
 
@@ -1183,6 +1184,16 @@ def _looks_like_codex_package_root(path: Path) -> bool:
 
 def _bounded_regular_file_bytes(path: Path, *, max_bytes: int, label: str) -> bytes:
     """Read one package-manager file without following a final link or racing its pathname."""
+
+    def metadata_identity(metadata: os.stat_result) -> tuple[int, int, int, int | None, int | None]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            getattr(metadata, "st_mtime_ns", None),
+            getattr(metadata, "st_ctime_ns", None),
+        )
+
     try:
         before = path.lstat()
     except OSError as exc:
@@ -1198,6 +1209,7 @@ def _bounded_regular_file_bytes(path: Path, *, max_bytes: int, label: str) -> by
             opened = os.fstat(descriptor)
             if (
                 not stat.S_ISREG(opened.st_mode)
+                or opened.st_size > max_bytes
                 or (before.st_dev, before.st_ino, before.st_size)
                 != (opened.st_dev, opened.st_ino, opened.st_size)
             ):
@@ -1214,7 +1226,8 @@ def _bounded_regular_file_bytes(path: Path, *, max_bytes: int, label: str) -> by
                 chunks.append(chunk)
                 retained += len(chunk)
             content = b"".join(chunks)
-            after = os.fstat(descriptor)
+            after_descriptor = os.fstat(descriptor)
+            after_pathname = path.lstat()
         finally:
             os.close(descriptor)
     except OrchestrationHostError:
@@ -1223,21 +1236,17 @@ def _bounded_regular_file_bytes(path: Path, *, max_bytes: int, label: str) -> by
         raise _runner_isolation_error(
             f"Managed Codex could not read its {label}; reinstall the Codex CLI."
         ) from exc
-    before_identity = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        getattr(before, "st_mtime_ns", None),
-        getattr(before, "st_ctime_ns", None),
-    )
-    after_identity = (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        getattr(after, "st_mtime_ns", None),
-        getattr(after, "st_ctime_ns", None),
-    )
-    if len(content) > max_bytes or len(content) != before.st_size or before_identity != after_identity:
+    if (
+        not stat.S_ISREG(after_descriptor.st_mode)
+        or not stat.S_ISREG(after_pathname.st_mode)
+        or _is_link_like(path, after_pathname)
+        or after_descriptor.st_size > max_bytes
+        or after_pathname.st_size > max_bytes
+        or len(content) > max_bytes
+        or len(content) != opened.st_size
+        or metadata_identity(before) != metadata_identity(after_pathname)
+        or metadata_identity(opened) != metadata_identity(after_descriptor)
+    ):
         raise _runner_isolation_error(
             f"Managed Codex found a {label} that changed while it was read; retry after reinstalling the Codex CLI."
         )
@@ -1993,7 +2002,7 @@ def _validate_runner_capability(name: str, executable: str, root: Path) -> tuple
 
     if name != "claude":  # pragma: no cover - guarded by the closed runner registry
         raise OrchestrationHostError(f"Unsupported managed runner: {name}.")
-    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+    if _is_native_windows():  # pragma: no cover - exercised on Windows CI
         raise _runner_isolation_error(
             "Managed Claude orchestration is unavailable on native Windows because Claude Code cannot enforce its "
             "OS sandbox there. Run Claude from WSL2 or a container, or use the Codex runner.",
