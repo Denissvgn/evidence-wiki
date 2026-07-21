@@ -25,7 +25,10 @@ LABEL org.opencontainers.image.title="EvidenceWiki" \
       org.opencontainers.image.description="Evidence-gated research workspaces with auditable sources" \
       org.opencontainers.image.licenses="MIT"
 
-RUN install -d -o 10001 -g 10001 /workspace
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends poppler-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -o 10001 -g 10001 /workspace
 
 COPY --from=builder /opt/evidence-wiki-venv /opt/evidence-wiki-venv
 

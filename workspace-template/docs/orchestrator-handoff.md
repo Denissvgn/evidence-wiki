@@ -108,9 +108,20 @@ the controller to increment the lease attempt and replay the same action ID.
 `outcome` describes execution of the work order, not the child run's readiness
 verdict. When a research work order creates source requests and correctly ends
 its child run as `blocked_on_sources`, submit `outcome: completed` so the parent
-can route discovery and acquisition. Submit `blocked` only when the work order
-itself cannot progress; that outcome terminates the parent as
-`blocked_on_sources`. Submit `failed` only for a failed work order or tool.
+can route discovery and acquisition. Submit `blocked` when the current bounded
+attempt cannot progress. For every non-acquisition action, and for an
+acquisition action whose candidate remains `selected`, the controller sets the
+parent to `paused`, retains the same pending action, and replays it on `resume`.
+A repairable missing dependency or other retryable tooling/provider condition
+must use that path.
+
+A definitive candidate-specific acquisition failure uses the canonical
+`selected` → `failed` transition and its one new audit event, then also submits
+`blocked`. The controller completes only that route action and continues
+planning for another selected, reviewable, or discoverable route. It alone sets
+the parent to terminal `blocked_on_sources`, and only after artifact-derived
+route exhaustion. Submit `failed` only when execution is unrecoverable and the
+entire parent should terminate as `failed`.
 
 High-stakes questions can also carry facet-level answerability state in
 `sources/coverage/<slug>.yml`. The schema is documented in
@@ -144,10 +155,14 @@ python3 scripts/doctor.py --format json
 ```
 
 The JSON report includes per-check `ok`, `degraded`, or `missing` statuses for
-Python, PyYAML, `pdftotext`, git, workspace write permissions, and contract
-metadata. Required failures, such as missing PyYAML or Python older than 3.10,
-return a non-zero exit. Optional failures keep exit `0` and explain capability
-loss, such as "PDF normalization degrades to stubs for PDF-only records."
+Python, PyYAML, pypdf, `pdftotext`, git, workspace write permissions, and
+contract metadata. Required failures, such as missing PyYAML, missing pypdf, or
+Python older than 3.10, return a non-zero exit. pypdf is the portable canonical
+PDF backend installed by pip. The Poppler compatibility backend is optional
+and explicit; its `pdftotext` check includes system-package guidance, and its
+absence does not disable the default pypdf path. If
+`sources.pdf_extractor: poppler` selects it, missing `pdftotext` becomes a
+required failure and doctor exits non-zero before orchestration.
 
 ## Step 1: Contract Negotiation
 
@@ -164,8 +179,8 @@ The output is JSON. This abridged example omits the large
 {
   "schema_version": "1.0",
   "package": "evidence-wiki",
-  "package_version": "0.2.2",
-  "starter_version": "0.5.2",
+  "package_version": "0.2.3",
+  "starter_version": "0.5.3",
   "starter_schema_version": "0.1",
   "compatible_research_yml_contract": "0.1",
   "profile_schema_versions": ["0.1"],
@@ -685,8 +700,13 @@ send `--expected-state` from the freshly read record, and stop on
 `fetched`, and `superseded` are terminal. A completed delivery transitions
 `selected` to `fetched` only after inventory has produced the cited
 `--source-id`; acquisition failure transitions `selected` to `failed` with its
-reason. Every applied transition records actor, prior/new state, reason,
+reason. In a managed action this transition is reserved for a definitive
+failure of that candidate route. A retryable dependency, local tool, or
+provider condition leaves it `selected` so the same action can be replayed.
+Every applied transition records actor, prior/new state, reason,
 request/run/candidate/source correlation, and UTC time in the append-only audit.
+After a canonical route failure, the parent returns to planning; only controller
+route exhaustion can terminate the session as `blocked_on_sources`.
 
 The discovery command surface is `scripts/discover_sources.py`, with read-only
 `search`, `legal`, `github`, `authors`, and `companions` subcommands. Discovery is disabled by

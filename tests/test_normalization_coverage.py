@@ -2,7 +2,6 @@ import contextlib
 import importlib.util
 import io
 import json
-import shutil
 import sys
 import tempfile
 import unittest
@@ -164,11 +163,11 @@ class NormalizationCoverageBase(unittest.TestCase):
         self.assertEqual(1, len(matches), f"expected exactly one {kind} record")
         return matches[0]
 
-    def normalize_record(self, workspace: Path, record: dict, pdftotext_path: str | None = None):
+    def normalize_record(self, workspace: Path, record: dict, pdf_extractor=None):
         config = NORMALIZE.load_config(workspace)
         eligible = NORMALIZE.eligible_records(workspace, [record])
         self.assertEqual(1, len(eligible), f"record {record.get('id')} must be eligible")
-        source = NORMALIZE.normalize_selected_record(workspace, config, eligible[0], pdftotext_path)
+        source = NORMALIZE.normalize_selected_record(workspace, config, eligible[0], pdf_extractor)
         output_path = NORMALIZE.normalized_output_path_for_record(record, workspace / "sources" / "normalized")
         frontmatter = NORMALIZE.frontmatter_for(source, "sources/manifest.jsonl", output_path, "2026-06-10")
         output_path.write_text(NORMALIZE.render_markdown(source, frontmatter))
@@ -384,14 +383,13 @@ class TableNormalizationTests(NormalizationCoverageBase):
             self.assertIn("benchmark-scores", payload["results"][0]["path"])
 
 
-@unittest.skipUnless(shutil.which("pdftotext"), "pdftotext is required for needs_ocr detection tests")
 class NeedsOcrDetectionTests(NormalizationCoverageBase):
     """E19-T02: scanned-PDF detection and surfacing."""
 
     def normalize_pdf(self, workspace: Path) -> tuple:
         records = self.run_inventory(workspace)
         pdf_record = self.record_by_kind(records, "pdf")
-        return self.normalize_record(workspace, pdf_record, shutil.which("pdftotext"))
+        return self.normalize_record(workspace, pdf_record, NORMALIZE.resolve_pdf_extractor("pypdf"))
 
     def test_text_pdf_behavior_is_unchanged(self):
         with tempfile.TemporaryDirectory() as tmpdir:

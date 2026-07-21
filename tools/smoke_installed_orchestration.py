@@ -17,6 +17,59 @@ FAKE_CODEX = REPO_ROOT / "tests" / "fixtures" / "fake_codex_cli.py"
 FAKE_CODEX_WORKSPACE_PYTHON = "EVIDENCE_WIKI_FAKE_CODEX_WORKSPACE_PYTHON"
 
 
+def tiny_pdf_bytes() -> bytes:
+    """Return a dependency-free one-page PDF with extractable text."""
+    stream = (
+        "BT\n"
+        "/F1 18 Tf\n"
+        "72 720 Td\n"
+        "(Installed Wheel PDF Smoke) Tj\n"
+        "0 -36 Td\n"
+        "/F1 12 Tf\n"
+        "(Abstract) Tj\n"
+        "0 -18 Td\n"
+        "(The installed pypdf backend extracts this portable PDF without Poppler.) Tj\n"
+        "0 -30 Td\n"
+        "(1 Verification) Tj\n"
+        "0 -18 Td\n"
+        "(This body is long enough to be retained as usable normalized evidence.) Tj\n"
+        "ET\n"
+    ).encode("ascii")
+    objects = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        (
+            b"3 0 obj\n"
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\n"
+            b"endobj\n"
+        ),
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        (
+            b"5 0 obj\n<< /Length "
+            + str(len(stream)).encode("ascii")
+            + b" >>\nstream\n"
+            + stream
+            + b"endstream\nendobj\n"
+        ),
+    ]
+    pdf = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
+    offsets: list[int] = []
+    for obj in objects:
+        offsets.append(len(pdf))
+        pdf += obj
+    xref_offset = len(pdf)
+    pdf += f"xref\n0 {len(objects) + 1}\n".encode("ascii")
+    pdf += b"0000000000 65535 f \n"
+    for offset in offsets:
+        pdf += f"{offset:010d} 00000 n \n".encode("ascii")
+    pdf += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF\n"
+    ).encode("ascii")
+    return pdf
+
+
 def run(
     argv: list[str],
     *,
@@ -46,6 +99,70 @@ def fake_codex_environment() -> dict[str, str]:
     return environment
 
 
+def verify_installed_pdf_backend(cli: str, workspace: Path) -> None:
+    run(
+        [
+            cli,
+            "deploy",
+            "--target",
+            str(workspace),
+            "--project-name",
+            "installed-wheel-pdf-smoke",
+            "--project-description",
+            "Installed-wheel portable PDF normalization smoke",
+        ]
+    )
+    raw_pdf = workspace / "raw" / "pdf" / "installed-wheel-smoke.pdf"
+    raw_pdf.parent.mkdir(parents=True, exist_ok=True)
+    raw_pdf.write_bytes(tiny_pdf_bytes())
+    source_id = "raw:installed-wheel-pdf-smoke"
+    manifest = workspace / "sources" / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "id": source_id,
+                "kind": "pdf",
+                "status": "discovered",
+                "pairing_status": "pdf_only",
+                "raw_paths": ["raw/pdf/installed-wheel-smoke.pdf"],
+                "raw_pdf": "raw/pdf/installed-wheel-smoke.pdf",
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    normalized = run(
+        [
+            sys.executable,
+            str(workspace / "scripts" / "normalize_sources.py"),
+            "--project-root",
+            str(workspace),
+            "--source-id",
+            source_id,
+            "--format",
+            "json",
+        ]
+    )
+    report = json.loads(normalized.stdout)
+    actions = report.get("actions")
+    if not isinstance(actions, list) or len(actions) != 1:
+        raise SystemExit(f"installed wheel returned an invalid PDF normalization report: {report}")
+    action = actions[0]
+    if not isinstance(action, dict):
+        raise SystemExit(f"installed wheel returned an invalid PDF normalization action: {report}")
+    extractor = action.get("pdf_extractor")
+    if (
+        action.get("status") != "content_extracted"
+        or not isinstance(extractor, dict)
+        or extractor.get("name") != "pypdf"
+    ):
+        raise SystemExit(f"installed wheel did not use its portable PDF backend: {report}")
+    output = workspace / str(action.get("output", ""))
+    if not output.is_file() or "Installed Wheel PDF Smoke" not in output.read_text(encoding="utf-8"):
+        raise SystemExit("installed wheel did not retain extracted PDF text")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", required=True, type=Path)
@@ -53,7 +170,7 @@ def main() -> int:
     cli = str(args.cli.resolve())
 
     contract = json.loads(run([cli, "contract", "--format", "json"]).stdout)
-    if contract.get("starter_version") != "0.5.2":
+    if contract.get("starter_version") != "0.5.3":
         raise SystemExit(f"installed CLI reported an unexpected starter version: {contract.get('starter_version')}")
     schema_documents = contract.get("artifact_schema_documents")
     expected_schemas = {
@@ -76,6 +193,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-wheel-smoke-") as tmpdir:
         temporary_root = Path(tmpdir)
+        verify_installed_pdf_backend(cli, temporary_root / "portable PDF workspace")
         workspace = temporary_root / "workspace with spaces"
         fake_bin = temporary_root / "bin"
         fake_bin.mkdir()

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import shutil
 from pathlib import Path
 from typing import Any
@@ -109,6 +110,7 @@ def evaluate_workspace_health(
 ) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
     findings: list[dict[str, Any]] = []
+    config: dict[str, Any] = {}
     if not project_root.is_dir():
         findings.append(
             finding(
@@ -165,20 +167,44 @@ def evaluate_workspace_health(
                         )
                     )
 
-    pdftotext_available = (
-        optional_tool_availability.get("pdftotext", False)
-        if optional_tool_availability is not None
-        else shutil.which("pdftotext") is not None
-    )
-    if check_optional_tools and not pdftotext_available:
+    if optional_tool_availability is not None and "pypdf" in optional_tool_availability:
+        pypdf_available = optional_tool_availability["pypdf"]
+    else:
+        try:
+            pypdf_available = importlib.util.find_spec("pypdf") is not None
+        except (ImportError, ValueError):
+            # A broken or partially initialized import system makes pypdf
+            # unavailable for the purpose of this dependency-health check.
+            pypdf_available = False
+    if not pypdf_available:
         findings.append(
             finding(
-                "OPTIONAL_TOOL_MISSING",
-                "LOW",
-                "Optional Poppler pdftotext is unavailable; PDF-only normalization will degrade to stubs.",
+                "REQUIRED_DEPENDENCY_MISSING",
+                "HIGH",
+                "Required pypdf dependency is unavailable; portable PDF normalization cannot run.",
                 [],
-                "Install Poppler when full PDF-only normalization is required.",
-                STATUS_DEGRADED,
+                "Install the package's required dependencies, for example with "
+                "`python3 -m pip install evidence-wiki`.",
+                STATUS_INVALID,
+            )
+        )
+
+    sources = config.get("sources") if isinstance(config.get("sources"), dict) else {}
+    pdf_extractor = sources.get("pdf_extractor", "pypdf")
+    pdftotext_available = (
+        optional_tool_availability["pdftotext"]
+        if optional_tool_availability is not None and "pdftotext" in optional_tool_availability
+        else shutil.which("pdftotext") is not None
+    )
+    if pdf_extractor == "poppler" and not pdftotext_available:
+        findings.append(
+            finding(
+                "REQUIRED_DEPENDENCY_MISSING",
+                "HIGH",
+                "The configured Poppler PDF extractor requires `pdftotext`, but it is unavailable.",
+                ["research.yml"],
+                "Install Poppler and expose `pdftotext` on PATH, or set sources.pdf_extractor to pypdf.",
+                STATUS_INVALID,
             )
         )
 

@@ -210,7 +210,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual("1.0", payload["schema_version"])
         self.assertIn(payload["verdict"], {"ok", "degraded"})
         checks = {check["id"]: check for check in payload["checks"]}
-        for check_id in ("python", "pyyaml", "pdftotext", "git", "workspace_write", "contract"):
+        for check_id in ("python", "pyyaml", "pypdf", "pdftotext", "git", "workspace_write", "contract"):
             self.assertIn(check_id, checks)
         self.assertEqual("ok", checks["python"]["status"])
         self.assertEqual("ok", checks["pyyaml"]["status"])
@@ -887,6 +887,11 @@ class PackageCliTests(unittest.TestCase):
         self.assertIn('"/LICENSE"', pyproject)
         self.assertIn('"workspace-template" = "evidence_wiki/assets/workspace-template"', pyproject)
         self.assertIn('"domain-packs" = "evidence_wiki/assets/domain-packs"', pyproject)
+
+    def test_pyproject_installs_portable_pdf_backend(self):
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+
+        self.assertIn('"pypdf>=6.14,<7"', pyproject)
 
     def test_pyproject_publishes_public_repository_metadata(self):
         pyproject = (REPO_ROOT / "pyproject.toml").read_text()

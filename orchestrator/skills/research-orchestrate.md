@@ -209,10 +209,11 @@ evidence-wiki doctor --format json
 evidence-wiki contract
 ```
 
-`doctor` reports per-check `ok`/`degraded`/`missing` for Python, PyYAML,
-`pdftotext`, git, and write permissions; a required failure exits non-zero. Treat
-`degraded` optional capabilities (for example, missing `pdftotext` degrading
-PDF normalization to stubs) as acceptable only if the scope tolerates them.
+`doctor` reports per-check `ok`/`degraded`/`missing` for Python, PyYAML, pypdf,
+`pdftotext`, git, and write permissions; a required failure exits non-zero.
+pypdf is the required portable PDF backend. Missing `pdftotext` is
+informational unless `sources.pdf_extractor: poppler` explicitly selects the
+Poppler compatibility backend, in which case it is a required failure.
 `contract` reports the supported `profile_schema_versions` and per-artifact
 schema versions; only submit profiles whose `schema_version` it accepts.
 
@@ -526,7 +527,7 @@ pages or unknown source ids surface as `warnings[]`, never crashes.
   refreshing starter-managed tooling:
 
 ```bash
-python -m pip install --upgrade evidence-wiki==0.2.2
+python -m pip install --upgrade evidence-wiki==0.2.3
 evidence-wiki --version
 evidence-wiki upgrade --target my-research-workspace --dry-run
 evidence-wiki upgrade --target my-research-workspace

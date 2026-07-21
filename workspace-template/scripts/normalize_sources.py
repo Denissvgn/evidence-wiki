@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.metadata
+import importlib.util
 import io
 import json
 import re
@@ -26,7 +28,7 @@ except ImportError as exc:  # pragma: no cover - environment guard
 
 
 NORMALIZER_NAME = "normalize_sources.py"
-NORMALIZER_VERSION = 1
+NORMALIZER_VERSION = 2
 OVERRIDABLE_EVIDENCE_USABILITY_REASONS = {"html_javascript_shell"}
 MAX_INCLUDE_DEPTH = 24
 MAX_UNRESOLVED_MACROS = 30
@@ -35,6 +37,12 @@ PDF_MIN_USEFUL_CHARS = 200
 # fewer extracted characters per page than this, the PDF likely needs OCR.
 PDF_MIN_CHARS_PER_PAGE = 100
 PDF_LAYOUT_TEXT_CACHE: dict[str, str] = {}
+PDF_EXTRACTORS = ("pypdf", "poppler")
+PDF_DEFAULT_EXTRACTOR = "pypdf"
+PDF_EXTRACTION_TIMEOUT_SECONDS = 120
+PDF_MAX_INPUT_BYTES = 100 * 1024 * 1024
+PDF_MAX_PAGES = 2_000
+PDF_MAX_OUTPUT_CHARS = 20_000_000
 # HTML extraction reads at most this many bytes; larger pages are truncated
 # with a parse warning. No JS rendering, no remote asset fetching.
 HTML_MAX_BYTES = 2_000_000
@@ -215,6 +223,8 @@ class NormalizedSource:
     needs_ocr: bool = False
     title_source: str | None = None
     extracted_title: str | None = None
+    pdf_extractor: str | None = None
+    pdf_extractor_version: str | None = None
 
 
 @dataclass
@@ -233,6 +243,24 @@ class PdfAbstractExtraction:
     text: str | None
     confidence: str
     recovered_by_fallback: bool = False
+
+
+@dataclass(frozen=True)
+class PdfExtractor:
+    name: str
+    version: str
+    executable: str | None = None
+
+
+@dataclass
+class PdfExtractionResult:
+    reading_text: str
+    layout_text: str
+    page_count: int
+    backend: str
+    backend_version: str
+    warnings: list[str]
+    extractor_ran: bool
 
 
 @dataclass
@@ -285,6 +313,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Append a compact normalization run summary to log.md.",
     )
+    parser.add_argument(
+        "--pdf-extractor",
+        choices=PDF_EXTRACTORS,
+        help=(
+            "PDF text extractor. Defaults to sources.pdf_extractor from research.yml, "
+            f"then {PDF_DEFAULT_EXTRACTOR}. Poppler must be selected explicitly."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -336,6 +372,19 @@ def source_paths(config: dict[str, Any]) -> tuple[str, str]:
         "sources.normalized_dir",
     )
     return manifest_path, normalized_dir
+
+
+def pdf_extractor_name(config: dict[str, Any], cli_value: str | None = None) -> str:
+    if cli_value is not None:
+        return cli_value
+    sources_config = config.get("sources") or {}
+    if not isinstance(sources_config, dict):
+        raise SystemExit("research.yml sources must be a mapping")
+    value = sources_config.get("pdf_extractor", PDF_DEFAULT_EXTRACTOR)
+    if not isinstance(value, str) or value not in PDF_EXTRACTORS:
+        choices = ", ".join(PDF_EXTRACTORS)
+        raise SystemExit(f"research.yml sources.pdf_extractor must be one of: {choices}")
+    return value
 
 
 def codebase_analysis_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -441,18 +490,48 @@ def record_raw_fingerprint(record: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def is_stale(record: dict[str, Any], output_path: Path) -> bool:
-    """True when the raw inputs changed since the normalized record was written.
+def stored_normalizer_version(frontmatter: dict[str, Any]) -> int | None:
+    normalizer = frontmatter.get("normalizer")
+    if not isinstance(normalizer, dict):
+        return None
+    version = normalizer.get("version")
+    return version if isinstance(version, int) and not isinstance(version, bool) else None
+
+
+def stored_pdf_extractor(frontmatter: dict[str, Any]) -> str | None:
+    extractor = frontmatter.get("pdf_extractor")
+    if not isinstance(extractor, dict):
+        return None
+    name = extractor.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def is_stale(
+    record: dict[str, Any],
+    output_path: Path,
+    *,
+    pdf_extractor: str | None = None,
+) -> bool:
+    """True when raw inputs or the deterministic extraction profile changed.
 
     Returns False when the manifest carries no raw fingerprint (links/codebase or
-    a pre-fingerprint manifest), so those records keep skip-if-exists behavior.
-    A stored fingerprint that is missing or different counts as stale, which also
-    backfills fingerprints into records written before this signal existed.
+    a pre-fingerprint manifest), unless the normalizer version changed. A stored
+    fingerprint that is missing or different counts as stale, which also backfills
+    fingerprints into records written before this signal existed. PDF records are
+    additionally stale when their explicitly recorded extractor differs from the
+    configured extractor; extractor patch versions remain provenance rather than an
+    implicit rewrite trigger.
     """
+    frontmatter = read_output_frontmatter(output_path)
+    if stored_normalizer_version(frontmatter) != NORMALIZER_VERSION:
+        return True
+    if pdf_extractor is not None and stored_pdf_extractor(frontmatter) != pdf_extractor:
+        return True
     manifest_fingerprint = record_raw_fingerprint(record)
     if manifest_fingerprint is None:
         return False
-    return stored_raw_fingerprint(output_path) != manifest_fingerprint
+    stored_fingerprint = frontmatter.get("raw_fingerprint")
+    return stored_fingerprint != manifest_fingerprint
 
 
 def record_id(record: dict[str, Any]) -> str:
@@ -726,6 +805,8 @@ def select_eligible_records(
     records: list[dict[str, Any]],
     eligible: list[EligibleRecord],
     normalized_root: Path,
+    *,
+    pdf_extractor: str | None = None,
 ) -> tuple[list[EligibleRecord], int, str]:
     by_id = records_by_source_id(records)
     eligible_by_id = eligible_by_source_id(eligible)
@@ -747,7 +828,12 @@ def select_eligible_records(
     pending: list[EligibleRecord] = []
     for item in eligible:
         output_path = normalized_output_path_for_record(item.record, normalized_root)
-        if not output_path.exists() or is_stale(item.record, output_path):
+        desired_pdf_extractor = pdf_extractor if item.method == "pdf" else None
+        if not output_path.exists() or is_stale(
+            item.record,
+            output_path,
+            pdf_extractor=desired_pdf_extractor,
+        ):
             pending.append(item)
     return pending, skipped_unsupported, "pending"
 
@@ -756,14 +842,21 @@ def normalize_selected_record(
     project_root: Path,
     config: dict[str, Any],
     item: EligibleRecord,
-    pdftotext_path: str | None,
+    pdf_extractor: PdfExtractor | str | None = None,
+    *,
+    pdftotext_path: str | None = None,
 ) -> NormalizedSource:
+    if pdftotext_path is not None:
+        if pdf_extractor is not None:
+            raise TypeError("pass pdf_extractor or pdftotext_path, not both")
+        # Compatibility for callers of the pre-v2 library helper. New code
+        # should pass an explicit PdfExtractor or use the configured default.
+        pdf_extractor = pdftotext_path
     if item.method == "latex":
         return normalize_latex_record(project_root, item.record)
     if item.method == "pdf":
-        if not pdftotext_path:
-            raise RuntimeError("PDF text extraction requires pdftotext")
-        return normalize_pdf_record(project_root, item.record, pdftotext_path)
+        selected_extractor = pdf_extractor or resolve_pdf_extractor(pdf_extractor_name(config))
+        return normalize_pdf_record(project_root, item.record, selected_extractor)
     if item.method == "link":
         return normalize_link_record(item.record)
     if item.method == "html":
@@ -1625,6 +1718,199 @@ def manifest_warnings(record: dict[str, Any]) -> list[str]:
     return [warning for warning in warnings if isinstance(warning, str)]
 
 
+def poppler_version(pdftotext_path: str) -> str:
+    try:
+        result = subprocess.run(  # noqa: S603 - resolved executable, shell=False
+            [pdftotext_path, "-v"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    match = re.search(r"pdftotext\s+version\s+([^\s]+)", output, flags=re.IGNORECASE)
+    return match.group(1) if match else "unknown"
+
+
+def resolve_pdf_extractor(name: str) -> PdfExtractor:
+    if name == "pypdf":
+        try:
+            available = importlib.util.find_spec("pypdf") is not None
+        except (ImportError, ValueError):
+            available = False
+        if not available:
+            raise SystemExit(
+                "PDF text extraction requires the `pypdf` Python package. "
+                "Install the EvidenceWiki package dependencies, then rerun normalize_sources.py."
+            )
+        try:
+            version = importlib.metadata.version("pypdf")
+        except importlib.metadata.PackageNotFoundError:
+            version = "unknown"
+        return PdfExtractor(name="pypdf", version=version)
+    if name == "poppler":
+        executable = shutil.which("pdftotext")
+        if not executable:
+            raise SystemExit(
+                "PDF extractor `poppler` requires the `pdftotext` executable. "
+                "Install Poppler or poppler-utils, then rerun normalize_sources.py."
+            )
+        return PdfExtractor(name="poppler", version=poppler_version(executable), executable=executable)
+    raise SystemExit(f"Unsupported PDF extractor: {name}")
+
+
+PYPDF_EXTRACTION_PROGRAM = r"""
+import json
+import logging
+import sys
+import warnings
+
+logging.disable(logging.CRITICAL)
+warnings.simplefilter("ignore")
+
+pdf_path = sys.argv[1]
+max_pages = int(sys.argv[2])
+max_output_chars = int(sys.argv[3])
+
+try:
+    import pypdf
+
+    reader = pypdf.PdfReader(pdf_path, strict=False, root_object_recovery_limit=10_000)
+    page_count = len(reader.pages)
+    if page_count > max_pages:
+        raise RuntimeError(f"PDF has {page_count} pages; limit is {max_pages}")
+    reading_pages = []
+    layout_pages = []
+    reading_chars = 0
+    layout_chars = 0
+    for page in reader.pages:
+        reading = page.extract_text() or ""
+        layout = page.extract_text(
+            extraction_mode="layout",
+            layout_mode_space_vertically=False,
+        ) or ""
+        reading_chars += len(reading) + 1
+        layout_chars += len(layout) + 1
+        if reading_chars > max_output_chars or layout_chars > max_output_chars:
+            raise RuntimeError(
+                f"PDF extracted text exceeds {max_output_chars} characters per pass"
+            )
+        reading_pages.append(reading)
+        layout_pages.append(layout)
+    reading_text = "".join(page + "\f" for page in reading_pages)
+    layout_text = "".join(page + "\f" for page in layout_pages)
+    print(json.dumps({
+        "reading_text": reading_text,
+        "layout_text": layout_text,
+        "page_count": page_count,
+        "backend": "pypdf",
+        "backend_version": getattr(pypdf, "__version__", "unknown"),
+    }, ensure_ascii=True, separators=(",", ":")))
+except Exception as exc:
+    message = f"{type(exc).__name__}: {exc}"[:2_000]
+    print(json.dumps({"error": message}, ensure_ascii=True, separators=(",", ":")))
+    raise SystemExit(1)
+""".strip()
+
+
+def run_pypdf_extractor(pdf_path: Path, pdf_label: str, extractor: PdfExtractor) -> PdfExtractionResult:
+    try:
+        size_bytes = pdf_path.stat().st_size
+    except OSError as exc:
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [f"{pdf_label}: cannot inspect PDF before extraction: {exc}"], False,
+        )
+    if size_bytes > PDF_MAX_INPUT_BYTES:
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [f"{pdf_label}: PDF size {size_bytes} bytes exceeds extraction limit {PDF_MAX_INPUT_BYTES}"], False,
+        )
+    args = [
+        sys.executable,
+        "-I",
+        "-B",
+        "-c",
+        PYPDF_EXTRACTION_PROGRAM,
+        str(pdf_path),
+        str(PDF_MAX_PAGES),
+        str(PDF_MAX_OUTPUT_CHARS),
+    ]
+    try:
+        process = subprocess.run(  # noqa: S603 - exact interpreter, static helper, shell=False
+            args,
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=PDF_EXTRACTION_TIMEOUT_SECONDS,
+        )
+    except OSError as exc:
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [f"{pdf_label}: cannot run pypdf extractor: {exc}"], False,
+        )
+    except subprocess.TimeoutExpired:
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [f"{pdf_label}: pypdf extraction timed out after {PDF_EXTRACTION_TIMEOUT_SECONDS} seconds"], False,
+        )
+
+    try:
+        payload = json.loads(process.stdout)
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    if process.returncode != 0 or not isinstance(payload, dict) or "error" in payload:
+        detail = payload.get("error") if isinstance(payload, dict) else None
+        if not isinstance(detail, str) or not detail:
+            detail = single_line(process.stderr) or f"extractor exited with code {process.returncode}"
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [f"{pdf_label}: pypdf extraction failed: {detail[:2_000]}"], False,
+        )
+
+    reading_text = payload.get("reading_text")
+    layout_text = payload.get("layout_text")
+    page_count = payload.get("page_count")
+    backend = payload.get("backend")
+    backend_version = payload.get("backend_version")
+    if (
+        not isinstance(reading_text, str)
+        or not isinstance(layout_text, str)
+        or not isinstance(page_count, int)
+        or isinstance(page_count, bool)
+        or backend != extractor.name
+        or page_count < 0
+        or page_count > PDF_MAX_PAGES
+        or len(reading_text) > PDF_MAX_OUTPUT_CHARS
+        or len(layout_text) > PDF_MAX_OUTPUT_CHARS
+    ):
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [f"{pdf_label}: pypdf extractor returned an invalid or oversized result"], False,
+        )
+    if not isinstance(backend_version, str) or not backend_version:
+        backend_version = extractor.version
+    warnings: list[str] = []
+    if process.stderr.strip():
+        warnings.append(f"{pdf_label}: pypdf warning: {single_line(process.stderr)[:2_000]}")
+    if not reading_text.strip():
+        warnings.append(f"{pdf_label}: pypdf reading-order pass produced no output")
+    if not layout_text.strip():
+        warnings.append(f"{pdf_label}: pypdf layout pass produced no output")
+    return PdfExtractionResult(
+        reading_text,
+        layout_text,
+        page_count,
+        extractor.name,
+        backend_version,
+        warnings,
+        True,
+    )
+
+
 def run_pdftotext(
     pdftotext_path: str,
     pdf_path: Path,
@@ -1679,6 +1965,66 @@ def extract_pdf_text(pdftotext_path: str, pdf_path: Path, pdf_label: str) -> tup
     if layout_ran:
         return layout_text, warnings, True
     return "", warnings, False
+
+
+def run_poppler_extractor(pdf_path: Path, pdf_label: str, extractor: PdfExtractor) -> PdfExtractionResult:
+    try:
+        size_bytes = pdf_path.stat().st_size
+    except OSError as exc:
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [f"{pdf_label}: cannot inspect PDF before extraction: {exc}"], False,
+        )
+    if size_bytes > PDF_MAX_INPUT_BYTES:
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [f"{pdf_label}: PDF size {size_bytes} bytes exceeds extraction limit {PDF_MAX_INPUT_BYTES}"], False,
+        )
+    if not extractor.executable:
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [f"{pdf_label}: Poppler extractor executable is unavailable"], False,
+        )
+    reading_text, warnings, extractor_ran = extract_pdf_text(extractor.executable, pdf_path, pdf_label)
+    layout_text = PDF_LAYOUT_TEXT_CACHE.get(pdf_label, reading_text)
+    if len(reading_text) > PDF_MAX_OUTPUT_CHARS or len(layout_text) > PDF_MAX_OUTPUT_CHARS:
+        return PdfExtractionResult(
+            "", "", 0, extractor.name, extractor.version,
+            [*warnings, f"{pdf_label}: Poppler extracted text exceeds {PDF_MAX_OUTPUT_CHARS} characters per pass"],
+            False,
+        )
+    page_count = max(reading_text.count("\f"), layout_text.count("\f"), 1 if extractor_ran else 0)
+    if page_count > PDF_MAX_PAGES:
+        return PdfExtractionResult(
+            "", "", page_count, extractor.name, extractor.version,
+            [*warnings, f"{pdf_label}: PDF has {page_count} pages; extraction limit is {PDF_MAX_PAGES}"],
+            False,
+        )
+    return PdfExtractionResult(
+        reading_text,
+        layout_text,
+        page_count,
+        extractor.name,
+        extractor.version,
+        warnings,
+        extractor_ran,
+    )
+
+
+def extract_pdf(
+    pdf_path: Path,
+    pdf_label: str,
+    extractor: PdfExtractor | str,
+) -> PdfExtractionResult:
+    if isinstance(extractor, str):
+        # Backwards-compatible library API: a string has historically meant a
+        # resolved pdftotext executable path.
+        extractor = PdfExtractor(name="poppler", version="unknown", executable=extractor)
+    if extractor.name == "pypdf":
+        return run_pypdf_extractor(pdf_path, pdf_label, extractor)
+    if extractor.name == "poppler":
+        return run_poppler_extractor(pdf_path, pdf_label, extractor)
+    raise RuntimeError(f"Unsupported PDF extractor: {extractor.name}")
 
 
 def normalize_pdf_text(text: str) -> str:
@@ -1926,48 +2272,30 @@ def extract_pdf_media(text: str) -> list[MediaReference]:
     return media
 
 
-def normalize_pdf_record(project_root: Path, record: dict[str, Any], pdftotext_path: str) -> NormalizedSource:
+def normalize_pdf_record(
+    project_root: Path,
+    record: dict[str, Any],
+    extractor: PdfExtractor | str,
+) -> NormalizedSource:
     source_id = str(record.get("id", "unknown"))
     warnings = manifest_warnings(record)
     raw_pdf = raw_pdf_value(record)
     if not raw_pdf:
-        return NormalizedSource(
-            record=record,
-            extraction_method="pdf_text",
-            title=source_id,
-            authors=[],
-            abstract=None,
-            outline=[],
-            extracted_text="None extracted.",
-            media=[],
-            links=[],
-            bibliography_files=[],
-            included_paths=[],
-            warnings=unique_values([*warnings, f"{source_id}: raw PDF path not found"]),
-        )
+        raise RuntimeError(f"{source_id}: raw PDF path not found")
 
     pdf_path = safe_workspace_path(project_root, raw_pdf)
     if pdf_path is None or not pdf_path.is_file():
-        return NormalizedSource(
-            record=record,
-            extraction_method="pdf_text",
-            title=source_id,
-            authors=[],
-            abstract=None,
-            outline=[],
-            extracted_text="None extracted.",
-            media=[],
-            links=[],
-            bibliography_files=[],
-            included_paths=[],
-            warnings=unique_values([*warnings, f"{source_id}: raw PDF file not found: {raw_pdf}"]),
-        )
+        raise RuntimeError(f"{source_id}: raw PDF file not found: {raw_pdf}")
 
-    extracted_text, extraction_warnings, extractor_ran = extract_pdf_text(pdftotext_path, pdf_path, raw_pdf)
-    warnings.extend(extraction_warnings)
-    # pdftotext terminates every page with a form feed, so the raw output
-    # carries the page count even when no text was extracted.
-    page_count = max(1, extracted_text.count("\f"))
+    extraction = extract_pdf(pdf_path, raw_pdf, extractor)
+    extracted_text = extraction.reading_text
+    warnings.extend(extraction.warnings)
+    if not extraction.extractor_ran:
+        detail = "; ".join(extraction.warnings) or "extractor did not complete successfully"
+        raise RuntimeError(f"{source_id}: PDF extraction failed using {extraction.backend}: {detail}")
+    # Both supported backends preserve the page count explicitly. Poppler's
+    # form feeds remain accepted by the backwards-compatible string API.
+    page_count = max(1, extraction.page_count, extracted_text.count("\f"))
     normalized_text = normalize_pdf_text(extracted_text)
     title, title_confidence = infer_pdf_title(normalized_text, source_id)
     extracted_title = title
@@ -1980,18 +2308,18 @@ def normalize_pdf_record(project_root: Path, record: dict[str, Any], pdftotext_p
     abstract_result = extract_pdf_abstract_details(normalized_text)
     abstract = abstract_result.text
     outline = extract_pdf_outline(normalized_text)
-    layout_text = PDF_LAYOUT_TEXT_CACHE.get(raw_pdf, extracted_text)
+    layout_text = extraction.layout_text or extracted_text
     media = extract_pdf_media(normalize_pdf_text(layout_text))
     links = extract_links(normalized_text)
 
-    needs_ocr = extractor_ran and len(normalized_text) < PDF_MIN_CHARS_PER_PAGE * page_count
+    needs_ocr = extraction.extractor_ran and len(normalized_text) < PDF_MIN_CHARS_PER_PAGE * page_count
     if needs_ocr:
         warnings.append(
             f"{source_id}: extracted {len(normalized_text)} character(s) across {page_count} page(s); "
             "likely a scanned or image-only PDF (needs OCR)"
         )
     if len(normalized_text) < PDF_MIN_USEFUL_CHARS:
-        warnings.append(f"{source_id}: pdftotext produced no useful text")
+        warnings.append(f"{source_id}: {extraction.backend} produced no useful text")
         if not normalized_text.strip():
             normalized_text = "None extracted."
     if title == source_id:
@@ -2021,6 +2349,8 @@ def normalize_pdf_record(project_root: Path, record: dict[str, Any], pdftotext_p
         needs_ocr=needs_ocr,
         title_source=title_source,
         extracted_title=extracted_title,
+        pdf_extractor=extraction.backend,
+        pdf_extractor_version=extraction.backend_version,
     )
 
 
@@ -3062,6 +3392,12 @@ def frontmatter_for(
         "provider": codebase_provider(record) if is_codebase_record(record) else link_provider(record) if source.extraction_method in {"link_stub", "web_stub"} else None,
         "fetch_status": "artifact_recorded" if source.extraction_method == "codebase_context" else "not_fetched" if source.extraction_method in {"link_stub", "web_stub", "codebase_stub"} else None,
         "extraction_method": source.extraction_method,
+        "pdf_extractor": {
+            "name": source.pdf_extractor,
+            "version": source.pdf_extractor_version,
+        }
+        if source.pdf_extractor
+        else None,
         "content_hash": content_hash(source),
         "raw_fingerprint": record_raw_fingerprint(record),
         "references_source_ids": matched_reference_source_ids(source, manifest_records, project_root) or None,
@@ -3429,7 +3765,14 @@ def run_normalization(args: argparse.Namespace) -> int:
     run_timestamp = timestamp_utc()
     normalized_at = run_timestamp
     eligible = eligible_records(project_root, records)
-    selected, skipped_unsupported, selector = select_eligible_records(args, records, eligible, normalized_root)
+    selected_pdf_extractor_name = pdf_extractor_name(config, args.pdf_extractor)
+    selected, skipped_unsupported, selector = select_eligible_records(
+        args,
+        records,
+        eligible,
+        normalized_root,
+        pdf_extractor=selected_pdf_extractor_name,
+    )
     summary = empty_summary(len(selected), skipped_unsupported, selector)
     actions: list[dict[str, Any]] = []
     report_warnings: list[str] = []
@@ -3460,7 +3803,12 @@ def run_normalization(args: argparse.Namespace) -> int:
         summary[method_count_key(item.method)] += 1
         output_path = normalized_output_path_for_record(item.record, normalized_root)
         existed = output_path.exists()
-        stale = existed and is_stale(item.record, output_path)
+        desired_pdf_extractor = selected_pdf_extractor_name if item.method == "pdf" else None
+        stale = existed and is_stale(
+            item.record,
+            output_path,
+            pdf_extractor=desired_pdf_extractor,
+        )
         if existed and not args.force and not stale:
             summary["skipped_existing"] += 1
             output_text = relative_output_path(project_root, output_path)
@@ -3492,7 +3840,7 @@ def run_normalization(args: argparse.Namespace) -> int:
         for item, output_path, existed, stale in actionable:
             action = "would_update" if existed else "would_create"
             text_action = action.replace("_", " ")
-            reason = " (stale: raw changed)" if stale else ""
+            reason = " (stale: source or extraction profile changed)" if stale else ""
             summary["dry_run"] += 1
             if existed:
                 summary["would_update"] += 1
@@ -3544,16 +3892,15 @@ def run_normalization(args: argparse.Namespace) -> int:
             print_summary(summary)
         return 0
 
-    pdftotext_path = shutil.which("pdftotext") if any(item.method == "pdf" for item, _, _, _ in actionable) else None
-    if any(item.method == "pdf" for item, _, _, _ in actionable) and not pdftotext_path:
-        raise SystemExit(
-            "PDF text extraction requires `pdftotext` from Poppler. "
-            "Install Poppler or poppler-utils, then rerun normalize_sources.py."
-        )
+    resolved_pdf_extractor = (
+        resolve_pdf_extractor(selected_pdf_extractor_name)
+        if any(item.method == "pdf" for item, _, _, _ in actionable)
+        else None
+    )
 
     for item, output_path, _existed, stale in actionable:
         try:
-            source = normalize_selected_record(project_root, config, item, pdftotext_path)
+            source = normalize_selected_record(project_root, config, item, resolved_pdf_extractor)
             # The selection loop already decided to (re)write this record, so force the write.
             output_path, write_action = write_normalized_source(
                 source,
@@ -3578,6 +3925,12 @@ def run_normalization(args: argparse.Namespace) -> int:
                     "stale": stale,
                     "warnings": [],
                     "error": str(exc),
+                    "pdf_extractor": {
+                        "name": resolved_pdf_extractor.name,
+                        "version": resolved_pdf_extractor.version,
+                    }
+                    if item.method == "pdf" and resolved_pdf_extractor is not None
+                    else None,
                 }
             )
             if not json_output:
@@ -3595,7 +3948,7 @@ def run_normalization(args: argparse.Namespace) -> int:
             summary["partial"] += 1
         elif status == "failed":
             summary["failed"] += 1
-        reason = " (stale: raw changed)" if stale else ""
+        reason = " (stale: source or extraction profile changed)" if stale else ""
         output_text = relative_output_path(project_root, output_path)
         report_warnings.extend(source.warnings)
         actions.append(
@@ -3607,6 +3960,12 @@ def run_normalization(args: argparse.Namespace) -> int:
                 "status": status,
                 "stale": stale,
                 "warnings": source.warnings,
+                "pdf_extractor": {
+                    "name": source.pdf_extractor,
+                    "version": source.pdf_extractor_version,
+                }
+                if source.pdf_extractor
+                else None,
             }
         )
         if not json_output:

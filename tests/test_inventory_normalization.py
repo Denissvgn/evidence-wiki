@@ -1101,7 +1101,14 @@ class RawFingerprintTests(unittest.TestCase):
     def test_is_stale_compares_manifest_and_stored_fingerprints(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "rec.md"
-            output.write_text("---\nraw_fingerprint: sha256:AAA\n---\n# x\n")
+            output.write_text(
+                "---\n"
+                "raw_fingerprint: sha256:AAA\n"
+                "normalizer:\n"
+                "  name: normalize_sources.py\n"
+                f"  version: {NORMALIZE.NORMALIZER_VERSION}\n"
+                "---\n# x\n"
+            )
             self.assertFalse(NORMALIZE.is_stale({"raw_fingerprint": "sha256:AAA"}, output))
             self.assertTrue(NORMALIZE.is_stale({"raw_fingerprint": "sha256:BBB"}, output))
             # No manifest fingerprint -> not stale (links/codebase, pre-feature manifests).
@@ -1110,6 +1117,25 @@ class RawFingerprintTests(unittest.TestCase):
             bare = Path(tmpdir) / "bare.md"
             bare.write_text("---\ntype: normalized_source\n---\n# x\n")
             self.assertTrue(NORMALIZE.is_stale({"raw_fingerprint": "sha256:BBB"}, bare))
+
+    def test_is_stale_detects_normalizer_and_pdf_extractor_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "rec.md"
+            output.write_text(
+                "---\n"
+                "normalizer:\n"
+                "  name: normalize_sources.py\n"
+                f"  version: {NORMALIZE.NORMALIZER_VERSION}\n"
+                "pdf_extractor:\n"
+                "  name: pypdf\n"
+                "  version: 6.14.2\n"
+                "---\n# x\n"
+            )
+
+            self.assertFalse(NORMALIZE.is_stale({}, output, pdf_extractor="pypdf"))
+            self.assertTrue(NORMALIZE.is_stale({}, output, pdf_extractor="poppler"))
+            output.write_text(output.read_text().replace(f"version: {NORMALIZE.NORMALIZER_VERSION}", "version: 1", 1))
+            self.assertTrue(NORMALIZE.is_stale({}, output, pdf_extractor="pypdf"))
 
     def test_read_output_frontmatter_is_line_anchored(self):
         # A value line beginning with `----` must not truncate the frontmatter block.

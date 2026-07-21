@@ -1847,6 +1847,11 @@ def require_acquisition_evidence_baselines(work_order: dict[str, Any]) -> None:
     candidate_records_before = (
         manifest_guard.get("candidate_record_fingerprints_before") if isinstance(manifest_guard, dict) else None
     )
+    candidate_audit_records_before = (
+        manifest_guard.get("candidate_audit_record_fingerprints_before")
+        if isinstance(manifest_guard, dict)
+        else None
+    )
     source_requests_before = (
         manifest_guard.get("source_request_record_fingerprints_before") if isinstance(manifest_guard, dict) else None
     )
@@ -1864,7 +1869,9 @@ def require_acquisition_evidence_baselines(work_order: dict[str, Any]) -> None:
         set(matching_source_ids_before) <= set(manifest_records_before)
     ) and valid_raw_tree_snapshot(raw_tree_before, include_entries=True) and valid_record_fingerprint_snapshot(
         candidate_records_before
-    ) and valid_record_fingerprint_snapshot(source_requests_before) and valid_file_fingerprint_snapshot(
+    ) and valid_record_fingerprint_snapshot(candidate_audit_records_before) and valid_record_fingerprint_snapshot(
+        source_requests_before
+    ) and valid_file_fingerprint_snapshot(
         normalized_files_before,
         prefix="sources/",
     ) and valid_question_file_fingerprint_snapshot(question_files_before):
@@ -3341,6 +3348,9 @@ def action_spec(
                 "manifest_record_fingerprints_before": manifest_records_before,
                 "raw_tree_before": raw_tree_before,
                 "candidate_record_fingerprints_before": candidate_records_before,
+                "candidate_audit_record_fingerprints_before": (
+                    candidate_audit_record_fingerprint_snapshot(project_root, config)
+                ),
                 "source_request_record_fingerprints_before": source_request_record_fingerprint_snapshot(
                     project_root,
                     config,
@@ -3398,6 +3408,7 @@ INTEGRITY_BASELINE_FIELDS = frozenset(
         "source_request_record_fingerprints_before",
         "candidate_states_before",
         "candidate_record_fingerprints_before",
+        "candidate_audit_record_fingerprints_before",
         "selected_candidate_ids_before",
         "blocked_questions_before",
         "matching_source_ids_before",
@@ -4044,6 +4055,144 @@ def verification_semantic_value(
     return strip_generated_timestamps(value)
 
 
+def normalized_source_quality_failure(
+    project_root: Path,
+    path: Path,
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return why a normalized source is unusable for acquisition fulfillment."""
+    payload = bounded_regular_bytes(
+        path,
+        max_bytes=MAX_VERIFICATION_ARTIFACT_BYTES,
+        error_code="ORCHESTRATION_POSTCONDITION_FAILED",
+        label="normalized evidence",
+        containment_root=project_root,
+    )
+    if payload is None:  # pragma: no cover - missing_ok is false
+        return {"reason": "normalized evidence is missing"}
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return {"reason": "normalized evidence is not valid UTF-8", "error": str(exc)}
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not lines or lines[0].strip() != "---":
+        return {"reason": "normalized evidence lacks YAML frontmatter"}
+    closing_index = next(
+        (index for index in range(1, len(lines)) if lines[index].strip() == "---"),
+        None,
+    )
+    if closing_index is None:
+        return {"reason": "normalized evidence has unterminated YAML frontmatter"}
+    try:
+        frontmatter = yaml.safe_load("\n".join(lines[1:closing_index])) or {}
+    except yaml.YAMLError as exc:
+        return {"reason": "normalized evidence has invalid YAML frontmatter", "error": str(exc)}
+    source_id = record.get("id")
+    if (
+        not isinstance(frontmatter, dict)
+        or frontmatter.get("type") != "normalized_source"
+        or frontmatter.get("source_id") != source_id
+    ):
+        return {
+            "reason": "normalized evidence frontmatter does not identify the manifest source",
+            "expected_source_id": source_id,
+            "actual_source_id": frontmatter.get("source_id")
+            if isinstance(frontmatter, dict)
+            else None,
+        }
+    status = frontmatter.get("status")
+    if not isinstance(status, str) or not status.strip():
+        return {"reason": "normalized evidence lacks a bounded extraction status"}
+    if status.strip().lower() in {"failed", "stubbed"}:
+        return {"reason": f"normalized evidence has unusable extraction status {status!r}"}
+    if frontmatter.get("evidence_usable") is not True:
+        return {
+            "reason": "normalized evidence is not explicitly marked usable",
+            "evidence_usable": frontmatter.get("evidence_usable"),
+        }
+
+    is_pdf = (
+        record.get("kind") == "pdf"
+        or isinstance(record.get("raw_pdf"), str)
+        or frontmatter.get("source_kind") == "pdf"
+        or frontmatter.get("extraction_method") == "pdf_text"
+    )
+    if is_pdf:
+        body = "\n".join(lines[closing_index + 1 :])
+        extracted = re.search(
+            r"(?ms)^## Extracted Text[ \t]*\n+(.*?)(?=^##[ \t]+|\Z)",
+            body,
+        )
+        extracted_text = extracted.group(1).strip() if extracted is not None else ""
+        if not extracted_text or extracted_text.casefold() == "none extracted.":
+            return {"reason": "normalized PDF evidence contains no extracted text"}
+    return None
+
+
+def candidate_failure_audit_events(
+    project_root: Path,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Read the bounded append-only candidate audit used to prove route failure."""
+    discover_sources = load_sibling_module("discover_sources")
+    path = discover_sources.candidate_audit_path(project_root, config)
+    payload = bounded_regular_bytes(
+        path,
+        max_bytes=MAX_SCOPE_GUARD_BYTES,
+        error_code="ORCHESTRATION_POSTCONDITION_FAILED",
+        label="candidate lifecycle audit",
+        missing_ok=True,
+        containment_root=project_root,
+    )
+    if payload is None:
+        return []
+    try:
+        lines = payload.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_POSTCONDITION_FAILED",
+            f"candidate lifecycle audit is not valid UTF-8: {exc}",
+            recoverable=True,
+        ) from exc
+    if len(lines) > MAX_SCOPE_GUARD_ENTRIES:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_SCOPE_EXCEEDED",
+            "candidate lifecycle audit exceeds the bounded integrity-guard limit",
+            recoverable=False,
+        )
+    events: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                f"candidate lifecycle audit contains invalid JSON at line {line_number}: {exc}",
+                recoverable=True,
+            ) from exc
+        if not isinstance(event, dict):
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                f"candidate lifecycle audit entry {line_number} is not an object",
+                recoverable=True,
+            )
+        events.append(event)
+    return events
+
+
+def candidate_audit_record_fingerprint_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+) -> dict[str, str]:
+    return record_fingerprint_snapshot(
+        candidate_failure_audit_events(project_root, config),
+        id_field="event_id",
+        label="candidate lifecycle audit",
+    )
+
+
 def verify_action_postconditions(
     project_root: Path,
     session: dict[str, Any],
@@ -4465,15 +4614,34 @@ def verify_action_postconditions(
         )
         normalized_root = project_root / normalized_relative
         missing_normalized: list[str] = []
+        unusable_normalized: list[dict[str, Any]] = []
         for request in fulfilled:
             source_id = str(request.get("source_id") or "")
             record = by_source_id.get(source_id)
-            if record is None or not normalize_sources.normalized_output_path_for_record(record, normalized_root).is_file():
+            normalized_path = (
+                normalize_sources.normalized_output_path_for_record(record, normalized_root)
+                if isinstance(record, dict)
+                else None
+            )
+            if not isinstance(normalized_path, Path) or not normalized_path.is_file():
                 missing_normalized.append(source_id)
+                continue
+            quality_failure = normalized_source_quality_failure(project_root, normalized_path, record)
+            if quality_failure is not None:
+                unusable_normalized.append({"source_id": source_id, **quality_failure})
         require(
             not missing_normalized,
             "fulfilled source requests do not have normalized evidence",
             {"source_ids": missing_normalized},
+        )
+        require(
+            not unusable_normalized,
+            "fulfilled source requests do not have usable normalized evidence",
+            {"quality_failures": unusable_normalized},
+            (
+                "Normalize the acquired source successfully before fulfillment; failed or stubbed records and "
+                "PDFs without extracted text cannot satisfy a source request."
+            ),
         )
         scoped_candidate_ids = {
             value for value in scope.get("candidate_ids", []) if isinstance(value, str) and value
@@ -4943,6 +5111,392 @@ def verify_action_postconditions(
     raise OrchestrationControllerError("ORCHESTRATION_STATE_INVALID", f"unsupported submitted phase: {phase}")
 
 
+def verify_blocked_action_postconditions(
+    project_root: Path,
+    session: dict[str, Any],
+    work_order: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Classify a blocked action without trusting its human-readable summary.
+
+    Most blocked actions remain pending and are replayed after an explicit
+    resume. Acquisition has one additional bounded outcome: an audited failure
+    of the scoped selected candidate completes that route attempt so planning
+    can continue with another candidate.
+    """
+    work_order = require_action_baselines(work_order, project_root)
+    if work_order.get("phase") != "acquisition":
+        return PAUSED_STATUS, None
+
+    config = load_config(project_root)
+    scope = work_order.get("scope") if isinstance(work_order.get("scope"), dict) else {}
+    request_ids = [value for value in scope.get("request_ids", []) if isinstance(value, str)]
+    candidate_ids = [value for value in scope.get("candidate_ids", []) if isinstance(value, str)]
+    request_scope = set(request_ids)
+    candidate_scope = set(candidate_ids)
+
+    def require(
+        condition: bool,
+        message: str,
+        details: dict[str, Any] | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if not condition:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                message,
+                recoverable=True,
+                remediation=remediation or "Restore the persisted acquisition baseline and replay the same action.",
+                details=details,
+            )
+
+    require(
+        bool(request_scope)
+        and bool(candidate_scope)
+        and valid_scope_id_list(request_ids)
+        and valid_scope_id_list(candidate_ids),
+        "blocked acquisition lacks a bounded request and candidate scope",
+    )
+    postconditions = {
+        item.get("check"): item
+        for item in work_order.get("required_postconditions", [])
+        if isinstance(item, dict) and isinstance(item.get("check"), str)
+    }
+    manifest_guard = postconditions.get("manifest_records_increased", {})
+    manifest_records_before = manifest_guard.get("manifest_record_fingerprints_before")
+    raw_tree_before = manifest_guard.get("raw_tree_before")
+    candidate_records_before = manifest_guard.get("candidate_record_fingerprints_before")
+    candidate_audit_records_before = manifest_guard.get(
+        "candidate_audit_record_fingerprints_before"
+    )
+    source_requests_before = manifest_guard.get("source_request_record_fingerprints_before")
+    normalized_files_before = manifest_guard.get("normalized_file_fingerprints_before")
+    question_files_before = manifest_guard.get("question_file_fingerprints_before")
+    before_manifest = manifest_guard.get("before")
+    require(
+        valid_record_fingerprint_snapshot(manifest_records_before)
+        and isinstance(before_manifest, int)
+        and not isinstance(before_manifest, bool)
+        and before_manifest == len(manifest_records_before)
+        and valid_raw_tree_snapshot(raw_tree_before, include_entries=True)
+        and valid_record_fingerprint_snapshot(candidate_records_before)
+        and candidate_scope <= set(candidate_records_before)
+        and valid_record_fingerprint_snapshot(candidate_audit_records_before)
+        and valid_record_fingerprint_snapshot(source_requests_before)
+        and request_scope <= set(source_requests_before)
+        and valid_file_fingerprint_snapshot(normalized_files_before, prefix="sources/")
+        and valid_question_file_fingerprint_snapshot(question_files_before),
+        "blocked acquisition lacks its exact pre-action integrity baseline",
+        remediation="Preserve this action for audit and start a fresh orchestration; do not infer a baseline.",
+    )
+
+    current_source_requests = source_request_record_fingerprint_snapshot(project_root, config)
+    require(
+        current_source_requests == source_requests_before,
+        "blocked acquisition changed the source-request store",
+        {
+            "source_request_scope_violations": fingerprint_scope_violations(
+                source_requests_before,
+                current_source_requests,
+                mutable_ids=set(),
+            )
+        },
+        "Restore every request to its pre-action state; a blocked attempt cannot fulfill a request.",
+    )
+    current_question_files = question_file_fingerprint_snapshot(project_root, config)
+    require(
+        current_question_files == question_files_before,
+        "blocked acquisition changed question files",
+        {
+            "question_scope_violations": fingerprint_scope_violations(
+                question_files_before,
+                current_question_files,
+                mutable_ids=set(),
+            )
+        },
+        "Restore every question to its pre-action state; a blocked attempt cannot reopen a question.",
+    )
+
+    all_candidates = load_candidates(project_root, config)
+    candidates_by_id = {
+        str(candidate.get("candidate_id")): candidate
+        for candidate in all_candidates
+        if isinstance(candidate.get("candidate_id"), str)
+    }
+    current_candidate_fingerprints = candidate_record_fingerprint_snapshot(all_candidates)
+    candidate_scope_violations = fingerprint_scope_violations(
+        candidate_records_before,
+        current_candidate_fingerprints,
+        mutable_ids=candidate_scope,
+    )
+    require(
+        not any(candidate_scope_violations.values()),
+        "blocked acquisition changed candidate records outside the persisted candidate scope",
+        {"candidate_scope_violations": candidate_scope_violations},
+        "Restore every out-of-scope candidate and mutate only the selected candidate named by this work order.",
+    )
+    scoped_candidates = [candidates_by_id.get(candidate_id) for candidate_id in candidate_ids]
+    candidate_correlation_failures = [
+        candidate_id
+        for candidate_id, candidate in zip(candidate_ids, scoped_candidates, strict=True)
+        if not isinstance(candidate, dict) or candidate_request_id(candidate) not in request_scope
+    ]
+    require(
+        not candidate_correlation_failures,
+        "blocked acquisition lost its request-to-candidate correlation",
+        {"candidate_ids": candidate_correlation_failures},
+    )
+    candidate_states = {
+        candidate_id: candidate_state(candidate)
+        for candidate_id, candidate in zip(candidate_ids, scoped_candidates, strict=True)
+        if isinstance(candidate, dict)
+    }
+    require(
+        set(candidate_states.values()) <= {"selected", "failed"}
+        and len(set(candidate_states.values())) == 1,
+        "blocked acquisition must leave every scoped candidate selected or transition it to failed",
+        {"candidate_states": candidate_states},
+        (
+            "Leave retryable candidates selected, or use discover_sources.py candidates transition with "
+            "--expected-state selected --to-state failed for a candidate-specific route failure."
+        ),
+    )
+    route_failed = bool(candidate_states) and next(iter(candidate_states.values())) == "failed"
+    audit_events = candidate_failure_audit_events(project_root, config)
+    current_audit_fingerprints = record_fingerprint_snapshot(
+        audit_events,
+        id_field="event_id",
+        label="candidate lifecycle audit",
+    )
+    new_audit_event_ids = set(current_audit_fingerprints) - set(candidate_audit_records_before)
+    audit_scope_violations = fingerprint_scope_violations(
+        candidate_audit_records_before,
+        current_audit_fingerprints,
+        mutable_ids=set(),
+        allowed_new_ids=new_audit_event_ids,
+    )
+    require(
+        not any(audit_scope_violations.values()),
+        "blocked acquisition changed existing candidate lifecycle audit records",
+        {"candidate_audit_scope_violations": audit_scope_violations},
+        "Restore the append-only candidate lifecycle audit and replay the same action.",
+    )
+    if not route_failed:
+        changed_selected = [
+            candidate_id
+            for candidate_id in candidate_ids
+            if current_candidate_fingerprints.get(candidate_id)
+            != candidate_records_before.get(candidate_id)
+        ]
+        require(
+            not changed_selected,
+            "retryable blocked acquisition changed its selected candidate record",
+            {"changed_candidate_ids": changed_selected},
+            "Restore the selected candidate record, then resume and replay the same action.",
+        )
+        require(
+            not new_audit_event_ids,
+            "retryable blocked acquisition appended candidate lifecycle events",
+            {"new_candidate_audit_event_ids": sorted(new_audit_event_ids)},
+            "Remove the unexpected lifecycle events, leave the scoped candidate selected, and replay the action.",
+        )
+    else:
+        run_id = work_order.get("run_id")
+        require(
+            len(new_audit_event_ids) == len(candidate_ids),
+            "candidate-specific acquisition failure did not append exactly one audit event per scoped candidate",
+            {
+                "candidate_ids": candidate_ids,
+                "new_candidate_audit_event_ids": sorted(new_audit_event_ids),
+            },
+        )
+        new_audit_events = [
+            event for event in audit_events if event.get("event_id") in new_audit_event_ids
+        ]
+        invalid_failures: list[dict[str, Any]] = []
+        for candidate_id, candidate in zip(candidate_ids, scoped_candidates, strict=True):
+            if not isinstance(candidate, dict):  # pragma: no cover - correlation was checked above
+                invalid_failures.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "record_is_valid": False,
+                        "audit_matches": False,
+                    }
+                )
+                continue
+            request_id = candidate_request_id(candidate)
+            reason = candidate.get("failure_reason")
+            actor = candidate.get("failed_by")
+            failed_at = candidate.get("failed_at")
+            record_is_valid = (
+                current_candidate_fingerprints.get(candidate_id)
+                != candidate_records_before.get(candidate_id)
+                and candidate.get("fetch_status") == "failed"
+                and candidate.get("selection_status") == "selected"
+                and isinstance(reason, str)
+                and bool(reason.strip())
+                and isinstance(actor, str)
+                and bool(actor.strip())
+                and isinstance(failed_at, str)
+                and bool(failed_at.strip())
+                and candidate.get("lifecycle_reason") == reason
+                and candidate.get("lifecycle_updated_by") == actor
+                and candidate.get("lifecycle_updated_at") == failed_at
+                and candidate.get("lifecycle_run_id") == run_id
+            )
+            audit_matches = any(
+                event.get("event_type") == "candidate_transition"
+                and event.get("event") == "transition"
+                and event.get("candidate_id") == candidate_id
+                and event.get("prior_state") == "selected"
+                and event.get("new_state") == "failed"
+                and event.get("request_id") == request_id
+                and event.get("run_id") == run_id
+                and event.get("actor") == actor
+                and event.get("reason") == reason
+                and event.get("at") == failed_at
+                for event in new_audit_events
+            )
+            if not record_is_valid or not audit_matches:
+                invalid_failures.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "record_is_valid": record_is_valid,
+                        "audit_matches": audit_matches,
+                    }
+                )
+        require(
+            not invalid_failures,
+            "candidate-specific acquisition failure lacks its canonical selected-to-failed audit",
+            {"invalid_candidate_failures": invalid_failures},
+            (
+                "Record the route failure with discover_sources.py candidates transition using the work-order "
+                "candidate id, request id, run id, and expected selected state."
+            ),
+        )
+
+    normalize_sources = load_sibling_module("normalize_sources")
+    manifest_relative, normalized_relative = normalize_sources.source_paths(config)
+    manifest_records = normalize_sources.load_manifest(project_root / manifest_relative)
+    current_manifest_fingerprints = record_fingerprint_snapshot(
+        manifest_records,
+        id_field="id",
+        label="evidence manifest",
+    )
+    actual_new_source_ids = set(current_manifest_fingerprints) - set(manifest_records_before)
+    manifest_scope_violations = fingerprint_scope_violations(
+        manifest_records_before,
+        current_manifest_fingerprints,
+        mutable_ids=set(),
+        allowed_new_ids=actual_new_source_ids,
+    )
+    require(
+        not any(manifest_scope_violations.values()),
+        "blocked acquisition changed existing evidence-manifest records",
+        {"manifest_scope_violations": manifest_scope_violations},
+        "Restore every pre-action manifest record; partial acquisition may only append scoped records.",
+    )
+    correlated_records: list[dict[str, Any]] = []
+    uncorrelated_new_sources: list[str] = []
+    for record in manifest_records:
+        source_id = record.get("id") if isinstance(record, dict) else None
+        provenance = record.get("provenance") if isinstance(record, dict) else None
+        request_id = provenance.get("request_id") if isinstance(provenance, dict) else None
+        candidate_id = provenance.get("candidate_id") if isinstance(provenance, dict) else None
+        candidate = candidates_by_id.get(candidate_id) if isinstance(candidate_id, str) else None
+        correlated = (
+            request_id in request_scope
+            and candidate_id in candidate_scope
+            and isinstance(candidate, dict)
+            and candidate_request_id(candidate) == request_id
+        )
+        if correlated:
+            correlated_records.append(record)
+        elif source_id in actual_new_source_ids:
+            uncorrelated_new_sources.append(str(source_id))
+    require(
+        not uncorrelated_new_sources,
+        "blocked acquisition appended manifest records outside its request/candidate correlation",
+        {"source_ids": sorted(uncorrelated_new_sources)},
+        "Remove uncorrelated manifest additions and retain only records tied to the scoped request and candidate.",
+    )
+
+    normalized_root = project_root / normalized_relative
+    allowed_new_normalized_paths = {
+        relative_workspace_path(
+            project_root,
+            normalize_sources.normalized_output_path_for_record(record, normalized_root),
+        )
+        for record in correlated_records
+    }
+    current_normalized_files = normalized_file_fingerprint_snapshot(project_root, config)
+    actual_new_normalized_paths = set(current_normalized_files) - set(normalized_files_before)
+    normalized_scope_violations = fingerprint_scope_violations(
+        normalized_files_before,
+        current_normalized_files,
+        mutable_ids=set(),
+        allowed_new_ids=actual_new_normalized_paths,
+    )
+    unexpected_normalized_paths = sorted(
+        actual_new_normalized_paths - allowed_new_normalized_paths
+    )
+    require(
+        not any(normalized_scope_violations.values()) and not unexpected_normalized_paths,
+        "blocked acquisition changed normalized evidence outside correlated partial outputs",
+        {
+            "normalized_scope_violations": normalized_scope_violations,
+            "unexpected_new_normalized_paths": unexpected_normalized_paths,
+        },
+        "Restore existing normalized evidence and remove outputs not correlated to the scoped acquisition.",
+    )
+
+    allowed_new_raw_paths: set[str] = set()
+    for record in correlated_records:
+        raw_paths = record.get("raw_paths") if isinstance(record.get("raw_paths"), list) else []
+        for raw_path in raw_paths:
+            if (
+                isinstance(raw_path, str)
+                and raw_path.startswith("raw/")
+                and safe_snapshot_relative_path(raw_path)
+            ):
+                allowed_new_raw_paths.add(raw_path)
+                allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
+    current_raw_tree = raw_tree_snapshot(project_root, config, include_entries=True)
+    before_raw_entries = raw_tree_before["entries"]
+    current_raw_entries = current_raw_tree["entries"]
+    actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
+    raw_scope_violations = fingerprint_scope_violations(
+        before_raw_entries,
+        current_raw_entries,
+        mutable_ids=set(),
+        allowed_new_ids=actual_new_raw_paths,
+    )
+    unexpected_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
+    require(
+        not any(raw_scope_violations.values()) and not unexpected_raw_paths,
+        "blocked acquisition changed raw evidence outside correlated partial deliveries",
+        {
+            "raw_scope_violations": raw_scope_violations,
+            "unexpected_new_raw_paths": unexpected_raw_paths[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+        },
+        "Restore existing raw evidence and remove deliveries not referenced by a correlated manifest record.",
+    )
+
+    controller = load_sibling_module("run_controller")
+    run_id = work_order.get("run_id")
+    run_state = controller.load_run_state(project_root, run_id) if isinstance(run_id, str) else None
+    current_child_state = (
+        run_state.get("state", {}).get("current") if isinstance(run_state, dict) else None
+    )
+    require(
+        current_child_state in {"fetching", "evidence_ready"},
+        "blocked acquisition child run is in an invalid state",
+        {"child_state": current_child_state},
+    )
+    if route_failed:
+        return "planning", "The scoped candidate route failed; planning may continue with remaining routes."
+    return PAUSED_STATUS, "The scoped acquisition remains pending and can be replayed after resume."
+
+
 def prepare_submission(
     project_root: Path,
     session: dict[str, Any],
@@ -4957,7 +5511,12 @@ def prepare_submission(
             apply_effects=False,
         )
     elif result["outcome"] == "blocked":
-        next_phase, completion_reason = "blocked_on_sources", result["summary"]
+        next_phase, completion_reason = verify_blocked_action_postconditions(
+            project_root,
+            session,
+            work_order,
+        )
+        completion_reason = completion_reason or result["summary"]
     else:
         next_phase, completion_reason = "failed", result["summary"]
     pending = {
@@ -5039,6 +5598,22 @@ def finalize_pending_submission(
             recoverable=False,
         )
     verify_pending_trusted_static_inputs(project_root, session, work_order)
+    expected_phase = pending.get("next_phase")
+    completion_reason = pending.get("completion_reason")
+    if result["outcome"] == "blocked":
+        verified_phase, verified_reason = verify_blocked_action_postconditions(
+            project_root,
+            session,
+            work_order,
+        )
+        if verified_phase != expected_phase:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_STATE_INVALID",
+                "accepted blocked submission no longer verifies to its prepared next phase",
+                recoverable=True,
+            )
+        completion_reason = verified_reason or completion_reason
+
     existing = retained_result(project_root, session["orchestration_id"], action_id)
     if existing is not None and existing != result:
         raise OrchestrationControllerError(
@@ -5046,11 +5621,34 @@ def finalize_pending_submission(
             f"action {action_id} already has a different retained result",
             recoverable=False,
         )
+    if result["outcome"] == "blocked" and expected_phase == PAUSED_STATUS:
+        if existing is not None:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_STATE_INVALID",
+                "retryable blocked action already has a retained completion result",
+                recoverable=False,
+            )
+        session["pending_submission"] = None
+        session["recovery"] = default_recovery_state()
+        session["status"] = PAUSED_STATUS
+        session["phase"] = PAUSED_STATUS
+        session["verdict"] = PAUSED_STATUS
+        session["pause_reason"] = result["summary"]
+        session["completed_at"] = None
+        session["updated_at"] = timestamp_utc()
+        write_json_atomic(session_path(project_root, session["orchestration_id"]), session)
+        record_event_once(
+            project_root,
+            session,
+            "action_paused",
+            result["summary"],
+            action_id=action_id,
+            data={"outcome": result["outcome"], "resume_replays_action": True},
+        )
+        return session
     if existing is None:
         write_json_atomic(work_result_path(project_root, session["orchestration_id"], action_id), result)
 
-    expected_phase = pending.get("next_phase")
-    completion_reason = pending.get("completion_reason")
     if result["outcome"] == "completed":
         verified_phase, verified_reason = verify_action_postconditions(
             project_root,
@@ -5078,7 +5676,7 @@ def finalize_pending_submission(
             )
         completion_reason = finalized_reason or verified_reason or completion_reason
     elif result["outcome"] == "blocked":
-        finish_active_child(project_root, session, "blocked_on_sources")
+        pass
     else:
         finish_active_child(project_root, session, "failed")
         if not any(record.get("action_id") == action_id for record in session["failure_records"]):

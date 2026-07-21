@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.2.3 - 2026-07-21
+
+- Install pypdf as the portable, canonical PDF normalization backend so a
+  normal wheel installation can process PDF-only evidence on macOS, Linux, and
+  Windows without an undeclared system executable.
+- Treat Poppler `pdftotext` as an explicit optional compatibility backend,
+  document the pip/system-package boundary and platform installation commands,
+  and align doctor/workspace-health reporting with the actual backend policy.
+- Pause and replay retryable blocked orchestration actions, while treating an
+  audited candidate-specific `selected` to `failed` acquisition transition as
+  one exhausted route so the controller can try the next candidate before it
+  declares terminal `blocked_on_sources`.
+- Reject acquisition fulfillment backed by failed, stubbed, explicitly
+  unusable, or text-empty normalized evidence, and validate the request
+  correlation supplied for definitive candidate-route failures.
+- Harden Windows workspace locking and managed-run runtime handling so
+  concurrent index builders and protected virtual-environment checks fail
+  predictably instead of raising platform-specific permission errors.
+- Bump the managed workspace starter to `0.5.3`; `evidence-wiki upgrade`
+  refreshes the compatible managed scripts while preserving project evidence and
+  configuration.
+
 ## 0.2.2 - 2026-07-21
 
 - Canonicalize package-managed runner results by discarding descriptive

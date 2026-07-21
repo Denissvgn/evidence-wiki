@@ -317,13 +317,24 @@ class PublicationSecurityMatrixTests(unittest.TestCase):
             ):
                 normalize = capture_main(
                     NORMALIZE.main,
-                    ["--project-root", str(workspace), "--all", "--force", "--format", "json"],
+                    [
+                        "--project-root",
+                        str(workspace),
+                        "--all",
+                        "--force",
+                        "--pdf-extractor",
+                        "poppler",
+                        "--format",
+                        "json",
+                    ],
                 )
 
             self.assertEqual(0, normalize[0], normalize[2])
             self.assertFalse(sentinel.exists())
             self.assertEqual(before, raw_snapshot(workspace))
-            self.assertEqual(2, runner.call_count)
+            # One explicit Poppler version probe plus reading-order and layout
+            # extraction passes.
+            self.assertEqual(3, runner.call_count)
             for call in runner.call_args_list:
                 self.assertIsInstance(call.args[0], list)
                 self.assertIs(call.kwargs.get("shell", False), False)

@@ -172,7 +172,10 @@ class PublicationSourceMatrixTests(unittest.TestCase):
         return capture_main(INVENTORY.main, ["--project-root", str(workspace), *arguments])
 
     def run_normalize(self, workspace: Path, *arguments: str) -> tuple[int, str, str]:
-        return capture_main(NORMALIZE.main, ["--project-root", str(workspace), *arguments])
+        return capture_main(
+            NORMALIZE.main,
+            ["--project-root", str(workspace), "--pdf-extractor", "poppler", *arguments],
+        )
 
     def manifest(self, workspace: Path) -> list[dict]:
         path = workspace / "sources" / "manifest.jsonl"
@@ -211,6 +214,7 @@ class PublicationSourceMatrixTests(unittest.TestCase):
         with (
             inert_external_boundaries(),
             mock.patch.object(NORMALIZE.shutil, "which", return_value="pdftotext"),
+            mock.patch.object(NORMALIZE, "poppler_version", return_value="test"),
             mock.patch.object(
                 NORMALIZE,
                 "extract_pdf_text",
@@ -565,7 +569,17 @@ class PublicationSourceMatrixTests(unittest.TestCase):
                         raise KeyboardInterrupt("synthetic normalization interruption")
                 return original_replace(path, target)
 
-            args = NORMALIZE.parse_args(["--project-root", str(workspace), "--all", "--format", "json"])
+            args = NORMALIZE.parse_args(
+                [
+                    "--project-root",
+                    str(workspace),
+                    "--all",
+                    "--pdf-extractor",
+                    "poppler",
+                    "--format",
+                    "json",
+                ]
+            )
             with (
                 self.offline_normalization(),
                 mock.patch.object(Path, "replace", new=interrupt_second_replace),

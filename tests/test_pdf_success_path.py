@@ -1,9 +1,14 @@
+import contextlib
 import importlib.util
+import io
+import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -74,6 +79,239 @@ def tiny_pdf_bytes() -> bytes:
 
 
 class PdfSuccessPathTests(unittest.TestCase):
+    def test_pypdf_is_the_deterministic_default_even_when_poppler_is_available(self):
+        with mock.patch.object(NORMALIZE.shutil, "which", return_value="/opt/homebrew/bin/pdftotext"):
+            selected = NORMALIZE.pdf_extractor_name({"sources": {}})
+
+        self.assertEqual("pypdf", selected)
+
+    def test_poppler_requires_explicit_config_or_cli_selection(self):
+        self.assertEqual(
+            "poppler",
+            NORMALIZE.pdf_extractor_name({"sources": {"pdf_extractor": "poppler"}}),
+        )
+        self.assertEqual(
+            "pypdf",
+            NORMALIZE.pdf_extractor_name(
+                {"sources": {"pdf_extractor": "poppler"}},
+                "pypdf",
+            ),
+        )
+        args = NORMALIZE.parse_args(["--pdf-extractor", "poppler"])
+        self.assertEqual("poppler", args.pdf_extractor)
+
+    def test_pypdf_extractor_uses_isolated_bounded_child_process(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf = Path(tmpdir) / "paper.pdf"
+            pdf.write_bytes(tiny_pdf_bytes())
+            payload = {
+                "reading_text": "Reading order.\f",
+                "layout_text": "Layout order.\f",
+                "page_count": 1,
+                "backend": "pypdf",
+                "backend_version": "6.14.2",
+            }
+            completed = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+            with mock.patch.object(NORMALIZE.subprocess, "run", return_value=completed) as run:
+                result = NORMALIZE.run_pypdf_extractor(
+                    pdf,
+                    "raw/pdf/paper.pdf",
+                    NORMALIZE.PdfExtractor("pypdf", "6.14.2"),
+                )
+
+        argv = run.call_args.args[0]
+        self.assertEqual(sys.executable, argv[0])
+        self.assertEqual(["-I", "-B", "-c"], argv[1:4])
+        self.assertEqual(str(NORMALIZE.PDF_MAX_PAGES), argv[-2])
+        self.assertEqual(str(NORMALIZE.PDF_MAX_OUTPUT_CHARS), argv[-1])
+        self.assertEqual(NORMALIZE.PDF_EXTRACTION_TIMEOUT_SECONDS, run.call_args.kwargs["timeout"])
+        self.assertEqual("Reading order.\f", result.reading_text)
+        self.assertEqual("Layout order.\f", result.layout_text)
+        self.assertEqual(1, result.page_count)
+        self.assertEqual("pypdf", result.backend)
+        self.assertEqual("6.14.2", result.backend_version)
+        self.assertTrue(result.extractor_ran)
+
+    def test_real_pypdf_extractor_normalizes_tiny_pdf(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            pdf = workspace / "raw" / "pdf" / "tiny.pdf"
+            pdf.parent.mkdir(parents=True)
+            pdf.write_bytes(tiny_pdf_bytes())
+            extractor = NORMALIZE.resolve_pdf_extractor("pypdf")
+            result = NORMALIZE.run_pypdf_extractor(pdf, "raw/pdf/tiny.pdf", extractor)
+            record = {
+                "id": "raw:tiny-pdf",
+                "kind": "pdf",
+                "raw_paths": ["raw/pdf/tiny.pdf"],
+                "raw_pdf": "raw/pdf/tiny.pdf",
+            }
+            normalized = NORMALIZE.normalize_pdf_record(workspace, record, extractor)
+
+        self.assertTrue(result.extractor_ran, result.warnings)
+        self.assertEqual(1, result.page_count)
+        self.assertEqual("pypdf", result.backend)
+        self.assertEqual(extractor.version, result.backend_version)
+        self.assertIn("A Tiny PDF Fixture For Normalization", result.reading_text)
+        self.assertEqual("A Tiny PDF Fixture For Normalization", normalized.title)
+        self.assertIn("PDF-only fixture exercises pdftotext", normalized.extracted_text)
+        self.assertEqual("pypdf", normalized.pdf_extractor)
+
+    def test_pypdf_extractor_rejects_oversized_input_before_launch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf = Path(tmpdir) / "paper.pdf"
+            pdf.write_bytes(b"%PDF")
+            with (
+                mock.patch.object(NORMALIZE, "PDF_MAX_INPUT_BYTES", 3),
+                mock.patch.object(NORMALIZE.subprocess, "run") as run,
+            ):
+                result = NORMALIZE.run_pypdf_extractor(
+                    pdf,
+                    "raw/pdf/paper.pdf",
+                    NORMALIZE.PdfExtractor("pypdf", "6.14.2"),
+                )
+
+        run.assert_not_called()
+        self.assertFalse(result.extractor_ran)
+        self.assertTrue(any("exceeds extraction limit" in warning for warning in result.warnings))
+
+    def test_pypdf_extractor_rejects_oversized_child_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf = Path(tmpdir) / "paper.pdf"
+            pdf.write_bytes(b"%PDF")
+            payload = {
+                "reading_text": "too long",
+                "layout_text": "layout",
+                "page_count": 1,
+                "backend": "pypdf",
+                "backend_version": "6.14.2",
+            }
+            completed = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+            with (
+                mock.patch.object(NORMALIZE, "PDF_MAX_OUTPUT_CHARS", 4),
+                mock.patch.object(NORMALIZE.subprocess, "run", return_value=completed),
+            ):
+                result = NORMALIZE.run_pypdf_extractor(
+                    pdf,
+                    "raw/pdf/paper.pdf",
+                    NORMALIZE.PdfExtractor("pypdf", "6.14.2"),
+                )
+
+        self.assertFalse(result.extractor_ran)
+        self.assertTrue(any("invalid or oversized result" in warning for warning in result.warnings))
+
+    def test_pdf_frontmatter_records_extractor_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            pdf = workspace / "raw" / "papers" / "manual.pdf"
+            pdf.parent.mkdir(parents=True)
+            pdf.write_bytes(b"%PDF-1.4\n")
+            record = {
+                "id": "raw:manual-pdf",
+                "kind": "pdf",
+                "raw_paths": ["raw/papers/manual.pdf"],
+                "raw_pdf": "raw/papers/manual.pdf",
+            }
+            extraction = NORMALIZE.PdfExtractionResult(
+                reading_text="Manual PDF Title\nAbstract\nUseful body text.\f",
+                layout_text="Manual PDF Title\nAbstract\nUseful body text.\f",
+                page_count=1,
+                backend="pypdf",
+                backend_version="6.14.2",
+                warnings=[],
+                extractor_ran=True,
+            )
+            with mock.patch.object(NORMALIZE, "extract_pdf", return_value=extraction):
+                normalized = NORMALIZE.normalize_pdf_record(
+                    workspace,
+                    record,
+                    NORMALIZE.PdfExtractor("pypdf", "6.14.2"),
+                )
+            output = workspace / "sources" / "normalized" / "raw--manual-pdf.md"
+            frontmatter = NORMALIZE.frontmatter_for(
+                normalized,
+                "sources/manifest.jsonl",
+                output,
+                "2026-07-21",
+            )
+
+        self.assertEqual({"name": "pypdf", "version": "6.14.2"}, frontmatter["pdf_extractor"])
+        self.assertEqual(2, frontmatter["normalizer"]["version"])
+
+    def test_failed_pypdf_extraction_writes_no_normalized_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            pdf = workspace / "raw" / "pdf" / "corrupt.pdf"
+            pdf.parent.mkdir(parents=True)
+            pdf.write_bytes(b"%PDF-1.4\ncorrupt")
+            (workspace / "sources" / "normalized").mkdir(parents=True)
+            (workspace / "research.yml").write_text(
+                "raw:\n"
+                "  source_roots: [raw/pdf]\n"
+                "sources:\n"
+                "  manifest_path: sources/manifest.jsonl\n"
+                "  normalized_dir: sources/normalized\n",
+                encoding="utf-8",
+            )
+            record = {
+                "id": "raw:corrupt-pdf",
+                "kind": "pdf",
+                "raw_paths": ["raw/pdf/corrupt.pdf"],
+                "raw_pdf": "raw/pdf/corrupt.pdf",
+                "pairing_status": "pdf_only",
+                "status": "discovered",
+            }
+            (workspace / "sources" / "manifest.jsonl").write_text(
+                json.dumps(record) + "\n",
+                encoding="utf-8",
+            )
+            failure = NORMALIZE.PdfExtractionResult(
+                reading_text="",
+                layout_text="",
+                page_count=0,
+                backend="pypdf",
+                backend_version="6.14.2",
+                warnings=["raw/pdf/corrupt.pdf: pypdf extraction failed: PdfReadError"],
+                extractor_ran=False,
+            )
+            args = NORMALIZE.parse_args(
+                [
+                    "--project-root",
+                    str(workspace),
+                    "--source-id",
+                    "raw:corrupt-pdf",
+                    "--format",
+                    "json",
+                ]
+            )
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    NORMALIZE,
+                    "resolve_pdf_extractor",
+                    return_value=NORMALIZE.PdfExtractor("pypdf", "6.14.2"),
+                ),
+                mock.patch.object(NORMALIZE, "run_pypdf_extractor", return_value=failure),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = NORMALIZE.run_normalization(args)
+            report = json.loads(stdout.getvalue())
+            output = NORMALIZE.normalized_output_path_for_record(
+                record,
+                workspace / "sources" / "normalized",
+            )
+            output_exists = output.exists()
+
+        self.assertEqual(1, code)
+        self.assertEqual(1, report["summary"]["failed"])
+        self.assertEqual("failed", report["actions"][0]["status"])
+        self.assertIn("PDF extraction failed using pypdf", report["actions"][0]["error"])
+        self.assertEqual(
+            {"name": "pypdf", "version": "6.14.2"},
+            report["actions"][0]["pdf_extractor"],
+        )
+        self.assertFalse(output_exists)
+
     def test_required_pdf_extraction_fixtures_are_committed(self):
         for arxiv_id in REQUIRED_PDF_EXTRACTION_FIXTURE_IDS:
             with self.subTest(arxiv_id=arxiv_id):

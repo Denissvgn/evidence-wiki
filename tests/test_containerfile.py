@@ -11,6 +11,8 @@ def test_containerfile_builds_source_into_a_non_root_runtime() -> None:
     assert "COPY . ." in text
     assert "/opt/evidence-wiki-venv/bin/python -m pip install --no-cache-dir ." in text
     assert "/opt/evidence-wiki-venv/bin/evidence-wiki --version" in text
+    assert "apt-get install --yes --no-install-recommends poppler-utils" in text
+    assert "rm -rf /var/lib/apt/lists/*" in text
     assert "USER 10001:10001" in text
     assert 'ENTRYPOINT ["/opt/evidence-wiki-venv/bin/evidence-wiki"]' in text
 

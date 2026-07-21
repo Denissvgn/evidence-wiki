@@ -24,6 +24,18 @@ For the minimal-preparation path, ask an agent to use `skills/research-init.md`.
 
 Use the installed `evidence-wiki init` command to instantiate a production research workspace from the starter. In a source checkout, the same initializer is available as `scripts/init_research_workspace.py`. The CLI accepts explicit project fields or an agent-generated setup profile; see `docs/workspace-initialization.md` for usage and `docs/workspace-init-profile.md` for the profile schema. Profile-driven initialization also writes `docs/workspace-init-report.md` for maintainer review. Use `docs/new-project-guide.md` for the full setup guide and manual fallback checklist.
 
+The installed package supplies the required PyYAML and pypdf Python
+dependencies. pypdf is the portable default for PDF normalization. Poppler
+`pdftotext` is an optional, explicit compatibility backend and is not installed
+by pip. Install it with `sudo apt install poppler-utils` on Debian/Ubuntu,
+`brew install poppler` on macOS, or `conda install conda-forge::poppler` on
+Windows only when that backend is required. Run
+`evidence-wiki doctor --format json` (or the workspace-local
+`python3 scripts/doctor.py --format json`) to inspect required and optional
+capabilities. The workspace records `pypdf` as the default
+`sources.pdf_extractor`; use
+`--pdf-extractor poppler` only for a reviewed compatibility run.
+
 Use `docs/domain-guidance-generator.md` when no reusable domain pack matches and the project needs local extraction targets, claim types, filing rules, or output scaffolds for its first research cycles.
 
 Use `skills/domain-pack-create.md` when a planner, orchestrator, or user asks

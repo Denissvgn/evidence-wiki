@@ -23,6 +23,8 @@ raw:
 sources:
   manifest_path: sources/manifest.jsonl
   normalized_dir: sources/normalized
+  # Portable canonical default. Use poppler only for explicit compatibility runs.
+  pdf_extractor: pypdf
   cards_dir: sources/cards
   source_requests_path: sources/source-requests.jsonl
   coverage_dir: sources/coverage
