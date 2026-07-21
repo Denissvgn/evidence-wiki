@@ -151,6 +151,20 @@ class DoctorScriptTests(unittest.TestCase):
         self.assertNotIn("REQUIRED_DEPENDENCY_MISSING", health["finding_codes"])
         self.assertNotIn("OPTIONAL_TOOL_MISSING", health["finding_codes"])
 
+    def test_workspace_health_treats_broken_pypdf_spec_lookup_as_missing(self):
+        health_module = sys.modules["_workspace_health"]
+        for error in (ImportError("import system unavailable"), ValueError("invalid module spec")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as tmpdir:
+                workspace = make_workspace(Path(tmpdir))
+                with mock.patch.object(health_module.importlib.util, "find_spec", side_effect=error):
+                    health = health_module.evaluate_workspace_health(
+                        workspace,
+                        optional_tool_availability={"pdftotext": False},
+                    )
+
+            self.assertEqual("invalid", health["status"])
+            self.assertIn("REQUIRED_DEPENDENCY_MISSING", health["finding_codes"])
+
     def test_missing_poppler_alone_does_not_degrade_portable_pdf_backend(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = make_workspace(Path(tmpdir))

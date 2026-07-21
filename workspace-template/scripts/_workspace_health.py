@@ -167,11 +167,15 @@ def evaluate_workspace_health(
                         )
                     )
 
-    pypdf_available = (
-        optional_tool_availability["pypdf"]
-        if optional_tool_availability is not None and "pypdf" in optional_tool_availability
-        else importlib.util.find_spec("pypdf") is not None
-    )
+    if optional_tool_availability is not None and "pypdf" in optional_tool_availability:
+        pypdf_available = optional_tool_availability["pypdf"]
+    else:
+        try:
+            pypdf_available = importlib.util.find_spec("pypdf") is not None
+        except (ImportError, ValueError):
+            # A broken or partially initialized import system makes pypdf
+            # unavailable for the purpose of this dependency-health check.
+            pypdf_available = False
     if not pypdf_available:
         findings.append(
             finding(
