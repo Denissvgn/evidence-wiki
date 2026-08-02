@@ -228,6 +228,14 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
         self.assertEqual("1.0", payload["artifact_schemas"]["orchestration_work_order"])
         self.assertEqual("1.0", payload["artifact_schemas"]["orchestration_result"])
         self.assertEqual("1.0", payload["artifact_schemas"]["orchestration_attempt"])
+        self.assertEqual(
+            {
+                "managed_runner_ids": ["codex", "claude"],
+                "external_protocol_commands": ["start", "next", "submit", "status"],
+                "canonical_instruction_file": "AGENTS.md",
+            },
+            payload["orchestration_capabilities"],
+        )
         schemas = payload["artifact_schema_documents"]
         self.assertEqual(
             {
@@ -387,6 +395,21 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
         }
         assert_matches_schema(attempt, schema)
         self.assertEqual(attempt, orchestration._validate_attempt(copy.deepcopy(attempt)))
+
+        future_attempt = {**attempt, "runner": "opencode"}
+        assert_matches_schema(future_attempt, schema)
+        self.assertEqual(
+            future_attempt,
+            orchestration._validate_attempt(copy.deepcopy(future_attempt)),
+        )
+
+        for invalid_runner in ("OpenCode", "../pi", "a" * 65):
+            invalid_runner_attempt = {**attempt, "runner": invalid_runner}
+            with self.subTest(invalid_runner=invalid_runner):
+                with self.assertRaises(AssertionError):
+                    assert_matches_schema(invalid_runner_attempt, schema)
+                with self.assertRaises(orchestration.OrchestrationHostError):
+                    orchestration._validate_attempt(invalid_runner_attempt)
 
         invalid_attempts = []
         for field_name in ("work_order_identity", "result_digest"):

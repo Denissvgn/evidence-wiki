@@ -1474,6 +1474,50 @@ class DocumentedWorkflowTests(unittest.TestCase):
         self.assertIn('"$EVIDENCE_WIKI_PYTHON" -B scripts/...', agents)
         self.assertIn("$env:EVIDENCE_WIKI_PYTHON", agents)
 
+    def test_harness_support_levels_are_documented_without_false_managed_claims(self):
+        documents = {
+            "README.md": README.read_text(encoding="utf-8"),
+            "workspace-template/README.md": TEMPLATE_README.read_text(encoding="utf-8"),
+            "docs/orchestration.md": ORCHESTRATION_DOC.read_text(encoding="utf-8"),
+            "docs/orchestrator-handoff.md": HANDOFF_DOC.read_text(encoding="utf-8"),
+            "orchestrator/README.md": (
+                REPO_ROOT / "orchestrator" / "README.md"
+            ).read_text(encoding="utf-8"),
+            "research-orchestrate.md": ORCHESTRATE_SKILL.read_text(encoding="utf-8"),
+        }
+        for label, text in documents.items():
+            normalized = text.casefold()
+            normalized_words = " ".join(normalized.replace("-", " ").split())
+            with self.subTest(document=label):
+                self.assertIn("managed adapters", normalized_words)
+                self.assertIn("codex", normalized_words)
+                self.assertIn("claude", normalized_words)
+                self.assertIn("external protocol", normalized_words)
+                self.assertIn("opencode", normalized_words)
+                self.assertIn("pi", normalized_words)
+                self.assertIn("aider", normalized_words)
+                self.assertIn("gemini cli", normalized_words)
+                self.assertIn("agents.md", normalized_words)
+                self.assertIn("not package managed runners", normalized_words)
+                self.assertNotIn("--runner opencode", normalized)
+                self.assertNotIn("--runner pi", normalized)
+                self.assertNotIn("managed opencode", normalized)
+                self.assertNotIn("managed pi", normalized)
+
+        orchestration = documents["docs/orchestration.md"]
+        for expected in (
+            "user configuration",
+            "plugins",
+            "MCP servers",
+            "single-driver coordination",
+            "crash replay",
+            "JSON event stream",
+            "must require a workspace upgrade",
+        ):
+            self.assertIn(expected, orchestration)
+        self.assertFalse((REPO_ROOT / "workspace-template" / "OPENCODE.md").exists())
+        self.assertFalse((REPO_ROOT / "workspace-template" / "PI.md").exists())
+
     def test_workspace_status_documents_claim_invariants(self):
         workspace_status_doc = (REPO_ROOT / "workspace-template" / "docs" / "workspace-status.md").read_text()
 

@@ -97,7 +97,6 @@ ORCHESTRATION_ATTEMPT_KEYS = {
     "result_digest",
     "error_code",
 }
-ORCHESTRATION_ATTEMPT_RUNNERS = {"codex", "claude"}
 ORCHESTRATION_ATTEMPT_PHASES = {"research", "discovery", "candidate_review", "acquisition", "verification"}
 ORCHESTRATION_ATTEMPT_STATUSES = {
     "running",
@@ -130,6 +129,7 @@ ORCHESTRATION_ATTEMPT_EXPECTED_ERRORS = {
     "repair_acknowledged": "CONTROL_ARTIFACT_TAMPERED",
 }
 ORCHESTRATION_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+ORCHESTRATION_RUNNER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 ORCHESTRATION_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CHECK_COMPLETE_EXIT_CODES = {
     VERDICT_COMPLETE: EXIT_REPORTED,
@@ -1865,7 +1865,8 @@ def orchestration_attempt_summary(project_root: Path, orchestration_id: str) -> 
                 or not isinstance(document.get("lease_attempt"), int)
                 or isinstance(document.get("lease_attempt"), bool)
                 or document["lease_attempt"] <= 0
-                or document.get("runner") not in ORCHESTRATION_ATTEMPT_RUNNERS
+                or not isinstance(document.get("runner"), str)
+                or ORCHESTRATION_RUNNER_ID_RE.fullmatch(document["runner"]) is None
                 or document.get("phase") not in ORCHESTRATION_ATTEMPT_PHASES
                 or (
                     run_id is not None

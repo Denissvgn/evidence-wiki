@@ -31,6 +31,26 @@ Inputs:
 - whether a fetch agent is reachable for blocked-source delivery,
 - `docs/orchestrator-handoff.md` (the contract this skill executes).
 
+## Harness Support Levels
+
+Choose one of three integration levels:
+
+- **Managed adapters:** use Codex or Claude Code with package-owned `run` and
+  `resume` execution.
+- **External protocol:** connect OpenCode, Pi, Aider, Gemini CLI, or another
+  harness through a host that drives `start`, `next`, `submit`, and `status`.
+  These harnesses are not package-managed runners.
+- **Instruction compatibility:** give any worker the canonical workspace
+  `AGENTS.md`, the selected workspace skill, and the issued work order.
+  `CLAUDE.md` is only a pointer to `AGENTS.md` for Claude-style discovery.
+
+An external-protocol host must provide OS- or container-level process
+isolation, prevent user configuration, plugins, and MCP servers from entering
+the worker environment, serialize one driver per parent session, and replay the
+same pending action after a crash. For OpenCode and Pi, extract a bounded
+structured result from the harness's JSON event stream before calling
+`submit`; never submit a transcript or free-form final response.
+
 ## Preferred Managed Workflow
 
 When Codex or Claude Code is installed, use the package orchestrator instead of
@@ -108,8 +128,8 @@ normalization, fulfillment, reopening, a later research run, verification, and
 export. It finishes `blocked_on_sources` only when no explicitly enabled
 provider route can make progress.
 
-For an agent harness other than the two managed runners, drive the same
-model-neutral protocol with `orchestrate start`, `next`, `submit`, and `status`.
+For an external-protocol harness, drive the same model-neutral protocol with
+`orchestrate start`, `next`, `submit`, and `status`.
 `next` replays the pending work order after interruption; `submit` accepts a
 small structured result but trusts only verified workspace artifacts. See
 `docs/orchestration.md` for session artifacts, result schema, limits, and

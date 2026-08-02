@@ -18,6 +18,28 @@ Manual local-file delivery remains supported, but it is an alternative input
 path—not a prerequisite for a provider-enabled orchestration that starts with an
 empty `raw/` directory.
 
+## Harness Support Levels
+
+The package exposes three deliberately different levels of harness support:
+
+- **Managed adapters:** Codex and Claude Code can be selected for package-owned
+  `run` and `resume` execution. EvidenceWiki owns their capability preflight,
+  fixed invocation, isolation, result decoding, and durable recovery.
+- **External protocol:** OpenCode, Pi, Aider, Gemini CLI, and other harnesses
+  can be driven by an external host through `start`, `next`, `submit`, and
+  `status`. They are not package-managed runners.
+- **Instruction compatibility:** any worker can execute an issued order when
+  given the canonical `AGENTS.md` and the selected workspace skill.
+  `CLAUDE.md` only points Claude-style discovery to `AGENTS.md`.
+
+The external host owns OS- or container-level process isolation; isolation
+from user configuration, plugins, and MCP servers; single-driver coordination;
+and replay of the unchanged pending action after a crash. It must translate
+harness output into the bounded `orchestration_result` document and let the
+controller verify real workspace postconditions. OpenCode and Pi integrations
+must extract that document from their JSON event streams rather than submit a
+transcript or free-form final message.
+
 The durable parent protocol publishes `orchestration_session`,
 `orchestration_work_order`, `orchestration_result`, and
 `orchestration_attempt` schema version `1.0` through `evidence-wiki contract`.
@@ -180,7 +202,7 @@ The output is JSON. This abridged example omits the large
   "schema_version": "1.0",
   "package": "evidence-wiki",
   "package_version": "0.2.4",
-  "starter_version": "0.5.4",
+  "starter_version": "0.5.5",
   "starter_schema_version": "0.1",
   "compatible_research_yml_contract": "0.1",
   "profile_schema_versions": ["0.1"],
