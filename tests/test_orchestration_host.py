@@ -1241,9 +1241,12 @@ class OrchestrationHostTests(unittest.TestCase):
             )
 
         self.assertEqual("codex", prepared.adapter_id)
-        self.assertEqual("/tmp/fake codex", prepared.executable)
+        # PreparedRunner carries the filesystem-native launcher selected by
+        # preflight, so Windows separators come from Path rather than the input
+        # fixture's POSIX spelling.
+        self.assertEqual(os.fspath(runtime_resolution.launcher), prepared.executable)
         self.assertEqual(
-            (str(runtime_resolution.runtime_root), *managed_python.read_paths),
+            (os.fspath(runtime_resolution.runtime_root), *managed_python.read_paths),
             prepared.runtime_read_paths,
         )
         self.assertEqual(3, len(observed))
@@ -1255,7 +1258,7 @@ class OrchestrationHostTests(unittest.TestCase):
         )
         self.assertNotIn("--sandbox", probe_argv)
         self.assertIn(
-            f'{json.dumps(str(runtime_resolution.runtime_root))}="read"',
+            f'{json.dumps(os.fspath(runtime_resolution.runtime_root))}="read"',
             "\n".join(probe_argv),
         )
         self.assertIn(
