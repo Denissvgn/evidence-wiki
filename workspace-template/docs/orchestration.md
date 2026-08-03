@@ -59,7 +59,22 @@ before a new parent is created by `run` and before a worker is launched by
 default PDF backend. A workspace that explicitly selects the Poppler
 compatibility backend must provide `pdftotext` on the worker-visible `PATH`.
 
-Any agent harness can drive the same model-neutral protocol:
+### Harness Support Levels
+
+EvidenceWiki distinguishes three integration levels:
+
+- **Managed adapters:** Codex and Claude Code are the registered runners for
+  package-owned `run` and `resume` execution. The host performs runner-specific
+  capability checks, fixed invocation, isolation, result decoding, and crash
+  recovery.
+- **External protocol:** OpenCode, Pi, Aider, Gemini CLI, and other harnesses
+  can be integrated by a host that drives the model-neutral commands below.
+  These harnesses are not package-managed runners.
+- **Instruction compatibility:** any worker can receive the canonical
+  `AGENTS.md`, the selected workspace skill, and the persisted work order.
+  `CLAUDE.md` is a discovery pointer to `AGENTS.md`, not a separate contract.
+
+The external protocol is:
 
 ```bash
 evidence-wiki orchestrate start --target PATH --agent-id pm-agent --format json
@@ -74,6 +89,21 @@ accepts the result only for that action, validates its schema, and checks the
 real question, request, candidate, source, run, verification, and export
 artifacts required by the order. A worker's `completed` claim is not sufficient
 by itself.
+
+An external-protocol host owns OS- or container-level process isolation and
+must prevent user configuration, plugins, and MCP servers from becoming
+unreviewed worker inputs. It also owns bounded structured-result extraction,
+single-driver coordination, and crash replay of the same pending action. For
+OpenCode and Pi, extract the work result from the harness's JSON event stream,
+validate it against the published result schema, and pass only that bounded
+document to `submit`; never treat a transcript as a result.
+
+Attempt contract `1.0` readers accept bounded lowercase runner IDs so retained
+history remains readable if the registry changes, but this starter writes only
+`codex` or `claude`. A future package release must require a workspace upgrade
+before it begins writing another managed runner ID. Runner-specific control
+roots such as `.opencode/` or `.pi/` are likewise added only with an adapter
+whose isolation contract has been implemented and verified.
 
 Only one package-managed `run` or `resume` process may drive a parent session
 at a time. The host holds a session-scoped lock for the complete managed window;

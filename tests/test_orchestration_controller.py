@@ -512,6 +512,83 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(2, reissued["lease"]["attempt"])
             self.assertNotEqual(expired["lease"]["expires_at"], reissued["lease"]["expires_at"])
 
+    def test_network_free_external_protocol_replays_validates_and_advances(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+
+            code, first, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--agent-id",
+                "agent-test",
+            )
+            self.assertEqual(0, code, stderr)
+            code, replayed, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--agent-id",
+                "agent-test",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(first, replayed)
+
+            malformed_path = root / "malformed-result.json"
+            malformed_path.write_text('{"schema_version": "1.0"}\n', encoding="utf-8")
+            code, malformed, _ = self.controller(
+                target,
+                "submit",
+                "--orchestration-id",
+                "orch-test",
+                "--action-id",
+                first["action_id"],
+                "--result-file",
+                str(malformed_path),
+                "--agent-id",
+                "agent-test",
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("RESULT_INVALID", malformed["error_code"])
+
+            code, unsafe, _ = self.submit(
+                root,
+                target,
+                first["action_id"],
+                artifacts=["../outside-workspace"],
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("RESULT_INVALID", unsafe["error_code"])
+            self.assertFalse(
+                CONTROLLER.work_result_path(target, "orch-test", first["action_id"]).exists()
+            )
+
+            self.block_question(target)
+            code, accepted, stderr = self.submit(
+                root,
+                target,
+                first["action_id"],
+                summary="External harness completed the deterministic work order.",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(1, accepted["completed_action_count"])
+            self.assertEqual(first["action_id"], accepted["last_completed_action_id"])
+
+            code, status, stderr = self.controller(
+                target,
+                "status",
+                "--orchestration-id",
+                "orch-test",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(1, status["completed_action_count"])
+            self.assertIsNone(status["pending_action_id"])
+            self.assertNotEqual("research", status["phase"])
+
     def test_required_control_repair_marker_blocks_protocol_next_and_submit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

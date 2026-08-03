@@ -832,12 +832,23 @@ summary: Curation status fixture.
                 document = {
                     **base,
                     "attempt_id": attempt_id,
+                    "runner": "opencode" if attempt_id == "attempt-two" else "codex",
                     "updated_at": updated_at,
                     "status": status,
                     "result_digest": "sha256:" + "b" * 64 if status == "submitted" else None,
                     "error_code": "RUNNER_FAILED" if status == "runner_failed" else None,
                 }
                 (attempts / f"{attempt_id}.json").write_text(json.dumps(document), encoding="utf-8")
+            for index, unsafe_runner in enumerate(("OpenCode", "../pi", "a" * 65), start=1):
+                unsafe = {
+                    **document,
+                    "attempt_id": f"invalid-runner-{index}",
+                    "runner": unsafe_runner,
+                }
+                (attempts / f"invalid-runner-{index}.json").write_text(
+                    json.dumps(unsafe),
+                    encoding="utf-8",
+                )
             (attempts / "invalid.json").write_text("not json", encoding="utf-8")
             repair_guards = target / "runs" / "orchestration-guards"
             repair_guards.mkdir(parents=True)
@@ -869,9 +880,10 @@ summary: Curation status fixture.
             )
 
         self.assertEqual(2, summary["attempts"]["count"])
-        self.assertEqual(1, summary["attempts"]["invalid_records"])
+        self.assertEqual(4, summary["attempts"]["invalid_records"])
         self.assertFalse(summary["attempts"]["truncated"])
         self.assertEqual("attempt-two", summary["attempts"]["latest"]["attempt_id"])
+        self.assertEqual("opencode", summary["attempts"]["latest"]["runner"])
         self.assertEqual("submitted", summary["attempts"]["latest"]["status"])
         serialized = json.dumps(summary["attempts"])
         self.assertNotIn("work_order_identity", serialized)

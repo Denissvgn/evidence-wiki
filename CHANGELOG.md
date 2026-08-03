@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Refactor managed Codex and Claude execution behind a closed adapter registry,
+  and document OpenCode, Pi, and other harnesses as external-protocol clients.
+- Bump the reusable managed workspace starter to `0.5.5`, including the
+  canonical `CLAUDE.md` instruction pointer in its required asset manifest.
+
 ## 0.2.4 - 2026-07-21
 
 - Treat broken or partially initialized pypdf import-spec lookups as a missing

@@ -124,6 +124,7 @@ class InitResearchWorkspaceTests(unittest.TestCase):
             self.assertEqual("Verify deterministic workspace creation.", config["project"]["owner_goal"])
             self.assertTrue((target / "workspace-system.yml").is_file())
             self.assertTrue((target / "AGENTS.md").is_file())
+            self.assertTrue((target / "CLAUDE.md").is_file())
             self.assertTrue((target / "raw" / "papers").is_dir())
             self.assertTrue((target / "sources" / "normalized").is_dir())
             self.assertTrue((target / "wiki" / "sources").is_dir())

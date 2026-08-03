@@ -97,6 +97,27 @@ evidence-wiki orchestrate run \
 Use `--runner claude` to run the same work-order protocol through Claude Code.
 Pass `--model MODEL_ID` only when an explicit runner-specific model override is
 needed; otherwise the runner's safe configured default is used.
+
+EvidenceWiki supports agent harnesses at three levels:
+
+- **Managed adapters:** Codex and Claude Code are the registered runners for
+  package-owned `run` and `resume` execution, including capability preflight,
+  isolation, result decoding, and crash recovery.
+- **External protocol:** OpenCode, Pi, Aider, Gemini CLI, and other harnesses
+  can be integrated by a host that drives `start`, `next`, `submit`, and
+  `status`. They are not package-managed runners.
+- **Instruction compatibility:** any worker can follow the canonical
+  `AGENTS.md`, the selected workspace skill, and the issued work order.
+  `CLAUDE.md` is only a pointer to `AGENTS.md` for Claude-style discovery.
+
+An external-protocol host owns the boundary that the managed adapters would
+otherwise provide: OS- or container-level process isolation, isolation from
+user configuration, plugins, and MCP servers, single-driver coordination for
+the parent session, and replay of the same pending action after a crash. For
+OpenCode and Pi, the host must also extract a bounded structured work result
+from their JSON event stream before passing it to `submit`; the controller
+still accepts only results whose workspace postconditions verify.
+
 The orchestrator does not contain a battery-specific workflow. It first gives
 the research agent the empty workspace; when the question blocks, it retains
 that immutable run, discovers request-linked academic candidates, asks the

@@ -164,7 +164,7 @@ HOST_STAGED_RESULT_KEYS = frozenset(
     }
 )
 
-PROTECTED_WORKSPACE_PATHS = (
+COMMON_PROTECTED_WORKSPACE_PATH_PREFIX = (
     "research.yml",
     "workspace-system.yml",
     "AGENTS.md",
@@ -177,14 +177,11 @@ PROTECTED_WORKSPACE_PATHS = (
     "runs/orchestrations",
     "runs/orchestration-guards",
     ".git",
-    ".codex",
-    ".claude",
+)
+COMMON_PROTECTED_WORKSPACE_PATH_SUFFIX = (
     ".agents",
     ".venv",
     "venv",
-)
-PROTECTED_WORKSPACE_FILES = frozenset(
-    {"research.yml", "workspace-system.yml", "AGENTS.md", "CLAUDE.md", "README.md", ".gitignore"}
 )
 WORKER_WRITABLE_CONTROL_PATHS = ("runs/run-reports",)
 MANAGED_HOST_LOCK_CONTROL_PATH = ".locks/managed-host.lock"
@@ -195,7 +192,6 @@ EXIT_BLOCKED = 3
 EXIT_PAUSED = 4
 EXIT_RUNNER_FAILED = 5
 
-RUNNER_NAMES = ("codex", "claude")
 TERMINAL_STATUSES = frozenset({"complete", "blocked_on_sources", "no_ship", "failed"})
 PAUSED_STATUSES = frozenset({"paused", "action_limit_reached", "time_limit_reached"})
 RESULT_OUTCOMES = frozenset({"completed", "blocked", "failed"})
@@ -220,9 +216,11 @@ WORK_ORDER_KEYS = frozenset(
     }
 )
 RESULT_KEYS = frozenset({"schema_version", "action_id", "outcome", "summary", "artifacts"})
+RUNNER_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 SAFE_SKILL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 SAFE_SCOPE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+SAFE_RUNNER_ID_RE = re.compile(RUNNER_ID_PATTERN)
 
 ORCHESTRATION_RESULT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -251,7 +249,7 @@ ORCHESTRATION_ATTEMPT_SCHEMA: dict[str, Any] = {
         "attempt_id": {"type": "string"},
         "action_id": {"type": "string"},
         "lease_attempt": {"type": "integer", "minimum": 1},
-        "runner": {"type": "string", "enum": list(RUNNER_NAMES)},
+        "runner": {"type": "string", "pattern": RUNNER_ID_PATTERN},
         "phase": {"type": "string", "enum": sorted(WORK_ORDER_PHASES)},
         "run_id": {"type": ["string", "null"]},
         "started_at": {"type": "string"},
@@ -282,6 +280,230 @@ class ProcessResult:
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     timed_out: bool = False
+
+
+@dataclass(frozen=True)
+class PreparedRunner:
+    """A resolved managed runner whose isolation capability has been checked."""
+
+    adapter_id: str
+    executable: str
+    runtime_read_paths: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class RunnerInvocation:
+    """One fixed, shell-free invocation produced by a managed runner adapter."""
+
+    argv: list[str]
+    stdin_text: str
+    result_path: Path
+
+
+class ManagedRunnerAdapter:
+    """Internal contract for one package-managed agent CLI."""
+
+    runner_id = ""
+    executable_name = ""
+    protected_workspace_paths: tuple[str, ...] = ()
+
+    def resolve_executable(self) -> str:
+        return _resolve_runner_executable(self.executable_name)
+
+    def prepare(self, executable: str, root: Path) -> PreparedRunner:
+        raise NotImplementedError
+
+    def build_invocation(
+        self,
+        *,
+        prepared: PreparedRunner,
+        root: Path,
+        prompt: str,
+        schema_path: Path,
+        result_path: Path,
+        model: str | None,
+        allow_network: bool,
+        managed_python: _ManagedPythonRuntime,
+    ) -> RunnerInvocation:
+        raise NotImplementedError
+
+    def decode_result(self, process: ProcessResult, invocation: RunnerInvocation) -> Any:
+        raise NotImplementedError
+
+
+class _CodexManagedRunnerAdapter(ManagedRunnerAdapter):
+    runner_id = "codex"
+    executable_name = "codex"
+    protected_workspace_paths = (".codex",)
+
+    def resolve_executable(self) -> str:
+        return _resolve_runner_executable(self.executable_name, resolve_codex_windows_shim=True)
+
+    def prepare(self, executable: str, root: Path) -> PreparedRunner:
+        resolution = _codex_runtime_resolution(executable)
+        managed_python = _managed_python_runtime(root)
+        runtime_read_paths = tuple(dict.fromkeys((str(resolution.runtime_root), *managed_python.read_paths)))
+        _validate_codex_runtime_workspace_boundary(
+            runtime_read_paths,
+            root,
+            launcher_path=resolution.launcher,
+            package_root=resolution.package_root,
+        )
+        selected_executable = str(resolution.launcher)
+        version_process = _run_runner_capability_command([selected_executable, "--version"], cwd=root)
+        version = _codex_version(version_process)
+        if version < CODEX_MIN_PERMISSION_PROFILE_VERSION:
+            minimum = ".".join(str(part) for part in CODEX_MIN_PERMISSION_PROFILE_VERSION)
+            found = ".".join(str(part) for part in version)
+            raise _runner_isolation_error(
+                f"Managed Codex requires Codex CLI {minimum} or newer for custom permission profiles; found {found}.",
+            )
+        _probe_codex_permission_profile(selected_executable, runtime_read_paths)
+        _probe_codex_managed_python(selected_executable, root, runtime_read_paths, managed_python)
+        return PreparedRunner(
+            adapter_id=self.runner_id,
+            executable=selected_executable,
+            runtime_read_paths=runtime_read_paths,
+        )
+
+    def build_invocation(
+        self,
+        *,
+        prepared: PreparedRunner,
+        root: Path,
+        prompt: str,
+        schema_path: Path,
+        result_path: Path,
+        model: str | None,
+        allow_network: bool,
+        managed_python: _ManagedPythonRuntime,
+    ) -> RunnerInvocation:
+        argv = _codex_argv(
+            prepared.executable,
+            root,
+            schema_path,
+            result_path,
+            model,
+            allow_network=allow_network,
+            runtime_read_paths=prepared.runtime_read_paths,
+            managed_python=managed_python,
+        )
+        return RunnerInvocation(argv=argv, stdin_text=prompt, result_path=result_path)
+
+    def decode_result(self, process: ProcessResult, invocation: RunnerInvocation) -> Any:
+        return _read_result_file(invocation.result_path)
+
+
+class _ClaudeManagedRunnerAdapter(ManagedRunnerAdapter):
+    runner_id = "claude"
+    executable_name = "claude"
+    protected_workspace_paths = (".claude",)
+
+    def prepare(self, executable: str, root: Path) -> PreparedRunner:
+        if _is_native_windows():  # pragma: no cover - exercised on Windows CI
+            raise _runner_isolation_error(
+                "Managed Claude orchestration is unavailable on native Windows because Claude Code cannot enforce its "
+                "OS sandbox there. Run Claude from WSL2 or a container, or use the Codex runner.",
+            )
+        _probe_claude_sandbox_primitives()
+        process = _run_runner_capability_command([executable, "--help"], cwd=root)
+        help_text = f"{process.stdout}\n{process.stderr}"
+        required_flags = ("--json-schema", "--settings", "--setting-sources", "--strict-mcp-config")
+        if process.returncode != 0 or any(flag not in help_text for flag in required_flags):
+            raise _runner_isolation_error(
+                "Managed Claude requires a Claude Code CLI with structured output and host settings support.",
+                process,
+            )
+        return PreparedRunner(adapter_id=self.runner_id, executable=executable)
+
+    def build_invocation(
+        self,
+        *,
+        prepared: PreparedRunner,
+        root: Path,
+        prompt: str,
+        schema_path: Path,
+        result_path: Path,
+        model: str | None,
+        allow_network: bool,
+        managed_python: _ManagedPythonRuntime,
+    ) -> RunnerInvocation:
+        del schema_path, managed_python
+        argv = _claude_argv(
+            prepared.executable,
+            root,
+            model,
+            allow_network=allow_network,
+        )
+        return RunnerInvocation(argv=argv, stdin_text=prompt, result_path=result_path)
+
+    def decode_result(self, process: ProcessResult, invocation: RunnerInvocation) -> Any:
+        del invocation
+        return _claude_result(process.stdout)
+
+
+def _build_managed_runner_registry(
+    adapters: tuple[ManagedRunnerAdapter, ...],
+) -> dict[str, ManagedRunnerAdapter]:
+    registry: dict[str, ManagedRunnerAdapter] = {}
+    for adapter in adapters:
+        runner_id = adapter.runner_id
+        if SAFE_RUNNER_ID_RE.fullmatch(runner_id) is None:
+            raise RuntimeError(f"Managed runner adapter id is unsafe: {runner_id!r}")
+        if runner_id in registry:
+            raise RuntimeError(f"Managed runner adapter id is duplicated: {runner_id!r}")
+        for protected_path in adapter.protected_workspace_paths:
+            parts = protected_path.split("/")
+            if (
+                not protected_path
+                or protected_path.startswith(("/", "\\"))
+                or "\\" in protected_path
+                or any(part in {"", ".", ".."} for part in parts)
+            ):
+                raise RuntimeError(
+                    f"Managed runner adapter {runner_id!r} has an unsafe protected path: {protected_path!r}"
+                )
+        registry[runner_id] = adapter
+    return registry
+
+
+_MANAGED_RUNNER_ADAPTERS = _build_managed_runner_registry(
+    (
+        _CodexManagedRunnerAdapter(),
+        _ClaudeManagedRunnerAdapter(),
+    )
+)
+
+
+def managed_runner_names() -> tuple[str, ...]:
+    """Return the stable ids of package-managed runner adapters."""
+
+    return tuple(_MANAGED_RUNNER_ADAPTERS)
+
+
+def _managed_runner_adapter(name: str) -> ManagedRunnerAdapter:
+    try:
+        return _MANAGED_RUNNER_ADAPTERS[name]
+    except (KeyError, TypeError) as exc:
+        raise OrchestrationHostError(f"Unsupported managed runner: {name}.") from exc
+
+
+PROTECTED_WORKSPACE_PATHS = tuple(
+    dict.fromkeys(
+        (
+            *COMMON_PROTECTED_WORKSPACE_PATH_PREFIX,
+            *(
+                path
+                for adapter in _MANAGED_RUNNER_ADAPTERS.values()
+                for path in adapter.protected_workspace_paths
+            ),
+            *COMMON_PROTECTED_WORKSPACE_PATH_SUFFIX,
+        )
+    )
+)
+PROTECTED_WORKSPACE_FILES = frozenset(
+    {"research.yml", "workspace-system.yml", "AGENTS.md", "CLAUDE.md", "README.md", ".gitignore"}
+)
 
 
 @dataclass(frozen=True)
@@ -1182,6 +1404,9 @@ def _canonicalize_managed_result(document: Any) -> Any:
 
 def _runner_prompt(work_order: dict[str, Any]) -> str:
     skill = work_order["skill"]
+    protected_paths = ", ".join(
+        path for path in PROTECTED_WORKSPACE_PATHS if path != "runs/orchestrations"
+    )
     if _is_native_windows():  # pragma: no cover - exercised on Windows CI
         python_instruction = (
             f'In PowerShell use `& "$env:{MANAGED_PYTHON_ENV}" -B scripts/...`; '
@@ -1200,9 +1425,8 @@ def _runner_prompt(work_order: dict[str, Any]) -> str:
         "This action may be a replay after interruption. Inspect existing scoped artifacts first, preserve valid "
         "prior work, and perform only missing idempotent steps; never duplicate downloads or overwrite evidence "
         "merely because the action was replayed.\n"
-        "The host owns research.yml, workspace-system.yml, AGENTS.md, CLAUDE.md, README.md, .gitignore, docs/, "
-        "scripts/, skills/, .git/, .codex/, .claude/, .agents/, workspace virtual environments, and the entire "
-        "runs/orchestrations/ tree. They are read-only control inputs: never create, modify, delete, rename, relink, "
+        f"The host owns these protected workspace paths: {protected_paths}, and the entire runs/orchestrations/ tree. "
+        "They are read-only control inputs: never create, modify, delete, rename, relink, "
         "or change metadata beneath those paths. In particular, never write a result into runs/orchestrations; "
         "the host validates and persists your returned result. Generated run reports belong under "
         "runs/run-reports/, outside the trusted documentation tree. Do not start background processes, daemons, "
@@ -1231,24 +1455,34 @@ def _runner_prompt(work_order: dict[str, Any]) -> str:
 
 
 def _runner_executable(name: str) -> str:
-    if name not in RUNNER_NAMES:
-        raise OrchestrationHostError(f"Unsupported managed runner: {name}.")
-    executable = shutil.which(name)
+    return _managed_runner_adapter(name).resolve_executable()
+
+
+def _resolve_runner_executable(
+    executable_name: str,
+    *,
+    resolve_codex_windows_shim: bool = False,
+) -> str:
+    executable = shutil.which(executable_name)
     if executable is None:
         raise _runner_isolation_error(
-            f"Managed runner executable {name!r} was not found on PATH."
+            f"Managed runner executable {executable_name!r} was not found on PATH."
         )
-    if name == "codex" and _is_native_windows() and Path(executable).suffix.casefold() in {".bat", ".cmd", ".ps1"}:
+    if (
+        resolve_codex_windows_shim
+        and _is_native_windows()
+        and Path(executable).suffix.casefold() in {".bat", ".cmd", ".ps1"}
+    ):
         return _codex_windows_shim_native_executable(executable)
     try:
         resolved = Path(os.path.abspath(executable)).resolve(strict=True)
         metadata = resolved.stat()
     except OSError as exc:
         raise _runner_isolation_error(
-            f"Managed runner executable {name!r} could not be resolved from PATH."
+            f"Managed runner executable {executable_name!r} could not be resolved from PATH."
         ) from exc
     if not stat.S_ISREG(metadata.st_mode):
-        raise _runner_isolation_error(f"Managed runner executable {name!r} is not a regular file.")
+        raise _runner_isolation_error(f"Managed runner executable {executable_name!r} is not a regular file.")
     # Always execute the same absolute object that capability preflight inspects.
     # A relative PATH component must not be reinterpreted under the research
     # workspace cwd by subprocess.Popen().
@@ -1889,7 +2123,7 @@ def _validate_codex_runtime_workspace_boundary(
 
 
 def _codex_permission_profile_config(
-    protected_paths: tuple[str, ...] = PROTECTED_WORKSPACE_PATHS,
+    protected_paths: tuple[str, ...] | None = None,
     writable_paths: tuple[str, ...] | None = None,
     *,
     runtime_read_paths: tuple[str, ...] = (),
@@ -1897,6 +2131,8 @@ def _codex_permission_profile_config(
 ) -> str:
     if workspace_root_mode not in {"read", "write"}:  # pragma: no cover - internal closed call sites
         raise ValueError("workspace_root_mode must be read or write")
+    if protected_paths is None:
+        protected_paths = PROTECTED_WORKSPACE_PATHS
     if writable_paths is None:
         writable_paths = WORKER_WRITABLE_CONTROL_PATHS
     workspace_rules = [
@@ -2353,48 +2589,46 @@ def _probe_claude_sandbox_primitives() -> None:
             )
 
 
-def _validate_runner_capability(name: str, executable: str, root: Path) -> tuple[str, ...] | None:
-    """Fail before a managed worker launch when hard isolation is unavailable."""
-    if name == "codex":
-        resolution = _codex_runtime_resolution(executable)
-        managed_python = _managed_python_runtime(root)
-        runtime_read_paths = tuple(dict.fromkeys((str(resolution.runtime_root), *managed_python.read_paths)))
-        _validate_codex_runtime_workspace_boundary(
-            runtime_read_paths,
-            root,
-            launcher_path=resolution.launcher,
-            package_root=resolution.package_root,
-        )
-        selected_executable = str(resolution.launcher)
-        version_process = _run_runner_capability_command([selected_executable, "--version"], cwd=root)
-        version = _codex_version(version_process)
-        if version < CODEX_MIN_PERMISSION_PROFILE_VERSION:
-            minimum = ".".join(str(part) for part in CODEX_MIN_PERMISSION_PROFILE_VERSION)
-            found = ".".join(str(part) for part in version)
-            raise _runner_isolation_error(
-                f"Managed Codex requires Codex CLI {minimum} or newer for custom permission profiles; found {found}.",
-            )
-        _probe_codex_permission_profile(selected_executable, runtime_read_paths)
-        _probe_codex_managed_python(selected_executable, root, runtime_read_paths, managed_python)
-        return runtime_read_paths
+def _prepare_runner(name: str, executable: str, root: Path) -> PreparedRunner:
+    """Resolve one adapter's fail-closed capability report."""
 
-    if name != "claude":  # pragma: no cover - guarded by the closed runner registry
-        raise OrchestrationHostError(f"Unsupported managed runner: {name}.")
-    if _is_native_windows():  # pragma: no cover - exercised on Windows CI
-        raise _runner_isolation_error(
-            "Managed Claude orchestration is unavailable on native Windows because Claude Code cannot enforce its "
-            "OS sandbox there. Run Claude from WSL2 or a container, or use the Codex runner.",
+    adapter = _managed_runner_adapter(name)
+    prepared = adapter.prepare(executable, root)
+    if prepared.adapter_id != adapter.runner_id:
+        raise OrchestrationHostError(
+            f"Managed runner adapter {adapter.runner_id!r} returned a conflicting identity.",
+            exit_code=EXIT_RUNNER_FAILED,
         )
-    _probe_claude_sandbox_primitives()
-    process = _run_runner_capability_command([executable, "--help"], cwd=root)
-    help_text = f"{process.stdout}\n{process.stderr}"
-    required_flags = ("--json-schema", "--settings", "--setting-sources", "--strict-mcp-config")
-    if process.returncode != 0 or any(flag not in help_text for flag in required_flags):
-        raise _runner_isolation_error(
-            "Managed Claude requires a Claude Code CLI with structured output and host settings support.",
-            process,
-        )
-    return None
+    return prepared
+
+
+def _validate_runner_capability(name: str, executable: str, root: Path) -> PreparedRunner:
+    """Fail before a managed worker launch when hard isolation is unavailable."""
+
+    return _prepare_runner(name, executable, root)
+
+
+def _prepared_runner_from_preflight(
+    runner: str,
+    executable: str,
+    preflight: PreparedRunner | tuple[str, ...] | None,
+) -> PreparedRunner:
+    """Normalize the adapter preflight result, including legacy test doubles."""
+
+    adapter = _managed_runner_adapter(runner)
+    if isinstance(preflight, PreparedRunner):
+        if preflight.adapter_id != adapter.runner_id:
+            raise OrchestrationHostError(
+                f"Managed runner adapter {adapter.runner_id!r} returned a conflicting identity.",
+                exit_code=EXIT_RUNNER_FAILED,
+            )
+        return preflight
+    runtime_read_paths = preflight if isinstance(preflight, tuple) else ()
+    return PreparedRunner(
+        adapter_id=adapter.runner_id,
+        executable=executable,
+        runtime_read_paths=runtime_read_paths,
+    )
 
 
 def _read_result_file(
@@ -2490,10 +2724,30 @@ def execute_work_order(
     timeout_seconds: int,
     executable: str | None = None,
     runtime_read_paths: tuple[str, ...] | None = None,
+    prepared_runner: PreparedRunner | None = None,
 ) -> dict[str, Any]:
     """Execute and validate one work order without persisting runner output."""
     order = _validate_work_order(work_order)
-    executable = executable or _runner_executable(runner)
+    adapter = _managed_runner_adapter(runner)
+    if prepared_runner is not None:
+        if prepared_runner.adapter_id != adapter.runner_id:
+            raise OrchestrationHostError(
+                f"Prepared runner {prepared_runner.adapter_id!r} cannot execute managed runner {runner!r}.",
+                exit_code=EXIT_RUNNER_FAILED,
+            )
+        if executable is not None and executable != prepared_runner.executable:
+            raise OrchestrationHostError(
+                "Prepared runner executable conflicts with the requested managed executable.",
+                exit_code=EXIT_RUNNER_FAILED,
+            )
+        prepared = prepared_runner
+    else:
+        selected_executable = executable or _runner_executable(runner)
+        prepared = PreparedRunner(
+            adapter_id=adapter.runner_id,
+            executable=selected_executable,
+            runtime_read_paths=runtime_read_paths,
+        )
     managed_python = _managed_python_runtime(root)
     prompt = _runner_prompt(order)
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-runner-") as tmpdir:
@@ -2501,28 +2755,20 @@ def execute_work_order(
         schema_path = temporary_root / "orchestration-result.schema.json"
         result_path = temporary_root / "result.json"
         schema_path.write_text(json.dumps(ORCHESTRATION_RESULT_SCHEMA), encoding="utf-8")
-        if runner == "codex":
-            argv = _codex_argv(
-                executable,
-                root,
-                schema_path,
-                result_path,
-                model,
-                allow_network=_work_order_allows_network(order),
-                runtime_read_paths=runtime_read_paths,
-                managed_python=managed_python,
-            )
-        else:
-            argv = _claude_argv(
-                executable,
-                root,
-                model,
-                allow_network=_work_order_allows_network(order),
-            )
+        invocation = adapter.build_invocation(
+            prepared=prepared,
+            root=root,
+            prompt=prompt,
+            schema_path=schema_path,
+            result_path=result_path,
+            model=model,
+            allow_network=_work_order_allows_network(order),
+            managed_python=managed_python,
+        )
         process = _execute_bounded(
-            argv,
+            invocation.argv,
             cwd=root,
-            stdin_text=prompt,
+            stdin_text=invocation.stdin_text,
             timeout_seconds=timeout_seconds,
             environment=_managed_python_environment(managed_python),
         )
@@ -2538,7 +2784,7 @@ def execute_work_order(
                 f"Managed {runner} action exited with code {process.returncode}; the action remains resumable.{suffix}",
                 exit_code=EXIT_RUNNER_FAILED,
             )
-        document = _read_result_file(result_path) if runner == "codex" else _claude_result(process.stdout)
+        document = adapter.decode_result(process, invocation)
     return _validate_result(_canonicalize_managed_result(document), order["action_id"])
 
 
@@ -2684,7 +2930,12 @@ def _validate_attempt(document: Any) -> dict[str, Any]:
             "Retained orchestration attempt lease_attempt is invalid.",
             exit_code=EXIT_RUNNER_FAILED,
         )
-    if document.get("runner") not in RUNNER_NAMES or document.get("phase") not in WORK_ORDER_PHASES:
+    runner = document.get("runner")
+    if (
+        not isinstance(runner, str)
+        or SAFE_RUNNER_ID_RE.fullmatch(runner) is None
+        or document.get("phase") not in WORK_ORDER_PHASES
+    ):
         raise OrchestrationHostError(
             "Retained orchestration attempt runner or phase is invalid.",
             exit_code=EXIT_RUNNER_FAILED,
@@ -2869,6 +3120,7 @@ def _load_attempt(path: Path) -> dict[str, Any]:
 
 def _start_attempt(root: Path, work_order: dict[str, Any], runner: str) -> dict[str, Any]:
     order = _validate_work_order(work_order)
+    _managed_runner_adapter(runner)
     now = _timestamp_utc()
     attempt = {
         "schema_version": ORCHESTRATION_ATTEMPT_SCHEMA_VERSION,
@@ -3414,7 +3666,8 @@ def _load_host_staged_envelope(root: Path, work_order: dict[str, Any]) -> dict[s
         and document.get("phase") == order["phase"]
         and isinstance(document.get("attempt_id"), str)
         and SAFE_SCOPE_ID_RE.fullmatch(document["attempt_id"])
-        and document.get("runner") in RUNNER_NAMES
+        and isinstance(document.get("runner"), str)
+        and SAFE_RUNNER_ID_RE.fullmatch(document["runner"]) is not None
         and document.get("work_order_identity") == _work_order_identity(order)
         and isinstance(staged_attempt, int)
         and not isinstance(staged_attempt, bool)
@@ -3771,11 +4024,32 @@ def _drive_session_unlocked(
     runner_executable: str | None = None,
     capability_checked: bool = False,
     runner_runtime_read_paths: tuple[str, ...] | None = None,
+    prepared_runner: PreparedRunner | None = None,
 ) -> dict[str, Any]:
     """Drive a durable session until the controller returns no next action."""
-    executable = runner_executable
-    isolation_checked = capability_checked
-    runtime_read_paths = runner_runtime_read_paths
+    adapter = _managed_runner_adapter(runner)
+    prepared = prepared_runner
+    if prepared is not None and prepared.adapter_id != adapter.runner_id:
+        raise OrchestrationHostError(
+            f"Prepared runner {prepared.adapter_id!r} cannot drive managed runner {runner!r}.",
+            exit_code=EXIT_RUNNER_FAILED,
+        )
+    executable = prepared.executable if prepared is not None else runner_executable
+    isolation_checked = prepared is not None or capability_checked
+    runtime_read_paths = (
+        prepared.runtime_read_paths if prepared is not None else runner_runtime_read_paths
+    )
+    if prepared is None and isolation_checked:
+        if executable is None:
+            raise OrchestrationHostError(
+                "Managed runner capability state omitted its executable.",
+                exit_code=EXIT_RUNNER_FAILED,
+            )
+        prepared = PreparedRunner(
+            adapter_id=adapter.runner_id,
+            executable=executable,
+            runtime_read_paths=runtime_read_paths,
+        )
     if resume:
         _control_repair_gate(root, orchestration_id, acknowledge=acknowledge_control_repair)
     if agent_id is None:
@@ -3845,7 +4119,10 @@ def _drive_session_unlocked(
             if executable is None:
                 executable = _runner_executable(runner)
             if not isolation_checked:
-                runtime_read_paths = _validate_runner_capability(runner, executable, root)
+                preflight = _validate_runner_capability(runner, executable, root)
+                prepared = _prepared_runner_from_preflight(runner, executable, preflight)
+                executable = prepared.executable
+                runtime_read_paths = prepared.runtime_read_paths
                 isolation_checked = True
             # Reject a pre-existing unsafe control tree before a worker attempt
             # is recorded. Capture again after recording so the durable running
@@ -3877,6 +4154,7 @@ def _drive_session_unlocked(
                     timeout_seconds=_action_timeout(work_order, action_timeout_seconds),
                     executable=executable,
                     runtime_read_paths=runtime_read_paths,
+                    prepared_runner=prepared,
                 )
             except KeyboardInterrupt:
                 try:
@@ -4004,7 +4282,11 @@ def drive_session(
     runner_executable: str | None = None,
     capability_checked: bool = False,
     runner_runtime_read_paths: tuple[str, ...] | None = None,
+    prepared_runner: PreparedRunner | None = None,
 ) -> dict[str, Any]:
+    # Internal callers do not pass through argparse, so enforce the same closed
+    # managed-runner registry before reading or mutating controller state.
+    _managed_runner_adapter(runner)
     with _managed_session_lock(root, orchestration_id):
         return _drive_session_unlocked(
             root,
@@ -4018,6 +4300,7 @@ def drive_session(
             runner_executable=runner_executable,
             capability_checked=capability_checked,
             runner_runtime_read_paths=runner_runtime_read_paths,
+            prepared_runner=prepared_runner,
         )
 
 
@@ -4044,7 +4327,12 @@ def _add_format(parser: argparse.ArgumentParser, *, default: str = "text") -> No
 
 
 def _add_managed_runner(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--runner", required=True, choices=RUNNER_NAMES, help="Managed agent CLI to launch.")
+    parser.add_argument(
+        "--runner",
+        required=True,
+        choices=managed_runner_names(),
+        help="Package-managed agent CLI to launch; other harnesses use start/next/submit/status.",
+    )
     parser.add_argument("--model", default=None, help="Optional runner-specific model id.")
     parser.add_argument("--agent-id", default=None, help="Stable lease owner. Defaults to <runner>-runner.")
     parser.add_argument(
@@ -4144,9 +4432,13 @@ def main(argv: list[str] | None = None) -> int:
         executable: str | None = None
         capability_checked = False
         runner_runtime_read_paths: tuple[str, ...] | None = None
+        prepared_runner: PreparedRunner | None = None
         if args.command == "run":
             executable = _runner_executable(runner)
-            runner_runtime_read_paths = _validate_runner_capability(runner, executable, root)
+            preflight = _validate_runner_capability(runner, executable, root)
+            prepared_runner = _prepared_runner_from_preflight(runner, executable, preflight)
+            executable = prepared_runner.executable
+            runner_runtime_read_paths = prepared_runner.runtime_read_paths
             capability_checked = True
             agent_id = args.agent_id or f"{runner}-runner"
             start_arguments = [
@@ -4182,6 +4474,7 @@ def main(argv: list[str] | None = None) -> int:
             runner_executable=executable,
             capability_checked=capability_checked,
             runner_runtime_read_paths=runner_runtime_read_paths,
+            prepared_runner=prepared_runner,
         )
         _print_managed_result(result, args.format)
         return _session_exit_code(result)

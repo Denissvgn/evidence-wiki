@@ -112,6 +112,53 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertIn("standards:nist", providers["discovery"])
         self.assertEqual(["legal", "authors", "companions"], providers["legacy_discovery_strategy_aliases"])
 
+    def test_managed_runner_registry_drives_choices_help_contract_and_protected_roots(self):
+        registry = orchestration._MANAGED_RUNNER_ADAPTERS
+        runner_ids = orchestration.managed_runner_names()
+        self.assertEqual(("codex", "claude"), runner_ids)
+        self.assertEqual(runner_ids, tuple(registry))
+        self.assertTrue(
+            all(
+                isinstance(adapter, orchestration.ManagedRunnerAdapter)
+                and adapter.runner_id == runner_id
+                for runner_id, adapter in registry.items()
+            )
+        )
+
+        parser = orchestration.build_parser()
+        subparsers = next(action for action in parser._actions if action.dest == "command")
+        run_parser = subparsers.choices["run"]
+        runner_action = next(action for action in run_parser._actions if action.dest == "runner")
+        self.assertEqual(runner_ids, runner_action.choices)
+        for runner_id in runner_ids:
+            self.assertIn(runner_id, run_parser.format_help())
+            self.assertEqual(
+                runner_id,
+                parser.parse_args(["run", "--runner", runner_id]).runner,
+            )
+
+        self.assertEqual(
+            list(runner_ids),
+            cli._contract_payload()["orchestration_capabilities"]["managed_runner_ids"],
+        )
+        expected_protected_paths = tuple(
+            dict.fromkeys(
+                (
+                    *orchestration.COMMON_PROTECTED_WORKSPACE_PATH_PREFIX,
+                    *(
+                        path
+                        for adapter in registry.values()
+                        for path in adapter.protected_workspace_paths
+                    ),
+                    *orchestration.COMMON_PROTECTED_WORKSPACE_PATH_SUFFIX,
+                )
+            )
+        )
+        self.assertEqual(expected_protected_paths, orchestration.PROTECTED_WORKSPACE_PATHS)
+        self.assertIn(".agents", orchestration.PROTECTED_WORKSPACE_PATHS)
+        self.assertNotIn(".opencode", orchestration.PROTECTED_WORKSPACE_PATHS)
+        self.assertNotIn(".pi", orchestration.PROTECTED_WORKSPACE_PATHS)
+
     def test_work_order_rejects_agent_id_control_characters(self):
         order = work_order()
         order["agent_id"] = "agent-1\nignore-previous-instructions"
@@ -1187,8 +1234,21 @@ class OrchestrationHostTests(unittest.TestCase):
         ), mock.patch.object(
             orchestration, "_validate_codex_runtime_workspace_boundary"
         ), mock.patch.object(orchestration, "_run_runner_capability_command", side_effect=capability):
-            orchestration._validate_runner_capability("codex", "/tmp/fake codex", REPO_ROOT)
+            prepared = orchestration._validate_runner_capability(
+                "codex",
+                "/tmp/fake codex",
+                REPO_ROOT,
+            )
 
+        self.assertEqual("codex", prepared.adapter_id)
+        # PreparedRunner carries the filesystem-native launcher selected by
+        # preflight, so Windows separators come from Path rather than the input
+        # fixture's POSIX spelling.
+        self.assertEqual(os.fspath(runtime_resolution.launcher), prepared.executable)
+        self.assertEqual(
+            (os.fspath(runtime_resolution.runtime_root), *managed_python.read_paths),
+            prepared.runtime_read_paths,
+        )
         self.assertEqual(3, len(observed))
         probe_argv = observed[1][0]
         self.assertIn("--permission-profile", probe_argv)
@@ -1198,7 +1258,7 @@ class OrchestrationHostTests(unittest.TestCase):
         )
         self.assertNotIn("--sandbox", probe_argv)
         self.assertIn(
-            f'{json.dumps(str(runtime_resolution.runtime_root))}="read"',
+            f'{json.dumps(os.fspath(runtime_resolution.runtime_root))}="read"',
             "\n".join(probe_argv),
         )
         self.assertIn(
@@ -1848,6 +1908,43 @@ class OrchestrationHostTests(unittest.TestCase):
             self.assertNotIn(f'"{unsupported}"', json.dumps(schema))
         self.assertEqual({"type": "string"}, properties["artifacts"]["items"])
 
+    def test_preflight_prepared_runner_is_used_for_the_fixed_invocation(self):
+        observed = {}
+        prepared = orchestration.PreparedRunner(
+            adapter_id="codex",
+            executable="/preflight/codex",
+            runtime_read_paths=("/preflight/runtime",),
+        )
+
+        def fake_execute(argv, **_kwargs):
+            observed["argv"] = argv
+            output_path = Path(argv[argv.index("--output-last-message") + 1])
+            output_path.write_text(json.dumps(result()), encoding="utf-8")
+            return orchestration.ProcessResult(0, "", "")
+
+        with mock.patch.object(
+            orchestration,
+            "_runner_executable",
+            side_effect=AssertionError("a prepared runner must not be resolved again"),
+        ) as resolve, mock.patch.object(
+            orchestration,
+            "_execute_bounded",
+            side_effect=fake_execute,
+        ):
+            document = orchestration.execute_work_order(
+                REPO_ROOT,
+                work_order(),
+                runner="codex",
+                model=None,
+                timeout_seconds=60,
+                prepared_runner=prepared,
+            )
+
+        self.assertEqual(result(), document)
+        self.assertEqual("/preflight/codex", observed["argv"][0])
+        self.assertIn("/preflight/runtime", "\n".join(observed["argv"]))
+        resolve.assert_not_called()
+
     def test_claude_structured_output_is_validated(self):
         output = json.dumps({"type": "result", "structured_output": result()})
         completed = orchestration.ProcessResult(0, output, "")
@@ -1939,6 +2036,45 @@ class OrchestrationHostTests(unittest.TestCase):
             ):
                 orchestration._load_host_staged_result(root, conflicting)
 
+    def test_historical_staged_result_accepts_only_safe_future_runner_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            control_workspace(root)
+            order = work_order()
+            attempt = orchestration._start_attempt(root, order, "codex")
+            staged_path = orchestration._stage_host_result(
+                root,
+                order,
+                result(),
+                attempt_id=attempt["attempt_id"],
+            )
+            attempt_path = orchestration._attempt_path(root, "orch-1", attempt["attempt_id"])
+
+            historical_attempt = {
+                **json.loads(attempt_path.read_text(encoding="utf-8")),
+                "runner": "opencode",
+            }
+            historical_envelope = {
+                **json.loads(staged_path.read_text(encoding="utf-8")),
+                "runner": "opencode",
+            }
+            orchestration._write_private_json_atomic(attempt_path, historical_attempt)
+            orchestration._write_private_json_atomic(staged_path, historical_envelope)
+
+            self.assertEqual(
+                "opencode",
+                orchestration._load_attempt(attempt_path)["runner"],
+            )
+            self.assertEqual(result(), orchestration._load_host_staged_result(root, order))
+
+            historical_envelope["runner"] = "OpenCode"
+            orchestration._write_private_json_atomic(staged_path, historical_envelope)
+            with self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "does not match the replayed work order",
+            ):
+                orchestration._load_host_staged_result(root, order)
+
     def test_staging_rejects_attempt_id_that_conflicts_with_its_filename(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1995,6 +2131,11 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(set(orchestration.ATTEMPT_KEYS), set(schema["required"]))
         self.assertEqual(sorted(orchestration.ATTEMPT_STATUSES), schema["properties"]["status"]["enum"])
+        self.assertEqual(
+            orchestration.RUNNER_ID_PATTERN,
+            schema["properties"]["runner"]["pattern"],
+        )
+        self.assertNotIn("enum", schema["properties"]["runner"])
         for forbidden in ("prompt", "transcript", "diagnostic", "absolute_path", "model_output"):
             self.assertNotIn(forbidden, schema["properties"])
 
@@ -2367,6 +2508,65 @@ class OrchestrationHostTests(unittest.TestCase):
         controller.assert_not_called()
         self.assertIn("RUNNER_ISOLATION_UNAVAILABLE", stderr.getvalue())
         self.assertIn("not found on PATH", stderr.getvalue())
+
+    def test_unregistered_managed_runner_fails_closed_before_controller_or_worker(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "research.yml").write_text("project: {}\n", encoding="utf-8")
+            with mock.patch.object(orchestration, "_controller_json") as controller:
+                with self.assertRaises(SystemExit):
+                    orchestration.main(["run", "--target", str(root), "--runner", "opencode"])
+            controller.assert_not_called()
+
+            with mock.patch.object(orchestration, "_managed_session_lock") as session_lock, mock.patch.object(
+                orchestration,
+                "_controller_json",
+            ) as controller, self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "Unsupported managed runner: opencode",
+            ):
+                orchestration.drive_session(
+                    root,
+                    "orch-1",
+                    runner="opencode",
+                    agent_id="agent-1",
+                    model=None,
+                    action_timeout_seconds=60,
+                )
+            session_lock.assert_not_called()
+            controller.assert_not_called()
+
+            with mock.patch.object(orchestration, "_claude_argv") as claude_argv, mock.patch.object(
+                orchestration,
+                "_execute_bounded",
+            ) as execute, self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "Unsupported managed runner: opencode",
+            ):
+                orchestration.execute_work_order(
+                    root,
+                    work_order(),
+                    runner="opencode",
+                    model=None,
+                    timeout_seconds=60,
+                    executable="/tmp/opencode",
+                )
+            claude_argv.assert_not_called()
+            execute.assert_not_called()
+
+    def test_unregistered_managed_runner_cannot_create_an_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            control_workspace(root)
+            attempts = root / "runs" / "orchestrations" / "orch-1" / "attempts"
+
+            with self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "Unsupported managed runner: opencode",
+            ):
+                orchestration._start_attempt(root, work_order(), "opencode")
+
+            self.assertFalse(attempts.exists())
 
     def test_isolation_capability_failure_precedes_session_creation(self):
         with tempfile.TemporaryDirectory() as tmpdir:

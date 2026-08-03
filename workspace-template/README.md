@@ -72,6 +72,23 @@ work can provide evidence for a new run. Use
 `docs/orchestration.md` for the operating model and
 `docs/orchestrator-handoff.md` for the protocol and artifact schemas.
 
+Harness support has three levels. Codex and Claude Code are the managed
+adapters accepted by package-owned `run` and `resume` execution. OpenCode, Pi,
+Aider, Gemini CLI, and other harnesses integrate through an external host that
+drives `start`, `next`, `submit`, and `status`; they are not package-managed
+runners. At the instruction-compatibility level, any worker can consume the
+canonical `AGENTS.md`, the selected workspace skill, and the issued work order.
+`CLAUDE.md` remains a discovery pointer to `AGENTS.md`, not a second instruction
+contract.
+
+External-protocol hosts must supply OS- or container-level isolation, exclude
+user configuration, plugins, and MCP servers from the worker environment,
+serialize one driver per parent session, and replay the same pending action
+after a crash. An OpenCode or Pi host must additionally extract a bounded
+structured result from the harness's JSON events before calling `submit`.
+EvidenceWiki then validates that result and its deterministic workspace
+postconditions.
+
 Codex managed runs require Codex CLI 0.138 or newer. For user-local npm, pnpm,
 or bun installs, the host exposes only the resolved platform-native Codex
 runtime tree as read-only; it does not expose the home directory,

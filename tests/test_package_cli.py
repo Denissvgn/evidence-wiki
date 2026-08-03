@@ -52,6 +52,7 @@ class PackageCliTests(unittest.TestCase):
     def test_assets_resolve_from_source_checkout(self):
         with resources.assets_root() as root:
             self.assertTrue((root / "workspace-template" / "research.yml").is_file())
+            self.assertTrue((root / "workspace-template" / "CLAUDE.md").is_file())
             self.assertTrue((root / "domain-packs" / "llm-research" / "taxonomy.md").is_file())
             self.assertTrue(resources.orchestrator_skill_path(root).is_file())
 
@@ -93,6 +94,7 @@ class PackageCliTests(unittest.TestCase):
         )
         required_assets = payload["required_asset_manifest"]
         self.assertIn("workspace-template/AGENTS.md", required_assets["starter"])
+        self.assertIn("workspace-template/CLAUDE.md", required_assets["starter"])
         self.assertIn("workspace-template/README.md", required_assets["starter"])
         self.assertIn("workspace-template/docs/orchestration.md", required_assets["starter"])
         self.assertIn("workspace-template/docs/orchestrator-handoff.md", required_assets["starter"])

@@ -32,3 +32,6 @@ RELEASING.md
 !workspace-template/AGENTS.md
 !examples/urban-heat-resilience-workspace/AGENTS.md
 !tests/fixtures/madrid-autonomo-workspace/AGENTS.md
+docs/llm_wiki/
+.llm-wiki/
+AGENTS.md

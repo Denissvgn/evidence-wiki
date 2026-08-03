@@ -19,6 +19,26 @@ or more workspaces.
   `workspace-template/docs/orchestrator-handoff.md` (the contract stays
   canonical for schemas and error codes).
 
+## Harness Support Levels
+
+EvidenceWiki supports harnesses through three distinct surfaces:
+
+- **Managed adapters:** Codex and Claude Code are the registered runners for
+  package-owned `run` and `resume` execution.
+- **External protocol:** OpenCode, Pi, Aider, Gemini CLI, and other harnesses
+  can be connected by a host that drives `start`, `next`, `submit`, and
+  `status`. They are not package-managed runners.
+- **Instruction compatibility:** any worker can follow the canonical
+  workspace `AGENTS.md`, the selected workspace skill, and an issued work
+  order. `CLAUDE.md` is only a discovery pointer to `AGENTS.md`.
+
+An external-protocol host owns OS- or container-level process isolation,
+isolation from user configuration, plugins, and MCP servers, single-driver
+coordination, and crash replay of the unchanged pending action. OpenCode and Pi
+hosts must extract a bounded structured result from JSON events before calling
+`submit`; the deterministic controller then validates the claimed workspace
+postconditions.
+
 ## Managed Run
 
 The installed package can execute the protocol through Codex or Claude Code:
@@ -96,8 +116,8 @@ subprocesses, and all action processes must finish before result submission.
 Process-group cleanup is not a security boundary for a hostile process tree;
 run untrusted agents inside an operator-controlled container or VM.
 
-For any other agent harness, use `orchestrate start`, `next`, `submit`, and
-`status` directly. Work orders are persisted under
+For an external-protocol harness, use `orchestrate start`, `next`, `submit`,
+and `status` directly. Work orders are persisted under
 `runs/orchestrations/<orchestration_id>/`; worker claims are accepted only
 after the controller verifies the corresponding workspace artifacts.
 

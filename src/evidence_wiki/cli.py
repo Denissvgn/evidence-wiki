@@ -259,6 +259,11 @@ def _contract_payload() -> dict:
                 "workspace_schema_versions": list(initializer.SUPPORTED_WORKSPACE_SCHEMA_VERSIONS),
                 "research_yml_contract_versions": list(initializer.SUPPORTED_RESEARCH_YML_CONTRACTS),
             },
+            "orchestration_capabilities": {
+                "managed_runner_ids": list(orchestration.managed_runner_names()),
+                "external_protocol_commands": ["start", "next", "submit", "status"],
+                "canonical_instruction_file": "AGENTS.md",
+            },
             "required_asset_manifest": required_asset_manifest(),
             "source_providers": {
                 "discovery": list(provider_registry_module.DISCOVERY_PROVIDER_IDS),
@@ -523,6 +528,11 @@ def _run_pack(args: list[str]) -> int:
 
 
 def _print_help() -> None:
+    from . import orchestration
+
+    managed_runner_ids = orchestration.managed_runner_names()
+    managed_runners = "|".join(managed_runner_ids)
+    managed_runner_prose = ", ".join(managed_runner_ids)
     print(
         "evidence-wiki: deploy source-grounded research workspaces\n\n"
         "Usage:\n"
@@ -537,7 +547,7 @@ def _print_help() -> None:
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
         "  evidence-wiki orchestrate start|next|submit|status [options]\n"
-        "  evidence-wiki orchestrate run|resume --runner codex|claude [options]\n"
+        f"  evidence-wiki orchestrate run|resume --runner {managed_runners} [options]\n"
         "  evidence-wiki contract\n"
         "  evidence-wiki orchestrator-guide [--print] [--format json]\n\n"
         "Common initializer options:\n"
@@ -576,7 +586,8 @@ def _print_help() -> None:
         "workspace tools while preserving the CLI scripts as the canonical contract.\n\n"
         "Orchestrate creates a durable parent session. Protocol subcommands let\n"
         "any external agent obtain and submit bounded work orders; run and resume\n"
-        "can launch a fresh Codex or Claude process for each action.\n\n"
+        f"launch only registered package-managed adapters ({managed_runner_prose}). OpenCode, Pi, and\n"
+        "other harnesses drive start/next/submit/status from an external host.\n\n"
         "Orchestrator-guide locates the PM/orchestrator playbook skill that drives\n"
         "deploy, question intake, the run loop, blocked-source routing, and result\n"
         "collection for a parent agent managing workspaces.\n\n"

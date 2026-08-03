@@ -21,6 +21,7 @@ ORCHESTRATOR_DIR = "orchestrator"
 ORCHESTRATOR_SKILL = "research-orchestrate"
 REQUIRED_STARTER_ASSETS = (
     "AGENTS.md",
+    "CLAUDE.md",
     "README.md",
     "index.md",
     "log.md",
