@@ -1,49 +1,42 @@
 # EvidenceWiki
 
-**Answers you can audit.** This project builds *verifiable autonomous research*
-workspaces: any LLM agent can drive the research loop, but every answer must
-cite normalized source records with provenance, every state transition is owned
-by a deterministic script, and a question that lacks required evidence blocks
-with a structured source request instead of degrading into a weakly-cited
-answer.
+**Answers you can audit.** EvidenceWiki creates persistent research workspaces
+where agents investigate questions and deterministic scripts enforce
+provenance, lifecycle state, and export validation. A validated research
+outcome is either a cited, auditable answer or a structured request for missing
+evidence.
 
-It ships as reusable tooling: a configurable research wiki starter,
-deterministic scripts for inventory/normalization/linting and the question
-lifecycle, optional domain packs, and tests that prove a minimally described
-research project can be initialized and validated without hand-editing
-`research.yml`.
+[Quick start](#five-minute-tour) · [Documentation](#documentation) ·
+[Worked example][worked-example] · [PyPI][pypi] · [Contributing][contributing]
 
-## Why It Is Different
+## Why EvidenceWiki
 
-Most research agents produce a one-shot report that cites whatever they
-happened to retrieve. This system takes the opposite bet:
+- **Traceable answers.** Every citation resolves through a stable source ID to
+  a normalized record and its provenance-tracked original.
+- **Evidence-aware failure.** Configured coverage requirements block weakly
+  supported answers and produce machine-readable source requests.
+- **Deterministic control.** Scripts own critical question-lifecycle
+  transitions, validation, and export; agents supply research judgment.
+- **Reusable workspaces.** The starter, domain packs, agent skills, and
+  orchestration protocol work across research domains and agent harnesses.
 
-- **A persistent workspace, not a disposable report.** Research accumulates in
-  a versioned wiki where every claim cites a source ID that resolves to a
-  normalized record with provenance. Answers are regenerable, lintable, and
-  exportable as structured JSON.
-- **Evidence gates, not vibes.** High-stakes questions carry coverage
-  manifests with facet-typed requirements (for example `official_guidance` or
-  `standards_registry_reference`). A failing facet blocks the question with a
-  structured source request; it never silently downgrades the answer. See
-  `workspace-template/docs/coverage-manifest.md`.
-- **Blocked, not fabricated.** "No such paper exists" claims require a
-  `claim_probe` record: provider, query, result counts, and an explicit
-  limitation statement — bounded non-confirmation instead of invented
-  citations.
-- **Multi-agent-safe by construction.** Question claiming, per-run budgets,
-  stale-claim recovery, and deterministic `blocked → reopen` transitions make
-  unattended fleets coordinable. LLM skills do the judgment; scripts own every
-  state transition, which is what makes the behavior testable.
-- **Source content is data, never instructions.** Acquisition fails closed on
-  TLS/DNS/redirect/media-type/size violations, provenance-incomplete
-  deliveries are quarantined, and provenance URLs are never auto-fetched. See
-  `workspace-template/docs/prompt-injection-hardening.md`.
+```text
+question → discover/acquire → inventory/normalize → answer/verify → export
+                       ↘ missing evidence → structured source request
+```
+
+The workspace keeps original evidence in `raw/`, generated evidence records in
+`sources/`, and maintained research knowledge in `wiki/`. Source content is
+treated as data, never as agent instructions; see [prompt-injection
+hardening][prompt-injection].
 
 ## Five-Minute Tour
 
-The goal: start with an empty source directory and let an agent produce a cited,
-exportable answer from evidence that it discovers and acquires during the run.
+These commands set up the workflow; research time varies with the question,
+providers, and agent runner. The examples use a POSIX-compatible shell; on
+Windows, create `batch.yaml` in an editor or adapt that one heredoc step for
+PowerShell. Python 3.10 or newer is required.
+
 Install the package and create a provider-enabled scientific workspace:
 
 ```bash
@@ -60,19 +53,15 @@ evidence-wiki deploy \
 cd solid-state-batteries
 ```
 
-The wheel installs both required Python dependencies, PyYAML and pypdf. The
-portable pypdf backend is therefore available to PDF-only acquisition and
-normalization without installing Poppler separately. The agent CLI remains an
-operator-managed system tool.
+`init` and `deploy` invoke the same workspace initializer. The repeated
+provider flags explicitly authorize network-backed discovery and acquisition;
+a domain pack never enables providers by itself. arXiv needs no credential,
+while OpenAlex can use `OPENALEX_API_KEY` from the process environment. See
+[workspace initialization][workspace-initialization], [source
+discovery][source-discovery], and [acquisition][acquisition] for the full
+contracts.
 
-The repeated provider flags are explicit network authorization. The
-`general-science` pack recommends these providers but does not enable them by
-itself. arXiv needs no credential; OpenAlex can use `OPENALEX_API_KEY` from the
-process environment for authenticated quotas. Never put credentials in
-`research.yml`.
-
-Seed the backlog with a question (schema in
-`workspace-template/docs/question-api.md`):
+Add a question using the [question API][question-api]:
 
 ```bash
 cat > batch.yaml <<'EOF'
@@ -85,7 +74,14 @@ EOF
 evidence-wiki questions add --target . --from-file batch.yaml
 ```
 
-Run the managed orchestrator with an installed agent CLI:
+Codex CLI 0.138 or newer must already be installed for the managed Codex
+adapter. Check the environment before launching it:
+
+```bash
+evidence-wiki doctor --format json
+```
+
+Run the managed orchestrator:
 
 ```bash
 evidence-wiki orchestrate run \
@@ -94,261 +90,61 @@ evidence-wiki orchestrate run \
   --agent-id battery-demo
 ```
 
-Use `--runner claude` to run the same work-order protocol through Claude Code.
-Pass `--model MODEL_ID` only when an explicit runner-specific model override is
-needed; otherwise the runner's safe configured default is used.
-
-EvidenceWiki supports agent harnesses at three levels:
-
-- **Managed adapters:** Codex and Claude Code are the registered runners for
-  package-owned `run` and `resume` execution, including capability preflight,
-  isolation, result decoding, and crash recovery.
-- **External protocol:** OpenCode, Pi, Aider, Gemini CLI, and other harnesses
-  can be integrated by a host that drives `start`, `next`, `submit`, and
-  `status`. They are not package-managed runners.
-- **Instruction compatibility:** any worker can follow the canonical
-  `AGENTS.md`, the selected workspace skill, and the issued work order.
-  `CLAUDE.md` is only a pointer to `AGENTS.md` for Claude-style discovery.
-
-An external-protocol host owns the boundary that the managed adapters would
-otherwise provide: OS- or container-level process isolation, isolation from
-user configuration, plugins, and MCP servers, single-driver coordination for
-the parent session, and replay of the same pending action after a crash. For
-OpenCode and Pi, the host must also extract a bounded structured work result
-from their JSON event stream before passing it to `submit`; the controller
-still accepts only results whose workspace postconditions verify.
-
-The orchestrator does not contain a battery-specific workflow. It first gives
-the research agent the empty workspace; when the question blocks, it retains
-that immutable run, discovers request-linked academic candidates, asks the
-agent to select them, acquires the selected evidence, inventories and
-normalizes it, fulfills the request, reopens the question, and starts a later
-bounded research run. It declares completion only after deterministic
-verification passes.
-
-Managed runner isolation is fail-closed. Codex requires Codex CLI 0.138 or
-newer so EvidenceWiki can apply its named `evidence_wiki_worker` permission
-profile. User-local npm, pnpm, and bun installations are supported: the host
-resolves the selected launcher's platform-native runtime tree and grants that
-exact tree read-only inside the profile. It never grants the home directory,
-`CODEX_HOME`, or a package-manager prefix. For provider-enabled actions on
-Linux/WSL2, the profile also preserves the lexical `/etc` path read-only so
-DNS, NSS, and TLS system configuration remain available inside Codex's
-bubblewrap sandbox. If `/etc` is itself a symlink, its canonical directory
-target is also granted read-only. When `/etc/resolv.conf` resolves outside that
-directory into a supported system resolver location, only its canonical target
-file receives an additional read grant. Offline actions do not receive those
-paths. Keep the runner installation outside the writable research workspace;
-an incomplete or overlapping runtime fails before session creation with
-`RUNNER_ISOLATION_UNAVAILABLE`. Managed Claude
-execution is unavailable on native Windows; use macOS,
-Linux, WSL2, a container, or the external `start` / `next` / `submit` protocol
-there. If the required boundary cannot be enforced, the host returns
-`RUNNER_ISOLATION_UNAVAILABLE` before starting a worker. The parent owns
-`runs/orchestrations/<orchestration_id>/`, and workers must never write that
-tree or invoke `evidence-wiki orchestrate` themselves.
-
-The semantic baseline is the set of **tripwire-protected controls**: the
-workspace contract and instruction files (`research.yml`,
-`workspace-system.yml`, `AGENTS.md`, `CLAUDE.md`, `README.md`, and
-`.gitignore`), plus bounded snapshots of `scripts/`, `skills/`, `docs/`, and
-the current parent session. Snapshotting is capped at 10,000 entries and 32 MiB
-of regular-file content. The runner also makes `.git/`, `.codex/`,
-`.claude/`, `.agents/`, `.venv/`, and `venv/` read-only preventively, but those
-potentially large roots are not post-action tripwire snapshots. The durable
-host guard root is likewise preventive-only and lives outside the parent tree at
-`runs/orchestration-guards/<orchestration_id>.json` and is read-only to the
-worker.
-
-Only one managed host may drive a parent session at a time. A competing managed
-drive for the same session fails before launching a worker with
-`ORCHESTRATION_ALREADY_RUNNING`. Hosts built on the external
-`start` / `next` / `submit` / `status` protocol must provide equivalent
-session-wide coordination; the command-level locks do not replace that host
-ownership boundary.
-
-Managed Claude additionally requires `bubblewrap` and `socat` on Linux/WSL2,
-or the built-in `sandbox-exec` and `touch` tools on macOS. These are checked
-before a worker is launched. A retained running attempt with the same lease
-fails with `ORCHESTRATION_LEASE_ACTIVE`; wait for expiry and resume so the
-controller can renew the same action. An invalid or already-expired absolute
-lease fails before worker launch with `ORCHESTRATION_LEASE_INVALID` or
-`ORCHESTRATION_LEASE_EXPIRED`. The worker timeout is capped by the lease's
-remaining lifetime, even when the configured action timeout is longer.
-
-Workers must not start daemons, hooks, background jobs, or detached
-subprocesses; every process started for an action must finish inside that
-action. The managed host cleans up the runner's process group, but this is not
-a hostile-process-tree containment guarantee. Put an untrusted agent in an
-operator-controlled container or VM with its own process and network limits.
-Provider allow-lists and the run-bound academic call ledger are enforced by the
-protected workspace scripts for this trusted-writer mode; they are not a
-host-level domain firewall or hostile-process quota. Put provider traffic
-behind an operator-controlled proxy, or execute it in the protocol host, when
-the worker itself is not trusted to follow those commands.
-
-If a runner exits after writing valid research artifacts, keep the durable
-session. The `orchestrate resume` recovery order is: an accepted canonical result,
-an identical clean staged result, then the same persisted action in a fresh
-worker only when neither checkpoint exists. The worker checks its
-postconditions before doing more work, and the controller still verifies the
-artifacts before advancing. Host-owned
-`attempts/<attempt_id>.json` records describe bounded execution state;
-`.host-results/<action_id>.json` is a private submission checkpoint, not a
-canonical result.
-
-Do not fabricate a work-result, edit `session.json`, or redeploy over the
-workspace. `CONTROL_ARTIFACT_TAMPERED` records bounded path diagnostics, marks
-the attempt, writes
-`runs/orchestration-guards/<orchestration_id>.json`, and, when a validated
-worker result exists, retains it under `quarantine/` without submitting it.
-EvidenceWiki does not automatically restore or roll changes back. A later
-managed resume fails with `CONTROL_REPAIR_REQUIRED` before any controller
-command or worker starts. After inspection and restoration, resume with
-`--acknowledge-control-repair`. Acknowledgement succeeds only when all
-tripwire-protected controls match the pre-action fingerprint; otherwise it
-fails with
-`CONTROL_REPAIR_MISMATCH`. The flag does not accept quarantine or bypass the
-controller's per-action trusted-input fingerprint. Start a new session for an
-intentional static-control change. If a retained tampered attempt has no
-durable baseline, acknowledgement fails closed with
-`CONTROL_REPAIR_BASELINE_MISSING`; preserve that session for inspection and
-start a new orchestration from reviewed workspace state. See
-`workspace-template/docs/orchestration.md` for the upgrade and recovery steps.
-
-Discovery and candidate review are metadata-only phases. At issuance and
-submission, the controller compares a bounded SHA-256 content snapshot of the
-configured raw roots (at most 10,000 files and 2 GiB) and both the record count
-and exact content digest of the evidence manifest (`sources/manifest.jsonl`, at
-most 32 MiB). The candidate store may change; the raw evidence tree and
-evidence manifest may not change until acquisition.
-
-Generated run reports now belong under `runs/run-reports/`, which remains a
-worker-writable output surface. Reports already present under
-`docs/run-reports/` remain historical, read-only inputs.
-
-For a session created by 0.2.0, upgrade the package and managed workspace
-scripts, then inspect its phase before replay:
-
-```bash
-python -m pip install --upgrade evidence-wiki==0.2.4
-evidence-wiki upgrade --target . --dry-run
-evidence-wiki upgrade --target .
-evidence-wiki orchestrate status --target . --orchestration-id ORCH_ID --format json
-```
-
-A pending research, discovery, candidate-review, or acquisition action issued
-before the starter recorded its scoped pre-action baseline cannot be rebound
-safely after execution. Resume reports
-`ORCHESTRATION_RESEARCH_BASELINE_UNAVAILABLE`,
-`ORCHESTRATION_DISCOVERY_BASELINE_UNAVAILABLE`,
-`ORCHESTRATION_CANDIDATE_REVIEW_BASELINE_UNAVAILABLE`, or
-`ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE`. Preserve that parent session
-for audit and start a fresh orchestration from the current reviewed workspace
-state. If the upgraded session has no such pending legacy action, resume it
-normally with its original agent ID. Never hand-edit a work order to invent the
-missing baseline.
-
-Current work orders keep their bounded public contract small by referring to a
-controller-owned scope baseline below `runs/orchestrations/<id>/trusted-inputs/`.
-If that protected sidecar is missing, changed, or malformed, resume fails closed
-with `ORCHESTRATION_INTEGRITY_BASELINE_CHANGED` or
-`ORCHESTRATION_INTEGRITY_BASELINE_INVALID`. Preserve the affected session for
-audit and restore the exact controller-owned artifact; do not regenerate it from
-post-action workspace state. Scope baselines are capped at 8 MiB and persisted
-work orders at 256 KiB; `ORCHESTRATION_SCOPE_EXCEEDED` requires reducing or
-archiving the bounded workspace history before starting a fresh action.
-
-Inspect the durable parent session and export the answer:
+Use `--runner claude` for the managed Claude Code adapter. Then inspect the
+durable parent session and export the answer:
 
 ```bash
 evidence-wiki orchestrate status --target . --format json
 evidence-wiki export --target . --format json
 ```
 
-The export contains question state, the answer summary and page, confidence,
-evidence strength, and citations resolved to provenance-tracked manifest and
-normalized records. If no allowed provider can satisfy a request, orchestration
-stops as `blocked_on_sources` with machine-readable remediation instead of
-inventing an answer.
+The orchestrator can discover candidate sources, ask an agent to select them,
+acquire and normalize the selected evidence, reopen a blocked question, and
+verify the final artifacts. If allowed providers cannot satisfy the request,
+the session ends as `blocked_on_sources` instead of inventing an answer. The
+[orchestration guide][orchestration] covers execution, recovery, and security
+boundaries.
 
-### Local-Files-Only Alternative
+### Local-files-only alternative
 
-Discovery and acquisition are optional. For a local-only workspace, omit all
-provider flags, deliver reviewed files with provenance sidecars under the
-configured `raw/` roots, then run:
+Discovery and acquisition are optional. Omit provider flags, deliver reviewed
+files with provenance sidecars under the configured `raw/` roots, then run:
 
 ```bash
 python3 scripts/source_inventory.py --report
 python3 scripts/normalize_sources.py --all
 ```
 
-Inventory and normalization process files that are already present. They never
-search the internet or download evidence. Point an agent at
-`skills/research-run.md` after normalization, or use the model-neutral
-`orchestrate start` / `next` / `submit` protocol from an external harness.
+Inventory and normalization process only files already present. Continue with
+the [research-run skill][research-run], or use the external protocol described
+below. The [source-delivery contract][source-delivery] defines provenance
+sidecars and atomic delivery.
 
 ## Drive It With An Agent
 
-The repository is the substrate; the intelligence comes from whatever agent
-runs it. Every created workspace ships an `AGENTS.md` operating contract (with
-a `CLAUDE.md` pointer for Claude-style agents) and executable skill playbooks
-under `skills/` — `research-init`, `research-ingest`, `research-answer`,
-`research-run`, and friends. The system is developed and exercised end to end
-with two harness families, and exposes a third integration surface:
+EvidenceWiki supports agent harnesses at three levels:
 
-- **Claude Code** — reads `CLAUDE.md`/`AGENTS.md` and the workspace skills
-  directly. This is the pairing used for the project's live evaluation runs.
-- **Codex-style `AGENTS.md` agents** — the same contract files drive
-  Codex-like harnesses; the project's offline regression runs use this
-  pairing.
-- **Any MCP client** — `evidence-wiki serve-mcp` exposes status, retrieval,
-  question intake, answer export, and source-request listing over stdio
-  without changing the canonical CLI/script contracts.
+- **Managed adapters:** Codex and Claude Code are the registered runners for
+  package-owned `run` and `resume` execution.
+- **External protocol:** OpenCode, Pi, Aider, Gemini CLI, and other harnesses
+  can drive `start`, `next`, `submit`, and `status` from an operator-controlled
+  host. They are not package-managed runners.
+- **Instruction compatibility:** any worker can follow the workspace
+  `AGENTS.md`, selected skill, and bounded work order. `CLAUDE.md` points
+  Claude-style agents to the same contract.
 
-### How This Project Was Built
+Managed Codex execution requires Codex CLI 0.138 or newer. Managed Claude
+execution is unavailable on native Windows; use macOS, Linux, WSL2, a
+container, or the external protocol. If the required isolation boundary cannot
+be enforced, the host returns `RUNNER_ISOLATION_UNAVAILABLE` before starting a
+worker. The parent exclusively owns `runs/orchestrations/`; workers never write
+that tree or invoke the parent controller. Use `resume` for a retained session
+after a runner failure. See [parent orchestration][orchestration] for
+isolation, leases, tamper recovery, and upgrade rules.
 
-EvidenceWiki was planned, written, and tested entirely with AI coding agents.
-Most of the work was done with OpenAI Codex using GPT-5.5 and GPT-5.6, with
-Anthropic Claude also used for parts of the project. No code in this repository
-was manually authored by a human.
+### External protocol
 
-A concrete end-to-end pairing, matching the tour above:
-
-1. Deploy with reviewed discovery and acquisition provider allow-lists.
-2. Seed questions yourself or let an agent submit the validated batch.
-3. Run `evidence-wiki orchestrate run --runner codex|claude`. Each worker gets
-   one persisted, bounded work order and the relevant workspace skill.
-4. Inspect `evidence-wiki orchestrate status` and collect
-   `evidence-wiki export --target PATH`.
-
-### Agent-Assisted Setup
-
-For the minimal-preparation path, ask an agent to use `workspace-template/skills/research-init.md`. The agent should ask at most three setup questions:
-
-1. Target workspace path or short project name.
-2. Research scope and desired outcome.
-3. Optional starting sources, URLs, folders, repositories, or existing wiki.
-
-The agent then writes a reviewable setup profile and runs the initializer with `--profile`. Profile-driven initialization writes `docs/workspace-init-report.md` in the created workspace so the inferred decisions, skipped decisions, validation commands, and next actions are visible without reading the conversation.
-
-Example profile flow:
-
-```bash
-evidence-wiki init \
-  --profile /path/to/workspace-init.yml \
-  --dry-run
-
-evidence-wiki init \
-  --profile /path/to/workspace-init.yml
-```
-
-Profile schema details are in `workspace-template/docs/workspace-init-profile.md`.
-
-### Orchestrating From a Parent Agent
-
-A PM, planner, or parent agent can use the persisted orchestration protocol
-without depending on either built-in runner:
+A PM, planner, or custom host can drive the model-neutral protocol directly:
 
 ```bash
 evidence-wiki orchestrate start --target PATH --agent-id parent-agent --format json
@@ -358,105 +154,61 @@ evidence-wiki orchestrate submit --target PATH --orchestration-id ORCH_ID \
 evidence-wiki orchestrate status --target PATH --orchestration-id ORCH_ID --format json
 ```
 
-`next` is idempotent: after a crash it returns the same unfinished work order.
-`submit` treats the worker result as a claim and verifies the actual workspace
-artifacts before advancing. A terminal `blocked_on_sources` child run is never
-reopened; the parent session can retain it and start a later run after evidence
-acquisition.
-
-The `research-orchestrate` skill in `orchestrator/skills/` documents this
-protocol for external agents. The machine contract remains
-`workspace-template/docs/orchestrator-handoff.md`.
-
-These orchestrator skills ship with the package but are never copied into a
-created workspace. Locate the playbook without a source checkout:
+`next` is idempotent, and `submit` verifies workspace postconditions before
+advancing. External hosts must provide process isolation, single-driver
+coordination, and crash replay; see the [orchestrator handoff
+contract][orchestrator-handoff]. The packaged [research-orchestrate
+playbook][research-orchestrate] lives under `orchestrator/skills/` and can be
+located without a source checkout:
 
 ```bash
-evidence-wiki orchestrator-guide            # print the resolved skill path
-evidence-wiki orchestrator-guide --print    # print the skill content
-evidence-wiki orchestrator-guide --format json
+evidence-wiki orchestrator-guide
+evidence-wiki orchestrator-guide --print
 ```
 
-## What This Repository Contains
+For MCP clients, an optional stdio server exposes status, retrieval, question
+intake, answer export, and source-request listing:
 
-- `workspace-template/`: reusable starter copied into each new research workspace.
-- `domain-packs/`: optional reusable domain guidance, including `llm-research`,
-  `general-science`, and `legal-regulatory`.
-- `examples/`: public-safe worked research workspaces built from synthetic evidence.
-- `tests/`: regression tests and small, rights-inventoried synthetic fixtures for initialization, inventory, normalization, linting, and end-to-end workspace bootstrap.
+```bash
+evidence-wiki serve-mcp --target /path/to/workspace
+```
 
-The template separates three evidence layers:
+See the [MCP server contract][mcp-server] for its tool list and read/append-only
+boundary.
 
-- `raw/`: immutable original source material.
-- `sources/`: generated manifests, normalized source records, cards, and optional codebase-analysis artifacts.
-- `wiki/`: maintained research knowledge that cites source IDs.
-
-## Requirements
+## Requirements and Diagnostics
 
 Required:
 
 - Python 3.10 or newer.
-- PyYAML, importable as `yaml`, and pypdf 6.14 or newer within major version 6.
-  Both are installed by `python3 -m pip install evidence-wiki`.
+- PyYAML 6.0 or newer and pypdf 6.14 or newer within major version 6. Both are
+  installed with `evidence-wiki`; the portable pypdf backend requires no
+  separate PDF tool.
 
-Optional:
+Optional capabilities include Codex CLI or Claude Code for managed runs, Git
+for snapshots, and the Poppler compatibility backend for explicitly configured
+`pdftotext` extraction. Platform installation is covered by [workspace
+initialization][workspace-initialization]; managed-runner sandbox requirements
+are covered by [parent orchestration][orchestration].
 
-- Poppler `pdftotext` for the explicit Poppler compatibility backend. The
-  portable pypdf backend is the default and does not require Poppler.
-- Codex CLI 0.138 or newer, or Claude Code on macOS, Linux, WSL2, or in a
-  container, for
-  `evidence-wiki orchestrate run`; the
-  model-neutral `start` / `next` / `submit` / `status` protocol does not require
-  either built-in runner.
-- `agent-wiki-cli` / `llm-wiki` for manually generated codebase-analysis artifacts. The repository does not install or run this adapter automatically.
-- Git, for normal version-control workflows and optional user-edit snapshots.
-
-Python package requirements and operating-system tools have different install
-paths. pip installs EvidenceWiki, PyYAML, and pypdf. It cannot install the
-Poppler executable, Git, agent CLIs, `bubblewrap`, or `socat`. Install only the
-system capabilities required by the workflows you enable:
-
-| Capability | Linux / WSL2 | macOS | Windows |
-|------------|--------------|-------|---------|
-| Optional Poppler compatibility backend | `sudo apt install poppler-utils` | `brew install poppler` | `conda install conda-forge::poppler` |
-| Git snapshots | Install `git` with the OS package manager | Install Git or Xcode Command Line Tools | Install Git for Windows |
-| Managed Claude sandbox | Install `bubblewrap` and `socat` | Uses built-in `sandbox-exec` and `touch` | Use WSL2, a container, or the external protocol |
-
-The PyPI package named `pdftotext` is a native Python binding that still needs
-Poppler development libraries; it is not a portable substitute for the
-`pdftotext` executable. Use the default pypdf backend unless Poppler
-compatibility is specifically required.
-
-Quick dependency check:
+Check dependencies and optional capabilities from any directory:
 
 ```bash
 evidence-wiki doctor --format json
 ```
 
-From inside an initialized workspace, the same preflight is available without
-the package entry point:
+An initialized workspace includes the same preflight:
 
 ```bash
 python3 scripts/doctor.py --format json
 ```
 
-The doctor report is machine-readable and distinguishes required Python
-dependencies from optional system capabilities. Missing pypdf is a required
-failure. Missing Poppler is informational because the portable pypdf backend
-remains available by default. It becomes a required failure when
-`sources.pdf_extractor: poppler` explicitly selects the Poppler compatibility
-backend. Doctor includes the corresponding installation or configuration
-remediation.
+Missing pypdf is a required failure. Missing Poppler is informational unless
+the workspace explicitly selects the Poppler compatibility backend.
 
-## Workspace Commands
+## Create and Maintain a Workspace
 
-Install the package from PyPI:
-
-```bash
-python3 -m pip install evidence-wiki
-```
-
-Create a new research workspace from explicit fields:
+Create a generic workspace from explicit fields:
 
 ```bash
 evidence-wiki init \
@@ -466,68 +218,26 @@ evidence-wiki init \
   --owner-goal "Build a source-grounded knowledge base for decisions"
 ```
 
-Preview before writing files:
+Add `--dry-run` to preview without writing files. For minimal-preparation,
+agent-assisted setup, ask an agent to follow the [research-init
+skill][research-init]; it can prepare a reviewable [workspace init
+profile][workspace-init-profile].
+
+After upgrading the package, preview and apply starter-managed script updates:
 
 ```bash
-evidence-wiki init \
-  --target ../my-research-workspace \
-  --project-name my-research-workspace \
-  --project-description "Research workspace for a specific topic" \
-  --dry-run
+evidence-wiki upgrade --target ../my-research-workspace --dry-run
+evidence-wiki upgrade --target ../my-research-workspace
 ```
 
-Create a workspace with the LLM research domain pack:
-
-```bash
-evidence-wiki deploy \
-  --target ../llm-research-workspace \
-  --project-name llm-research-workspace \
-  --project-description "Research workspace for LLM research systems" \
-  --domain-pack llm-research
-```
-
-Refresh an existing workspace's starter-managed tooling (`scripts/`) to the
-installed package version after upgrading `evidence-wiki`:
-
-```bash
-evidence-wiki upgrade --target ../my-research-workspace --dry-run   # preview
-evidence-wiki upgrade --target ../my-research-workspace             # apply
-```
-
-`upgrade` overwrites only starter-managed files. Add `--include skills` or
-`--include docs` to refresh those optional reusable directories; if an overlapping
-optional file has local edits, upgrade refuses unless `--force-optional` is set.
-Forced optional replacements preserve the displaced file under `.replaced/<path>`.
-It never touches `research.yml`, `raw/`, `sources/`, `wiki/`, `index.md`, or your
-`log.md` content.
-
-For source-checkout development, run tests from the repository root:
-
-```bash
-python3 -B -m unittest discover -s tests -p 'test_*.py'
-```
-
-The equivalent source-checkout initializer command is:
-
-```bash
-python3 workspace-template/scripts/init_research_workspace.py \
-  --target ../my-research-workspace \
-  --project-name my-research-workspace \
-  --project-description "Research workspace for a specific topic" \
-  --owner-goal "Build a source-grounded knowledge base for decisions"
-```
-
-## Worked Example
-
-See `examples/urban-heat-resilience-workspace/` for a complete public-safe
-workspace. It uses synthetic urban heat resilience evidence, reserved
-`example.org` URLs, normalized source records, source notes, claims, synthesis,
-questions, decisions, and an example output without private pilot data or
-machine-specific paths.
+`upgrade` does not touch `research.yml`, `raw/`, `sources/`, `wiki/`,
+`index.md`, or `log.md`. Optional skills and docs have additional conflict
+rules documented in [workspace initialization][workspace-initialization].
 
 ## Validate A Created Workspace
 
-Run these commands from the created workspace root:
+For manual or operator-level validation, the copied workspace exposes its
+lower-level checks directly. Run these commands from the workspace root:
 
 ```bash
 python3 scripts/doctor.py --format json
@@ -537,39 +247,18 @@ python3 scripts/normalize_sources.py --all --dry-run
 python3 scripts/lint.py --format text
 ```
 
-Doctor should be `ok` or only `degraded` for optional capabilities before
-running unattended workflows. Smoke validation should pass before inventory,
-normalization, or broader lint checks. `source_inventory.py --report` writes
-`sources/manifest.jsonl` so the following normalization dry run has real
-manifest records to inspect. normalize_sources.py --all --dry-run reads `sources/manifest.jsonl` and previews generated normalized records without writing them.
-
-For one aggregate machine-readable health and progress document (including a
-completion verdict for orchestrators and parent agents), run:
+`source_inventory.py --report` writes `sources/manifest.jsonl`, so
+normalize_sources.py --all --dry-run reads `sources/manifest.jsonl` and can
+preview normalized records without writing them. For aggregate health and a
+machine-readable completion verdict, run:
 
 ```bash
 python3 scripts/workspace_status.py --format json
 python3 scripts/workspace_status.py --check-complete --format json
 ```
 
-From outside a workspace, the installed package exposes the same status and
-export contracts plus contract negotiation, fleet status, and domain-pack
-validation:
-
-```bash
-evidence-wiki status --target ../my-research-workspace --format json --no-cache
-evidence-wiki export --target ../my-research-workspace --format json
-evidence-wiki contract
-evidence-wiki fleet-status --target ../my-research-workspace --format json
-evidence-wiki pack validate --path general-science --format json
-```
-
-`evidence-wiki status` forwards to the copied `workspace_status.py` contract;
-`evidence-wiki export` is the concise alias for `evidence-wiki questions
-export`. Both retain the workspace script schema and exit behavior.
-
-To inject question batches into a running workspace and export structured
-answers with citations (schemas in
-`workspace-template/docs/question-api.md`), run:
+Question intake and structured answer export are also available inside a
+workspace:
 
 ```bash
 python3 scripts/intake_questions.py --from-file batch.yaml --dry-run
@@ -577,223 +266,116 @@ python3 scripts/intake_questions.py --from-file batch.yaml --format json
 python3 scripts/export_answers.py --format json
 ```
 
-The same operations are available from outside the workspace via
-`evidence-wiki questions add|export --target PATH`.
+The installed equivalents are `evidence-wiki status`, `evidence-wiki
+questions add`, and `evidence-wiki export`; see [workspace status][workspace-status]
+and the [question API][question-api].
 
-For MCP-speaking orchestrators, the optional stdio server exposes status,
-question status, retrieval, question intake, answer export, and source-request
-listing without changing the canonical CLI/script contracts:
-
-```bash
-evidence-wiki serve-mcp --target /path/to/workspace
-```
-
-See `workspace-template/docs/mcp-server.md` for the tool list, handshake,
-and read/append-only boundary.
-
-To preview inventory records before writing the manifest, run:
+To preview inventory records without writing the manifest:
 
 ```bash
 python3 scripts/source_inventory.py --dry-run --report
 ```
 
-## Add Sources
+## Evidence and Provider Permissions
 
-### Enable Source Providers
+Discovery and acquisition are separate permissions. Discovery providers
+(`arxiv`, `openalex`, `github`, `search`, and `standards`) propose metadata;
+candidates are not evidence until selected, acquired into `raw/`, and recorded
+with provenance. Acquisition providers (`arxiv`, `openalex`, `github`, and
+allow-listed `web`) retrieve selected evidence under configured limits.
 
-Discovery and acquisition are separate permissions:
+Three controls remain independent:
 
-| Phase | Provider | Purpose | Runtime configuration |
-|---|---|---|---|
-| Discovery | `arxiv` | Search arXiv metadata and propose paper candidates. | No credential. Metadata only; no download. |
-| Discovery | `openalex` | Search the OpenAlex scholarly index and propose paper candidates. | Optional `OPENALEX_API_KEY` in the environment. Index metadata is not itself evidence. |
-| Discovery | `github` | Search repository metadata and propose code candidates. | Optional `GITHUB_TOKEN` in the environment. Never clones during discovery. |
-| Discovery | `search` | Run a configured general-search backend. | A reviewed fixture, argv command, or HTTP backend in the setup profile; backend secrets stay in its environment. |
-| Discovery | `standards` | Propose bounded registry candidates. | Registry-specific configuration; it does not grant rights to standards text. |
-| Acquisition | `arxiv` | Download selected PDF and source-bundle evidence. | No credential; per-paper copyright and license still apply. |
-| Acquisition | `openalex` | Resolve works, enrich records, and download selected open-access PDFs. | Optional `OPENALEX_API_KEY`; unavailable or uncertain OA routes fail closed. |
-| Acquisition | `github` | Capture selected metadata, releases, or bounded source archives. | Optional `GITHUB_TOKEN`; repository license remains authoritative. |
-| Acquisition | `web` | Capture one explicitly selected HTTPS resource. | A non-empty domain allow-list and byte limit; license cannot be inferred. |
-
-The three controls are independent:
-
-1. `integrations.discovery` authorizes candidate metadata lookup.
-2. `integrations.acquisition` authorizes retrieval of selected evidence.
+1. `integrations.discovery` authorizes candidate lookup.
+2. `integrations.acquisition` authorizes retrieval.
 3. Environment credentials authenticate an already-authorized provider.
 
 A token, installed runner, domain-pack recommendation, or discovered URL never
-grants provider permission. The orchestrator uses only the configured
-allow-lists and never edits them during a run. arXiv is primarily a preprint
-host and OpenAlex is a scholarly index; neither provider alone establishes that
-a work was peer reviewed.
+grants provider permission. See [source discovery][source-discovery],
+[acquisition][acquisition], and the [workspace init
+profile][workspace-init-profile] for provider configuration. For reviewed
+local evidence, follow the [source-delivery contract][source-delivery], keep
+raw files immutable, then inventory and normalize them.
 
-Repeated initializer flags are the concise opt-in. When a flag is present for a
-phase, it replaces that phase's profile allow-list and sets `enabled: true`:
+## Repository Layout
 
-```bash
-evidence-wiki deploy \
-  --target literature-workspace \
-  --project-name literature-workspace \
-  --project-description "Agent-acquired literature review" \
-  --discovery-provider arxiv \
-  --discovery-provider openalex \
-  --acquisition-provider arxiv \
-  --acquisition-provider openalex \
-  --dry-run
-```
+- [`workspace-template/`][workspace-template] is copied into each research
+  workspace and contains its scripts, skills, and operator documentation.
+- [`domain-packs/`][domain-packs] contains optional, reusable domain guidance.
+- [`examples/`][examples] includes a [complete public-safe
+  workspace][worked-example] built from synthetic evidence.
+- [`orchestrator/`][orchestrator-readme] contains the external parent-agent
+  playbook.
+- [`tests/`][tests] contains regression tests and synthetic fixtures with
+  documented usage rights.
 
-Use a setup profile for providers with additional policy. For example, this
-`workspace_init.integrations` excerpt configures general search and reviewed
-web domains (the rest of the required profile is unchanged):
+## Documentation
 
-```yaml
-integrations:
-  git:
-    snapshot_user_edits: explicit
-  discovery:
-    enabled: true
-    providers: [search]
-    search:
-      provider: command
-      command: [my-search-adapter, --json]
-  acquisition:
-    enabled: true
-    providers: [web]
-    target_root: raw/papers
-    max_downloads_per_run: 10
-    require_license_check: true
-    web:
-      target_root: raw/web
-      allowed_domains: [official.example]
-      max_download_bytes: 10485760
-```
+- **Start a workspace:** [new project guide][new-project], [workspace
+  initialization][workspace-initialization], [setup profile
+  schema][workspace-init-profile], [`research.yml` configuration][research-yml],
+  [domain packs][domain-packs], and the [worked example][worked-example].
+- **Research and evidence:** [question API][question-api], [source
+  discovery][source-discovery], [acquisition][acquisition], [source
+  delivery][source-delivery], [source manifest][source-manifest], [normalized
+  records][normalized-source], [coverage manifests][coverage-manifest],
+  [evidence policies][evidence-policies], and [citation
+  verification][citation-verification].
+- **Agents and integrations:** [parent orchestration][orchestration],
+  [orchestrator handoff][orchestrator-handoff], [workspace
+  status][workspace-status], [run controller][run-controller], [MCP
+  server][mcp-server], and [orchestrator playbooks][orchestrator-readme].
+- **Safety and operations:** [prompt-injection hardening][prompt-injection],
+  [human editing and snapshots][human-editing], [codebase
+  analysis][codebase-analysis], [production readiness][production-readiness],
+  and [publication readiness][publication-readiness].
+- **Project development:** [architecture index][architecture],
+  [contributing][contributing], [changelog][changelog], [release
+  process][releasing], [third-party notices][third-party], and [license][license].
 
-See `workspace-template/docs/source-discovery.md`,
-`workspace-template/docs/acquisition.md`, and
-`workspace-template/docs/workspace-init-profile.md` for the complete contracts.
+Development setup, repository boundaries, style rules, and the full verification
+suite are documented in [CONTRIBUTING.md][contributing].
 
-### Deliver Local Evidence
+## License
 
-Use `research.yml` to configure source roots. Common roots are:
+EvidenceWiki is available under the [MIT License][license].
 
-- `raw/papers/` for papers, PDFs, arXiv bundles, and reports.
-- `raw/links/` for URLs and link lists.
-- `raw/data/` for dataset cards or benchmark metadata.
-- `raw/media/` for screenshots or other media evidence.
-- `raw/code/` for repositories or source archives that are research evidence.
-
-Keep raw source files immutable once added. Prefer adding a newer version as a new file instead of overwriting evidence.
-
-Automated deliveries (fetch agents, orchestrators) follow the delivery contract in
-`workspace-template/docs/source-delivery.md`: provenance sidecars next to delivered
-files, atomic delivery, and the structured source-request artifact
-(`scripts/source_requests.py`) that routes evidence gaps back to fetch agents.
-Optional workspace-side discovery and acquisition are disabled by default.
-Prompt-injection hardening guidance is in
-`workspace-template/docs/prompt-injection-hardening.md`: source content is evidence
-data, provenance URLs are metadata, and the default-on lint heuristic is a weak
-reviewer-awareness signal, not a guarantee.
-
-Inventory sources:
-
-```bash
-python3 scripts/source_inventory.py --report
-```
-
-Normalize pending eligible sources:
-
-```bash
-python3 scripts/normalize_sources.py
-```
-
-`sources.pdf_extractor: pypdf` is the portable default. A reviewed
-compatibility run can select `poppler` in `research.yml` or pass
-`--pdf-extractor poppler`; that explicit backend requires the separately
-installed `pdftotext` executable.
-
-Regenerate a selected source:
-
-```bash
-python3 scripts/normalize_sources.py --source-id paper:2604.13018v1 --force
-```
-
-## Optional Codebase Analysis
-
-Codebase analysis is disabled by default. Enable it only when repositories, source archives, or local implementations are part of the research evidence.
-
-Safe default contract:
-
-```yaml
-integrations:
-  codebase_analysis:
-    enabled: false
-    provider: none
-    command: null
-    output_dir: sources/code_wikis
-    read_only: true
-    install_hooks: false
-    background_sync: false
-    untrusted_input: null
-```
-
-When enabled, generated adapter output must stay under `sources/`, not the maintained `wiki/`. The initializer and normalizer record adapter commands but do not execute them, clone repositories, install hooks, or start background sync. Treat `raw/code/` as untrusted input and acknowledge that boundary only after choosing a safe adapter. See `workspace-template/docs/codebase-analysis.md`.
-
-## Human Editing And Git Safety
-
-Agents should not auto-commit or install hooks. From a created research workspace root, take an explicit user-edit snapshot before broad operations:
-
-```bash
-python3 scripts/snapshot_user_edits.py
-```
-
-Only commit snapshots when the user explicitly asks:
-
-```bash
-python3 scripts/snapshot_user_edits.py --commit --message "snapshot: user edits before ingest"
-```
-
-## Developer Workflow
-
-Run the full regression suite from the repository root after changing scripts, fixtures, docs, or tests:
-
-```bash
-.venv/bin/python -m pytest -q
-.venv/bin/python -m ruff check .
-.venv/bin/python tools/sync_vendored_scripts.py --check
-git diff --check
-```
-
-Useful focused checks:
-
-```bash
-.venv/bin/python -m pytest -q tests/test_package_cli.py
-.venv/bin/python -m pytest -q tests/test_init_research_workspace.py tests/test_smoke_validate_workspace.py
-.venv/bin/python -m pytest -q tests/test_inventory_normalization.py
-.venv/bin/python -m pytest -q tests/test_end_to_end_init_fixture.py
-```
-
-On Windows, use `.venv\Scripts\python.exe` in place of `.venv/bin/python`.
-Use the operating system's temporary directory for smoke workspaces so generated
-files do not land in the repository root.
-
-## Documentation Map
-
-- `workspace-template/docs/new-project-guide.md`: full project setup guide.
-- `workspace-template/docs/workspace-initialization.md`: initialization CLI and setup profile workflow.
-- `workspace-template/docs/workspace-init-profile.md`: setup profile schema.
-- `workspace-template/docs/orchestrator-handoff.md`: machine contract for external orchestrators and parent agents.
-- `workspace-template/docs/orchestration.md`: durable parent sessions, work orders, managed runners, and recovery.
-- `workspace-template/docs/workspace-status.md`: aggregate status document schema and completion verdict.
-- `workspace-template/docs/research-yml.md`: public configuration contract.
-- `workspace-template/docs/source-manifest.md`: source inventory format.
-- `workspace-template/docs/normalized-source-format.md`: normalized record format.
-- `workspace-template/docs/coverage-manifest.md`: per-question answerability manifest schema.
-- `workspace-template/docs/acquisition.md`: optional acquisition safety model and provider registry.
-- `workspace-template/docs/source-discovery.md`: candidate-discovery contract and `source_candidate` schema (proposals before acquisition).
-- `workspace-template/docs/codebase-analysis.md`: optional codebase evidence workflow.
-- `workspace-template/docs/production-readiness-checklist.md`: sustained-use readiness review.
-
-## Contributing
-
-See `CONTRIBUTING.md` for local setup, test expectations, style rules, and pull
-request guidance.
+[pypi]: https://pypi.org/project/evidence-wiki/
+[workspace-template]: https://github.com/Denissvgn/evidence-wiki/tree/main/workspace-template
+[domain-packs]: https://github.com/Denissvgn/evidence-wiki/blob/main/domain-packs/README.md
+[examples]: https://github.com/Denissvgn/evidence-wiki/tree/main/examples
+[worked-example]: https://github.com/Denissvgn/evidence-wiki/blob/main/examples/urban-heat-resilience-workspace/README.md
+[orchestrator-readme]: https://github.com/Denissvgn/evidence-wiki/blob/main/orchestrator/README.md
+[tests]: https://github.com/Denissvgn/evidence-wiki/tree/main/tests
+[new-project]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/new-project-guide.md
+[workspace-initialization]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-initialization.md
+[workspace-init-profile]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-init-profile.md
+[research-yml]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/research-yml.md
+[question-api]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/question-api.md
+[source-discovery]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/source-discovery.md
+[acquisition]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/acquisition.md
+[source-delivery]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/source-delivery.md
+[source-manifest]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/source-manifest.md
+[normalized-source]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/normalized-source-format.md
+[coverage-manifest]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/coverage-manifest.md
+[evidence-policies]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/evidence-policies.md
+[citation-verification]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/citation-verification.md
+[orchestration]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/orchestration.md
+[orchestrator-handoff]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/orchestrator-handoff.md
+[workspace-status]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-status.md
+[run-controller]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/run-controller.md
+[mcp-server]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/mcp-server.md
+[prompt-injection]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/prompt-injection-hardening.md
+[human-editing]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/human-editing.md
+[codebase-analysis]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/codebase-analysis.md
+[production-readiness]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/production-readiness-checklist.md
+[publication-readiness]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/publication-readiness.md
+[research-init]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/skills/research-init.md
+[research-run]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/skills/research-run.md
+[research-orchestrate]: https://github.com/Denissvgn/evidence-wiki/blob/main/orchestrator/skills/research-orchestrate.md
+[architecture]: https://github.com/Denissvgn/evidence-wiki/blob/main/docs/llm_wiki/index.md
+[contributing]: https://github.com/Denissvgn/evidence-wiki/blob/main/CONTRIBUTING.md
+[changelog]: https://github.com/Denissvgn/evidence-wiki/blob/main/CHANGELOG.md
+[releasing]: https://github.com/Denissvgn/evidence-wiki/blob/main/RELEASING.md
+[third-party]: https://github.com/Denissvgn/evidence-wiki/blob/main/THIRD_PARTY_NOTICES.md
+[license]: https://github.com/Denissvgn/evidence-wiki/blob/main/LICENSE
