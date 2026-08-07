@@ -260,6 +260,37 @@ against an empty workspace can block and create a source request; the parent
 then retains that run, starts another child run for discovery and acquisition,
 and eventually sends the reopened question to research again.
 
+Under `research.yml` `review.escalation_scope: question` (see
+`docs/research-yml.md`), a question awaiting human review no longer flips the
+workspace verdict, so the controller keeps issuing work for the remaining
+questions instead of refusing the workspace. When every remaining question
+awaits review, the readiness verdict is `in_progress` with an empty actionable
+scope; rather than issue a work order scoped to no questions, the parent
+terminates `no_ship`. The terminal reason begins with the stable prefix
+`All remaining questions await human review`, and the `session_finished` event
+carries `questions_awaiting_review` and `question_slugs` in its `data`, so a
+host can branch on the count without parsing prose. The host records the
+outstanding reviews and starts a new session. Under the default `workspace`
+scope the pending review still produces `attention_required`, and `next`,
+`submit`, and replay still refuse with `ORCHESTRATION_WORKSPACE_UNSAFE`.
+
+Scoping does not disable that refusal for anything else. `next`, `submit`, and
+replay still raise `ORCHESTRATION_WORKSPACE_UNSAFE` for smoke failure, HIGH lint
+findings, a blocked question without a linked open request, and the filesystem
+integrity guards over `raw/`, question files, and normalized evidence. That
+matters for the scoped mode specifically: `review.max_pending_review_hours`
+makes lint report a review nobody works as a HIGH finding, which returns the
+verdict to `attention_required` and re-freezes the workspace through the
+ordinary path. A scoped review queue cannot rot unnoticed.
+
+`research.yml` is a trusted static input of an orchestration session. Changing
+`review:` while an action is pending is refused with
+`ORCHESTRATION_TRUSTED_INPUT_CHANGED`, naming `research.yml` in
+`details.changed_paths`. This is deliberate fail-closed behavior, not a
+limitation to work around: a session must not have its escalation semantics
+changed underneath a work order it already issued. Set the escalation scope
+before `orchestrate start`; a changed scope takes effect for the next session.
+
 The parent declares `complete` only after fresh publication-readiness evaluation
 returns `ship`, then writes `answers.json` through the deterministic answer
 exporter. `workspace_status.py` remains read-only and exposes only an additive

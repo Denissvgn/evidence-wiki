@@ -176,6 +176,26 @@ class WorkspaceStatusTests(unittest.TestCase):
         config.setdefault("run", {}).update(values)
         config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
+    def set_review_config(self, target: Path, values: dict) -> None:
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text())
+        config.setdefault("review", {}).update(values)
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def park_question_for_review(self, target: Path, slug: str) -> None:
+        """Record the frontmatter `question_resolve.py answer --require-coverage` writes when parking."""
+        self.write_answer_page(target, slug)
+        self.set_question_status(
+            target,
+            slug,
+            "human_review",
+            {
+                "human_review_required": "true",
+                "human_review_status": "pending",
+                "human_review_policies": "\n  - pack:fixture-pack/manual-check",
+            },
+        )
+
     def set_question_status(self, target: Path, slug: str, status: str, extra_fields: dict | None = None) -> None:
         page = target / "wiki" / "questions" / f"{slug}.md"
         text = page.read_text()
@@ -2005,6 +2025,211 @@ question: Does cache invalidation work?
 
             check_code, _, _ = self.run_status("--project-root", str(target), "--check-complete", "--format", "json")
             self.assertEqual(4, check_code)
+
+    def test_workspace_scope_keeps_pending_review_contagious(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(
+                Path(tmpdir),
+                questions=[
+                    {"id": "parked", "question": "Parked question?"},
+                    {"id": "still-open", "question": "Still open?"},
+                ],
+            )
+            self.park_question_for_review(target, "parked")
+
+            code, document = self.status_json(target)
+            readiness = document["readiness"]
+
+            self.assertEqual(0, code)
+            self.assertEqual("attention_required", readiness["verdict"])
+            self.assertIn(
+                "1 question(s) require human review approval: parked.",
+                readiness["reasons"],
+            )
+            self.assertEqual(1, readiness["questions_awaiting_review"])
+            self.assertEqual(["parked"], document["questions"]["human_review_slugs"])
+
+            check_code, _, _ = self.run_status("--project-root", str(target), "--check-complete", "--format", "json")
+            self.assertEqual(4, check_code)
+
+    def test_awaiting_review_info_code_never_displaces_the_verdict_fallback(self):
+        questions = {"human_review": 1, "human_review_slugs": ["parked"]}
+        reasons = ["1 question(s) require human review approval: parked."]
+
+        structured = STATUS.structured_verdict_reasons("attention_required", reasons, questions, {}, {})
+
+        self.assertEqual("attention_required", structured[0]["code"])
+        self.assertEqual(reasons[0], structured[0]["message"])
+        self.assertEqual(
+            {"code": "questions_awaiting_review", "severity": "info", "count": 1, "question_slugs": ["parked"]},
+            structured[1],
+        )
+
+    def test_question_scope_keeps_other_work_moving(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(
+                Path(tmpdir),
+                questions=[
+                    {"id": "parked", "question": "Parked question?"},
+                    {"id": "still-open", "question": "Still open?"},
+                ],
+            )
+            self.set_review_config(target, {"escalation_scope": "question"})
+            self.park_question_for_review(target, "parked")
+
+            code, document = self.status_json(target)
+            readiness = document["readiness"]
+            reason_codes = {reason["code"] for reason in readiness["verdict_reasons"]}
+
+            self.assertEqual(0, code)
+            self.assertEqual("in_progress", readiness["verdict"])
+            self.assertEqual(1, readiness["questions_awaiting_review"])
+            self.assertIn("questions_awaiting_review", reason_codes)
+            self.assertNotIn("questions_awaiting_review_only", reason_codes)
+            self.assertTrue(
+                any(
+                    "await human review" in reason and "parked" in reason
+                    for reason in readiness["reasons"]
+                ),
+                readiness["reasons"],
+            )
+            self.assertEqual(["still-open"], document["questions"]["actionable_slugs"])
+
+            info_reason = next(
+                reason for reason in readiness["verdict_reasons"] if reason["code"] == "questions_awaiting_review"
+            )
+            self.assertEqual("info", info_reason["severity"])
+            self.assertEqual(["parked"], info_reason["question_slugs"])
+
+            check_code, _, _ = self.run_status("--project-root", str(target), "--check-complete", "--format", "json")
+            self.assertEqual(1, check_code)
+
+    def test_question_scope_with_only_pending_reviews_is_never_complete(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(
+                Path(tmpdir),
+                questions=[{"id": "parked", "question": "Parked question?"}],
+            )
+            self.set_review_config(target, {"escalation_scope": "question"})
+            self.park_question_for_review(target, "parked")
+
+            code, document = self.status_json(target)
+            readiness = document["readiness"]
+            reason_codes = [reason["code"] for reason in readiness["verdict_reasons"]]
+
+            self.assertEqual(0, code)
+            self.assertNotEqual("complete", readiness["verdict"])
+            self.assertEqual("in_progress", readiness["verdict"])
+            self.assertEqual(1, readiness["questions_awaiting_review"])
+            self.assertIn("questions_awaiting_review_only", reason_codes)
+            self.assertEqual("questions_awaiting_review", reason_codes[-1])
+            self.assertLess(
+                reason_codes.index("questions_awaiting_review_only"),
+                reason_codes.index("questions_awaiting_review"),
+            )
+            self.assertEqual(0, document["questions"]["actionable"])
+            self.assertEqual(0, document["questions"]["blocked"])
+
+            check_code, _, _ = self.run_status("--project-root", str(target), "--check-complete", "--format", "json")
+            self.assertEqual(1, check_code)
+
+    def test_question_scope_reports_awaiting_review_in_text_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(
+                Path(tmpdir),
+                questions=[{"id": "parked", "question": "Parked question?"}],
+            )
+            self.set_review_config(target, {"escalation_scope": "question"})
+            self.park_question_for_review(target, "parked")
+
+            code, stdout, _ = self.run_status("--project-root", str(target))
+
+            self.assertEqual(0, code)
+            self.assertIn("Awaiting human review: 1 question(s): parked", stdout)
+
+    def test_workspace_without_pending_reviews_reports_a_zero_counter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(
+                Path(tmpdir),
+                questions=[{"id": "still-open", "question": "Still open?"}],
+            )
+
+            code, stdout, _ = self.run_status("--project-root", str(target))
+            _, document = self.status_json(target)
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, document["readiness"]["questions_awaiting_review"])
+            self.assertNotIn("Awaiting human review", stdout)
+            self.assertNotIn(
+                "questions_awaiting_review",
+                {reason["code"] for reason in document["readiness"]["verdict_reasons"]},
+            )
+
+    def test_aged_pending_review_re_escalates_to_attention_required(self):
+        """The rot guard: a scoped review that nobody works flips the verdict back."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(
+                Path(tmpdir),
+                questions=[{"id": "parked", "question": "Parked question?"}],
+            )
+            self.set_review_config(target, {"escalation_scope": "question", "max_pending_review_hours": 24})
+            self.park_question_for_review(target, "parked")
+            aged = (datetime.now(timezone.utc) - timedelta(hours=200)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            _, fresh_document = self.status_json(target)
+            page = target / "wiki" / "questions" / "parked.md"
+            page.write_text(
+                page.read_text().replace(
+                    "human_review_status: pending",
+                    f'human_review_status: pending\nhuman_review_requested_at: "{aged}"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            _, aged_document = self.status_json(target, "--no-cache")
+
+            self.assertEqual("in_progress", fresh_document["readiness"]["verdict"])
+            self.assertEqual(0, fresh_document["lint"]["issue_counts"].get("HIGH", 0))
+
+            self.assertEqual(1, aged_document["lint"]["issue_counts"].get("HIGH", 0))
+            self.assertEqual("attention_required", aged_document["readiness"]["verdict"])
+            self.assertEqual(1, aged_document["readiness"]["questions_awaiting_review"])
+            self.assertIn(
+                "lint_high",
+                {reason["code"] for reason in aged_document["readiness"]["verdict_reasons"]},
+            )
+
+            check_code, _, _ = self.run_status(
+                "--project-root", str(target), "--check-complete", "--format", "json", "--no-cache"
+            )
+            self.assertEqual(4, check_code)
+
+    def test_invalid_review_config_fails_instead_of_defaulting(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(
+                Path(tmpdir),
+                questions=[{"id": "parked", "question": "Parked question?"}],
+            )
+            self.set_review_config(target, {"escalation_scope": "Question"})
+            self.park_question_for_review(target, "parked")
+
+            code, stdout, stderr = self.run_status("--project-root", str(target), "--format", "json")
+            envelope = json.loads(stderr)
+
+            self.assertEqual(2, code)
+            self.assertEqual("", stdout)
+            self.assertEqual("CONFIG_INVALID", envelope["error_code"])
+            self.assertIn("escalation_scope", envelope["message"])
+
+    def test_invalid_max_pending_review_hours_fails_the_status_document(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.set_review_config(target, {"escalation_scope": "question", "max_pending_review_hours": 0})
+
+            code, _, stderr = self.run_status("--project-root", str(target), "--format", "json")
+
+            self.assertEqual(2, code)
+            self.assertEqual("CONFIG_INVALID", json.loads(stderr)["error_code"])
 
     def test_handoff_passthrough_from_profile_to_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:

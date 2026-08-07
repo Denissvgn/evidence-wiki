@@ -229,9 +229,15 @@ On success it records `coverage_required: true` and
 status, lint, and export can identify covered high-stakes answers after the
 resolver command has finished.
 Facet policy results can still require human review. `manual_review` can pass
-coverage when the source is otherwise acceptable, but publication readiness
-stays `no_ship` until `question_resolve.py approve` records the reviewer,
-timestamp, and approval state.
+coverage when the source is otherwise acceptable, but the answer is recorded as
+`status: human_review` and publication readiness stays `no_ship` until the
+review is recorded — either by `question_resolve.py approve` for a reviewer
+working inside the workspace, or by `question_resolve.py review --policy P
+--verdict accepted --reviewed-by PRINCIPAL --review-ref REF` for a review a host
+collected in its own approval queue. Both write the reviewer, timestamp, and
+approval state. How far the pending review reaches is separately configurable
+through `research.yml` `review.escalation_scope`; see
+[evidence-policies.md](evidence-policies.md).
 It refuses the answer with:
 
 - `COVERAGE_REQUIRED` when `--require-coverage` is set but the selected manifest

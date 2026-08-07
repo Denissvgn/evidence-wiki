@@ -5,7 +5,9 @@ This document specifies the machine surfaces of the question lifecycle:
 - **Intake**: `scripts/intake_questions.py` injects a validated batch of
   questions into a running workspace at any lifecycle point.
 - **Resolution**: `scripts/question_resolve.py` moves claimed questions to
-  answered, blocked, deferred, or rejected under the stable per-question lock.
+  answered, human_review, blocked, deferred, or rejected under the stable
+  per-question lock, and records the reviews that move a `human_review`
+  question on to `answered`.
 - **Export**: `scripts/export_answers.py` emits structured answers with
   citations so downstream agents never parse wiki Markdown.
 - **Publication readiness**: `scripts/publication_readiness.py --format json`
@@ -17,6 +19,14 @@ backlog summary remains `scripts/question_status.py`, claim ownership is
 managed by `scripts/question_claim.py`, and the aggregate health surface
 remains `scripts/workspace_status.py`
 ([workspace-status.md](workspace-status.md)).
+
+`question_status.py` is also the reviewer queue. Each record carries
+`human_review_requested_at` (when the answer transition parked the question) and
+`human_review_pending_policies` (declared `human_review_policies` that have no
+accepted entry in `human_reviews` yet), so a queue can be ordered by age and
+remaining work. Text output renders both on the `Pending Human Review` lines as
+`- SLUG [waiting 30.2h, 1 policy(ies) pending]: …`, or `age unknown` for a
+question parked before the timestamp existed.
 
 Package CLI equivalents (forwarding `--target` as `--project-root`):
 
@@ -141,6 +151,9 @@ python3 scripts/question_resolve.py defer --slug broad-survey --agent-id agent-a
 python3 scripts/question_resolve.py reject --slug duplicate --agent-id agent-a \
   --reason "Superseded by a narrower parent-agent question."
 python3 scripts/question_resolve.py approve --slug current-fee --reviewer reviewer-a
+python3 scripts/question_resolve.py review --slug current-fee \
+  --policy pack:market-data/quote-48h --verdict accepted \
+  --reviewed-by ops-principal --review-ref approval-queue-42
 ```
 
 Resolution requires the question to be claimed by the same `--agent-id` unless
@@ -163,11 +176,73 @@ If a coverage-gated answer includes a policy result that requires manual review
 (`manual_review_required`, `manual_review`, or a declared namespaced pack policy
 that currently evaluates to manual review), `answer --require-coverage` records
 `status: human_review` instead of `answered`. The answer page, source IDs,
-coverage manifest, answer author, and `human_review_policies` are still recorded,
-but publication readiness treats the record as `no_ship` until approval.
-`approve` is separate from answer authorship: it records `approved_by`,
-`approved_at`, `human_review_status: approved`, and `human_review_approved:
-true`, then moves the question to `answered`.
+coverage manifest, answer author, `human_review_policies`, and
+`human_review_requested_at` are still recorded, but publication readiness treats
+the record as `no_ship` until the review is recorded.
+
+### Recording Reviews
+
+Two reviewer topologies write the same records. Both are separate from answer
+authorship, and neither weakens the publication gate.
+
+`approve --slug SLUG --reviewer REVIEWER` is the in-workspace reviewer: one call
+accepts every policy still pending.
+
+`review --slug SLUG --policy POLICY --verdict accepted|rejected --reviewed-by
+PRINCIPAL [--review-ref REF] [--note TEXT]` records one policy at a time, which
+lets a host collect the review in its own approval queue and point at it with
+`--review-ref`. The reference is opaque to the workspace: it is retained and
+exported, never resolved or validated.
+
+`--reviewed-by` is a recorded principal on the same trust model as `--reviewer`.
+These scripts authenticate nobody; the audit trail is the frontmatter entry plus
+the `log.md` line, and `--review-ref` is the pointer into the host system where
+an authenticated click actually happened.
+
+Each call appends one entry per reviewed policy to `human_reviews`:
+
+```yaml
+status: human_review
+human_review_required: true
+human_review_status: pending
+human_review_requested_at: "2026-08-07T09:14:03Z"
+human_review_policies:
+  - manual_review_required
+  - pack:market-data/quote-48h
+human_reviews:
+  - policy: "pack:market-data/quote-48h"
+    verdict: accepted
+    reviewed_by: ops-principal
+    review_ref: approval-queue-42
+    reviewed_at: "2026-08-07T10:02:55Z"
+```
+
+Entries are append-only within one review cycle. A second `accepted` review for
+an already-accepted policy is refused rather than overwritten. Answering the
+question again starts a new cycle: the answer transition clears `human_reviews`
+and stamps a fresh `human_review_requested_at`, so reviews of a superseded
+answer can never satisfy the new one. Superseded entries remain in `log.md`.
+
+Once every policy in `human_review_policies` has an `accepted` entry, the
+question moves to `answered` and the review fields downstream consumers already
+read are written: `human_review_status: approved`, `human_review_approved:
+true`, `approved_by` (the last reviewer), and `approved_at`. Until then the
+question stays in `human_review` with `human_review_status: pending`.
+
+`--verdict rejected` returns the question to `open` for rework. The rejecting
+entry is retained, `human_review_status: rejected` is recorded, and the claim
+and approval fields are cleared. The rejection reason belongs in the entry's
+`note`, not in `blocked_reason` — the question is not blocked on missing
+evidence.
+
+| Error code | Cause |
+|------------|-------|
+| `STATUS_NOT_REVIEWABLE` | `review` targeted a question that is not in `human_review`. |
+| `STATUS_NOT_APPROVABLE` | `approve` targeted a question that is not in `human_review`. |
+| `REVIEW_POLICY_UNKNOWN` | `--policy` is not one of the question's `human_review_policies`. |
+| `REVIEW_VERDICT_INVALID` | `--verdict` is outside `accepted`, `rejected`. |
+| `REVIEW_ALREADY_RECORDED` | The policy already has an accepted review in this cycle. |
+| `REVIEWER_INVALID` | `--reviewed-by` or `--reviewer` is empty. |
 
 Coverage-gated answers should also carry quote anchors in question frontmatter.
 `grounding` is a list of mappings; each entry requires `claim`, `source_id`, and
@@ -278,6 +353,8 @@ Per-question record:
 | `missing_source_request_ids` | Blocking request IDs that do not resolve in `sources/source-requests.jsonl`. |
 | `unconfirmed_claims` | Flattened `claim_probe` records for bounded arXiv/OpenAlex method or artifact existence probes that remain unconfirmed. These records do not add citations or source IDs. |
 | `policy_results` | Flattened coverage policy checks for the question, preserving evidence-path, source-policy, freshness-policy, and identity-policy verdicts. |
+| `human_review` | Aggregate review state: `required`, `status` (`not_required`, `pending`, `approved`), `pending`, `reviewer`, `approved_at`, and the manual-review `policies`. This is what publication readiness gates on. |
+| `human_reviews` | Per-policy review entries recorded by `question_resolve.py review` or `approve`: `policy`, `verdict`, `reviewed_by`, `review_ref`, `note`, `reviewed_at`, with `null` for absent optional fields. Empty for workspaces that never recorded one. Audit visibility only — the gate reads `human_review`. |
 | `currentness` | Freshness/currentness policy checks, including legal-current-figure and product-spec currentness outcomes. |
 | `candidate_trace` | Discovery candidates linked to cited sources by `candidate_id` or fetched source id, including trust tier, recommended action, selection, and fetch status. |
 | `citation_verification` | Citation verification records for cited source ids when `sources/citation-verification.json` or a run evaluation artifact is present. |

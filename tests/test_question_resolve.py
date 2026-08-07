@@ -207,6 +207,81 @@ class QuestionResolveTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def write_two_policy_manual_review_coverage(self, target: Path, slug: str = "which-benchmarks") -> list[str]:
+        """Park the question behind one base and one pack-declared manual-review policy."""
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config["domain_pack"] = {
+            "name": "market-data",
+            "policy_vocabularies": {
+                "freshness_policy": {
+                    "pack:market-data/quote-48h": "Require a reviewer to confirm the quote is under 48 hours old.",
+                }
+            },
+        }
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        coverage = target / "sources" / "coverage" / f"{slug}.yml"
+        coverage.parent.mkdir(parents=True, exist_ok=True)
+        coverage.write_text(
+            yaml.safe_dump(
+                {
+                    "schema_version": "1.0",
+                    "question_slug": slug,
+                    "created_at": "2026-06-14T00:00:00Z",
+                    "updated_at": "2026-06-14T00:00:00Z",
+                    "coverage_profile": "two-policy-manual-review-fixture",
+                    "coverage_verdict": "pending",
+                    "required_facets": [
+                        {
+                            "facet_id": "reviewed-evidence",
+                            "description": "Require reviewer sign-off for this source.",
+                            "required": True,
+                            "evidence_path": "academic_method_existence",
+                            "source_policy": "manual_review_required",
+                            "freshness_policy": "pack:market-data/quote-48h",
+                            "identity_policy": "none",
+                            "min_sources": 1,
+                            "accepted_source_ids": ["raw:bench-survey-2026"],
+                            "blocking_request_ids": [],
+                            "facet_verdict": "pending",
+                        }
+                    ],
+                    "optional_facets": [],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return ["manual_review_required", "pack:market-data/quote-48h"]
+
+    def park_for_review(self, target: Path, *, two_policies: bool = False) -> list[str]:
+        """Answer the fixture question under coverage so it parks in human_review."""
+        self.run_claim(target, "which-benchmarks")
+        self.seed_manifest(target)
+        if two_policies:
+            policies = self.write_two_policy_manual_review_coverage(target)
+        else:
+            self.write_manual_review_coverage(target)
+            policies = ["manual_review_required"]
+        answer = self.write_answer_page(target)
+        code, payload, stderr = self.run_resolve(
+            target,
+            "answer",
+            "--slug",
+            "which-benchmarks",
+            "--agent-id",
+            "agent-a",
+            "--answer-page",
+            answer.relative_to(target).as_posix(),
+            "--source-id",
+            "raw:bench-survey-2026",
+            "--require-coverage",
+        )
+        self.assertEqual(0, code, stderr)
+        self.assertEqual("human_review", payload["status"])
+        self.assertEqual(policies, sorted(self.page_frontmatter(target, "which-benchmarks")["human_review_policies"]))
+        return policies
+
     def page_frontmatter(self, target: Path, slug: str) -> dict:
         text = (target / "wiki" / "questions" / f"{slug}.md").read_text(encoding="utf-8")
         return yaml.safe_load(text.split("---\n", 2)[1])
@@ -465,6 +540,386 @@ class QuestionResolveTests(unittest.TestCase):
             self.assertEqual("approved", frontmatter["human_review_status"])
             self.assertEqual("reviewer-a", frontmatter["approved_by"])
             self.assertIn("approved_at", frontmatter)
+
+    def test_answer_stamps_human_review_requested_at_when_parking(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target)
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+
+            requested_at = frontmatter["human_review_requested_at"]
+            self.assertIsInstance(requested_at, str)
+            self.assertRegex(requested_at, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            self.assertNotIn("human_reviews", frontmatter)
+
+    def test_review_accepting_one_of_two_policies_keeps_the_question_parked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("human_review", payload["status"])
+            self.assertEqual(["pack:market-data/quote-48h"], payload["reviewed_policies"])
+            self.assertEqual(["manual_review_required"], payload["pending_policies"])
+            self.assertEqual("approval-queue-42", payload["review_ref"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("human_review", frontmatter["status"])
+            self.assertEqual("pending", frontmatter["human_review_status"])
+            self.assertNotIn("human_review_approved", frontmatter)
+            self.assertEqual(1, len(frontmatter["human_reviews"]))
+            self.assertEqual(
+                {
+                    "policy": "pack:market-data/quote-48h",
+                    "verdict": "accepted",
+                    "reviewed_by": "ops-principal",
+                    "review_ref": "approval-queue-42",
+                },
+                {
+                    key: value
+                    for key, value in frontmatter["human_reviews"][0].items()
+                    if key != "reviewed_at"
+                },
+            )
+            self.assertRegex(frontmatter["human_reviews"][0]["reviewed_at"], r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_review_accepting_every_policy_answers_with_legacy_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "reviewer-b",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("answered", payload["status"])
+            self.assertEqual([], payload["pending_policies"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("answered", frontmatter["status"])
+            self.assertTrue(frontmatter["human_review_approved"])
+            self.assertEqual("approved", frontmatter["human_review_status"])
+            self.assertEqual("reviewer-b", frontmatter["approved_by"])
+            self.assertIn("approved_at", frontmatter)
+            self.assertEqual(
+                ["pack:market-data/quote-48h", "manual_review_required"],
+                [entry["policy"] for entry in frontmatter["human_reviews"]],
+            )
+            self.assertEqual(
+                ["ops-principal", "reviewer-b"],
+                [entry["reviewed_by"] for entry in frontmatter["human_reviews"]],
+            )
+
+    def test_review_rejection_reopens_the_question_and_retains_the_entry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target)
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "rejected",
+                "--reviewed-by",
+                "ops-principal",
+                "--note",
+                "The cited survey predates the reporting window.",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("open", payload["status"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("open", frontmatter["status"])
+            self.assertEqual("rejected", frontmatter["human_review_status"])
+            self.assertNotIn("human_review_approved", frontmatter)
+            self.assertNotIn("approved_by", frontmatter)
+            self.assertNotIn("claimed_by", frontmatter)
+            self.assertNotIn("human_review_requested_at", frontmatter)
+            self.assertNotIn("blocked_reason", frontmatter)
+            entry = frontmatter["human_reviews"][0]
+            self.assertEqual("rejected", entry["verdict"])
+            self.assertEqual("The cited survey predates the reporting window.", entry["note"])
+
+    def test_re_answer_after_rejection_reparks_with_a_fresh_review_cycle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target)
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "rejected",
+                "--reviewed-by",
+                "ops-principal",
+                "--note",
+                "Needs a newer survey.",
+            )
+            answer = self.write_answer_page(target)
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "answer",
+                "--slug",
+                "which-benchmarks",
+                "--agent-id",
+                "agent-a",
+                "--answer-page",
+                answer.relative_to(target).as_posix(),
+                "--source-id",
+                "raw:bench-survey-2026",
+                "--require-coverage",
+                "--allow-unclaimed",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("human_review", payload["status"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("pending", frontmatter["human_review_status"])
+            self.assertIn("human_review_requested_at", frontmatter)
+            # A new answer opens a new review cycle: the superseded rejection must not linger
+            # where a completion check could read it.
+            self.assertNotIn("human_reviews", frontmatter)
+
+    def test_review_refuses_unknown_policy_wrong_status_and_bad_verdict(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target)
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:other/not-declared",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+            )
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("REVIEW_POLICY_UNKNOWN", error["error_code"])
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "approved",
+                "--reviewed-by",
+                "ops-principal",
+            )
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("REVIEW_VERDICT_INVALID", error["error_code"])
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "   ",
+            )
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("REVIEWER_INVALID", error["error_code"])
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "needs-evidence",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+            )
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("STATUS_NOT_REVIEWABLE", error["error_code"])
+
+    def test_review_refuses_a_second_accepted_review_for_one_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+            )
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "someone-else",
+            )
+
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("REVIEW_ALREADY_RECORDED", error["error_code"])
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual(1, len(frontmatter["human_reviews"]))
+
+    def test_approve_records_an_entry_for_every_pending_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "approve",
+                "--slug",
+                "which-benchmarks",
+                "--reviewer",
+                "reviewer-a",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("answered", payload["status"])
+            self.assertEqual([], payload["pending_policies"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("answered", frontmatter["status"])
+            self.assertEqual(
+                ["manual_review_required", "pack:market-data/quote-48h"],
+                sorted(entry["policy"] for entry in frontmatter["human_reviews"]),
+            )
+            for entry in frontmatter["human_reviews"]:
+                self.assertEqual("accepted", entry["verdict"])
+                self.assertEqual("reviewer-a", entry["reviewed_by"])
+                self.assertNotIn("review_ref", entry)
+
+    def test_approve_completes_a_partially_reviewed_question(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "approve",
+                "--slug",
+                "which-benchmarks",
+                "--reviewer",
+                "reviewer-a",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("answered", payload["status"])
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual(2, len(frontmatter["human_reviews"]))
+            self.assertEqual("approval-queue-42", frontmatter["human_reviews"][0]["review_ref"])
+            self.assertEqual("reviewer-a", frontmatter["human_reviews"][1]["reviewed_by"])
+
+    def test_review_appends_a_log_entry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+
+            log = (target / "log.md").read_text(encoding="utf-8")
+            self.assertIn("- Question: `which-benchmarks` (review).", log)
+            self.assertIn("- Reviewer: ops-principal.", log)
+            self.assertIn("- Reviewed accepted: pack:market-data/quote-48h.", log)
+            self.assertIn("- Review reference: approval-queue-42.", log)
+            self.assertIn("- Still pending review: manual_review_required.", log)
 
     def test_block_requires_linked_request_and_clears_claim(self):
         with tempfile.TemporaryDirectory() as tmpdir:

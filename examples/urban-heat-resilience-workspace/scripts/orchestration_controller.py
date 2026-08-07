@@ -61,6 +61,8 @@ MAX_SUMMARY_LENGTH = 4000
 MAX_ARTIFACTS = 256
 MAX_SCOPE_IDS = 256
 MAX_SCOPE_ID_LENGTH = 200
+MAX_REASON_SLUGS = 5
+AWAITING_REVIEW_TERMINAL_REASON = "All remaining questions await human review"
 MAX_ARTIFACT_PATH_LENGTH = 512
 MAX_TRUSTED_STATIC_INPUT_BYTES = 32 * 1024 * 1024
 MAX_TRUSTED_STATIC_INPUT_ENTRIES = 10_000
@@ -2517,6 +2519,16 @@ def request_candidates(candidates: list[dict[str, Any]], request_id: str) -> lis
     return [candidate for candidate in candidates if candidate_request_id(candidate) == request_id]
 
 
+def summarize_reason_slugs(slugs: list[str]) -> str:
+    """Render a bounded slug list for a terminal reason sentence."""
+    shown = slugs[:MAX_REASON_SLUGS]
+    summary = ", ".join(shown)
+    remaining = len(slugs) - len(shown)
+    if remaining > 0:
+        summary += f", and {remaining} more"
+    return summary
+
+
 def bounded_scope_ids(
     values: list[Any],
     label: str,
@@ -3059,6 +3071,30 @@ def choose_route(
     if verdict == "in_progress":
         questions = status.get("questions") if isinstance(status.get("questions"), dict) else {}
         slugs = questions.get("actionable_slugs") if isinstance(questions.get("actionable_slugs"), list) else []
+        awaiting_review = int(readiness.get("questions_awaiting_review", 0) or 0)
+        if not slugs and awaiting_review:
+            # Under review.escalation_scope: question, a workspace whose only remaining work is
+            # pending human review reports in_progress with an empty actionable scope. Issuing a
+            # research work order here would scope it to no questions at all. The session cannot
+            # ship; the host collects the reviews and starts a new session.
+            review_slugs = bounded_scope_ids(
+                [value for value in questions.get("human_review_slugs", []) if isinstance(value, str)],
+                "human review question scope",
+                truncate=True,
+            )
+            return None, {
+                "terminal_status": "no_ship",
+                "reason": (
+                    f"{AWAITING_REVIEW_TERMINAL_REASON}: {awaiting_review} question(s) "
+                    f"({summarize_reason_slugs(review_slugs)}). Record the outstanding reviews, "
+                    "then start a new session."
+                ),
+                "workspace_status": status,
+                "event_data": {
+                    "questions_awaiting_review": awaiting_review,
+                    "question_slugs": review_slugs,
+                },
+            }
         if rollover_exhausted_child_for_phase(project_root, status, session, "research"):
             if session.get("status") == PAUSED_STATUS:
                 return None, {"paused": True, "workspace_status": status}
@@ -3758,6 +3794,7 @@ def finish_session(
     session: dict[str, Any],
     status: str,
     reason: str,
+    data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if status not in TERMINAL_STATUSES:
         raise OrchestrationControllerError("ORCHESTRATION_STATE_INVALID", f"invalid terminal status: {status}")
@@ -3774,7 +3811,7 @@ def finish_session(
     session["updated_at"] = timestamp_utc()
     session["completed_at"] = session["updated_at"]
     write_json_atomic(session_path(project_root, session["orchestration_id"]), session)
-    record_event(project_root, session, "session_finished", reason)
+    record_event(project_root, session, "session_finished", reason, data=data)
     return session
 
 
@@ -3894,7 +3931,13 @@ def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
         if route is None:
             if session.get("status") == PAUSED_STATUS:
                 return session
-            return finish_session(project_root, session, context["terminal_status"], context["reason"])
+            return finish_session(
+                project_root,
+                session,
+                context["terminal_status"],
+                context["reason"],
+                context.get("event_data"),
+            )
         spec = action_spec(project_root, session, route, context)
         return issue_work_order(project_root, session, spec)
 

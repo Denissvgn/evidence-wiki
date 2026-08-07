@@ -167,6 +167,81 @@ class McpServerTests(unittest.TestCase):
             )
             self.assertEqual(["batch"], tools["intake_questions"]["inputSchema"]["required"])
 
+    def test_workspace_status_tool_reports_scoped_review_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(
+                Path(tmpdir),
+                questions=[
+                    {"id": "parked", "question": "Which review clears this?", "priority": "high"},
+                    {"id": "still-open", "question": "What else is open?", "priority": "high"},
+                ],
+            )
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text())
+            config["review"] = {"escalation_scope": "question"}
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            page = target / "wiki" / "questions" / "parked.md"
+            page.write_text(
+                page.read_text(encoding="utf-8").replace(
+                    "status: open",
+                    "status: human_review\n"
+                    "human_review_required: true\n"
+                    "human_review_status: pending\n"
+                    'human_review_requested_at: "2026-08-07T09:00:00Z"\n'
+                    "human_review_policies:\n"
+                    "  - manual_review_required",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            server = MCP.ResearchWikiMcpServer(target)
+
+            result = self.call_tool(server, "workspace_status")
+            payload = result["structuredContent"]
+
+            self.assertFalse(result["isError"])
+            self.assertEqual("in_progress", payload["readiness"]["verdict"])
+            self.assertEqual(1, payload["readiness"]["questions_awaiting_review"])
+            self.assertEqual(["parked"], payload["questions"]["human_review_slugs"])
+            self.assertIn(
+                "questions_awaiting_review",
+                {reason["code"] for reason in payload["readiness"]["verdict_reasons"]},
+            )
+
+    def test_question_status_tool_reports_review_queue_detail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(
+                Path(tmpdir),
+                questions=[{"id": "parked", "question": "Which review clears this?", "priority": "high"}],
+            )
+            page = target / "wiki" / "questions" / "parked.md"
+            page.write_text(
+                page.read_text(encoding="utf-8").replace(
+                    "status: open",
+                    "status: human_review\n"
+                    "human_review_required: true\n"
+                    "human_review_status: pending\n"
+                    'human_review_requested_at: "2026-08-07T09:00:00Z"\n'
+                    "human_review_policies:\n"
+                    "  - manual_review_required\n"
+                    "  - pack:market-data/quote-48h\n"
+                    "human_reviews:\n"
+                    '  - policy: "pack:market-data/quote-48h"\n'
+                    "    verdict: accepted\n"
+                    "    reviewed_by: ops-principal\n"
+                    '    reviewed_at: "2026-08-07T10:00:00Z"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            server = MCP.ResearchWikiMcpServer(target)
+
+            payload = self.call_tool(server, "question_status")["structuredContent"]
+            record = next(item for item in payload["questions"] if item["slug"] == "parked")
+
+            self.assertEqual("2026-08-07T09:00:00Z", record["human_review_requested_at"])
+            self.assertEqual(["manual_review_required"], record["human_review_pending_policies"])
+
     def test_read_tools_return_same_json_payloads_as_underlying_scripts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))

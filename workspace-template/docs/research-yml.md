@@ -71,7 +71,14 @@ Defines the maintained knowledge layer.
 - `non_empty_fields`: fields that must not be empty when present.
 - `allowed_values`: allowed scalar values for specific fields.
 
-Default type-specific rules require source notes to cite at least one source ID, decisions to include a configured `status`, and claims to include structured claim fields such as `subject`, `predicate`, `object`, and `source_ids`. Question task records allow resolver-managed fields such as `answer_page`, `blocked_reason`, `resolution_reason`, `claimed_by`, `claimed_at`, `confidence`, `evidence_strength`, `coverage_required`, and `coverage_manifest`.
+Default type-specific rules require source notes to cite at least one source ID, decisions to include a configured `status`, and claims to include structured claim fields such as `subject`, `predicate`, `object`, and `source_ids`. Question task records allow resolver-managed fields such as `answer_page`, `blocked_reason`, `resolution_reason`, `claimed_by`, `claimed_at`, `confidence`, `evidence_strength`, `coverage_required`, and `coverage_manifest`, plus the review fields `human_review_required`, `human_review_status`, `human_review_requested_at`, `human_review_approved`, `human_review_policies`, `approved_by`, and `approved_at`.
+
+The question `status` values include `human_review`, which
+`scripts/question_resolve.py answer --require-coverage` writes when a coverage
+policy requires manual sign-off. The per-policy `human_reviews` list is
+intentionally undeclared: it is a list of mappings, and `field_types` has no
+type for that shape. Lint validates only declared fields, so an undeclared
+field is accepted rather than reported.
 
 Structured claims can be represented as dedicated pages under `wiki/claims/` with `type: claim`, or as embedded frontmatter records on another wiki page:
 
@@ -155,6 +162,53 @@ limits stay in the acquisition config when provider adapters enforce their own
 download and byte guards; the run section is the orchestrator-facing status
 view.
 
+### `review`
+
+Optional. Defines how far one pending human review escalates. The whole section
+may be omitted; every key then falls back to the default below, which reproduces
+the behavior of workspaces that predate the section. Adding the section does not
+change `compatible_research_yml_contract`.
+
+- `escalation_scope`: `workspace` (default) or `question`.
+  - `workspace`: a question in `human_review` contributes to the
+    `attention_required` readiness verdict, so orchestration refuses to operate
+    over the workspace until the review is recorded.
+  - `question`: a pending review parks only its own question. The question is
+    still excluded from scheduling (`human_review` is not an actionable status),
+    but `scripts/workspace_status.py` reports it under `questions_awaiting_review`
+    rather than flipping the verdict.
+- `max_pending_review_hours`: age after which lint reports a question that has
+  sat in `human_review` too long (default 168). Must be a positive integer, or
+  `null` to disable the age finding. The finding applies under
+  `escalation_scope: question` only; under `workspace` scope the pending review
+  already blocks the workspace.
+
+The age finding is the rot guard for the scoped mode. It is HIGH on purpose:
+HIGH lint findings flip the readiness verdict to `attention_required`, so a
+review queue nobody works re-freezes the workspace through the existing
+lint-to-verdict path rather than sitting unnoticed behind a scoped escalation.
+Lint measures the age from `human_review_requested_at`, which the answer
+transition stamps when it parks a question.
+
+Under either scope, a question in `human_review` also keeps drawing the MEDIUM
+`question_human_review_pending` finding. That is expected, not a defect: it is
+how a pending review stays visible to anyone reading lint output directly.
+MEDIUM findings do not change the readiness verdict, but they do count towards
+`readiness.operational_debt.warning_count`, so a workspace with parked questions
+reports non-zero operational warnings while reviews are outstanding.
+
+Unlike `run`, an invalid `review` value is not silently replaced by its default:
+scripts reject the workspace config, because defaulting a misconfigured review
+scope back to `workspace` would silently freeze the workspace the operator was
+configuring. Omit a key to accept its default, or use an `x-` prefix for
+experimental keys.
+
+```yaml
+review:
+  escalation_scope: question
+  max_pending_review_hours: 168
+```
+
 ### `lint`
 
 Defines validation behavior for future lint tooling.
@@ -167,7 +221,7 @@ Defines validation behavior for future lint tooling.
 - `validate_provenance`: require license provenance on automated deliveries (manifest records whose `provenance.retrieved_by` is set; MEDIUM `provenance_missing_license`).
 - `validate_source_requests`: check the source-request artifact — blocked questions should reference an open or fulfilled request (LOW `question_blocked_no_request`) and fulfilled requests must point at existing manifest sources (MEDIUM `request_fulfilled_missing_source`); malformed request lines are reported (MEDIUM `source_request_invalid`).
 - `validate_output_license_status`: require reusable output pages under `outputs.default_dir` to cite fetched sources with concrete license metadata. If an output page cites a manifest source whose `provenance.retrieved_by` is set and whose `provenance.license` is missing, null, or empty, lint reports LOW `output_license_missing`.
-- `validate_questions`: validate question task records, including answered/blocked consistency, coverage manifests, and claim hygiene — answered questions with `coverage_required: true` but missing, blocked, or invalid coverage emit HIGH `question_coverage_missing`, `question_coverage_blocked`, or `question_coverage_invalid`; `in_progress` questions without `claimed_by`/`claimed_at` emit MEDIUM `question_claim_missing`, and claims older than `run.claim_staleness_hours` emit LOW `question_claim_stale`.
+- `validate_questions`: validate question task records, including answered/blocked consistency, coverage manifests, and claim hygiene — answered questions with `coverage_required: true` but missing, blocked, or invalid coverage emit HIGH `question_coverage_missing`, `question_coverage_blocked`, or `question_coverage_invalid`; `in_progress` questions without `claimed_by`/`claimed_at` emit MEDIUM `question_claim_missing`, and claims older than `run.claim_staleness_hours` emit LOW `question_claim_stale`. Questions in `human_review` emit MEDIUM `question_human_review_pending`; under `review.escalation_scope: question` they additionally emit HIGH `question_human_review_stale` once `human_review_requested_at` is older than `review.max_pending_review_hours`, or MEDIUM `question_human_review_undated` when that timestamp is missing or unparseable.
 - `detect_prompt_injection_patterns`: default-on weak reviewer-awareness heuristic. When enabled, lint scans normalized Markdown records, question pages, and parsed manifest `provenance.notes` values for instruction-like phrases, structural prompt-injection shapes, and large base64-like blobs after Unicode/zero-width normalization. It reports LOW `source_prompt_injection_pattern` findings and never reads raw files, opens provenance sidecars, or fetches provenance URLs.
 - `dataview_aware`: account for Dataview-generated index sections.
 - `severity_levels`: allowed issue severities.

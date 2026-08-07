@@ -100,6 +100,10 @@ workspace_lock = _workspace_locks.workspace_lock
 _source_failure_taxonomy = load_workspace_module(_SCRIPT_DIR, "source_failure_taxonomy")
 delivery_unusable_evidence_reasons = _source_failure_taxonomy.unusable_evidence_reasons
 coverage_manifest = load_workspace_module(_SCRIPT_DIR, "coverage_manifest")
+_review_config = load_workspace_module(_SCRIPT_DIR, "_review_config")
+ESCALATION_SCOPE_QUESTION = _review_config.ESCALATION_SCOPE_QUESTION
+ReviewConfigError = _review_config.ReviewConfigError
+review_config = _review_config.review_config
 
 
 @dataclass
@@ -2223,6 +2227,63 @@ def parse_claim_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def validated_review_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Read the optional ``review`` section through lint's own config-invalid exit path."""
+    try:
+        return review_config(config)
+    except ReviewConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def check_human_review_age(
+    results: dict[str, Any],
+    label: str,
+    frontmatter: dict[str, Any],
+    max_pending_review_hours: int,
+) -> None:
+    """Re-escalate a review queue that has stopped moving.
+
+    Under ``review.escalation_scope: question`` a pending review no longer freezes the
+    workspace, so nothing would otherwise notice a review nobody works. A HIGH finding here
+    flips the readiness verdict back to ``attention_required`` through the existing
+    lint-to-verdict path, with no new verdict machinery.
+    """
+    requested_at = frontmatter.get("human_review_requested_at")
+    parsed_at = parse_claim_timestamp(requested_at)
+    if parsed_at is None:
+        issue(
+            results,
+            "MEDIUM",
+            "question_human_review_undated",
+            f"Question awaiting human review has no usable `human_review_requested_at`: {label}",
+            [label],
+            "Re-answer the question with scripts/question_resolve.py answer --require-coverage so the "
+            "review clock is recorded, or stamp human_review_requested_at as a quoted ISO 8601 UTC time. "
+            "Questions parked before this field existed will not have it.",
+            field="human_review_requested_at",
+            expected="ISO 8601 UTC timestamp while awaiting review",
+            actual="missing" if "human_review_requested_at" not in frontmatter else "unparseable",
+        )
+        return
+    age_hours = (datetime.now(timezone.utc) - parsed_at).total_seconds() / 3600
+    if age_hours <= max_pending_review_hours:
+        return
+    issue(
+        results,
+        "HIGH",
+        "question_human_review_stale",
+        f"Question has awaited human review for {age_hours:.1f}h, over the "
+        f"{max_pending_review_hours}h limit: {label}",
+        [label],
+        "Record the outstanding review with scripts/question_resolve.py review --slug SLUG --policy POLICY "
+        "--verdict accepted|rejected --reviewed-by PRINCIPAL (or approve), or raise "
+        "research.yml review.max_pending_review_hours if this queue is expected to move more slowly.",
+        field="human_review_requested_at",
+        expected=f"recorded review within {max_pending_review_hours}h",
+        actual=f"{age_hours:.1f}h",
+    )
+
+
 def claim_staleness_window_hours(config: dict[str, Any]) -> int:
     run_config = config.get("run") if isinstance(config.get("run"), dict) else {}
     value = run_config.get("claim_staleness_hours", DEFAULT_CLAIM_STALENESS_HOURS)
@@ -2413,6 +2474,14 @@ def check_questions(
     config: dict[str, Any] | None = None,
 ) -> None:
     config = config or {}
+    review = validated_review_config(config)
+    # Under workspace scope a pending review already freezes the workspace, so the age finding
+    # would be redundant noise; null disables it outright.
+    review_age_limit = (
+        review["max_pending_review_hours"]
+        if review["escalation_scope"] == ESCALATION_SCOPE_QUESTION
+        else None
+    )
     stats = results["stats"]
     checked = 0
     status_counts: dict[str, int] = {}
@@ -2441,6 +2510,8 @@ def check_questions(
                     expected="answered with human_review_status: approved",
                     actual="human_review",
                 )
+                if review_age_limit is not None:
+                    check_human_review_age(results, label, frontmatter, review_age_limit)
             answer_page = frontmatter.get("answer_page")
             if not isinstance(answer_page, str) or not answer_page.strip():
                 issue(
@@ -3088,6 +3159,11 @@ def generate_recommendations(results: dict[str, Any]) -> None:
             "Resolve question task records: link answered questions to answer pages, "
             "ground answers in cited source_ids, explain blocked questions, and keep "
             "in_progress claims recorded and fresh."
+        )
+    if categories.intersection({"question_human_review_stale", "question_human_review_undated"}):
+        recommendations.append(
+            "Work the human-review queue: record outstanding reviews with question_resolve.py "
+            "review or approve, or adjust research.yml review.max_pending_review_hours."
         )
     if categories.intersection({"question_coverage_missing", "question_coverage_blocked", "question_coverage_invalid"}):
         recommendations.append(

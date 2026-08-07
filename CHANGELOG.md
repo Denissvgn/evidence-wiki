@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- Scope `human_review` escalation to the question instead of the workspace,
+  behind a new optional `research.yml` `review:` section. Under
+  `review.escalation_scope: question`, a question awaiting human review no
+  longer flips the readiness verdict to `attention_required`: it is reported as
+  `readiness.questions_awaiting_review`, orchestration keeps issuing work for
+  the other questions, and a workspace whose only remaining work is pending
+  reviews reports `in_progress` with the structured code
+  `questions_awaiting_review_only` rather than `complete`. The default
+  `review.escalation_scope: workspace` preserves 0.2.4 semantics, and
+  `compatible_research_yml_contract` is unchanged at `0.1` because the section
+  is optional and additive.
+- Add `question_resolve.py review --slug S --policy P --verdict
+  accepted|rejected --reviewed-by PRINCIPAL [--review-ref REF] [--note TEXT]`,
+  which records a human review collected outside the workspace against one
+  coverage policy at a time. Entries append to a `human_reviews` frontmatter
+  list; the question becomes `answered` once every declared policy is accepted,
+  writing the same review fields `approve` has always written, and a rejection
+  returns it to `open` with the reason retained. `approve` is unchanged for
+  callers and now accepts every still-pending policy through the same writer.
+  Publication readiness accepts recorded external reviews exactly as it accepts
+  `approve`, and still refuses to ship an answer whose required review is
+  unrecorded.
+- Report a review queue that has stopped moving: under
+  `review.escalation_scope: question`, lint emits HIGH
+  `question_human_review_stale` once a question has awaited review longer than
+  `review.max_pending_review_hours` (default 168, `null` disables), which
+  returns the workspace to `attention_required` through the existing
+  lint-to-verdict path. A parked question with no usable
+  `human_review_requested_at` emits MEDIUM `question_human_review_undated`.
+- Surface the review queue for reviewers and hosts: `workspace_status.py` text
+  output and MCP payload carry the awaiting-review count and slugs,
+  `question_status.py` records carry `human_review_requested_at` and
+  `human_review_pending_policies` (rendered as age and pending-policy count in
+  text), and `fleet_status.py` and `run_report.py` report the counter per
+  workspace. `export_answers.py` exports the per-policy `human_reviews` entries
+  for audit.
+- Declare the `human_review` question status and the review frontmatter fields
+  in the starter `research.yml` frontmatter rules, so a parked question no
+  longer draws a spurious `frontmatter` lint finding in a stock workspace.
 - Refactor managed Codex and Claude execution behind a closed adapter registry,
   and document OpenCode, Pi, and other harnesses as external-protocol clients.
 - Bump the reusable managed workspace starter to `0.5.5`, including the

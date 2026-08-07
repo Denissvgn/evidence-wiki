@@ -363,7 +363,12 @@ def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tu
             continue
         slug = question.get("slug", "<unknown>")
         human_review = question.get("human_review") if isinstance(question.get("human_review"), dict) else {}
-        if human_review.get("pending") is True or question.get("status") == "human_review":
+        status = question.get("status")
+        # A pending review only gates a question that carries an answer to review. A question
+        # returned to open by a rejected review is ordinary research work again: it retains
+        # human_review_required until it is answered afresh, and it independently holds the
+        # workspace verdict at in_progress, so it can never reach ship through this branch.
+        if status == "human_review" or (status == "answered" and human_review.get("pending") is True):
             no_ship = True
             append_reason(reasons, "safety", f"{slug} is pending required human review approval.")
         evidence_strength = question.get("evidence_strength")

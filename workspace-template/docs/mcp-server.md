@@ -74,6 +74,29 @@ that only read textual tool output.
 | `export_answers` | `scripts/export_answers.py --format json` | optional `status: string[]` |
 | `source_requests_list` | `scripts/source_requests.py list --format json` | optional `status: ["open"|"fulfilled"]` |
 
+### Human Review Over MCP
+
+Because each tool returns its script's payload verbatim, the human-review
+surfaces are available without any MCP-specific schema:
+
+- `workspace_status` carries `readiness.questions_awaiting_review` (present
+  under both escalation scopes) plus `questions.human_review` and
+  `questions.human_review_slugs`. Under
+  `review.escalation_scope: question` a pending review no longer forces
+  `attention_required`, so a host reading the verdict alone must read this
+  counter to see that reviews are outstanding. `readiness.verdict_reasons`
+  carries the informational `questions_awaiting_review` code, and
+  `questions_awaiting_review_only` when reviews are the only remaining work.
+  See [workspace-status.md](workspace-status.md).
+- `question_status` records for parked questions carry
+  `human_review_requested_at` and `human_review_pending_policies`, so a host
+  can build a reviewer queue ordered by age and remaining policies without
+  reading question Markdown. See [question-api.md](question-api.md).
+
+Recording the review is deliberately outside the MCP boundary: it is a write to
+question frontmatter, so it goes through `scripts/question_resolve.py review`
+or `approve`, not through this server.
+
 ## Boundary
 
 The v1 toolset is read/append-only. `intake_questions` may create question

@@ -330,6 +330,117 @@ optional_facets:
             self.assertFalse(record["human_review"]["pending"])
             self.assertEqual("reviewer-a", record["human_review"]["reviewer"])
 
+    def test_export_carries_per_policy_review_entries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            question = target / "wiki" / "questions" / "benchmarks.md"
+            text = question.read_text(encoding="utf-8")
+            text = text.replace(
+                "answer_page: ../synthesis/reasoning-benchmarks.md",
+                "answer_page: ../synthesis/reasoning-benchmarks.md\n"
+                "human_review_required: true\n"
+                "human_review_status: approved\n"
+                "human_review_approved: true\n"
+                "approved_by: reviewer-b\n"
+                'approved_at: "2026-06-14T12:00:00Z"\n'
+                "human_review_policies:\n"
+                "  - manual_review_required\n"
+                "  - pack:market-data/quote-48h\n"
+                "human_reviews:\n"
+                '  - policy: "pack:market-data/quote-48h"\n'
+                "    verdict: accepted\n"
+                "    reviewed_by: ops-principal\n"
+                "    review_ref: approval-queue-42\n"
+                '    reviewed_at: "2026-06-14T11:00:00Z"\n'
+                "  - policy: manual_review_required\n"
+                "    verdict: accepted\n"
+                "    reviewed_by: reviewer-b\n"
+                '    reviewed_at: "2026-06-14T12:00:00Z"',
+                1,
+            )
+            question.write_text(text, encoding="utf-8")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            record = self.question_by_slug(document, "benchmarks")
+            self.assertEqual(
+                [
+                    {
+                        "policy": "pack:market-data/quote-48h",
+                        "verdict": "accepted",
+                        "reviewed_by": "ops-principal",
+                        "review_ref": "approval-queue-42",
+                        "note": None,
+                        "reviewed_at": "2026-06-14T11:00:00Z",
+                    },
+                    {
+                        "policy": "manual_review_required",
+                        "verdict": "accepted",
+                        "reviewed_by": "reviewer-b",
+                        "review_ref": None,
+                        "note": None,
+                        "reviewed_at": "2026-06-14T12:00:00Z",
+                    },
+                ],
+                record["human_reviews"],
+            )
+            # The aggregate block downstream gates read is unchanged by the per-policy detail.
+            self.assertEqual("approved", record["human_review"]["status"])
+            self.assertFalse(record["human_review"]["pending"])
+
+    def test_export_reports_an_empty_review_list_for_approve_only_workspaces(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            question = target / "wiki" / "questions" / "benchmarks.md"
+            text = question.read_text(encoding="utf-8")
+            text = text.replace(
+                "answer_page: ../synthesis/reasoning-benchmarks.md",
+                "answer_page: ../synthesis/reasoning-benchmarks.md\n"
+                "human_review_required: true\n"
+                "human_review_status: approved\n"
+                "human_review_approved: true\n"
+                "approved_by: reviewer-a\n"
+                'approved_at: "2026-06-14T12:00:00Z"',
+                1,
+            )
+            question.write_text(text, encoding="utf-8")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            record = self.question_by_slug(document, "benchmarks")
+            self.assertEqual([], record["human_reviews"])
+            self.assertEqual("approved", record["human_review"]["status"])
+            self.assertEqual("reviewer-a", record["human_review"]["reviewer"])
+
+    def test_export_drops_malformed_review_entries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            question = target / "wiki" / "questions" / "benchmarks.md"
+            text = question.read_text(encoding="utf-8")
+            text = text.replace(
+                "answer_page: ../synthesis/reasoning-benchmarks.md",
+                "answer_page: ../synthesis/reasoning-benchmarks.md\n"
+                "human_reviews:\n"
+                "  - verdict: accepted\n"
+                "    reviewed_by: ops-principal\n"
+                "  - policy: manual_review_required\n"
+                "    verdict: accepted\n"
+                "    reviewed_by: reviewer-b\n"
+                "    unexpected_field: ignored",
+                1,
+            )
+            question.write_text(text, encoding="utf-8")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            entries = self.question_by_slug(document, "benchmarks")["human_reviews"]
+            self.assertEqual(1, len(entries))
+            self.assertEqual("manual_review_required", entries[0]["policy"])
+            self.assertNotIn("unexpected_field", entries[0])
+
     def test_export_includes_grounding_and_quote_verification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))

@@ -113,7 +113,13 @@ wiki:
       # scripts/question_claim.py and are required (non-empty) whenever a
       # question is in_progress; claimed_at is a quoted ISO 8601 timestamp.
       # confidence/evidence_strength are optional verification fields set by
-      # the research-verify workflow.
+      # the research-verify workflow. The human_review_* fields are managed by
+      # scripts/question_resolve.py answer --require-coverage, review, and
+      # approve; human_review_requested_at and approved_at are quoted ISO 8601
+      # timestamps. The per-policy human_reviews list is deliberately not
+      # declared here: it is a list of mappings, and field_types has no type for
+      # that shape. Lint only validates declared fields, so leaving it out is
+      # correct rather than a gap.
       required_fields:
         - status
       field_types:
@@ -130,14 +136,26 @@ wiki:
         evidence_strength: string
         coverage_required: boolean
         coverage_manifest: string
+        human_review_required: boolean
+        human_review_status: string
+        human_review_requested_at: string
+        human_review_approved: boolean
+        approved_by: string
+        approved_at: string
+        human_review_policies: string_list
         source_ids: string_list
       allowed_values:
         status:
           - open
           - in_progress
           - answered
+          - human_review
           - blocked
           - deferred
+          - rejected
+        human_review_status:
+          - pending
+          - approved
           - rejected
         priority:
           - high
@@ -195,6 +213,18 @@ run:
   max_intake_per_hour: 25
   max_mcp_intake_batch_questions: 100
   claim_staleness_hours: 24
+
+# How far one pending human review escalates. The section is optional; leaving
+# it out keeps the workspace scope, where a question in human_review flips the
+# workspace verdict to attention_required and orchestration refuses to operate.
+# review:
+#   # workspace (default): a pending review freezes the whole workspace.
+#   # question: a pending review parks only its own question; workspace_status.py
+#   # reports it under questions_awaiting_review instead.
+#   escalation_scope: workspace
+#   # Age after which lint reports a question still awaiting review (default 168
+#   # hours). Applies under question scope only; null disables the age finding.
+#   max_pending_review_hours: 168
 
 lint:
   validate_structure: true

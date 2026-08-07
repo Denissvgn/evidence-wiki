@@ -1742,6 +1742,196 @@ class DocumentedWorkflowTests(unittest.TestCase):
             self.assertIn("resolve | Question deferred", log_text)
             self.assertIn("resolve | Question rejected", log_text)
 
+    def test_scoped_review_commands_are_documented(self):
+        research_yml = RESEARCH_YML_DOC.read_text()
+        question_api = QUESTION_API_DOC.read_text()
+        workspace_status = WORKSPACE_STATUS_DOC.read_text()
+        publication = PUBLICATION_READINESS_DOC.read_text()
+        orchestration = ORCHESTRATION_DOC.read_text()
+        policies = (REPO_ROOT / "workspace-template" / "docs" / "evidence-policies.md").read_text()
+
+        for expected in ("`escalation_scope`", "`max_pending_review_hours`"):
+            self.assertIn(expected, research_yml)
+        self.assertIn("question_resolve.py review --slug", question_api)
+        for expected in ("`--review-ref`", "`human_reviews`", "`human_review_requested_at`"):
+            self.assertIn(expected, question_api)
+        for expected in ("`questions_awaiting_review`", "`questions_awaiting_review_only`"):
+            self.assertIn(expected, workspace_status)
+        self.assertIn("question_resolve.py review --verdict accepted", publication)
+        self.assertIn("All remaining questions await human review", orchestration)
+        self.assertIn("ORCHESTRATION_TRUSTED_INPUT_CHANGED", orchestration)
+        self.assertIn("review.escalation_scope", policies)
+        self.assertIn("CR-9", policies)
+
+    def test_documented_external_review_workflow_ships_a_scoped_workspace(self):
+        """Execute the question-api review command sequence end to end."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "workspace"
+            profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text())
+            profile["workspace_init"]["target_path"] = str(target)
+            profile["workspace_init"]["questions"] = [
+                {"id": "answerable", "question": "What benchmarks matter?", "priority": "high"},
+                {"id": "second", "question": "What else matters?", "priority": "medium"},
+            ]
+            profile_path = root / "profile.yml"
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False))
+            with contextlib.redirect_stdout(io.StringIO()):
+                INIT.main(["--profile", str(profile_path)])
+            self.seed_manifest_source(target)
+
+            # research.yml review: section, per docs/research-yml.md.
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text())
+            config["review"] = {"escalation_scope": "question", "max_pending_review_hours": 168}
+            config["domain_pack"] = {
+                "name": "market-data",
+                "policy_vocabularies": {
+                    "freshness_policy": {
+                        "pack:market-data/quote-48h": "Require a reviewer to confirm the quote is under 48 hours old.",
+                    }
+                },
+            }
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            coverage = target / "sources" / "coverage" / "answerable.yml"
+            coverage.parent.mkdir(parents=True, exist_ok=True)
+            coverage.write_text(
+                yaml.safe_dump(
+                    {
+                        "schema_version": "1.0",
+                        "question_slug": "answerable",
+                        "created_at": "2026-08-07T00:00:00Z",
+                        "updated_at": "2026-08-07T00:00:00Z",
+                        "coverage_profile": "documented-review-workflow",
+                        "coverage_verdict": "pending",
+                        "required_facets": [
+                            {
+                                "facet_id": "reviewed-evidence",
+                                "description": "Require reviewer sign-off for this source.",
+                                "required": True,
+                                "evidence_path": "academic_method_existence",
+                                "source_policy": "manual_review_required",
+                                "freshness_policy": "pack:market-data/quote-48h",
+                                "identity_policy": "none",
+                                "min_sources": 1,
+                                "accepted_source_ids": ["raw:bench-survey-2026"],
+                                "blocking_request_ids": [],
+                                "facet_verdict": "pending",
+                            }
+                        ],
+                        "optional_facets": [],
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            # docs/question-api.md: coverage-gated answers also carry grounding quote anchors.
+            normalized = target / "sources" / "normalized" / "raw--bench-survey-2026.md"
+            normalized.parent.mkdir(parents=True, exist_ok=True)
+            normalized.write_text(
+                "---\ntype: source\nsource_id: raw:bench-survey-2026\n"
+                "title: Benchmark Survey 2026\n---\n\n"
+                "# Benchmark Survey 2026\n\nGSM-Hard dominates 2026 reasoning evaluation.\n",
+                encoding="utf-8",
+            )
+            question_path = target / "wiki" / "questions" / "answerable.md"
+            question_text = question_path.read_text()
+            question_path.write_text(
+                question_text.replace(
+                    "source_ids: []",
+                    "source_ids: []\n"
+                    "grounding:\n"
+                    "  - claim: GSM-Hard dominates reasoning evaluation.\n"
+                    "    source_id: raw:bench-survey-2026\n"
+                    "    quote: GSM-Hard dominates 2026 reasoning evaluation.\n",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            # question_claim.py claim + question_resolve.py answer --require-coverage -> human_review
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    0,
+                    QUESTION_CLAIM.main(
+                        ["--project-root", str(target), "claim", "--slug", "answerable",
+                         "--agent-id", "agent-a", "--format", "json"]
+                    ),
+                )
+            self.write_answer_page(target)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = QUESTION_RESOLVE.main(
+                    ["--project-root", str(target), "answer", "--slug", "answerable",
+                     "--agent-id", "agent-a", "--answer-page", "wiki/synthesis/benchmarks.md",
+                     "--source-id", "raw:bench-survey-2026", "--require-coverage",
+                     "--require-grounding", "--format", "json"]
+                )
+            self.assertEqual(0, code, stdout.getvalue())
+            self.assertEqual("human_review", json.loads(stdout.getvalue())["status"])
+            parked = self.question_frontmatter(target, "answerable")
+            self.assertIn("human_review_requested_at", parked)
+
+            # workspace_status.py --check-complete: scoped review keeps other work moving.
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = WORKSPACE_STATUS.main(
+                    ["--project-root", str(target), "--check-complete", "--format", "json"]
+                )
+            document = json.loads(stdout.getvalue())
+            self.assertEqual(1, code)
+            self.assertEqual("in_progress", document["readiness"]["verdict"])
+            self.assertEqual(1, document["readiness"]["questions_awaiting_review"])
+
+            # question_resolve.py review --policy ... --review-ref ..., one policy at a time.
+            for policy, reviewer in (
+                ("pack:market-data/quote-48h", "ops-principal"),
+                ("manual_review_required", "reviewer-b"),
+            ):
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    code = QUESTION_RESOLVE.main(
+                        ["--project-root", str(target), "review", "--slug", "answerable",
+                         "--policy", policy, "--verdict", "accepted",
+                         "--reviewed-by", reviewer, "--review-ref", "approval-queue-42",
+                         "--format", "json"]
+                    )
+                self.assertEqual(0, code, stdout.getvalue())
+                review_payload = json.loads(stdout.getvalue())
+
+            self.assertEqual("answered", review_payload["status"])
+            self.assertEqual([], review_payload["pending_policies"])
+            answered = self.question_frontmatter(target, "answerable")
+            self.assertEqual("approved", answered["human_review_status"])
+            self.assertEqual(
+                ["pack:market-data/quote-48h", "manual_review_required"],
+                [entry["policy"] for entry in answered["human_reviews"]],
+            )
+
+            # export_answers.py carries the per-policy entries for auditors.
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(0, EXPORT.main(["--project-root", str(target), "--format", "json"]))
+            export = json.loads(stdout.getvalue())
+            record = next(item for item in export["questions"] if item["slug"] == "answerable")
+            self.assertEqual("approved", record["human_review"]["status"])
+            self.assertEqual(
+                ["approval-queue-42", "approval-queue-42"],
+                [entry["review_ref"] for entry in record["human_reviews"]],
+            )
+
+            # publication_readiness.py no longer reports the pending-review safety reason.
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                PUBLICATION_READINESS.main(["--project-root", str(target), "--format", "json"])
+            readiness = json.loads(stdout.getvalue())
+            self.assertEqual([], readiness["reasons"]["safety"])
+
+            log_text = (target / "log.md").read_text()
+            self.assertIn("- Question: `answerable` (review).", log_text)
+            self.assertIn("- Review reference: approval-queue-42.", log_text)
+
     def test_research_run_loop_drives_fixture_to_blocked_on_sources(self):
         """Execute the research-run skill command sequence on a seeded fixture."""
         with tempfile.TemporaryDirectory() as tmpdir:

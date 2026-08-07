@@ -85,6 +85,10 @@ def target_summary(target: Path, status_module: ModuleType, *, no_cache: bool) -
         "ok": True,
         "project_name": project.get("name"),
         "readiness_verdict": readiness.get("verdict"),
+        # The per-workspace summary is hand-built, so the readiness counter does not pass
+        # through on its own. Fleet operators need it to see which workspaces are waiting on
+        # a reviewer rather than on research.
+        "questions_awaiting_review": int(readiness.get("questions_awaiting_review", 0) or 0),
         "budget_state": budget_state,
         "operational_debt": operational_debt,
         "active_run_count": 1 if has_active_run else 0,
@@ -121,6 +125,9 @@ def build_report(targets: list[str], *, no_cache: bool) -> dict[str, Any]:
                 for summary in summaries
                 if isinstance(summary.get("operational_debt"), dict)
             ),
+            "questions_awaiting_review": sum(
+                int(summary.get("questions_awaiting_review", 0) or 0) for summary in summaries
+            ),
         },
     }
 
@@ -137,6 +144,7 @@ def render_text(report: dict[str, Any]) -> str:
         f"Targets with operational debt: {report['counts']['targets_with_operational_debt']}",
         f"Operational warnings: {report['counts']['operational_warnings']}",
         f"Deferred items: {report['counts']['deferred_items']}",
+        f"Questions awaiting review: {report['counts']['questions_awaiting_review']}",
     ]
     for summary in report["targets"]:
         if summary.get("ok"):
@@ -144,7 +152,8 @@ def render_text(report: dict[str, Any]) -> str:
             lines.append(
                 f"- {summary['path']}: {summary.get('readiness_verdict')} "
                 f"(active={summary.get('active_run_count')}, stale={summary.get('stale_run_count')}, "
-                f"warnings={debt.get('warning_count', 0)}, deferred={debt.get('deferred_count', 0)})"
+                f"warnings={debt.get('warning_count', 0)}, deferred={debt.get('deferred_count', 0)}, "
+                f"awaiting_review={summary.get('questions_awaiting_review', 0)})"
             )
         else:
             lines.append(f"- {summary['path']}: {summary.get('error_code')} {summary.get('message')}")

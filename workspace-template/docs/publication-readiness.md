@@ -33,6 +33,26 @@ Reports group reasons under stable keys: `coverage`, `source_quality`,
 `discovery_quality`, `citation_identity`, `currentness`, `curation`, and
 `safety`.
 
+### Human Review
+
+A question whose answer requires manual review is a `safety` no-ship reason
+until the review is recorded. The gate reads the aggregate `human_review` block
+of the answer export, so both reviewer topologies satisfy it identically: an
+in-workspace `question_resolve.py approve`, or per-policy
+`question_resolve.py review --verdict accepted --review-ref …` collected in a
+host's own approval queue. Every declared policy must be accepted before the
+question leaves `human_review`, so a partially reviewed question still blocks.
+
+`review.escalation_scope` does not change this. Scoping the escalation to the
+question changes which *workspace verdict* a pending review produces; it never
+lets an unreviewed answer publish.
+
+The reason fires for a question in `human_review`, and for an `answered`
+question whose required review was never recorded. It does not fire for a
+question a rejected review returned to `open`: that question has no answer to
+review, and it independently holds the workspace verdict at `in_progress`, so it
+cannot reach `ship` regardless.
+
 Standards coverage policies fail closed through the same `coverage` and
 `currentness` paths. Common standards no-ship reasons include
 `standard_reference_missing`, `standard_edition_missing`,

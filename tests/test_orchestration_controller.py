@@ -319,6 +319,34 @@ class OrchestrationControllerTests(unittest.TestCase):
         )
         self.assertEqual(0, code, stderr)
 
+    def events(self, target: Path, orchestration_id: str) -> list[dict]:
+        text = CONTROLLER.events_path(target, orchestration_id).read_text(encoding="utf-8")
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+    def set_review_scope(self, target: Path, scope: str) -> None:
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config.setdefault("review", {})["escalation_scope"] = scope
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def park_question_for_review(self, target: Path, slug: str) -> None:
+        """Record the frontmatter `question_resolve.py answer --require-coverage` writes when parking."""
+        page = target / "wiki" / "questions" / f"{slug}.md"
+        text = page.read_text(encoding="utf-8")
+        self.assertIn("status: open", text)
+        page.write_text(
+            text.replace(
+                "status: open",
+                "status: human_review\n"
+                "human_review_required: true\n"
+                "human_review_status: pending\n"
+                "human_review_policies:\n"
+                "  - pack:fixture-pack/manual-check",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
     def block_question(self, target: Path, slug: str = "test-question") -> str:
         self.assert_json_script_ok(
             CLAIM,
@@ -2053,6 +2081,155 @@ class OrchestrationControllerTests(unittest.TestCase):
             "outside the persisted candidate scope",
         ):
             verify([historical, authorized, injected])
+
+    def parked_review_workspace(self, root: Path, scope: str) -> Path:
+        """Two questions, one parked in human_review, under the requested escalation scope."""
+        target = self.init_workspace(root, question=True)
+        self.add_questions(
+            root,
+            target,
+            [
+                {
+                    "id": "parked-question",
+                    "question": "Which recorded review clears this parked question?",
+                    "priority": "high",
+                }
+            ],
+        )
+        self.set_review_scope(target, scope)
+        self.park_question_for_review(target, "parked-question")
+        return target
+
+    def test_question_scope_issues_work_for_the_unparked_question(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "question")
+            self.start(target)
+
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("orchestration_work_order", order["artifact_type"])
+            self.assertEqual("research", order["phase"])
+            self.assertEqual(["test-question"], order["scope"]["question_slugs"])
+
+            self.block_question(target, "test-question")
+            code, accepted, stderr = self.submit(
+                root,
+                target,
+                order["action_id"],
+                summary="Created a scoped source request and durably blocked the question on it.",
+                artifacts=["sources/source-requests.jsonl", "wiki/questions/test-question.md"],
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("active", accepted["status"])
+
+    def test_question_scope_runtime_guards_accept_a_review_parked_mid_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "question")
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            session = CONTROLLER.load_session(target, "orch-test")
+            retained = json.loads(
+                CONTROLLER.work_order_path(target, "orch-test", order["action_id"]).read_text(encoding="utf-8")
+            )
+
+            status = CONTROLLER.verify_runtime_guards(target, session, retained)
+
+            self.assertEqual("in_progress", status["readiness"]["verdict"])
+            self.assertEqual(1, status["readiness"]["questions_awaiting_review"])
+
+            # The guard passed, so submission proceeds to result validation instead of refusing
+            # the workspace outright.
+            code, error, _ = self.submit(
+                root,
+                target,
+                order["action_id"],
+                summary="The worker returned without processing its scoped question.",
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
+
+    def test_question_scope_terminates_no_ship_when_every_question_awaits_review(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "question")
+            self.park_question_for_review(target, "test-question")
+            self.start(target)
+
+            code, finished, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            # A terminal no_ship session is reported, not raised: the document is the payload.
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, stderr)
+            self.assertEqual("no_ship", finished["status"])
+            self.assertEqual("no_ship", finished["verdict"])
+            self.assertTrue(finished["pause_reason"].startswith(CONTROLLER.AWAITING_REVIEW_TERMINAL_REASON))
+            self.assertIn("parked-question", finished["pause_reason"])
+
+            events = self.events(target, "orch-test")
+            finished_event = [event for event in events if event["event_type"] == "session_finished"][-1]
+            self.assertEqual(2, finished_event["data"]["questions_awaiting_review"])
+            self.assertEqual(
+                ["parked-question", "test-question"],
+                sorted(finished_event["data"]["question_slugs"]),
+            )
+
+    def test_workspace_scope_keeps_the_0_2_4_freeze(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "workspace")
+            self.start(target)
+
+            code, finished, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, stderr)
+            self.assertEqual("no_ship", finished["status"])
+            self.assertEqual(
+                "Workspace health or HIGH validation findings require operator attention.",
+                finished["pause_reason"],
+            )
+            self.assertFalse(finished["pause_reason"].startswith(CONTROLLER.AWAITING_REVIEW_TERMINAL_REASON))
+
+    def test_workspace_scope_refuses_submit_after_a_review_is_parked_mid_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [{"id": "parked-question", "question": "Which review clears this?", "priority": "high"}],
+            )
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.park_question_for_review(target, "parked-question")
+
+            code, error, _ = self.submit(root, target, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_WORKSPACE_UNSAFE", error["error_code"])
+            self.assertEqual("attention_required", error["details"]["readiness_verdict"])
+            self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
+
+    def test_review_scope_flip_during_a_pending_action_is_refused_as_static_input_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "question")
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.set_review_scope(target, "workspace")
+
+            code, error, _ = self.submit(root, target, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_TRUSTED_INPUT_CHANGED", error["error_code"])
+            self.assertTrue(
+                any(path.startswith("research.yml ") for path in error["details"]["changed_paths"]),
+                error["details"]["changed_paths"],
+            )
+            self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
 
     def test_completed_research_requires_terminal_scoped_progress_and_accepts_linked_source_block(self):
         with tempfile.TemporaryDirectory() as tmpdir:

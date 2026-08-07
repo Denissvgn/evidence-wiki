@@ -29,6 +29,7 @@ def load_script_module(name: str, path: Path):
 
 READINESS = load_script_module("research_publication_readiness", READINESS_SCRIPT_PATH)
 INIT = load_script_module("research_publication_readiness_init", INIT_SCRIPT_PATH)
+RESOLVE = load_script_module("research_publication_readiness_resolve", SCRIPTS / "question_resolve.py")
 
 
 class PublicationReadinessTests(unittest.TestCase):
@@ -458,6 +459,150 @@ evidence_strength: corroborated""",
 
         self.assertEqual(0, code)
         self.assertEqual("ship", document["verdict"])
+
+    def test_answered_question_with_an_unrecorded_review_still_blocks_publication(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.write_ship_ready_vendor_fixture(target)
+            question = target / "wiki" / "questions" / "vendor-product-spec.md"
+            text = question.read_text(encoding="utf-8")
+            # Answered, never reviewed: the record claims a required review that nobody recorded.
+            text = text.replace(
+                "answered_by: answer-agent",
+                "answered_by: answer-agent\n"
+                "human_review_required: true\n"
+                "human_review_policies:\n"
+                "  - manual_review_required",
+                1,
+            )
+            question.write_text(text, encoding="utf-8")
+
+            code, document = self.run_readiness(target)
+
+        self.assertEqual(1, code)
+        self.assertEqual("no_ship", document["verdict"])
+        self.assertTrue(
+            any("pending required human review" in reason for reason in document["reasons"]["safety"])
+        )
+
+    def park_vendor_question_for_review(self, target: Path, policies: list[str]) -> None:
+        """Park the ship-ready fixture behind the named manual-review policies."""
+        question = target / "wiki" / "questions" / "vendor-product-spec.md"
+        text = question.read_text(encoding="utf-8")
+        text = text.replace("status: answered", "status: human_review", 1)
+        policy_lines = "".join(f"\n  - {policy}" for policy in policies)
+        text = text.replace(
+            "answered_by: answer-agent",
+            "answered_by: answer-agent\n"
+            "human_review_required: true\n"
+            "human_review_status: pending\n"
+            'human_review_requested_at: "2026-07-02T13:00:00Z"\n'
+            f"human_review_policies:{policy_lines}",
+            1,
+        )
+        question.write_text(text, encoding="utf-8")
+
+    def run_review(self, target: Path, *args: str) -> tuple[int, dict]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = RESOLVE.main(["--project-root", str(target), "review", *args, "--format", "json"])
+        return int(code or 0), json.loads(stdout.getvalue() or stderr.getvalue())
+
+    def test_recorded_external_review_satisfies_the_safety_gate_per_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.write_ship_ready_vendor_fixture(target)
+            self.park_vendor_question_for_review(
+                target,
+                ["manual_review_required", "pack:market-data/quote-48h"],
+            )
+
+            code, parked = self.run_readiness(target)
+            self.assertEqual(1, code)
+            self.assertEqual("no_ship", parked["verdict"])
+            self.assertTrue(
+                any("pending required human review" in reason for reason in parked["reasons"]["safety"])
+            )
+
+            code, _ = self.run_review(
+                target,
+                "--slug",
+                "vendor-product-spec",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+            self.assertEqual(0, code)
+
+            code, partial = self.run_readiness(target)
+            self.assertEqual(1, code, "one accepted policy must not clear a second pending policy")
+            self.assertEqual("no_ship", partial["verdict"])
+            self.assertTrue(
+                any("pending required human review" in reason for reason in partial["reasons"]["safety"])
+            )
+
+            code, _ = self.run_review(
+                target,
+                "--slug",
+                "vendor-product-spec",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-43",
+            )
+            self.assertEqual(0, code)
+
+            code, reviewed = self.run_readiness(target)
+
+        self.assertEqual(0, code)
+        self.assertEqual("ship", reviewed["verdict"])
+        self.assertEqual([], reviewed["reasons"]["safety"])
+
+    def test_rejected_question_returns_to_ordinary_open_work(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.write_ship_ready_vendor_fixture(target)
+            self.park_vendor_question_for_review(target, ["manual_review_required"])
+
+            code, _ = self.run_review(
+                target,
+                "--slug",
+                "vendor-product-spec",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "rejected",
+                "--reviewed-by",
+                "ops-principal",
+                "--note",
+                "The cited spec page predates the reporting window.",
+            )
+            self.assertEqual(0, code)
+
+            code, document = self.run_readiness(target)
+            question_status = yaml.safe_load(
+                (target / "wiki" / "questions" / "vendor-product-spec.md")
+                .read_text(encoding="utf-8")
+                .split("---\n", 2)[1]
+            )["status"]
+
+        self.assertEqual("open", question_status)
+        self.assertNotEqual("no_ship", document["verdict"])
+        self.assertEqual("attention_required", document["verdict"])
+        self.assertEqual([], document["reasons"]["safety"])
+        self.assertTrue(
+            any("actionable research questions" in reason for reason in document["reasons"]["source_quality"])
+        )
 
     def test_publication_readiness_blocks_on_failed_coverage(self):
         with tempfile.TemporaryDirectory() as tmpdir:

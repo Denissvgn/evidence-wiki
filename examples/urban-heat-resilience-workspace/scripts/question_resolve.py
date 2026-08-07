@@ -18,7 +18,15 @@ research runs:
 - ``defer`` and ``reject`` record a ``resolution_reason``.
 - ``approve --slug SLUG --reviewer REVIEWER`` records human-review approval for
   an answer that reached ``human_review`` because coverage policies required
-  manual sign-off.
+  manual sign-off. It accepts every policy still pending in one call.
+- ``review --slug SLUG --policy POLICY --verdict accepted|rejected --reviewed-by
+  PRINCIPAL [--review-ref REF] [--note TEXT]`` records one per-policy review,
+  which lets a host collect the review in its own approval queue and point at it
+  with the opaque ``--review-ref``. Entries append to ``human_reviews``; the
+  question becomes ``answered`` once every declared policy is accepted, and a
+  rejection returns it to ``open``. ``--reviewed-by`` is a recorded principal on
+  the same trust model as ``--reviewer``: these scripts authenticate nobody, and
+  the audit trail is the frontmatter entry plus ``log.md``.
 - ``reopen --slug SLUG --agent-id ID --source-id MANIFEST_ID`` moves a
   ``blocked`` question back to ``open`` once the delivered evidence is in the
   manifest and has a normalized record, drops ``blocked_reason``, and adds the
@@ -59,6 +67,9 @@ EXIT_CONFLICT = 3
 CONFIDENCE_VALUES = ("high", "medium", "low")
 EVIDENCE_STRENGTH_VALUES = ("corroborated", "single_source", "contested")
 TERMINAL_STATUSES = ("answered", "human_review", "blocked", "deferred", "rejected")
+REVIEW_VERDICT_ACCEPTED = "accepted"
+REVIEW_VERDICT_REJECTED = "rejected"
+REVIEW_VERDICTS = (REVIEW_VERDICT_ACCEPTED, REVIEW_VERDICT_REJECTED)
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -163,6 +174,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     approve.add_argument("--slug", required=True, help="Question page slug (file name without .md).")
     approve.add_argument("--reviewer", required=True, help="Human reviewer identity to record.")
     approve.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Report format. Defaults to text.",
+    )
+
+    review = subparsers.add_parser(
+        "review",
+        help="Record one per-policy human review collected inside or outside the workspace.",
+    )
+    review.add_argument("--slug", required=True, help="Question page slug (file name without .md).")
+    review.add_argument(
+        "--policy",
+        required=True,
+        help="One policy identifier from the question's human_review_policies.",
+    )
+    review.add_argument(
+        "--verdict",
+        required=True,
+        help=f"Review verdict. One of: {', '.join(REVIEW_VERDICTS)}.",
+    )
+    review.add_argument(
+        "--reviewed-by",
+        required=True,
+        help="Principal that recorded the review. Same trust model as --reviewer; not authenticated here.",
+    )
+    review.add_argument(
+        "--review-ref",
+        default=None,
+        help="Opaque host-side pointer to where the review was collected, such as an approval-queue id.",
+    )
+    review.add_argument("--note", default=None, help="Optional reviewer note retained with the entry.")
+    review.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
@@ -412,6 +456,15 @@ def has_normalized_record(project_root: Path, config: dict[str, Any], source_id:
     return record_path.is_file()
 
 
+def string_list_field(frontmatter: dict[str, Any], key: str) -> list[str]:
+    value = frontmatter.get(key)
+    if isinstance(value, list):
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
 def existing_source_ids(frontmatter: dict[str, Any]) -> list[str]:
     value = frontmatter.get("source_ids")
     if isinstance(value, list):
@@ -494,10 +547,28 @@ def quote_scalar(value: str) -> str:
     return json.dumps(value)
 
 
-def render_frontmatter_value(key: str, value: str | bool | list[str], quote: bool) -> list[str]:
+def render_mapping_sequence(key: str, entries: list[dict[str, str]]) -> list[str]:
+    """Render a list of flat mappings, the shape `human_reviews` retains.
+
+    Every value goes through ``quote_scalar``, which quotes anything outside the bare-scalar
+    character class. Policy identifiers and ISO timestamps contain ``:`` and are therefore
+    always emitted quoted, so the block round-trips through ``yaml.safe_load``.
+    """
+    lines = [f"{key}:"]
+    for entry in entries:
+        prefix = "  - "
+        for field, value in entry.items():
+            lines.append(f"{prefix}{field}: {quote_scalar(str(value))}")
+            prefix = "    "
+    return lines
+
+
+def render_frontmatter_value(key: str, value: str | bool | list[str] | list[dict[str, str]], quote: bool) -> list[str]:
     if isinstance(value, list):
         if not value:
             return [f"{key}: []"]
+        if all(isinstance(item, dict) for item in value):
+            return render_mapping_sequence(key, value)
         return [f"{key}:"] + [f"  - {item}" for item in value]
     if isinstance(value, bool):
         return [f"{key}: {'true' if value else 'false'}"]
@@ -701,7 +772,15 @@ def transition_resolution(
                 "approved_by",
                 "approved_at",
                 "human_review_approved",
+                # A new answer opens a new review cycle: reviews of the previous answer must not
+                # count towards this one. The audit trail of superseded reviews stays in log.md.
+                "human_reviews",
+                "human_review_requested_at",
             )
+            if resolution["status"] == "human_review":
+                # The answer transition is the single writer of entry into human_review, so it also
+                # stamps the clock that the stale-review lint finding reads.
+                fields["human_review_requested_at"] = now
         elif resolution["status"] == "blocked":
             remove_fields = (*remove_fields, "answer_page", "confidence", "evidence_strength", "resolution_reason")
         else:
@@ -713,7 +792,12 @@ def transition_resolution(
                 "confidence",
                 "evidence_strength",
             )
-        updated = apply_resolution_edits(text, fields, remove_fields, quoted_fields={"updated"})
+        updated = apply_resolution_edits(
+            text,
+            fields,
+            remove_fields,
+            quoted_fields={"updated", "human_review_requested_at"},
+        )
         question_claim.write_page_atomic(page_path, updated)
         return {
             "applied": True,
@@ -784,16 +868,55 @@ def transition_reopen(
         }
 
 
-def transition_approve(
+def existing_human_reviews(frontmatter: dict[str, Any]) -> list[dict[str, str]]:
+    """Return retained per-policy review entries, dropping anything not shaped like one."""
+    value = frontmatter.get("human_reviews")
+    if not isinstance(value, list):
+        return []
+    entries: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        entry = {
+            str(field): str(field_value)
+            for field, field_value in item.items()
+            if field_value is not None and str(field_value).strip()
+        }
+        if entry.get("policy") and entry.get("verdict"):
+            entries.append(entry)
+    return entries
+
+
+def accepted_review_policies(entries: list[dict[str, str]]) -> set[str]:
+    return {entry["policy"] for entry in entries if entry.get("verdict") == REVIEW_VERDICT_ACCEPTED}
+
+
+def record_human_reviews(
     page_path: Path,
-    project_root: Path,
-    args: argparse.Namespace,
+    *,
+    slug: str,
+    verdict: str,
+    reviewed_by: str,
+    policies: list[str] | None,
+    review_ref: str | None = None,
+    note: str | None = None,
+    status_error_code: str,
 ) -> dict[str, Any]:
+    """Append per-policy review entries and apply the resulting lifecycle transition.
+
+    This is the only writer of recorded reviews. ``review`` names one policy explicitly;
+    ``approve`` passes ``policies=None`` to accept every policy still pending, which keeps
+    the in-workspace and host-collected reviewer topologies on one code path.
+    """
     question_claim = load_sibling_module("question_claim")
-    slug = args.slug.strip()
-    reviewer = args.reviewer.strip()
-    if not reviewer:
-        raise ResolveError(EXIT_INVALID, "REVIEWER_INVALID", "--reviewer must be a non-empty string")
+    if not reviewed_by:
+        raise ResolveError(EXIT_INVALID, "REVIEWER_INVALID", "review principal must be a non-empty string")
+    if verdict not in REVIEW_VERDICTS:
+        raise ResolveError(
+            EXIT_INVALID,
+            "REVIEW_VERDICT_INVALID",
+            f"--verdict must be one of: {', '.join(REVIEW_VERDICTS)}",
+        )
     with question_claim.question_lock(page_path):
         text = page_path.read_text(encoding="utf-8")
         parts = question_claim.split_frontmatter_lines(text)
@@ -806,31 +929,130 @@ def transition_approve(
         if status != "human_review":
             raise ResolveError(
                 EXIT_INVALID,
-                "STATUS_NOT_APPROVABLE",
-                f"question {slug} has status '{status}'; only human_review questions can be approved",
+                status_error_code,
+                f"question {slug} has status '{status}'; only human_review questions can be reviewed",
             )
+        declared = string_list_field(frontmatter, "human_review_policies")
+        retained = existing_human_reviews(frontmatter)
+        already_accepted = accepted_review_policies(retained)
+        if policies is None:
+            selected = [policy for policy in declared if policy not in already_accepted]
+        else:
+            selected = []
+            for policy in policies:
+                if policy not in declared:
+                    raise ResolveError(
+                        EXIT_INVALID,
+                        "REVIEW_POLICY_UNKNOWN",
+                        f"policy {policy} is not one of the question's human_review_policies",
+                        details={"policy": policy, "human_review_policies": declared},
+                    )
+                if verdict == REVIEW_VERDICT_ACCEPTED and policy in already_accepted:
+                    raise ResolveError(
+                        EXIT_INVALID,
+                        "REVIEW_ALREADY_RECORDED",
+                        f"policy {policy} already has a recorded accepted review; reviews are append-only",
+                        details={"policy": policy},
+                    )
+                selected.append(policy)
+
         now = question_claim.timestamp_utc()
-        fields: dict[str, Any] = {
-            "status": "answered",
-            "human_review_required": True,
-            "human_review_status": "approved",
-            "human_review_approved": True,
-            "approved_by": reviewer,
-            "approved_at": now,
-            "updated": now.split("T", 1)[0],
-        }
-        updated = apply_resolution_edits(text, fields, (), quoted_fields={"approved_at", "updated"})
+        appended: list[dict[str, str]] = []
+        for policy in selected:
+            entry: dict[str, str] = {"policy": policy, "verdict": verdict, "reviewed_by": reviewed_by}
+            if review_ref:
+                entry["review_ref"] = review_ref
+            if note:
+                entry["note"] = note
+            entry["reviewed_at"] = now
+            appended.append(entry)
+        entries = [*retained, *appended]
+
+        fields: dict[str, Any] = {"updated": now.split("T", 1)[0]}
+        remove_fields: tuple[str, ...] = ()
+        if verdict == REVIEW_VERDICT_REJECTED:
+            # A rejected answer returns to ordinary open work. The reason lives in the review
+            # entry's note, not in blocked_reason prose, and the stale approval and claim fields
+            # go with it.
+            resulting_status = "open"
+            fields["status"] = "open"
+            fields["human_review_status"] = REVIEW_VERDICT_REJECTED
+            remove_fields = (
+                "claimed_by",
+                "claimed_at",
+                "approved_by",
+                "approved_at",
+                "human_review_approved",
+                "human_review_requested_at",
+            )
+        elif all(policy in accepted_review_policies(entries) for policy in declared):
+            # Every declared policy now has an accepted review. Write exactly the fields the
+            # 0.2.4 approve path wrote so export and publication readiness need no schema change.
+            resulting_status = "answered"
+            fields["status"] = "answered"
+            fields["human_review_required"] = True
+            fields["human_review_status"] = "approved"
+            fields["human_review_approved"] = True
+            fields["approved_by"] = reviewed_by
+            fields["approved_at"] = now
+        else:
+            resulting_status = "human_review"
+            fields["human_review_status"] = "pending"
+        if entries:
+            fields["human_reviews"] = entries
+
+        updated = apply_resolution_edits(
+            text,
+            fields,
+            remove_fields,
+            quoted_fields={"approved_at", "updated"},
+        )
         question_claim.write_page_atomic(page_path, updated)
         return {
             "applied": True,
-            "status": "answered",
+            "status": resulting_status,
             "previous_holder": {},
             "answer_page": frontmatter.get("answer_page"),
             "source_ids": existing_source_ids(frontmatter),
             "request_ids": [],
-            "reviewer": reviewer,
-            "approved_at": now,
+            "reviewer": reviewed_by,
+            "approved_at": now if resulting_status == "answered" else None,
+            "review_verdict": verdict,
+            "reviewed_policies": selected,
+            "review_ref": review_ref,
+            "pending_policies": [
+                policy for policy in declared if policy not in accepted_review_policies(entries)
+            ],
+            "human_reviews": entries,
         }
+
+
+def transition_review(page_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    policy = args.policy.strip()
+    if not policy:
+        raise ResolveError(EXIT_INVALID, "REVIEW_POLICY_UNKNOWN", "--policy must be a non-empty string")
+    return record_human_reviews(
+        page_path,
+        slug=args.slug.strip(),
+        verdict=args.verdict.strip(),
+        reviewed_by=args.reviewed_by.strip(),
+        policies=[policy],
+        review_ref=(args.review_ref or "").strip() or None,
+        note=(args.note or "").strip() or None,
+        status_error_code="STATUS_NOT_REVIEWABLE",
+    )
+
+
+def transition_approve(page_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    """Accept every still-pending policy in one call: the in-workspace reviewer topology."""
+    return record_human_reviews(
+        page_path,
+        slug=args.slug.strip(),
+        verdict=REVIEW_VERDICT_ACCEPTED,
+        reviewed_by=args.reviewer.strip(),
+        policies=None,
+        status_error_code="STATUS_NOT_APPROVABLE",
+    )
 
 
 def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) -> str:
@@ -845,9 +1067,19 @@ def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) ->
     ]
     if action == "reopen" and result.get("source_ids"):
         lines.append(f"- Reopened with sources: {', '.join(result['source_ids'])}.")
-    if action == "approve":
+    if action in {"approve", "review"}:
         lines.append(f"- Reviewer: {result.get('reviewer')}.")
-        lines.append(f"- Approved at: {result.get('approved_at')}.")
+        if result.get("reviewed_policies"):
+            lines.append(
+                f"- Reviewed {result.get('review_verdict', REVIEW_VERDICT_ACCEPTED)}: "
+                f"{', '.join(result['reviewed_policies'])}."
+            )
+        if result.get("review_ref"):
+            lines.append(f"- Review reference: {result['review_ref']}.")
+        if result.get("pending_policies"):
+            lines.append(f"- Still pending review: {', '.join(result['pending_policies'])}.")
+        if result.get("approved_at"):
+            lines.append(f"- Approved at: {result['approved_at']}.")
     if result.get("answer_page"):
         lines.append(f"- Answer page: {result['answer_page']}.")
     if result.get("request_ids"):
@@ -874,6 +1106,12 @@ def build_report(action: str, slug: str, agent_id: str, page_path: Path, project
         report["reviewer"] = result["reviewer"]
     if result.get("approved_at"):
         report["approved_at"] = result["approved_at"]
+    if action in {"approve", "review"}:
+        report["review_verdict"] = result.get("review_verdict")
+        report["reviewed_policies"] = result.get("reviewed_policies", [])
+        report["review_ref"] = result.get("review_ref")
+        report["pending_policies"] = result.get("pending_policies", [])
+        report["human_reviews"] = result.get("human_reviews", [])
     return report
 
 
@@ -886,12 +1124,16 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = json_mode_requested(argv, default_json=args.format == "json")
     project_root = Path(args.project_root).expanduser().resolve()
     slug = args.slug.strip()
-    agent_id = args.reviewer.strip() if args.command == "approve" else args.agent_id.strip()
+    principal_flags = {"approve": ("--reviewer", "reviewer"), "review": ("--reviewed-by", "reviewed_by")}
+    if args.command in principal_flags:
+        agent_id = getattr(args, principal_flags[args.command][1]).strip()
+    else:
+        agent_id = args.agent_id.strip()
     action = args.command
     try:
         if not agent_id:
-            error_code = "REVIEWER_INVALID" if args.command == "approve" else "AGENT_ID_INVALID"
-            label = "--reviewer" if args.command == "approve" else "--agent-id"
+            label = principal_flags.get(args.command, ("--agent-id",))[0]
+            error_code = "REVIEWER_INVALID" if args.command in principal_flags else "AGENT_ID_INVALID"
             raise ResolveError(EXIT_INVALID, error_code, f"{label} must be a non-empty string")
         question_claim = load_sibling_module("question_claim")
         question_status = load_sibling_module("question_status")
@@ -900,7 +1142,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "reopen":
             result = transition_reopen(page_path, project_root, config, args)
         elif args.command == "approve":
-            result = transition_approve(page_path, project_root, args)
+            result = transition_approve(page_path, args)
+        elif args.command == "review":
+            result = transition_review(page_path, args)
         else:
             result = transition_resolution(page_path, project_root, config, args)
     except ResolveError as error:

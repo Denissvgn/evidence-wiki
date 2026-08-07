@@ -242,6 +242,7 @@ def official_source_summary(project_root: Path, config: dict[str, Any]) -> dict[
     return {
         "final_verdict": status.get("readiness", {}).get("verdict"),
         "verdict_reasons": status.get("readiness", {}).get("verdict_reasons", []),
+        "questions_awaiting_review": int(status.get("readiness", {}).get("questions_awaiting_review", 0) or 0),
         "blocked_request_ids": status.get("questions", {}).get("blocked_open_request_ids", []),
         "open_requests": open_requests,
         "candidate_summary": status.get("candidates", {}) if isinstance(status.get("candidates"), dict) else {},

@@ -71,6 +71,7 @@ except ImportError as exc:  # pragma: no cover - environment guard
 SCHEMA_VERSION = "1.0"
 EXIT_OK = 0
 EXIT_UNREADABLE = 2
+HUMAN_REVIEW_ENTRY_FIELDS = ("policy", "verdict", "reviewed_by", "review_ref", "note", "reviewed_at")
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -510,6 +511,26 @@ def flattened_policy_results(value: Any) -> list[dict[str, Any]]:
     return flattened
 
 
+def recorded_human_reviews(frontmatter: dict[str, Any]) -> list[dict[str, Any]]:
+    """Export the per-policy review entries `question_resolve.py review` retains.
+
+    This is audit visibility, not a gate: `human_review_state` still decides whether a record
+    is pending. Auditors read these entries to see which policy was reviewed by whom, and
+    which host-side reference the reviewer acted on.
+    """
+    value = frontmatter.get("human_reviews")
+    if not isinstance(value, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        entry = {field: text_field(item, field) or None for field in HUMAN_REVIEW_ENTRY_FIELDS}
+        if entry["policy"] and entry["verdict"]:
+            entries.append(entry)
+    return entries
+
+
 def human_review_state(frontmatter: dict[str, Any], policy_results: list[dict[str, Any]]) -> dict[str, Any]:
     manual_policies = sorted(
         {
@@ -656,6 +677,7 @@ def build_question_record(
     record["policy_results"] = policy_results
     record["currentness"] = currentness_results(policy_results)
     record["human_review"] = human_review_state(frontmatter, policy_results)
+    record["human_reviews"] = recorded_human_reviews(frontmatter)
     record["candidate_trace"] = candidate_trace_for_sources(combined_ids, candidates)
     record["citation_verification"] = citation_verification_for_sources(combined_ids, citation_verification_by_source)
     confidence = text_field(frontmatter, "confidence")

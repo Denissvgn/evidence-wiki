@@ -104,14 +104,26 @@ wiki:
         blocked_reason: string
         coverage_required: boolean
         coverage_manifest: string
+        human_review_required: boolean
+        human_review_status: string
+        human_review_requested_at: string
+        human_review_approved: boolean
+        approved_by: string
+        approved_at: string
+        human_review_policies: string_list
         source_ids: string_list
       allowed_values:
         status:
         - open
         - in_progress
         - answered
+        - human_review
         - blocked
         - deferred
+        - rejected
+        human_review_status:
+        - pending
+        - approved
         - rejected
         priority:
         - high
