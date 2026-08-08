@@ -19,8 +19,9 @@ Deliver files only under the directories listed in `research.yml` `raw.source_ro
 |----------|------------------------------|-------|
 | Papers, PDFs, reports | `raw/papers/` or `raw/pdf/` | Single PDFs pair automatically with LaTeX bundles by arXiv ID or filename slug. |
 | arXiv source bundles | `raw/papers/arxiv-<id>/` | Directory names like `arxiv-2601.00001v1` trigger bundle detection; include `00README.json` when available. |
-| URLs and link lists | `raw/links/*.txt`, `.url`, `.webloc` | Newline-separated HTTP(S) URLs; `#` comments allowed. |
+| URLs and link lists | `raw/links/*.txt`, `.url`, `.webloc` | Newline-separated HTTP(S) URLs; `#` comments allowed. A `.txt` list is only expanded into one source per URL when it sits under a link root; `.url`/`.webloc` are expanded anywhere. A URL list delivered elsewhere is inventoried as a single `link` record whose URLs never become sources, and the inventory report says to move it. |
 | Datasets, tables | `raw/data/` | CSV/TSV files are normalized (columns, row counts, sample rows); Excel/Parquet/Feather stay classified-only. |
+| Structured payloads | `raw/data/` | `.json`/`.jsonl` are classified as `structured_data`. This package does not extract them, so they stay classified-only unless the workspace configures a normalization adapter for the kind, or an external normalizer writes the record directly. |
 | Repositories, archives | `raw/code/` | Only treated as codebase evidence when `integrations.codebase_analysis.enabled` is true. |
 | Web page snapshots, HTML papers | `raw/web/`, `raw/papers/` | `.html`/`.htm`/`.xhtml` files are normalized via stdlib extraction (no JS rendering, no asset fetching). |
 | Other media | `raw/media/`, `raw/other/` | Classified by extension; unsupported types surface as `unknown` for review. |
@@ -247,6 +248,24 @@ When the delivery fulfills a source request, link it and unblock the affected qu
 python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id paper:2601.00001v1
 ```
 
+Delivering a source is not enough to make it usable evidence. A source is only quotable
+and only reopens a blocked question once it has a **normalized record**: `reopen`
+refuses with `SOURCE_NOT_NORMALIZED`, and `verify_quotes.py` checks grounding against
+the normalized body, not the raw bytes.
+
+For source kinds `normalize_sources.py` reads, the command above produces that record.
+For kinds it does not read — structured API payloads, instrument output — an external
+normalizer may write the record instead, and it counts as evidence on the same terms
+once it conforms to the published record contract. Check it before relying on it:
+
+```bash
+python3 scripts/normalize_verify.py --source-id <source-id> --format json
+```
+
+See [normalized-source-format.md](normalized-source-format.md) for the contract, which
+sources an external tool may write records for, and the violation codes verification
+reports.
+
 ## Idempotency Guarantees
 
 - Re-running `source_inventory.py` after a partial delivery only adds or refreshes affected records. Existing record IDs are stable (path-derived), `detected_at` is preserved across runs, and no prior records are lost when new files arrive.
@@ -356,6 +375,7 @@ Concurrency: the artifact is single-writer. `add` and `fulfill` serialize throug
 - `scripts/workspace_status.py` reports `sources.requests_open` and `sources.requests_open_ids`; a clean `blocked_on_sources` verdict also requires each blocked question to carry `blocking_request_ids` linked to open requests, and the verdict reasons name those linked request IDs. A blocked question without a linked open request is `attention_required`.
 - `scripts/workspace_status.py` reports `sources.curation` counts for automated web records, cited automated web records, and missing terms/license, notes, origin URL, checksum, or candidate id metadata.
 - `scripts/lint.py` (config-gated, default on) reports: automated non-web deliveries missing `license` provenance (MEDIUM, `validate_provenance`); automated web deliveries missing `license`, `terms_url`, or `terms_note` (LOW, `validate_curation_metadata`); cited automated web deliveries missing `notes` (MEDIUM) or `origin_url`/verified `checksum` (HIGH); selected-candidate web deliveries missing `candidate_id` (LOW); blocked questions with no linked source request (LOW), and fulfilled requests pointing at missing manifest sources (MEDIUM, both under `validate_source_requests`).
+- `scripts/lint.py` also reports a delivered source with no normalized record (LOW, `source_missing_normalized`) and a normalized record from an external normalizer that does not conform to the record contract (MEDIUM, `normalized_record_contract_violation`). Acceptance of an externally written record is gated on that conformance check, not on its origin.
 
 ## Retained Mixed-Source Publication Matrix
 

@@ -1404,5 +1404,110 @@ class InitResearchWorkspaceTests(unittest.TestCase):
             self.assertFalse(target.exists())
 
 
+class OptionalSectionFooterTests(unittest.TestCase):
+    """Optional sections must reach the config an operator actually reads.
+
+    Generated configs are dumped from parsed YAML, so the starter's comments do not
+    survive. Documentation in docs/research-yml.md is complete, but a workspace whose
+    research.yml lists only active keys gives no hint that scoped human review or an
+    external normalizer adapter can be enabled at all.
+    """
+
+    STARTER = REPO_ROOT / "workspace-template"
+
+    def run_init(self, *args: str) -> str:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            INIT.main(list(args))
+        return stdout.getvalue()
+
+    def init_workspace(self, root: Path, *extra: str) -> Path:
+        target = root / "footer-workspace"
+        self.run_init(
+            "--target",
+            str(target),
+            "--project-name",
+            "footer-workspace",
+            "--project-description",
+            "Optional section footer workspace.",
+            *extra,
+        )
+        return target
+
+    def test_optional_sections_are_delivered_to_the_workspace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            text = (target / "research.yml").read_text(encoding="utf-8")
+
+        self.assertIn("# review:", text)
+        self.assertIn("# normalization:", text)
+        self.assertIn("docs/research-yml.md", text)
+
+    def test_delivered_blocks_are_verbatim_from_the_starter(self):
+        # One source of truth: the starter config. A drifting copy would document a
+        # section that no longer exists, or miss one that does.
+        starter_text = (self.STARTER / "research.yml").read_text(encoding="utf-8")
+        blocks = INIT.optional_section_examples(self.STARTER)
+
+        self.assertEqual(2, len(blocks), "expected the review and normalization examples")
+        for block in blocks:
+            with self.subTest(block=block.splitlines()[0]):
+                self.assertIn(block, starter_text)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            generated = (target / "research.yml").read_text(encoding="utf-8")
+        for block in blocks:
+            self.assertIn(block, generated)
+
+    def test_prose_comments_about_active_sections_are_not_delivered(self):
+        # Only blocks that declare a commented-out top-level key qualify; annotations on
+        # active keys stay behind rather than reading as things to enable.
+        blocks = "\n".join(INIT.optional_section_examples(self.STARTER))
+
+        self.assertNotIn("EvidenceWiki workspace template configuration", blocks)
+        self.assertNotIn("Budgets for one unattended research run", blocks)
+
+    def test_footer_adds_no_active_configuration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            document = yaml.safe_load((target / "research.yml").read_text(encoding="utf-8"))
+
+        self.assertNotIn("review", document)
+        self.assertNotIn("normalization", document)
+        self.assertIn("project", document)
+
+    def test_force_reinit_does_not_duplicate_the_footer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.init_workspace(Path(tmpdir), "--force")
+            text = (target / "research.yml").read_text(encoding="utf-8")
+
+        self.assertEqual(1, text.count("Optional sections, shown commented out"))
+        self.assertEqual(1, text.count("# normalization:"))
+
+    def test_a_newly_commented_section_is_delivered_without_code_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            starter = Path(tmpdir) / "starter"
+            shutil.copytree(self.STARTER, starter)
+            config = starter / "research.yml"
+            config.write_text(
+                config.read_text(encoding="utf-8")
+                + "\n# A future optional section.\n# future_section:\n#   enabled: false\n",
+                encoding="utf-8",
+            )
+
+            blocks = INIT.optional_section_examples(starter)
+
+        self.assertEqual(3, len(blocks))
+        self.assertIn("# future_section:", blocks[-1])
+
+    def test_unreadable_starter_config_degrades_to_no_footer(self):
+        # The footer is a convenience; losing it must not fail an otherwise valid init.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertEqual([], INIT.optional_section_examples(Path(tmpdir) / "absent"))
+            self.assertEqual("", INIT.render_optional_section_footer(Path(tmpdir) / "absent"))
+
+
 if __name__ == "__main__":
     unittest.main()

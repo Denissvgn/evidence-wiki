@@ -104,6 +104,7 @@ _review_config = load_workspace_module(_SCRIPT_DIR, "_review_config")
 ESCALATION_SCOPE_QUESTION = _review_config.ESCALATION_SCOPE_QUESTION
 ReviewConfigError = _review_config.ReviewConfigError
 review_config = _review_config.review_config
+_normalized_contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract")
 
 
 @dataclass
@@ -1091,6 +1092,143 @@ def index_normalized_sources(
         else:
             unknown_paths.append(path)
     return indexed, manual_ids, unknown_paths, failed_paths
+
+
+def min_rendered_coverage_ratio(config: dict[str, Any]) -> float | None:
+    """Threshold below which a rendering is reported as thin, or ``None`` when unset.
+
+    Off by default. A low ratio is not a defect — a renderer may legitimately cap a
+    long series — so this is a visibility control an operator opts into, never a gate.
+    An unusable value disables the notice rather than failing the run, matching how
+    lint treats its other tunables.
+    """
+    value = config.get("min_rendered_coverage_ratio")
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    ratio = float(value)
+    return ratio if 0.0 <= ratio <= 1.0 else None
+
+
+def check_rendered_coverage_ratio(
+    project_root: Path,
+    path: Path,
+    frontmatter: dict[str, Any],
+    threshold: float | None,
+    results: dict[str, Any],
+) -> bool:
+    """Report a record whose body renders less of its payload than the operator wants.
+
+    Grounding is by containment, so the un-rendered part is citable but not quotable.
+    Reported LOW: what to do about it is a judgement call about the renderer's caps,
+    not something lint can decide.
+    """
+    if threshold is None:
+        return False
+    block = frontmatter.get("rendered_coverage")
+    if not isinstance(block, dict):
+        return False
+    ratio = block.get("ratio")
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or float(ratio) >= threshold:
+        return False
+
+    label = project_relative(project_root, path)
+    source_id = frontmatter.get("source_id")
+    issue(
+        results,
+        "LOW",
+        "normalized_low_rendered_coverage",
+        (
+            f"Normalized record renders {float(ratio):.0%} of its structured content "
+            f"(below the configured {threshold:.0%}): {label}"
+        ),
+        [label],
+        (
+            "Content the body does not render is citable but not quotable. Raise the "
+            "renderer's caps, or accept the ratio and rely on the raw source for the rest."
+        ),
+        field="rendered_coverage.ratio",
+        expected=f">= {threshold}",
+        actual=ratio,
+        source_id=source_id if isinstance(source_id, str) and source_id else None,
+    )
+    return True
+
+
+def check_normalized_record_contract(
+    project_root: Path,
+    normalized_root: Path,
+    manifest_by_id: dict[str, dict[str, Any]],
+    results: dict[str, Any],
+    min_coverage_ratio: float | None = None,
+) -> tuple[int, int, int]:
+    """Hold externally produced records to the published record contract.
+
+    A record from another tool is evidence on the same terms as one this package wrote,
+    which is only safe if "conforms" is checked rather than assumed. Records that name
+    no producing tool are left alone: they predate the contract rather than claim it,
+    and lint's job here is to widen what is accepted, not to newly fail records that a
+    re-normalization repairs on its own. `normalize_verify.py` checks every record
+    regardless, for callers that want the stricter reading.
+
+    Returns the number of foreign records seen, the number of violations reported, and
+    the number of records reported as thinly rendered.
+    """
+    if not normalized_root.is_dir():
+        return 0, 0, 0
+
+    foreign_records = 0
+    violation_count = 0
+    low_coverage_records = 0
+    for path in sorted(normalized_root.rglob("*.md"), key=lambda value: value.as_posix()):
+        frontmatter, _ = load_frontmatter(path)
+        if not isinstance(frontmatter, dict):
+            continue
+        # Coverage applies to any record that declares it, whoever wrote it — a thin
+        # rendering is a thin rendering regardless of origin.
+        if check_rendered_coverage_ratio(project_root, path, frontmatter, min_coverage_ratio, results):
+            low_coverage_records += 1
+        if not _normalized_contract.declares_foreign_normalizer(frontmatter):
+            continue
+        foreign_records += 1
+        violations = _normalized_contract.validate_record(
+            path,
+            manifest_by_id=manifest_by_id,
+            normalized_root=normalized_root,
+        )
+        if not violations:
+            continue
+        violation_count += len(violations)
+        label = project_relative(project_root, path)
+        first = violations[0]
+        source_id = frontmatter.get("source_id")
+        detail = f" (field: {first.field})" if first.field else ""
+        # MEDIUM, not HIGH: a HIGH finding stops the orchestration controller from
+        # issuing the next work order, and a record that breaks the contract must not
+        # freeze research across the whole workspace. The gates that actually decide
+        # whether this record can support an answer — quote verification and the
+        # reopen check — fail closed on their own.
+        issue(
+            results,
+            "MEDIUM",
+            "normalized_record_contract_violation",
+            (
+                f"Externally produced normalized record does not match the record contract: "
+                f"{label} — {first.code}{detail}: {first.message}"
+            ),
+            [label],
+            (
+                f"{first.remediation} Run `normalize_verify.py --source-id "
+                f"{source_id}` for the full report."
+                if isinstance(source_id, str) and source_id
+                else f"{first.remediation} Run `normalize_verify.py` for the full report."
+            ),
+            field=first.field,
+            expected=first.expected,
+            actual=first.actual,
+            source_id=source_id if isinstance(source_id, str) and source_id else None,
+            code=first.code,
+        )
+    return foreign_records, violation_count, low_coverage_records
 
 
 def index_source_notes(
@@ -2585,6 +2723,7 @@ def check_source_coverage(
     wiki_root: Path,
     wiki_files: list[Path],
     results: dict[str, Any],
+    min_coverage_ratio: float | None = None,
 ) -> None:
     stats = results["stats"]
     manifest_by_id = index_manifest_records(manifest_records)
@@ -2639,12 +2778,20 @@ def check_source_coverage(
             label = project_relative(project_root, norm_path)
             issue(
                 results,
-                "WARNING",
+                "LOW",
                 "pdf_title_uncertain",
                 f"PDF title inference produced low-confidence result (`title_confidence: {tc}`): {label}",
                 [label],
                 "Verify the `title:` field in the normalized record and correct it if needed.",
             )
+
+    foreign_normalized, contract_violations, low_coverage_normalized = check_normalized_record_contract(
+        project_root,
+        normalized_root,
+        manifest_by_id,
+        results,
+        min_coverage_ratio=min_coverage_ratio,
+    )
 
     source_notes_by_id, note_integrated_ids = index_source_notes(wiki_root)
     integration_by_id = index_integration_citations(wiki_root, wiki_files)
@@ -2823,6 +2970,9 @@ def check_source_coverage(
     stats["sources_integrated"] = sum(1 for source_id in manifest_by_id if source_id in integration_by_id)
     stats["source_lifecycle_counts"] = lifecycle_counts
     stats["sources_missing_normalized"] = missing_normalized
+    stats["sources_foreign_normalized"] = foreign_normalized
+    stats["normalized_contract_violations"] = contract_violations
+    stats["normalized_low_rendered_coverage"] = low_coverage_normalized
     stats["normalized_missing_source_note"] = missing_source_notes
     stats["integrated_missing_citation"] = missing_integrations
     stats["normalized_orphans"] = len(
@@ -3379,6 +3529,7 @@ def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
             wiki_root,
             wiki_files,
             results,
+            min_coverage_ratio=min_rendered_coverage_ratio(lint_config),
         )
     if validate_provenance:
         check_provenance(project_root, manifest_path, manifest_records, results)

@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -1157,7 +1158,7 @@ class NormalizedSourceLintTests(unittest.TestCase):
         self.assertEqual("HIGH", issues[0]["severity"])
 
     def test_normalized_title_confidence_low_emits_warning(self):
-        """Bug 3C: normalized record with title_confidence:low → WARNING pdf_title_uncertain."""
+        """Bug 3C: normalized record with title_confidence:low → LOW pdf_title_uncertain."""
         with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             norm = self._normalized_record_path(project)
@@ -1173,10 +1174,13 @@ class NormalizedSourceLintTests(unittest.TestCase):
 
         issues = self.issue_for_category(results, "pdf_title_uncertain")
         self.assertEqual(1, len(issues))
-        self.assertEqual("WARNING", issues[0]["severity"])
+        self.assertEqual("LOW", issues[0]["severity"])
+        # The severity must be one the workspace declares, or the finding drops out of
+        # every consumer that iterates the configured levels.
+        self.assertIn(issues[0]["severity"], LINT.severity_order(LINT.load_config(FIXTURES / "minimal-project")))
 
     def test_normalized_title_confidence_none_emits_warning(self):
-        """Bug 3C: normalized record with title_confidence:none → WARNING pdf_title_uncertain."""
+        """Bug 3C: normalized record with title_confidence:none → LOW pdf_title_uncertain."""
         with tempfile.TemporaryDirectory() as tmpdir:
             project = self.copy_fixture("minimal-project", Path(tmpdir))
             norm = self._normalized_record_path(project)
@@ -1191,7 +1195,7 @@ class NormalizedSourceLintTests(unittest.TestCase):
 
         issues = self.issue_for_category(results, "pdf_title_uncertain")
         self.assertEqual(1, len(issues))
-        self.assertEqual("WARNING", issues[0]["severity"])
+        self.assertEqual("LOW", issues[0]["severity"])
 
     def test_normalized_failed_status_does_not_emit_title_warning(self):
         """Bug 3C: status:failed suppresses pdf_title_uncertain even if confidence is low."""
@@ -2205,6 +2209,283 @@ Reusable output grounded in `{source_id}`.
 
         self.assertNotIn("academic_metadata_missing", self.issue_categories(results))
         self.assertFalse(results["config"]["enabled_checks"]["academic_publication_metadata"])
+
+
+class LintSeverityVocabularyTests(unittest.TestCase):
+    """Every finding must use a severity the workspace declares.
+
+    `issue_counts()` seeds its dict from the configured levels but counts whatever it
+    is given, so an undeclared severity does not fail loudly — it creates a key that
+    consumers iterating the configured levels never look at, and the finding stops
+    being counted anywhere.
+    """
+
+    SEVERITY_LITERAL = re.compile(r"\bissue\(\s*\n\s*results,\s*\n\s*\"([A-Z_]+)\"", re.MULTILINE)
+
+    def test_template_research_yml_declares_the_expected_levels(self):
+        config = yaml.safe_load((REPO_ROOT / "workspace-template" / "research.yml").read_text(encoding="utf-8"))
+        self.assertEqual(["HIGH", "MEDIUM", "LOW"], config["lint"]["severity_levels"])
+
+    def test_every_emitted_severity_is_declared(self):
+        declared = set(LINT.severity_order({}))
+        emitted = self.SEVERITY_LITERAL.findall(LINT_PATH.read_text(encoding="utf-8"))
+
+        self.assertTrue(emitted, "expected to find severity literals in lint.py")
+        undeclared = sorted({severity for severity in emitted if severity not in declared})
+        self.assertEqual([], undeclared, f"lint emits severities outside {sorted(declared)}")
+
+
+class NormalizedRecordContractLintTests(unittest.TestCase):
+    """Lint accepts a conforming foreign record and names a failing one.
+
+    The fixture record in `minimal-project` is written by a foreign normalizer
+    (`normalizer.name: fixture`), so it exercises exactly the path CR-2 cares about:
+    a record this package did not produce, held to the published contract.
+    """
+
+    CATEGORY = "normalized_record_contract_violation"
+
+    def copy_fixture(self, fixture_name: str, workspace: Path) -> Path:
+        source = FIXTURES / fixture_name
+        target = workspace / fixture_name
+        shutil.copytree(source, target)
+        return target
+
+    def run_lint(self, project_root: Path) -> dict:
+        config = LINT.load_config(project_root)
+        return LINT.run_checks(project_root, config)
+
+    def issue_categories(self, results: dict) -> set[str]:
+        return {issue["category"] for issue in results["issues"]}
+
+    def issue_for_category(self, results: dict, category: str) -> list[dict]:
+        return [issue for issue in results["issues"] if issue["category"] == category]
+
+    def record_path(self, project: Path) -> Path:
+        return project / "sources" / "normalized" / "paper--fixture-static.md"
+
+    def test_conforming_foreign_record_produces_no_findings(self):
+        results = self.run_lint(FIXTURES / "minimal-project")
+
+        self.assertEqual([], results["issues"])
+        self.assertEqual(1, results["stats"]["sources_foreign_normalized"])
+        self.assertEqual(0, results["stats"]["normalized_contract_violations"])
+
+    def test_failing_foreign_record_is_named_with_its_violation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            record = self.record_path(project)
+            record.write_text(
+                record.read_text().replace("status: content_extracted", "status: done"),
+                encoding="utf-8",
+            )
+
+            results = self.run_lint(project)
+
+        findings = self.issue_for_category(results, self.CATEGORY)
+        self.assertEqual(1, len(findings), results["issues"])
+        finding = findings[0]
+        self.assertEqual("NORMALIZED_CONTRACT_FRONTMATTER_INVALID", finding["code"])
+        self.assertEqual("status", finding["field"])
+        self.assertEqual("paper:fixture-static", finding["source_id"])
+        self.assertIn("normalize_verify.py", finding["recommendation"])
+        self.assertEqual(1, results["stats"]["normalized_contract_violations"])
+
+    def test_contract_violation_does_not_freeze_orchestration(self):
+        # A HIGH finding makes the controller refuse the next work order. A record that
+        # breaks the contract must not stop research on every other question.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            record = self.record_path(project)
+            record.write_text(
+                record.read_text().replace("normalized_format: 1\n", ""),
+                encoding="utf-8",
+            )
+
+            results = self.run_lint(project)
+
+        findings = self.issue_for_category(results, self.CATEGORY)
+        self.assertEqual(
+            "NORMALIZED_CONTRACT_FORMAT_VERSION_UNSUPPORTED",
+            findings[0]["code"],
+        )
+        self.assertEqual("MEDIUM", findings[0]["severity"])
+        self.assertEqual(0, results["stats"]["issue_counts"]["HIGH"])
+
+    def test_missing_record_still_reports_the_existing_finding(self):
+        # The contract check is additive; the absent-record case is unchanged.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            self.record_path(project).unlink()
+
+            results = self.run_lint(project)
+
+        categories = self.issue_categories(results)
+        self.assertIn("source_missing_normalized", categories)
+        self.assertNotIn(self.CATEGORY, categories)
+        self.assertEqual(0, results["stats"]["sources_foreign_normalized"])
+
+    def test_record_naming_no_producing_tool_is_left_alone(self):
+        # An unidentified record predates the contract rather than claiming it, so lint
+        # does not newly police it; `normalize_verify.py` still checks it on demand.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            record = self.record_path(project)
+            record.write_text(
+                record.read_text().replace("normalizer:\n  name: fixture\n  version: 1\n", ""),
+                encoding="utf-8",
+            )
+
+            results = self.run_lint(project)
+
+        self.assertNotIn(self.CATEGORY, self.issue_categories(results))
+        self.assertEqual(0, results["stats"]["sources_foreign_normalized"])
+
+    def test_native_record_is_not_held_to_the_foreign_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            record = self.record_path(project)
+            record.write_text(
+                record.read_text()
+                .replace("  name: fixture\n", "  name: normalize_sources.py\n")
+                .replace("normalized_format: 1\n", ""),
+                encoding="utf-8",
+            )
+
+            results = self.run_lint(project)
+
+        self.assertNotIn(self.CATEGORY, self.issue_categories(results))
+        self.assertEqual(0, results["stats"]["sources_foreign_normalized"])
+
+    def test_one_finding_per_record_however_many_violations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            record = self.record_path(project)
+            record.write_text(
+                record.read_text()
+                .replace("normalized_format: 1\n", "")
+                .replace("status: content_extracted", "status: done")
+                .replace("evidence_usable: true\n", ""),
+                encoding="utf-8",
+            )
+
+            results = self.run_lint(project)
+
+        self.assertEqual(1, len(self.issue_for_category(results, self.CATEGORY)))
+        self.assertGreater(results["stats"]["normalized_contract_violations"], 1)
+
+
+class RenderedCoverageLintTests(unittest.TestCase):
+    """The optional `lint.min_rendered_coverage_ratio` visibility notice.
+
+    A thin rendering is not a defect — capping a long series is a legitimate choice —
+    so this is off unless an operator sets a threshold, and LOW when it fires. The
+    real fix for un-quotable content is CR-7 anchors, not a lint gate.
+    """
+
+    CATEGORY = "normalized_low_rendered_coverage"
+
+    COVERAGE_BLOCK = (
+        "rendered_coverage:\n"
+        "  total_values: 40\n"
+        "  rendered_values: 10\n"
+        "  ratio: 0.25\n"
+        "  sections:\n"
+        "    - heading: Extracted Text\n"
+        "      total: 40\n"
+        "      rendered: 10\n"
+        "parse_warnings: []\n"
+    )
+
+    def prepare(self, workspace: Path, *, threshold: object = None, coverage: str | None = None) -> Path:
+        project = workspace / "minimal-project"
+        shutil.copytree(FIXTURES / "minimal-project", project)
+        if coverage is not None:
+            record = project / "sources" / "normalized" / "paper--fixture-static.md"
+            record.write_text(
+                record.read_text(encoding="utf-8").replace("parse_warnings: []\n", coverage),
+                encoding="utf-8",
+            )
+        if threshold is not None:
+            config = project / "research.yml"
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "lint:\n", f"lint:\n  min_rendered_coverage_ratio: {threshold}\n"
+                ),
+                encoding="utf-8",
+            )
+        return project
+
+    def run_lint(self, project_root: Path) -> dict:
+        return LINT.run_checks(project_root, LINT.load_config(project_root))
+
+    def findings(self, results: dict) -> list[dict]:
+        return [issue for issue in results["issues"] if issue["category"] == self.CATEGORY]
+
+    def test_no_threshold_means_no_notice(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.prepare(Path(tmpdir), coverage=self.COVERAGE_BLOCK)
+            results = self.run_lint(project)
+
+        # Default off: a workspace that never opts in sees exactly what it saw before.
+        self.assertEqual([], results["issues"])
+        self.assertEqual(0, results["stats"][self.CATEGORY])
+
+    def test_thin_rendering_is_reported_low_under_a_threshold(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.prepare(Path(tmpdir), threshold=0.8, coverage=self.COVERAGE_BLOCK)
+            results = self.run_lint(project)
+
+        findings = self.findings(results)
+        self.assertEqual(1, len(findings), results["issues"])
+        self.assertEqual("LOW", findings[0]["severity"])
+        self.assertEqual("paper:fixture-static", findings[0]["source_id"])
+        self.assertEqual("rendered_coverage.ratio", findings[0]["field"])
+        self.assertEqual(0.25, findings[0]["actual"])
+        self.assertEqual(1, results["stats"][self.CATEGORY])
+        # Visibility, not a gate: the orchestration controller keeps issuing work.
+        self.assertEqual(0, results["stats"]["issue_counts"]["HIGH"])
+
+    def test_rendering_at_or_above_the_threshold_is_silent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.prepare(Path(tmpdir), threshold=0.25, coverage=self.COVERAGE_BLOCK)
+            results = self.run_lint(project)
+
+        self.assertEqual([], self.findings(results))
+
+    def test_record_without_a_coverage_block_is_not_reported(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.prepare(Path(tmpdir), threshold=0.9)
+            results = self.run_lint(project)
+
+        # Declaring nothing is not declaring zero: most records render no structured
+        # content at all, and reporting them would bury the ones that matter.
+        self.assertEqual([], self.findings(results))
+
+    def test_unusable_threshold_disables_the_notice_rather_than_failing_the_run(self):
+        for value in ("'most'", "true", "-0.5", "2"):
+            with self.subTest(threshold=value):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    project = self.prepare(
+                        Path(tmpdir), threshold=value, coverage=self.COVERAGE_BLOCK
+                    )
+                    results = self.run_lint(project)
+
+                self.assertEqual([], results["issues"])
+
+    def test_notice_applies_to_native_records_too(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.prepare(Path(tmpdir), threshold=0.8, coverage=self.COVERAGE_BLOCK)
+            record = project / "sources" / "normalized" / "paper--fixture-static.md"
+            record.write_text(
+                record.read_text(encoding="utf-8").replace("  name: fixture\n", "  name: normalize_sources.py\n"),
+                encoding="utf-8",
+            )
+            results = self.run_lint(project)
+
+        # A thin rendering is a thin rendering whoever produced it — unlike the contract
+        # check, this one is not about trusting a foreign writer.
+        self.assertEqual(1, len(self.findings(results)))
 
 
 if __name__ == "__main__":

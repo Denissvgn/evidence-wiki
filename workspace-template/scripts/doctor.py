@@ -27,6 +27,7 @@ WORKSPACE_DIRS = {
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _normalization_config import NormalizationConfigError, adapter_summaries, normalization_config
 from _script_errors import handle_system_exit, json_mode_requested
 from _workspace_health import evaluate_workspace_health
 
@@ -444,6 +445,58 @@ def semantic_retrieval_check(project_root: Path, yaml_module: Any | None) -> dic
     )
 
 
+def normalization_adapters_check(project_root: Path, yaml_module: Any | None) -> dict[str, Any]:
+    """Report which external commands normalization is authorized to execute.
+
+    Doctor is where an auditor asks what a workspace can do before it does it, and a
+    configured adapter is the one place normalization runs something the package did
+    not ship. Listing the declarations — never running them — makes that visible
+    without opening research.yml.
+    """
+    config = load_research_config(project_root, yaml_module)
+    try:
+        adapters = normalization_config(config)["adapters"]
+    except NormalizationConfigError as exc:
+        return check_item(
+            "normalization_adapters",
+            "Normalizer adapters",
+            "degraded",
+            False,
+            f"The research.yml normalization section is invalid: {exc.message}",
+            (
+                "Normalization refuses to run at all while the section is invalid, so no source "
+                "of any kind can be normalized."
+            ),
+            exc.remediation,
+            details={"error_code": exc.error_code, "configured": 0, "adapters": []},
+        )
+
+    if not adapters:
+        return check_item(
+            "normalization_adapters",
+            "Normalizer adapters",
+            "ok",
+            False,
+            "No external normalizer adapters are configured.",
+            "Normalization runs no external commands; only the packaged extractors run.",
+            "No action required.",
+            details={"configured": 0, "adapters": []},
+        )
+
+    summaries = adapter_summaries(adapters)
+    kinds = sorted({kind for summary in summaries for kind in summary["kinds"]})
+    return check_item(
+        "normalization_adapters",
+        "Normalizer adapters",
+        "ok",
+        False,
+        f"{len(summaries)} external normalizer adapter(s) configured for: {', '.join(kinds)}.",
+        "Normalization executes these commands for sources of the mapped kinds.",
+        "Confirm each command is the reviewed tool you intended to authorize.",
+        details={"configured": len(summaries), "adapters": summaries},
+    )
+
+
 def secret_exposure_check(project_root: Path) -> dict[str, Any]:
     candidates = [project_root / ".env"]
     readable: list[str] = []
@@ -526,6 +579,7 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
         workspace_write_check(project_root, env),
         contract_check(project_root, yaml_module),
         semantic_retrieval_check(project_root, yaml_module),
+        normalization_adapters_check(project_root, yaml_module),
         secret_exposure_check(project_root),
         check_item(
             "workspace_health",

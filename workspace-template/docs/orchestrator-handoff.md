@@ -288,6 +288,34 @@ Compatibility policy:
 - `policy_vocabularies` lists the allowed evidence policy identifiers for coverage manifests and domain-pack coverage templates. Human-readable definitions live in [evidence-policies.md](evidence-policies.md).
 - `contract.compatible_research_yml_contract` in workspace status output (see step 5) reports what an already-created workspace was built against.
 
+### Machine Output On stdout
+
+Under `--format json`, **stdout carries exactly one JSON document and nothing else**.
+All logging, progress, and warnings go to stderr, and a fatal error is the stderr error
+envelope below with stdout left empty. Parse the whole of stdout — a host does not need
+to scan for the first `{`, skip banner lines, or tolerate trailing output, and any
+script that produced such output would be failing this contract rather than expressing
+a variation of it.
+
+Two properties an orchestrator should not mistake for violations:
+
+- **A non-zero exit does not mean "no document".** Commands whose job is to assess a
+  workspace — `doctor.py`, `lint.py`, `publication_readiness.py`,
+  `smoke_validate_workspace.py`, `workspace_status.py`, `workspace_gc.py`,
+  `fleet_status.py` — report an unreadable or failing workspace *as* their JSON
+  document and exit non-zero. Read stdout first; the envelope appears only when no
+  report could be built at all.
+- **One documented stream exception.** `source_inventory.py --dry-run` *without*
+  `--report` emits newline-delimited JSON manifest records (JSONL), one record per
+  line, preserving its dry-run stream contract. See
+  [source-manifest.md](source-manifest.md). Every other JSON surface is a single
+  document. Note that a bare `--dry-run` also counts as machine mode for the error
+  envelope.
+
+`tests/test_json_stdout_purity.py` enforces this per command, and any script that
+gains a `--format` option is required to enroll, so the guarantee cannot quietly
+regress.
+
 ### Error Envelope
 
 When a workspace script that supports machine output fails fatally under
@@ -1069,5 +1097,6 @@ evidence-wiki serve-mcp --target .
 - Question intake is all-or-nothing and idempotent: invalid batches write nothing, and re-submitted batches skip duplicates instead of overwriting pages.
 - Profiles without a `handoff` block behave exactly as before; the block is optional and additive, and intake/export carry it through to results.
 - Machine-readable artifacts carry explicit schema versions; breaking shape changes bump them.
+- Under `--format json`, stdout carries exactly one JSON document; diagnostics go to stderr, and a fatal error leaves stdout empty.
 - The MCP server is optional and read/append-only; the CLI scripts remain canonical.
 - Nothing in this contract installs hooks, starts background processes, or fetches remote content.

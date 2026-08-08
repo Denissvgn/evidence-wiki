@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import sys
 import tarfile
@@ -581,6 +582,71 @@ class DocumentedWorkflowTests(unittest.TestCase):
                 self.assertIn("PDF-only degradation", text)
                 self.assertIn("verify_quotes.py --slug <slug> --write", text)
         self.assertIn("methods.latex", acquisition_doc)
+
+    def test_normalized_source_format_is_a_versioned_public_contract(self):
+        normalized_format_doc = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
+
+        self.assertIn("versioned public contract", normalized_format_doc)
+        self.assertIn("normalized_format: 1", normalized_format_doc)
+        # An external writer must be able to learn the rule that applies to it: declare
+        # the version; the absent-is-legacy allowance is not a way out.
+        self.assertIn("An externally written record must declare `normalized_format`", normalized_format_doc)
+
+    def test_machine_output_contract_is_documented_for_hosts(self):
+        # The guarantee only helps an embedder who is told it exists — otherwise they
+        # keep the defensive "find the first `{`" parsing this contract removes.
+        handoff = re.sub(r"\s+", " ", HANDOFF_DOC.read_text())
+
+        self.assertIn("stdout carries exactly one JSON document", handoff)
+        self.assertIn("Parse the whole of stdout", handoff)
+        # Both documented exceptions, or a host will read a false violation.
+        self.assertIn("A non-zero exit does not mean", handoff)
+        self.assertIn("source_inventory.py --dry-run", handoff)
+        # Named so a reader can see the guarantee is enforced, not asserted.
+        self.assertIn("tests/test_json_stdout_purity.py", handoff)
+
+    def test_machine_output_contract_is_cross_linked(self):
+        for doc in (RESEARCH_YML_DOC, NORMALIZED_SOURCE_FORMAT_DOC):
+            with self.subTest(doc=doc.name):
+                text = re.sub(r"\s+", " ", doc.read_text())
+                self.assertIn("Machine Output On stdout", text)
+                self.assertIn("orchestrator-handoff.md", text)
+
+    def test_external_normalizer_workflow_is_documented(self):
+        normalized_format_doc = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
+
+        self.assertIn("Writing Records From an External Normalizer", normalized_format_doc)
+        # Acceptance is earned per record, not granted by origin — the promise the CR
+        # makes to a maintainer reviewing this change.
+        self.assertIn("only when the record conforms", normalized_format_doc)
+        self.assertIn("normalized_record_contract_violation", normalized_format_doc)
+        # An external writer must be told which records normalization will overwrite,
+        # because the loss is silent and needs no --force.
+        self.assertIn("will be overwritten", normalized_format_doc)
+
+    def test_source_delivery_states_a_delivery_is_not_yet_evidence(self):
+        delivery_doc = SOURCE_DELIVERY_DOC.read_text()
+
+        self.assertIn("Delivering a source is not enough", delivery_doc)
+        self.assertIn("SOURCE_NOT_NORMALIZED", delivery_doc)
+        self.assertIn("normalize_verify.py", delivery_doc)
+        self.assertIn("normalized-source-format.md", delivery_doc)
+
+    def test_record_verification_command_is_documented(self):
+        normalized_format_doc = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
+
+        self.assertIn("python3 scripts/normalize_verify.py --format json", normalized_format_doc)
+        self.assertIn("evidence-wiki normalize verify", normalized_format_doc)
+        # Every code the verifier can emit must be findable by the host that receives it.
+        for code in (
+            "NORMALIZED_CONTRACT_FRONTMATTER_MISSING",
+            "NORMALIZED_CONTRACT_FRONTMATTER_INVALID",
+            "NORMALIZED_CONTRACT_FORMAT_VERSION_UNSUPPORTED",
+            "NORMALIZED_CONTRACT_SECTIONS_INVALID",
+            "NORMALIZED_CONTRACT_MANIFEST_MISMATCH",
+            "NORMALIZED_CONTRACT_WARNINGS_INCONSISTENT",
+        ):
+            self.assertIn(code, normalized_format_doc)
 
     def test_pdf_extraction_migration_rule_is_documented(self):
         normalized_format_doc = NORMALIZED_SOURCE_FORMAT_DOC.read_text()

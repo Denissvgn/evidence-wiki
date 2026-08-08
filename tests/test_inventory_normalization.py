@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1009,30 +1010,363 @@ class LatexSafetyTests(unittest.TestCase):
         )
 
 
+class RawLinkFileGuidanceTests(unittest.TestCase):
+    """A link-shaped file whose URLs were not inventoried must be told the right fix.
+
+    Two situations produce a `kind: link` record and they need opposite remedies. A URL
+    list outside a link root is well-formed and simply in the wrong place; a file inside
+    a link root that yielded nothing is malformed. Naming the wrong one sends the
+    operator away from the fix — "remove them from raw link roots" is the reverse of
+    what a misplaced file needs.
+    """
+
+    def build(self, root: Path, files: dict[str, str]) -> tuple[list[dict], dict]:
+        workspace = root / "link-workspace"
+        (workspace / "sources").mkdir(parents=True)
+        for relative, content in files.items():
+            path = workspace / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        roots = sorted({str(Path(relative).parent.as_posix()) for relative in files})
+        (workspace / "research.yml").write_text(
+            "raw:\n  source_roots:\n" + "".join(f"    - {root_path}\n" for root_path in roots)
+            + "sources:\n  manifest_path: sources/manifest.jsonl\n",
+            encoding="utf-8",
+        )
+        config = INVENTORY.load_config(workspace)
+        records, warnings, summary = INVENTORY.build_records(workspace, config, previous_detected_at={})
+        report = INVENTORY.build_report_data(
+            records,
+            warnings,
+            summary,
+            workspace / "sources" / "manifest.jsonl",
+            workspace,
+            "2026-08-08T00:00:00Z",
+        )
+        return records, report
+
+    MISPLACED_ACTION = "Move link files under a link root"
+    MALFORMED_ACTION = "Fix malformed raw link files"
+
+    def test_url_list_outside_a_link_root_is_reported_as_misplaced(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            records, report = self.build(
+                Path(tmpdir), {"raw/data/sources.txt": "https://example.org/a\nhttps://example.org/b\n"}
+            )
+
+        link_records = records_by_kind(records, "link")
+        self.assertEqual(1, len(link_records), records)
+        self.assertEqual(
+            INVENTORY.LINK_PARSE_OUTSIDE_ROOT,
+            link_records[0]["metadata"]["link_parse_status"],
+        )
+        self.assertTrue(any(self.MISPLACED_ACTION in action for action in report["next_actions"]))
+        self.assertFalse(any(self.MALFORMED_ACTION in action for action in report["next_actions"]))
+
+    def test_the_misplaced_files_urls_are_not_inventoried_as_sources(self):
+        # This is what the guidance has to communicate: the URLs are simply absent.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            records, _ = self.build(
+                Path(tmpdir), {"raw/data/sources.txt": "https://example.org/a\nhttps://example.org/b\n"}
+            )
+
+        self.assertEqual([], records_by_kind(records, "web_link"))
+        self.assertEqual([], records_by_kind(records, "repo_link"))
+
+    def test_unparsable_file_inside_a_link_root_keeps_the_malformed_guidance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            records, report = self.build(Path(tmpdir), {"raw/links/broken.txt": "not a url\nalso not a url\n"})
+
+        link_records = records_by_kind(records, "link")
+        self.assertEqual(1, len(link_records), records)
+        self.assertEqual(INVENTORY.LINK_PARSE_NO_URLS, link_records[0]["metadata"]["link_parse_status"])
+        self.assertTrue(any(self.MALFORMED_ACTION in action for action in report["next_actions"]))
+        self.assertFalse(any(self.MISPLACED_ACTION in action for action in report["next_actions"]))
+
+    def test_both_situations_get_their_own_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, report = self.build(
+                Path(tmpdir),
+                {
+                    "raw/data/sources.txt": "https://example.org/a\n",
+                    "raw/links/broken.txt": "not a url\n",
+                },
+            )
+
+        self.assertTrue(any(self.MISPLACED_ACTION in action for action in report["next_actions"]))
+        self.assertTrue(any(self.MALFORMED_ACTION in action for action in report["next_actions"]))
+
+    def test_a_correctly_placed_link_file_produces_no_link_record_or_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            records, report = self.build(Path(tmpdir), {"raw/links/ok.txt": "https://example.org/correct\n"})
+
+        self.assertEqual([], records_by_kind(records, "link"))
+        self.assertEqual(1, len(records_by_kind(records, "web_link")))
+        for action in report["next_actions"]:
+            with self.subTest(action=action):
+                self.assertNotIn(self.MISPLACED_ACTION, action)
+                self.assertNotIn(self.MALFORMED_ACTION, action)
+
+    def test_a_url_extension_outside_a_link_root_still_expands(self):
+        # `.url`/`.webloc` are parse candidates anywhere, so location is not the rule
+        # for them; only bare `.txt` depends on the root.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            records, _ = self.build(Path(tmpdir), {"raw/data/bookmark.url": "https://example.org/anywhere\n"})
+
+        self.assertEqual([], records_by_kind(records, "link"))
+        self.assertEqual(1, len(records_by_kind(records, "web_link")))
+
+    def test_records_predating_the_field_keep_the_malformed_guidance(self):
+        # Backward compatibility: a manifest written before `link_parse_status` existed
+        # must not silently acquire the misplaced-file remedy.
+        legacy = {"id": "raw:legacy", "kind": "link", "raw_paths": ["raw/links/old.txt"], "metadata": {}}
+
+        self.assertEqual(INVENTORY.LINK_PARSE_NO_URLS, INVENTORY.link_parse_status(legacy))
+        actions = INVENTORY.report_next_actions("ready_for_normalization", {}, [], [], [legacy], [])
+        self.assertTrue(any(self.MALFORMED_ACTION in action for action in actions))
+        self.assertFalse(any(self.MISPLACED_ACTION in action for action in actions))
+
+
+class StructuredDataKindTests(unittest.TestCase):
+    """`.json`/`.jsonl` classify as `structured_data`, the kind adapters exist for.
+
+    The package does not extract structured payloads, so the kind is classified-only.
+    What it buys is a name an adapter can be mapped to and a fingerprint the eventual
+    record can go stale against.
+    """
+
+    def workspace_with(self, root: Path, files: dict[str, str]) -> Path:
+        workspace = root / "structured-workspace"
+        (workspace / "raw" / "data").mkdir(parents=True)
+        (workspace / "sources").mkdir(parents=True)
+        (workspace / "research.yml").write_text(
+            "raw:\n  source_roots:\n    - raw/data\n"
+            "sources:\n  manifest_path: sources/manifest.jsonl\n  normalized_dir: sources/normalized\n",
+            encoding="utf-8",
+        )
+        for name, content in files.items():
+            (workspace / "raw" / "data" / name).write_text(content, encoding="utf-8")
+        return workspace
+
+    def build(self, workspace: Path, previous: dict | None = None) -> list[dict]:
+        config = INVENTORY.load_config(workspace)
+        records, _, _ = INVENTORY.build_records(workspace, config, previous_detected_at=previous or {})
+        return records
+
+    def test_json_and_jsonl_classify_as_structured_data(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace_with(
+                Path(tmpdir),
+                {"keepa.json": '{"sku": "B0ABC"}\n', "series.jsonl": '{"a": 1}\n{"a": 2}\n'},
+            )
+            records = self.build(workspace)
+
+        self.assertEqual(2, len(records_by_kind(records, "structured_data")), records)
+        self.assertEqual([], records_by_kind(records, "unknown"))
+        self.assertEqual([], records_by_kind(records, "table"))
+
+    def test_tabular_kinds_are_unaffected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace_with(
+                Path(tmpdir),
+                {"rows.csv": "a,b\n1,2\n", "rows.tsv": "a\tb\n1\t2\n", "book.xlsx": "binary-ish"},
+            )
+            records = self.build(workspace)
+
+        self.assertEqual(3, len(records_by_kind(records, "table")), records)
+        self.assertEqual([], records_by_kind(records, "structured_data"))
+
+    def test_structured_data_records_carry_a_raw_fingerprint(self):
+        # Without a fingerprint an adapter-produced record could never be detected as
+        # stale when the payload it was built from changes.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace_with(Path(tmpdir), {"keepa.json": '{"price": 1}\n'})
+            first = self.build(workspace)[0]["raw_fingerprint"]
+
+            (workspace / "raw" / "data" / "keepa.json").write_text('{"price": 2}\n', encoding="utf-8")
+            second = self.build(workspace)[0]["raw_fingerprint"]
+
+        self.assertTrue(first.startswith("sha256:"), first)
+        self.assertNotEqual(first, second, "changed payload must change the fingerprint")
+
+    def test_provenance_sidecar_is_attached(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace_with(Path(tmpdir), {"keepa.json": '{"price": 1}\n'})
+            (workspace / "raw" / "data" / "keepa.json.provenance.yml").write_text(
+                "origin_url: https://api.keepa.com/product/B0ABC\n"
+                "license: null\n"
+                "retrieved_at: 2026-08-08T12:00:00Z\n"
+                "retrieved_by: autoseller/keepa\n",
+                encoding="utf-8",
+            )
+            record = self.build(workspace)[0]
+
+        self.assertEqual("structured_data", record["kind"])
+        self.assertEqual("https://api.keepa.com/product/B0ABC", record["provenance"]["origin_url"])
+        self.assertEqual("autoseller/keepa", record["provenance"]["retrieved_by"])
+
+    def test_structured_data_is_not_normalized_without_an_adapter(self):
+        # Classified-only: a manifest record exists, but nothing claims to extract it.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace_with(Path(tmpdir), {"keepa.json": '{"price": 1}\n'})
+            record = self.build(workspace)[0]
+
+            self.assertIsNone(NORMALIZE.normalization_method(workspace, record))
+            self.assertEqual([], NORMALIZE.eligible_records(workspace, [record]))
+
+    def test_reclassification_keeps_the_source_id_stable(self):
+        # Source ids are path-derived, so an existing workspace re-inventoried after the
+        # kind was introduced relabels its records without losing their identity or
+        # their first-sighting timestamp.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace_with(
+                Path(tmpdir),
+                {"payload.json": '{"a": 1}\n', "series.jsonl": '{"a": 1}\n'},
+            )
+            manifest_path = workspace / "sources" / "manifest.jsonl"
+
+            # A manifest written before the kind existed: `.json` was `unknown` and
+            # `.jsonl` was `table`, both with no fingerprint.
+            legacy = []
+            for record in self.build(workspace):
+                stale = dict(record)
+                stale["kind"] = "unknown" if stale["raw_paths"][0].endswith(".json") else "table"
+                stale.pop("raw_fingerprint", None)
+                stale["detected_at"] = "2026-01-01T00:00:00Z"
+                legacy.append(stale)
+            INVENTORY.write_manifest(manifest_path, legacy)
+            legacy_by_id = {record["id"]: record for record in legacy}
+
+            refreshed = self.build(workspace, previous=INVENTORY.existing_detected_at(manifest_path))
+
+        self.assertEqual(set(legacy_by_id), {record["id"] for record in refreshed}, "source ids churned")
+        for record in refreshed:
+            with self.subTest(source_id=record["id"]):
+                self.assertEqual("structured_data", record["kind"])
+                self.assertEqual("2026-01-01T00:00:00Z", record["detected_at"])
+                self.assertTrue(record["raw_fingerprint"].startswith("sha256:"))
+
+    def test_structured_data_is_not_a_natively_normalized_kind(self):
+        # The adapter config refuses kinds the package extracts itself; this kind must
+        # stay mappable, which is the whole point of introducing it.
+        config = load_script_module(
+            "structured_kind_normalization_config",
+            REPO_ROOT / "workspace-template" / "scripts" / "_normalization_config.py",
+        )
+        self.assertNotIn("structured_data", config.NATIVE_SOURCE_KINDS)
+        self.assertIn("table", config.NATIVE_SOURCE_KINDS)
+
+
 class ConcurrentInventoryTests(unittest.TestCase):
     """E15-T05: manifest write is atomic and inventory is idempotent under repeat/concurrent runs."""
 
-    def _do_inventory(self, workspace: Path) -> None:
+    def _manifest_path(self, workspace: Path) -> Path:
         config = INVENTORY.load_config(workspace)
         sources_config = config.get("sources") or {}
-        manifest_path = workspace / str(sources_config.get("manifest_path", "sources/manifest.jsonl"))
-        records, _, _ = INVENTORY.build_records(workspace, config, previous_detected_at={})
+        return workspace / str(sources_config.get("manifest_path", "sources/manifest.jsonl"))
+
+    def _do_inventory(self, workspace: Path) -> None:
+        """Run inventory the way `main()` does.
+
+        Reading prior timestamps is what makes inventory idempotent: `detected_at` is
+        carried forward per source, and only a source with no prior entry gets the
+        current clock reading. A run that passed `{}` instead would regenerate every
+        timestamp, so two runs would agree only when they landed in the same second.
+        """
+        config = INVENTORY.load_config(workspace)
+        manifest_path = self._manifest_path(workspace)
+        previous = INVENTORY.existing_detected_at(manifest_path)
+        records, _, _ = INVENTORY.build_records(workspace, config, previous_detected_at=previous)
         INVENTORY.write_manifest(manifest_path, records)
+
+    def _detected_at_by_id(self, manifest_path: Path) -> dict[str, str]:
+        return {
+            record["id"]: record["detected_at"]
+            for record in (json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip())
+        }
+
+    @contextlib.contextmanager
+    def clock_at(self, moment: str):
+        """Pin the clock inventory stamps new records with.
+
+        Without this the repeat-run test only proves that two runs a few milliseconds
+        apart agree, which they would even if every timestamp were regenerated. Moving
+        the clock between runs is what makes the assertion about carrying `detected_at`
+        forward rather than about wall-clock luck.
+        """
+        fixed = datetime.strptime(moment, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+        class PinnedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):  # noqa: ARG003 - signature mirrors datetime.now
+                return fixed
+
+        original = INVENTORY.datetime
+        INVENTORY.datetime = PinnedClock
+        try:
+            yield
+        finally:
+            INVENTORY.datetime = original
 
     def test_inventory_idempotent_on_repeat_run(self):
         """Running inventory twice on the same workspace produces identical manifests."""
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             shutil.copytree(FIXTURE_ROOT, workspace)
-
-            self._do_inventory(workspace)
             manifest_path = workspace / "sources" / "manifest.jsonl"
-            first_content = manifest_path.read_text()
 
-            self._do_inventory(workspace)
+            with self.clock_at("2026-08-08T09:00:00Z"):
+                self._do_inventory(workspace)
+            first_content = manifest_path.read_text()
+            first_detected = self._detected_at_by_id(manifest_path)
+
+            # Hours later, with no raw change: nothing may be restamped.
+            with self.clock_at("2026-08-08T11:30:00Z"):
+                self._do_inventory(workspace)
             second_content = manifest_path.read_text()
+            second_detected = self._detected_at_by_id(manifest_path)
 
         self.assertEqual(first_content, second_content, "Repeat inventory run produced different manifest")
+        self.assertTrue(first_detected, "fixture produced no manifest records")
+        self.assertEqual(
+            first_detected,
+            second_detected,
+            "detected_at must be carried forward, not regenerated, on a repeat run",
+        )
+        self.assertTrue(
+            all(value.startswith("2026-08-08T09:00:00") for value in second_detected.values()),
+            f"records kept the later run's clock instead of their first sighting: {second_detected}",
+        )
+
+    def test_new_source_is_stamped_while_existing_records_keep_their_timestamp(self):
+        """Carrying `detected_at` forward must not freeze the clock for new evidence."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            shutil.copytree(FIXTURE_ROOT, workspace)
+            manifest_path = workspace / "sources" / "manifest.jsonl"
+
+            with self.clock_at("2026-08-08T09:00:00Z"):
+                self._do_inventory(workspace)
+            original = self._detected_at_by_id(manifest_path)
+
+            (workspace / "raw" / "links" / "late-arrival.txt").write_text(
+                "https://example.org/late-arrival\n", encoding="utf-8"
+            )
+            with self.clock_at("2026-08-08T11:30:00Z"):
+                self._do_inventory(workspace)
+            updated = self._detected_at_by_id(manifest_path)
+
+        self.assertEqual(
+            original,
+            {source_id: updated[source_id] for source_id in original},
+            "pre-existing records must keep their first-sighting timestamp",
+        )
+        arrivals = sorted(set(updated) - set(original))
+        self.assertEqual(1, len(arrivals), f"expected exactly one new source, got {arrivals}")
+        self.assertTrue(
+            updated[arrivals[0]].startswith("2026-08-08T11:30:00"),
+            f"a newly seen source must be stamped when it was seen: {updated[arrivals[0]]}",
+        )
 
     def test_concurrent_inventory_produces_valid_manifest(self):
         """Two concurrent inventory runs must not corrupt the manifest (atomic write guard)."""
@@ -1147,6 +1481,57 @@ class RawFingerprintTests(unittest.TestCase):
             frontmatter = NORMALIZE.read_output_frontmatter(output)
             self.assertEqual("sha256:Z", frontmatter.get("raw_fingerprint"))
             self.assertEqual("2026-01-01", NORMALIZE.existing_created_date(output))
+
+
+class NormalizedFormatContractTests(unittest.TestCase):
+    """The versioned public record contract in docs/normalized-source-format.md."""
+
+    def link_frontmatter(self, output_path: Path) -> dict:
+        record = {
+            "id": "link:example-org-contract-check",
+            "kind": "web_link",
+            "url": "https://example.org/contract-check",
+            "raw_paths": ["raw/links/contract-check.txt"],
+        }
+        normalized = NORMALIZE.normalize_link_record(record)
+        return NORMALIZE.frontmatter_for(normalized, "sources/manifest.jsonl", output_path, "2026-08-07")
+
+    def test_written_records_declare_the_contract_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            frontmatter = self.link_frontmatter(Path(tmpdir) / "link--example-org-contract-check.md")
+
+        self.assertEqual(NORMALIZE.NORMALIZED_FORMAT_VERSION, frontmatter["normalized_format"])
+        self.assertEqual(
+            {"name": NORMALIZE.NORMALIZER_NAME, "version": NORMALIZE.NORMALIZER_VERSION},
+            frontmatter["normalizer"],
+        )
+
+    def test_contract_version_is_declared_before_source_identity(self):
+        # Readers and the format doc both present the contract version directly under
+        # `type`, so a truncated record still says which contract it claims.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            frontmatter = self.link_frontmatter(Path(tmpdir) / "link--example-org-contract-check.md")
+
+        self.assertEqual(["type", "normalized_format", "source_id"], list(frontmatter)[:3])
+
+    def test_records_from_the_previous_release_are_stale_and_backfilled(self):
+        # The contract version ships with a normalizer bump, so records written before
+        # it are regenerated once instead of keeping an undeclared format forever.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "rec.md"
+            output.write_text(
+                "---\n"
+                "type: normalized_source\n"
+                "normalizer:\n"
+                "  name: normalize_sources.py\n"
+                f"  version: {NORMALIZE.NORMALIZER_VERSION - 1}\n"
+                "---\n# x\n"
+            )
+            self.assertNotIn("normalized_format", NORMALIZE.read_output_frontmatter(output))
+            self.assertTrue(NORMALIZE.is_stale({}, output))
+
+            frontmatter = self.link_frontmatter(output)
+            self.assertEqual(NORMALIZE.NORMALIZED_FORMAT_VERSION, frontmatter["normalized_format"])
 
 
 class LogAppendTests(unittest.TestCase):

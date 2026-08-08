@@ -97,6 +97,12 @@ fixtures:
     shipped_paths:
       - tests/fixtures/minimal-project/**
   - <<: *synthetic_defaults
+    stable_id: normalizer-adapter
+    source_work: Synthetic reference implementation of the external normalizer adapter protocol, with a structured-data payload and delivery sidecar
+    created_at: 2026-08-08
+    shipped_paths:
+      - tests/fixtures/normalizer-adapter/**
+  - <<: *synthetic_defaults
     stable_id: mutation-fault-recovery
     source_work: Synthetic deterministic mutation-boundary fault matrix
     transformations: Wholly synthetic fault points, error classes, lifecycle states, and external-lane declarations.

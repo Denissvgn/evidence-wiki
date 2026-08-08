@@ -1,8 +1,10 @@
 ---
 type: normalized_source
+normalized_format: 1
 source_id: paper:fixture-dataview
 source_kind: paper
 status: content_extracted
+evidence_usable: true
 created: 2026-05-09
 updated: 2026-05-09
 raw_paths:

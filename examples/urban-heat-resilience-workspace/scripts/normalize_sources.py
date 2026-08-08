@@ -28,7 +28,7 @@ except ImportError as exc:  # pragma: no cover - environment guard
 
 
 NORMALIZER_NAME = "normalize_sources.py"
-NORMALIZER_VERSION = 2
+NORMALIZER_VERSION = 3
 OVERRIDABLE_EVIDENCE_USABILITY_REASONS = {"html_javascript_shell"}
 MAX_INCLUDE_DEPTH = 24
 MAX_UNRESOLVED_MACROS = 30
@@ -180,10 +180,30 @@ CODEBASE_MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 CODEBASE_SUPPORTED_ARTIFACT_SUFFIXES = {".json", ".md", ".txt"}
 NORMALIZATION_REPORT_SCHEMA_VERSION = "1.0"
 NORMALIZATION_REPORT_DOCUMENT_TYPE = "source_normalization_report"
+# Selection method for records handled by a configured external normalizer.
+ADAPTER_METHOD = "adapter"
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+# The contract module owns the record format this script writes, so the version stamped
+# into output and the path a source id resolves to are defined in exactly one place.
+from _normalization_config import NormalizationConfigError, adapter_for_kind, normalization_config
+from _normalized_contract import (
+    NORMALIZED_FORMAT_VERSION,
+    safe_source_id,
+)
+from _normalized_contract import (
+    validate_record as validate_normalized_record,
+)
+from _normalizer_adapter import (
+    EXTRACTION_METHOD as ADAPTER_EXTRACTION_METHOD,
+)
+from _normalizer_adapter import (
+    AdapterError,
+    build_request,
+    run_adapter,
+)
 from _script_errors import emit_error, handle_system_exit
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import unusable_evidence_reasons as delivery_unusable_evidence_reasons
@@ -225,6 +245,12 @@ class NormalizedSource:
     extracted_title: str | None = None
     pdf_extractor: str | None = None
     pdf_extractor_version: str | None = None
+    # Adapter records only: the producing tool's declared identity and its own verdict
+    # on the extraction, which the body cannot express.
+    adapter_status: str | None = None
+    adapter_name: str | None = None
+    adapter_version: str | None = None
+    rendered_coverage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -424,16 +450,6 @@ def load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def safe_source_id(source_id: str) -> str:
-    value = source_id.lower().replace(":", "__colon__")
-    value = re.sub(r"[/\s]+", "-", value)
-    value = re.sub(r"[^a-z0-9._-]+", "-", value)
-    value = re.sub(r"-{2,}", "-", value)
-    value = value.replace("__colon__", "--")
-    value = value.replace("-.", ".").strip("-")
-    return value or "source"
-
-
 def unique_values(values: list[str]) -> list[str]:
     unique: list[str] = []
     seen: set[str] = set()
@@ -506,11 +522,25 @@ def stored_pdf_extractor(frontmatter: dict[str, Any]) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
+def stored_normalizer_identity(frontmatter: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Producer name and version a record claims, both as written."""
+    normalizer = frontmatter.get("normalizer")
+    if not isinstance(normalizer, dict):
+        return None, None
+    name = normalizer.get("name")
+    version = normalizer.get("version")
+    return (
+        name if isinstance(name, str) and name else None,
+        str(version) if isinstance(version, (str, int)) and not isinstance(version, bool) else None,
+    )
+
+
 def is_stale(
     record: dict[str, Any],
     output_path: Path,
     *,
     pdf_extractor: str | None = None,
+    adapter: Any = None,
 ) -> bool:
     """True when raw inputs or the deterministic extraction profile changed.
 
@@ -521,9 +551,23 @@ def is_stale(
     additionally stale when their explicitly recorded extractor differs from the
     configured extractor; extractor patch versions remain provenance rather than an
     implicit rewrite trigger.
+
+    ``normalizer.version`` is the only rewrite trigger for record shape, so raising
+    NORMALIZED_FORMAT_VERSION requires raising NORMALIZER_VERSION with it; otherwise
+    records keep claiming a contract version whose shape they no longer have.
+
+    Adapter records are versioned by their adapter, not by this script. Comparing them
+    to NORMALIZER_VERSION would mark every one of them stale on every run — the stored
+    version is the adapter's, and a string like ``"1.4.0"`` is not this script's integer
+    — so each run would re-execute the adapter to reproduce a record it already had.
+    They are stale when the configured adapter identity changes or the raw payload does.
     """
     frontmatter = read_output_frontmatter(output_path)
-    if stored_normalizer_version(frontmatter) != NORMALIZER_VERSION:
+    if adapter is not None:
+        stored_name, stored_version = stored_normalizer_identity(frontmatter)
+        if (stored_name, stored_version) != (adapter.name, adapter.version):
+            return True
+    elif stored_normalizer_version(frontmatter) != NORMALIZER_VERSION:
         return True
     if pdf_extractor is not None and stored_pdf_extractor(frontmatter) != pdf_extractor:
         return True
@@ -749,7 +793,17 @@ def table_raw_path(record: dict[str, Any]) -> str | None:
     return None
 
 
-def normalization_method(project_root: Path, record: dict[str, Any]) -> str | None:
+def normalization_method(
+    project_root: Path,
+    record: dict[str, Any],
+    adapters: tuple[Any, ...] = (),
+) -> str | None:
+    """Which extractor handles a record, or ``None`` when nothing does.
+
+    Adapters are consulted last: `_normalization_config` already refuses to map a kind
+    this package extracts itself, so an adapter fills a gap rather than shadowing a
+    built-in extractor. Callers that pass no adapters get the pre-adapter behaviour.
+    """
     if is_codebase_record(record):
         return "codebase"
     if is_latex_record(record):
@@ -766,13 +820,19 @@ def normalization_method(project_root: Path, record: dict[str, Any]) -> str | No
         return "html"
     if record.get("kind") == "table" and table_raw_path(record) is not None:
         return "table"
+    if adapters and adapter_for_kind(adapters, record.get("kind")) is not None:
+        return ADAPTER_METHOD
     return None
 
 
-def eligible_records(project_root: Path, records: list[dict[str, Any]]) -> list[EligibleRecord]:
+def eligible_records(
+    project_root: Path,
+    records: list[dict[str, Any]],
+    adapters: tuple[Any, ...] = (),
+) -> list[EligibleRecord]:
     eligible: list[EligibleRecord] = []
     for record in records:
-        method = normalization_method(project_root, record)
+        method = normalization_method(project_root, record, adapters)
         if method:
             eligible.append(EligibleRecord(record=record, method=method))
     return eligible
@@ -800,6 +860,13 @@ def normalized_output_path_for_record(record: dict[str, Any], normalized_root: P
     return normalized_root / f"{safe_source_id(record_id(record))}.md"
 
 
+def staleness_adapter(item: EligibleRecord, adapters: tuple[Any, ...]) -> Any:
+    """The adapter that owns a record's freshness, or ``None`` for native output."""
+    if item.method != ADAPTER_METHOD:
+        return None
+    return adapter_for_kind(adapters, item.record.get("kind"))
+
+
 def select_eligible_records(
     args: argparse.Namespace,
     records: list[dict[str, Any]],
@@ -807,6 +874,7 @@ def select_eligible_records(
     normalized_root: Path,
     *,
     pdf_extractor: str | None = None,
+    adapters: tuple[Any, ...] = (),
 ) -> tuple[list[EligibleRecord], int, str]:
     by_id = records_by_source_id(records)
     eligible_by_id = eligible_by_source_id(eligible)
@@ -833,6 +901,7 @@ def select_eligible_records(
             item.record,
             output_path,
             pdf_extractor=desired_pdf_extractor,
+            adapter=staleness_adapter(item, adapters),
         ):
             pending.append(item)
     return pending, skipped_unsupported, "pending"
@@ -865,7 +934,69 @@ def normalize_selected_record(
         return normalize_table_record(project_root, item.record)
     if item.method == "codebase":
         return normalize_codebase_record(project_root, config, item.record)
+    if item.method == ADAPTER_METHOD:
+        return normalize_adapter_record(project_root, config, item.record)
     raise RuntimeError(f"Unsupported normalization method: {item.method}")
+
+
+def record_raw_paths(record: dict[str, Any]) -> list[str]:
+    value = record.get("raw_paths")
+    if not isinstance(value, list):
+        return []
+    return [path for path in value if isinstance(path, str) and path]
+
+
+def normalize_adapter_record(
+    project_root: Path,
+    config: dict[str, Any],
+    record: dict[str, Any],
+    adapters: tuple[Any, ...] | None = None,
+) -> NormalizedSource:
+    """Normalize one record through the external adapter configured for its kind.
+
+    The adapter supplies content; this function supplies none of the record's identity.
+    Everything the rest of the workspace trusts — the producer stamped into
+    `normalizer`, the raw fingerprint, the section structure — is derived here from the
+    manifest and the validated response, so a buggy adapter cannot make a record claim
+    more than it earned.
+    """
+    configured = normalization_config(config)["adapters"] if adapters is None else adapters
+    source_id = record_id(record)
+    adapter = adapter_for_kind(configured, record.get("kind"))
+    if adapter is None:
+        raise AdapterError(f"{source_id}: no normalizer adapter is configured for kind {record.get('kind')!r}")
+
+    raw_paths_value = record_raw_paths(record)
+    request = build_request(
+        project_root,
+        record,
+        raw_paths=raw_paths_value,
+        normalized_format=NORMALIZED_FORMAT_VERSION,
+    )
+    result = run_adapter(adapter, request, source_id=source_id, project_root=project_root)
+
+    return NormalizedSource(
+        record=record,
+        extraction_method=ADAPTER_EXTRACTION_METHOD,
+        title=result.title or source_id,
+        authors=[],
+        abstract=result.abstract,
+        outline=list(result.outline),
+        extracted_text=result.body_markdown,
+        media=[],
+        links=[],
+        bibliography_files=[],
+        included_paths=[],
+        warnings=list(result.warnings),
+        # A `partial` adapter result must not read as a clean extraction. `status_for`
+        # infers status from the body alone, which cannot see that the adapter capped
+        # or dropped content, so the adapter's own verdict is carried in a warning the
+        # renderer and the report both surface.
+        adapter_status=result.status,
+        adapter_name=result.name,
+        adapter_version=result.version,
+        rendered_coverage=result.rendered_coverage,
+    )
 
 
 def resolve_include_path(current_file: Path, include_name: str) -> Path:
@@ -3212,6 +3343,11 @@ def raw_paths(record: dict[str, Any], included_paths: list[str]) -> list[str]:
 
 
 def status_for(source: NormalizedSource) -> str:
+    if source.adapter_status is not None:
+        # The adapter's own verdict wins. Status is inferred from the body everywhere
+        # else, but a rendering that capped or dropped payload content looks complete
+        # from the outside — only the adapter knows it is `partial`.
+        return source.adapter_status
     if source.extraction_method in {"link_stub", "web_stub", "codebase_stub"}:
         return "stubbed"
     if source.extraction_method == "codebase_context":
@@ -3341,6 +3477,7 @@ def frontmatter_for(
     unusable_reasons = record_unusable_evidence_reasons(record)
     frontmatter: dict[str, Any] = {
         "type": "normalized_source",
+        "normalized_format": NORMALIZED_FORMAT_VERSION,
         "source_id": record.get("id"),
         "source_kind": record.get("kind"),
         "status": status_for(source),
@@ -3351,9 +3488,12 @@ def frontmatter_for(
         "normalized_at": normalized_at,
         "raw_paths": raw_paths(record, source.included_paths),
         "manifest_path": manifest_path,
+        # An adapter-produced record names the adapter as its producer, not this
+        # script: the content is the adapter's, and staleness for these records is
+        # decided by comparing this identity to the configured one.
         "normalizer": {
-            "name": NORMALIZER_NAME,
-            "version": NORMALIZER_VERSION,
+            "name": source.adapter_name or NORMALIZER_NAME,
+            "version": source.adapter_version if source.adapter_name else NORMALIZER_VERSION,
         },
         "parse_warnings": source.warnings,
         "title": source.title,
@@ -3398,6 +3538,10 @@ def frontmatter_for(
         }
         if source.pdf_extractor
         else None,
+        # How much of the payload this rendering actually contains. Grounding is by
+        # containment, so capped-away content is citable but never quotable; this is
+        # what makes that visible instead of silent.
+        "rendered_coverage": source.rendered_coverage,
         "content_hash": content_hash(source),
         "raw_fingerprint": record_raw_fingerprint(record),
         "references_source_ids": matched_reference_source_ids(source, manifest_records, project_root) or None,
@@ -3611,6 +3755,7 @@ def empty_summary(
         "html": 0,
         "tables": 0,
         "codebase": 0,
+        "adapter": 0,
     }
 
 
@@ -3670,7 +3815,8 @@ def render_normalization_log_entry(data: dict[str, Any]) -> str:
         f"links={summary['links']} "
         f"html={summary['html']} "
         f"tables={summary['tables']} "
-        f"codebase={summary['codebase']}\n"
+        f"codebase={summary['codebase']} "
+        f"adapter={summary['adapter']}\n"
     )
 
 
@@ -3694,6 +3840,7 @@ def print_summary(summary: dict[str, int | str]) -> None:
         f"html={summary['html']} "
         f"tables={summary['tables']} "
         f"codebase={summary['codebase']} "
+        f"adapter={summary['adapter']} "
         f"partial={summary['partial']} "
         f"failed={summary['failed']}",
         file=sys.stderr,
@@ -3701,7 +3848,7 @@ def print_summary(summary: dict[str, int | str]) -> None:
 
 
 def normalization_report_summary(summary: dict[str, int | str]) -> dict[str, Any]:
-    method_keys = ("latex", "pdf", "links", "html", "tables", "codebase")
+    method_keys = ("latex", "pdf", "links", "html", "tables", "codebase", "adapter")
     skipped_existing = int(summary["skipped_existing"])
     skipped_unsupported = int(summary["skipped_unsupported"])
     return {
@@ -3753,6 +3900,36 @@ def relative_output_path(project_root: Path, output_path: Path) -> str:
     return output_path.relative_to(project_root).as_posix()
 
 
+def verify_adapter_output(
+    project_root: Path,
+    output_path: Path,
+    records: list[dict[str, Any]],
+    normalized_root: Path,
+) -> None:
+    """Hold this script's own adapter rendering to the published record contract.
+
+    Lint checks foreign records because it cannot trust their writer. Here the writer is
+    this script, so a violation is a bug in the rendering above rather than in the
+    adapter's content — and shipping it would put a non-conforming record into the
+    workspace under the package's own name. The written file is removed so a failed
+    action never leaves evidence behind.
+    """
+    violations = validate_normalized_record(
+        output_path,
+        manifest_by_id=records_by_source_id(records),
+        normalized_root=normalized_root,
+    )
+    if not violations:
+        return
+    output_path.unlink(missing_ok=True)
+    first = violations[0]
+    field = f" (field: {first.field})" if first.field else ""
+    raise AdapterError(
+        f"{relative_output_path(project_root, output_path)}: adapter output did not satisfy the record "
+        f"contract — {first.code}{field}: {first.message}"
+    )
+
+
 def run_normalization(args: argparse.Namespace) -> int:
     json_output = args.format == "json"
     project_root = Path(args.project_root).resolve()
@@ -3764,7 +3941,8 @@ def run_normalization(args: argparse.Namespace) -> int:
     date_text = today_utc()
     run_timestamp = timestamp_utc()
     normalized_at = run_timestamp
-    eligible = eligible_records(project_root, records)
+    configured_adapters = normalization_config(config)["adapters"]
+    eligible = eligible_records(project_root, records, configured_adapters)
     selected_pdf_extractor_name = pdf_extractor_name(config, args.pdf_extractor)
     selected, skipped_unsupported, selector = select_eligible_records(
         args,
@@ -3772,6 +3950,7 @@ def run_normalization(args: argparse.Namespace) -> int:
         eligible,
         normalized_root,
         pdf_extractor=selected_pdf_extractor_name,
+        adapters=configured_adapters,
     )
     summary = empty_summary(len(selected), skipped_unsupported, selector)
     actions: list[dict[str, Any]] = []
@@ -3808,6 +3987,7 @@ def run_normalization(args: argparse.Namespace) -> int:
             item.record,
             output_path,
             pdf_extractor=desired_pdf_extractor,
+            adapter=staleness_adapter(item, configured_adapters),
         )
         if existed and not args.force and not stale:
             summary["skipped_existing"] += 1
@@ -3912,6 +4092,8 @@ def run_normalization(args: argparse.Namespace) -> int:
                 project_root=project_root,
                 force=True,
             )
+            if item.method == ADAPTER_METHOD:
+                verify_adapter_output(project_root, output_path, records, normalized_root)
         except Exception as exc:
             summary["failed"] += 1
             output_text = relative_output_path(project_root, output_path)
@@ -3966,6 +4148,14 @@ def run_normalization(args: argparse.Namespace) -> int:
                 }
                 if source.pdf_extractor
                 else None,
+                # Which external tool produced this record, so a report reader can tell
+                # without opening the record itself.
+                "adapter": {
+                    "name": source.adapter_name,
+                    "version": source.adapter_version,
+                }
+                if source.adapter_name
+                else None,
             }
         )
         if not json_output:
@@ -4017,6 +4207,18 @@ def main(argv: list[str] | None = None) -> int:
         return run_normalization(args)
     except LockUnavailableError as exc:
         emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
+        return 2
+    except NormalizationConfigError as exc:
+        # A misconfigured adapter section is a fatal setup error, not a per-source
+        # failure: it is read before any record is selected. Report it through the
+        # shared envelope so a host gets the code and remediation instead of a
+        # traceback.
+        emit_error(
+            exc.message,
+            json_mode=json_mode,
+            error_code=exc.error_code,
+            remediation=exc.remediation,
+        )
         return 2
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=2)

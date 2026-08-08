@@ -236,7 +236,7 @@ class PdfSuccessPathTests(unittest.TestCase):
             )
 
         self.assertEqual({"name": "pypdf", "version": "6.14.2"}, frontmatter["pdf_extractor"])
-        self.assertEqual(2, frontmatter["normalizer"]["version"])
+        self.assertEqual(NORMALIZE.NORMALIZER_VERSION, frontmatter["normalizer"]["version"])
 
     def test_failed_pypdf_extraction_writes_no_normalized_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -226,6 +226,26 @@ run:
 #   # hours). Applies under question scope only; null disables the age finding.
 #   max_pending_review_hours: 168
 
+# External normalizers for evidence this package cannot extract itself, such as
+# structured API payloads. The section is optional; leaving it out means no adapter
+# exists and normalization behaves exactly as it does today.
+#
+# Configuring an adapter authorizes this workspace to execute that command. The command
+# is an argv list so argument boundaries are explicit and no shell is involved, and the
+# declared name/version must match what the adapter reports, so a record's stated
+# producer can be checked against what was authorized. Kinds normalize_sources.py reads
+# itself (paper, pdf, repo_link, web_link, html, table, codebase_architecture) may not
+# be mapped. The package grants the adapter no network and no credentials.
+# normalization:
+#   adapters:
+#     - kinds: [structured_data]
+#       provider: command
+#       command: ["autoseller-normalize", "--format", "json"]
+#       name: autoseller-normalize
+#       version: "1.4.0"
+#       # Optional; defaults to 120 seconds, maximum 3600.
+#       timeout_seconds: 120
+
 lint:
   validate_structure: true
   validate_frontmatter: true

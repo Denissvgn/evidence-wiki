@@ -1,4 +1,11 @@
 ---
+normalized_format: 1
+evidence_usable: true
+created: 2026-07-07
+updated: 2026-07-07
+normalizer:
+  name: manual
+  version: 1
 type: normalized_source
 source_id: web:iso-19131
 source_kind: html
@@ -31,4 +38,35 @@ parse_warnings: []
 
 # ISO 19131:2022
 
+## Citation Metadata
+
+- URL: https://www.iso.org/standard/77442.html
+- Designation: ISO 19131:2022
+
+## Abstract
+
+Fixture capture of Geographic information - Data product specifications.
+
+## Outline
+
+- ISO 19131:2022
+
+## Extracted Text
+
 ISO 19131:2022 identifies Geographic information - Data product specifications.
+
+## Figures and Tables
+
+- None recorded.
+
+## Links
+
+- https://www.iso.org/standard/77442.html
+
+## Raw Source Paths
+
+- `raw/web/iso-19131-2022.html`
+
+## Parse Warnings
+
+- None recorded.

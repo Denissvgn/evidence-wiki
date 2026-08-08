@@ -244,6 +244,7 @@ python3 scripts/doctor.py --format json
 python3 scripts/smoke_validate_workspace.py --format text
 python3 scripts/source_inventory.py --report
 python3 scripts/normalize_sources.py --all --dry-run
+python3 scripts/normalize_verify.py --format text
 python3 scripts/lint.py --format text
 ```
 
@@ -296,6 +297,15 @@ grants provider permission. See [source discovery][source-discovery],
 profile][workspace-init-profile] for provider configuration. For reviewed
 local evidence, follow the [source-delivery contract][source-delivery], keep
 raw files immutable, then inventory and normalize them.
+
+Evidence is not limited to the source kinds this package extracts. [Normalized
+records][normalized-source] are a versioned public contract, so an external
+normalizer can supply records for evidence the package does not read itself —
+structured API payloads, instrument output — and those records count on exactly
+the same terms as records the package wrote. The terms are enforced, not assumed:
+`evidence-wiki normalize verify` checks a record against the contract and names
+each breach with a stable code, and lint accepts an externally written record only
+when it conforms.
 
 ## Repository Layout
 

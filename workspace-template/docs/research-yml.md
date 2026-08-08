@@ -209,6 +209,69 @@ review:
   max_pending_review_hours: 168
 ```
 
+### `normalization`
+
+Optional. Maps manifest source kinds to an external normalizer, so evidence this
+package cannot extract — structured API payloads, instrument output — can produce
+normalized records through the normal pipeline instead of being written around it. The
+whole section may be omitted; no adapter then exists and normalization behaves exactly
+as it did before the section. Adding the section does not change
+`compatible_research_yml_contract`.
+
+```yaml
+normalization:
+  adapters:
+    - kinds: [structured_data]
+      provider: command
+      command: ["autoseller-normalize", "--format", "json"]
+      name: autoseller-normalize
+      version: "1.4.0"
+      timeout_seconds: 120
+```
+
+- `adapters`: list of adapter declarations. Absent or empty means no adapter.
+- `kinds`: non-empty list of manifest source kinds this adapter normalizes. One kind
+  resolves to exactly one adapter, so two adapters may not claim the same kind.
+  Membership is open — a domain pack may declare its own namespaced kinds — but kinds
+  `normalize_sources.py` extracts itself (`paper`, `pdf`, `repo_link`, `web_link`,
+  `html`, `table`, `codebase_architecture`) are refused, because adapters exist to fill
+  a gap rather than to override a built-in extractor from one config line.
+- `provider`: `command` (the only value today). Required rather than defaulted, so
+  `research.yml` states plainly that the workspace executes something.
+- `command`: argv list, for example `["tool", "--flag", "value"]`. A command string is
+  refused: splitting one into arguments would guess at the operator's quoting, and an
+  argv list says exactly what runs with no shell in the path.
+- `name`, `version`: the adapter's declared identity. Both are required and are matched
+  against what the adapter reports, so a record's stated producer can be checked
+  against what this workspace authorized. `version` is a string; quote it so a value
+  like `"1.40"` keeps its exact form.
+- `timeout_seconds`: optional, default 120, between 1 and 3600. An adapter that never
+  returns would otherwise hang normalization.
+
+**Security stance.** Configuring an adapter authorizes this package to execute that
+command during normalization — the same explicit-reviewed-config model as
+`integrations.retrieval.command`. The package grants the adapter nothing: no network,
+no credentials, no writes of its own. Whatever the adapter reaches, it reaches on its
+own authority. This is deliberately unlike `integrations.codebase_analysis`, whose
+configured command this package records for a human to run but never executes itself;
+that boundary is unchanged.
+
+`scripts/doctor.py` reports what a workspace is authorized to execute under its
+`normalization_adapters` check: every configured adapter's kinds, command, declared
+identity, and timeout, or an explicit "no external normalizer adapters are configured"
+when the section is absent. Doctor only reads the declaration — it never runs the
+command — so it is safe to use as the audit step before an unattended run.
+
+An invalid `normalization` value is not silently replaced by a default: scripts reject
+the workspace config, because quietly ignoring a misconfigured adapter would let a
+workspace believe its structured evidence had been normalized when nothing ran.
+`normalize_sources.py` reports the failure through the shared error envelope with
+`error_code: CONFIG_INVALID`, and doctor reports the same problem as a degraded check.
+Omit a key to accept its default, or use an `x-` prefix for experimental keys.
+
+See [normalized-source-format.md](normalized-source-format.md) for the record contract
+adapter output must satisfy.
+
 ### `lint`
 
 Defines validation behavior for future lint tooling.
@@ -216,7 +279,7 @@ Defines validation behavior for future lint tooling.
 - `validate_structure`: check configured directories.
 - `validate_frontmatter`: check required fields and allowed types.
 - `validate_links`: check internal Markdown links.
-- `validate_source_coverage`: compare manifest, normalized records, and notes.
+- `validate_source_coverage`: compare manifest, normalized records, and notes. A manifest source with no normalized record emits LOW `source_missing_normalized`. A record that names a producing tool other than this package's is additionally held to the published record contract: it is accepted exactly as a native record when it conforms, and emits MEDIUM `normalized_record_contract_violation` naming the first breach when it does not. MEDIUM rather than HIGH, so one malformed record cannot freeze orchestration across the workspace; the gates that decide whether a record can support an answer fail closed independently. A record that names no producing tool is left alone — it predates the contract rather than claims it — while `normalize_verify.py` checks every record on demand. See [normalized-source-format.md](normalized-source-format.md).
 - `validate_claims`: validate structured claim pages or embedded claims.
 - `validate_provenance`: require license provenance on automated deliveries (manifest records whose `provenance.retrieved_by` is set; MEDIUM `provenance_missing_license`).
 - `validate_source_requests`: check the source-request artifact — blocked questions should reference an open or fulfilled request (LOW `question_blocked_no_request`) and fulfilled requests must point at existing manifest sources (MEDIUM `request_fulfilled_missing_source`); malformed request lines are reported (MEDIUM `source_request_invalid`).
@@ -224,6 +287,7 @@ Defines validation behavior for future lint tooling.
 - `validate_questions`: validate question task records, including answered/blocked consistency, coverage manifests, and claim hygiene — answered questions with `coverage_required: true` but missing, blocked, or invalid coverage emit HIGH `question_coverage_missing`, `question_coverage_blocked`, or `question_coverage_invalid`; `in_progress` questions without `claimed_by`/`claimed_at` emit MEDIUM `question_claim_missing`, and claims older than `run.claim_staleness_hours` emit LOW `question_claim_stale`. Questions in `human_review` emit MEDIUM `question_human_review_pending`; under `review.escalation_scope: question` they additionally emit HIGH `question_human_review_stale` once `human_review_requested_at` is older than `review.max_pending_review_hours`, or MEDIUM `question_human_review_undated` when that timestamp is missing or unparseable.
 - `detect_prompt_injection_patterns`: default-on weak reviewer-awareness heuristic. When enabled, lint scans normalized Markdown records, question pages, and parsed manifest `provenance.notes` values for instruction-like phrases, structural prompt-injection shapes, and large base64-like blobs after Unicode/zero-width normalization. It reports LOW `source_prompt_injection_pattern` findings and never reads raw files, opens provenance sidecars, or fetches provenance URLs.
 - `dataview_aware`: account for Dataview-generated index sections.
+- `min_rendered_coverage_ratio`: optional number in `[0, 1]`. Unset by default, which disables the check. When set, any normalized record whose `rendered_coverage.ratio` falls below it emits LOW `normalized_low_rendered_coverage`, and the count appears as the `normalized_low_rendered_coverage` stat. This is a visibility control, not a gate: capping a long series is a legitimate rendering choice, and the un-rendered part stays citable by containment even though it cannot be quoted. Records that declare no `rendered_coverage` block are never reported — declaring nothing is not declaring zero. A value that is not a number in range disables the check rather than failing the run. See [normalized-source-format.md](normalized-source-format.md).
 - `severity_levels`: allowed issue severities.
 
 ### `outputs`
@@ -373,6 +437,14 @@ workspace-relative paths that are merged with lexical/FTS results as
 `engine: hybrid`. Semantic artifacts must stay under `.research-cache/`, and
 semantic ranking never replaces grounding, citation, coverage, or publication
 readiness gates.
+
+## Machine Output
+
+Every script configured by this file follows one output contract: under
+`--format json`, stdout carries exactly one JSON document, diagnostics go to stderr,
+and a fatal error — including an invalid section in this file — is the shared error
+envelope on stderr with stdout left empty. See "Machine Output On stdout" in
+[orchestrator-handoff.md](orchestrator-handoff.md).
 
 ## Extension Rules
 
