@@ -55,6 +55,23 @@ _REMEDIATIONS = {
     "QUERY_MISSING": "Provide one or more query terms.",
     "QUESTION_UNKNOWN": "Use a question slug that exists under wiki/questions/.",
     "REQUEST_UNKNOWN": "List requests with scripts/source_requests.py list --format json and choose an existing id.",
+    "REQUEST_ALREADY_FULFILLED": (
+        "A fulfilled request has evidence and no failed attempt to record; open a new request "
+        "if the delivered source turned out to be unusable."
+    ),
+    "ATTEMPT_FAILURE_CODE_INVALID": (
+        "Use an acquisition-attempt failure code documented in docs/source-delivery.md."
+    ),
+    "SOURCE_REQUEST_FULFILL_DELEGATED": (
+        "Fulfil or record an attempt against this request while executing the delegated acquisition work "
+        "order that scopes it, or finish the active session first."
+    ),
+    "QUESTION_REOPEN_DELEGATED": (
+        "Reopen this question while executing the work order that scopes it, or finish the active session first."
+    ),
+    "ORCHESTRATION_STATE_UNREADABLE": (
+        "Restore the orchestration control tree; unreadable session state cannot authorize a mutation."
+    ),
     "SOURCE_UNKNOWN": "Run scripts/source_inventory.py --report and choose a source id present in the manifest.",
     "TOOLING_MISSING": "Restore or upgrade the workspace scripts from the starter.",
     "INTAKE_TOTAL_CAP_EXCEEDED": (
@@ -193,6 +210,10 @@ def classify_error_code(message: str) -> str:
         return "QUESTION_UNKNOWN"
     if text.startswith("Unknown request id:") or "already fulfilled by a different source id" in lower:
         return "REQUEST_UNKNOWN"
+    if text.startswith("Request already fulfilled:"):
+        return "REQUEST_ALREADY_FULFILLED"
+    if text.startswith("Unknown attempt failure code:"):
+        return "ATTEMPT_FAILURE_CODE_INVALID"
     if text.startswith("Unknown source id:"):
         return "SOURCE_UNKNOWN"
     if text.startswith("Missing sibling workspace script:") or text.startswith("Cannot load sibling workspace script:"):

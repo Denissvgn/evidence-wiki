@@ -281,9 +281,43 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
             legacy_session,
             payload["artifact_schema_documents"]["orchestration_session"],
         )
+        # A session predating delegated acquisition carries none of its fields.
+        predelegation_session = copy.deepcopy(session)
+        for field in ("acquisition_mode", "acquirer_agent_id", "max_attempts_per_request"):
+            predelegation_session.pop(field)
+        assert_matches_schema(
+            predelegation_session,
+            payload["artifact_schema_documents"]["orchestration_session"],
+        )
+        # A delegated session names its acquirer, so the field is a string here rather
+        # than the null a providers-mode session carries.
+        delegated_session = copy.deepcopy(session)
+        delegated_session["acquisition_mode"] = "delegated"
+        delegated_session["acquirer_agent_id"] = "autoseller-orchestrator"
+        delegated_session["max_attempts_per_request"] = 3
+        assert_matches_schema(
+            delegated_session,
+            payload["artifact_schema_documents"]["orchestration_session"],
+        )
         assert_matches_schema(
             order,
             payload["artifact_schema_documents"]["orchestration_work_order"],
+        )
+        # A delegated acquisition order adds two optional fields; an order without them is
+        # a provider-mode order, which is every order issued before delegation existed.
+        delegated_order = copy.deepcopy(order)
+        delegated_order["phase"] = "acquisition"
+        delegated_order["skill"] = "research-acquire-delegated"
+        delegated_order["acquisition_mode"] = "delegated"
+        delegated_order["assigned_agent_id"] = "autoseller-orchestrator"
+        assert_matches_schema(
+            delegated_order,
+            payload["artifact_schema_documents"]["orchestration_work_order"],
+        )
+        self.assertEqual(
+            delegated_order,
+            orchestration._validate_work_order(copy.deepcopy(delegated_order)),
+            "the host validator must accept the optional delegation fields",
         )
         assert_matches_schema(
             {

@@ -313,6 +313,142 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertTrue(all(document["status"] == "submitted" for document in attempt_documents))
         self.assertTrue(all(document["artifact_type"] == "orchestration_attempt" for document in attempt_documents))
 
+    def deployed_workspace(self, root: Path, *, orchestration_section: str = "") -> Path:
+        target = root / "delegation workspace"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                0,
+                cli.main(
+                    [
+                        "deploy",
+                        "--target",
+                        str(target),
+                        "--project-name",
+                        "delegation-host",
+                        "--project-description",
+                        "Managed refusal for delegated acquisition.",
+                    ]
+                ),
+            )
+        if orchestration_section:
+            config = target / "research.yml"
+            config.write_text(
+                config.read_text(encoding="utf-8") + orchestration_section,
+                encoding="utf-8",
+            )
+        return target
+
+    DELEGATED_SECTION = "\norchestration:\n  acquisition: delegated\n  acquirer_agent_id: acquirer-1\n"
+
+    def test_managed_run_refuses_a_delegated_workspace_before_a_session_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.deployed_workspace(root, orchestration_section=self.DELEGATED_SECTION)
+            stderr = io.StringIO()
+
+            # No runner patches: a delegated workspace is refused for what it declares,
+            # not for whether this machine has Codex installed.
+            with contextlib.redirect_stderr(stderr):
+                code = cli.main(
+                    ["orchestrate", "run", "--target", str(target), "--runner", "codex", "--agent-id", "host-test"]
+                )
+
+            self.assertEqual(orchestration.EXIT_INVALID, code)
+            self.assertIn("RUNNER_DELEGATED_ACQUISITION_UNSUPPORTED", stderr.getvalue())
+            self.assertIn("orchestrate start/next/submit", stderr.getvalue())
+            self.assertFalse((target / "runs" / "orchestrations").exists())
+
+    def test_managed_resume_refuses_a_delegated_workspace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.deployed_workspace(root, orchestration_section=self.DELEGATED_SECTION)
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                code = cli.main(
+                    [
+                        "orchestrate",
+                        "resume",
+                        "--target",
+                        str(target),
+                        "--runner",
+                        "codex",
+                        "--orchestration-id",
+                        "orch-absent",
+                    ]
+                )
+
+            self.assertEqual(orchestration.EXIT_INVALID, code)
+            self.assertIn("RUNNER_DELEGATED_ACQUISITION_UNSUPPORTED", stderr.getvalue())
+
+    def test_the_external_protocol_still_drives_a_delegated_workspace(self):
+        # The refusal must not reach the commands delegation is meant to be driven with.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.deployed_workspace(root, orchestration_section=self.DELEGATED_SECTION)
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                code = cli.main(
+                    [
+                        "orchestrate",
+                        "start",
+                        "--target",
+                        str(target),
+                        "--agent-id",
+                        "pm-agent",
+                        "--orchestration-id",
+                        "orch-delegated",
+                        "--format",
+                        "json",
+                    ]
+                )
+
+            self.assertEqual(0, code)
+            session = json.loads(stdout.getvalue())
+            self.assertEqual("delegated", session["acquisition_mode"])
+            self.assertEqual("acquirer-1", session["acquirer_agent_id"])
+
+    def test_a_providers_workspace_is_not_refused(self):
+        # The guard must key on the declaration, not on the section existing at all.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for label, section in (
+                ("no section", ""),
+                ("explicit providers", "\norchestration:\n  acquisition: providers\n"),
+            ):
+                with self.subTest(case=label):
+                    target = self.deployed_workspace(root / label, orchestration_section=section)
+                    orchestration._refuse_delegated_acquisition(target)
+
+    def test_an_unreadable_declaration_leaves_the_verdict_to_the_controller(self):
+        # The host does not validate; a malformed section must not be silently treated as
+        # delegated, nor swallowed here. `start` refuses it with CONFIG_INVALID instead.
+        cases = {
+            "section is not a mapping": "\norchestration: delegated\n",
+            "acquisition is not a string": "\norchestration:\n  acquisition: [delegated]\n",
+            "unparseable yaml": "\norchestration:\n  acquisition: [delegated\n",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for label, section in cases.items():
+                with self.subTest(case=label):
+                    target = self.deployed_workspace(root / label.replace(" ", "-"), orchestration_section=section)
+                    self.assertIsNone(orchestration._declared_acquisition_mode(target))
+                    orchestration._refuse_delegated_acquisition(target)
+
+    def test_a_delegated_declaration_missing_its_acquirer_is_still_refused(self):
+        # Incomplete but unambiguous: the workspace has said who acquires, so the managed
+        # runner is the wrong tool regardless of whether the section would validate.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.deployed_workspace(
+                Path(tmpdir), orchestration_section="\norchestration:\n  acquisition: delegated\n"
+            )
+
+            with self.assertRaises(orchestration.OrchestrationHostError) as caught:
+                orchestration._refuse_delegated_acquisition(target)
+            self.assertIn("RUNNER_DELEGATED_ACQUISITION_UNSUPPORTED", str(caught.exception))
+
     def test_codex_network_read_paths_use_linux_system_configuration_for_regular_resolver(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_root = Path(tmpdir) / "etc"

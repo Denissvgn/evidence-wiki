@@ -105,7 +105,15 @@ WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
             "documented in docs/source-manifest.md: --dry-run without --report keeps the JSONL stream contract",
         ),
     ),
-    "source_requests.py": (Case((*ROOT, "list", "--format", "json"), DOCUMENT),),
+    "source_requests.py": (
+        Case((*ROOT, "list", "--format", "json"), DOCUMENT),
+        Case(
+            (*ROOT, "record-attempt-failure", "--request-id", "{request}", "--failure-code", "no_result",
+             "--orchestration-id", "{orchestration}", "--action-id", "purity-action", "--format", "json"),
+            DOCUMENT,
+            "a mutating command that also appends to log.md must still emit one document",
+        ),
+    ),
     "verify_citations.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
     "verify_quotes.py": (Case((*ROOT, "--slug", "{slug}", "--format", "json"), DOCUMENT),),
     "workspace_gc.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
@@ -178,11 +186,20 @@ class JsonStdoutPurityTests(unittest.TestCase):
         orchestrations = sorted((cls.workspace / "runs" / "orchestrations").glob("orch-*"))
         assert orchestrations, "setup could not create an orchestration session to report on"
 
+        cls._run_setup(
+            "source_requests.py",
+            [*project, "add", "--kind", "other", "--query-or-identifier", "purity probe",
+             "--rationale", "Gives the attempt-audit command an open request to record against."],
+        )
+        requests_file = cls.workspace / "sources" / "source-requests.jsonl"
+        request_id = json.loads(requests_file.read_text(encoding="utf-8").splitlines()[0])["request_id"]
+
         cls.substitutions = {
             "{slug}": slug,
             "{batch}": str(batch),
             "{run}": run_id,
             "{orchestration}": orchestrations[0].name,
+            "{request}": request_id,
         }
 
     @classmethod

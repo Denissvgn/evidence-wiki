@@ -190,6 +190,19 @@ def main() -> int:
     }
     if not required_provider_assets <= starter_assets:
         raise SystemExit("installed CLI contract omitted required provider workflow assets")
+    # Every skill a work order can name must survive packaging: the controller writes the
+    # skill id into the order, so a missing file hands the worker — or an external
+    # acquirer under delegated acquisition — a dangling pointer to its own playbook.
+    required_work_order_skills = {
+        "workspace-template/skills/research-run.md",
+        "workspace-template/skills/research-discover.md",
+        "workspace-template/skills/research-acquire.md",
+        "workspace-template/skills/research-acquire-delegated.md",
+        "workspace-template/skills/research-verify.md",
+    }
+    if not required_work_order_skills <= starter_assets:
+        missing = sorted(required_work_order_skills - starter_assets)
+        raise SystemExit(f"installed CLI contract omitted work-order skills: {', '.join(missing)}")
 
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-wheel-smoke-") as tmpdir:
         temporary_root = Path(tmpdir)

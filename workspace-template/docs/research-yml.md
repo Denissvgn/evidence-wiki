@@ -272,6 +272,67 @@ Omit a key to accept its default, or use an `x-` prefix for experimental keys.
 See [normalized-source-format.md](normalized-source-format.md) for the record contract
 adapter output must satisfy.
 
+### `orchestration`
+
+Optional. Declares who acquires evidence for this workspace. The whole section may be
+omitted; every key then falls back to the default below, which reproduces the behavior of
+workspaces that predate the section. Adding the section does not change
+`compatible_research_yml_contract`.
+
+```yaml
+orchestration:
+  acquisition: delegated
+  acquirer_agent_id: autoseller-orchestrator
+  max_attempts_per_request: 2
+```
+
+- `acquisition`: `providers` (default) or `delegated`.
+  - `providers`: the orchestration controller issues an acquisition work order only when
+    an enabled `integrations.acquisition` provider can fetch the source. A workspace with
+    no enabled provider never reaches the acquisition phase and terminates
+    `blocked_on_sources` once its open requests have no route.
+  - `delegated`: an external acquirer fulfils source requests. The controller issues
+    acquisition work orders scoped to open request ids and addressed to
+    `acquirer_agent_id`; the acquirer delivers evidence, fulfils the request, and reopens
+    the blocked question **while that order is pending**, so the mutation is verified as a
+    postcondition instead of happening between actions where no work order accounts for
+    it. See [orchestration.md](orchestration.md).
+- `acquirer_agent_id`: required under `acquisition: delegated`, refused otherwise. Same
+  shape as `--agent-id`: a non-empty string of at most 160 characters with no control
+  characters.
+- `max_attempts_per_request`: recorded attempt failures that retire one source request
+  within a session (default 2, maximum 10). Read under delegation only. There is
+  deliberately no unlimited value: an unbounded retry budget would let one failing request
+  keep a session alive forever. Attempts are counted per session, so a new session gets a
+  fresh look at every request — that is the supported way to retry after fixing a
+  host-side cause, rather than editing the append-only attempt audit.
+
+**Delegation is not a provider grant.** It authorizes no network access, no credentials,
+and no fetching by this package; whatever the acquirer reaches, it reaches on its own
+authority. `integrations.acquisition.providers` must stay empty under delegation — the two
+are mutually exclusive, and declaring both is refused when the session starts rather than
+resolved silently in favor of one.
+
+Delegated acquisition is an external-protocol mode. Drive it with
+`evidence-wiki orchestrate start/next/submit`; the package-managed `orchestrate run` and
+`resume` runners refuse a delegated workspace, because a delegated acquisition order is
+addressed to the host's own connectors and no managed worker can execute it.
+
+`scripts/doctor.py` reports the posture under its `acquisition_mode` check — the mode, the
+declared acquirer, and the attempts budget — so an auditor can see who acquires for this
+workspace without opening `research.yml`. `scripts/workspace_status.py` carries
+`acquisition_mode` and `acquirer_agent_id` on its parent-session summary, and the MCP
+`workspace_status` tool passes them through. Lint's delegation-specific findings are listed
+under `validate_source_requests` below.
+
+An invalid `orchestration` value is not silently replaced by a default: scripts reject the
+workspace config. Defaulting to `providers` would leave a workspace that believes it
+delegates unable to issue any acquisition order at all, and defaulting to `delegated`
+would address work orders to an acquirer nobody declared — both failures are silent.
+Delegated-only keys under `acquisition: providers` are refused for the same reason: they
+state an intent the workspace will not act on. Omit a key to accept its default, or use an
+`x-` prefix for experimental keys.
+
 ### `lint`
 
 Defines validation behavior for future lint tooling.
@@ -282,7 +343,7 @@ Defines validation behavior for future lint tooling.
 - `validate_source_coverage`: compare manifest, normalized records, and notes. A manifest source with no normalized record emits LOW `source_missing_normalized`. A record that names a producing tool other than this package's is additionally held to the published record contract: it is accepted exactly as a native record when it conforms, and emits MEDIUM `normalized_record_contract_violation` naming the first breach when it does not. MEDIUM rather than HIGH, so one malformed record cannot freeze orchestration across the workspace; the gates that decide whether a record can support an answer fail closed independently. A record that names no producing tool is left alone — it predates the contract rather than claims it — while `normalize_verify.py` checks every record on demand. See [normalized-source-format.md](normalized-source-format.md).
 - `validate_claims`: validate structured claim pages or embedded claims.
 - `validate_provenance`: require license provenance on automated deliveries (manifest records whose `provenance.retrieved_by` is set; MEDIUM `provenance_missing_license`).
-- `validate_source_requests`: check the source-request artifact — blocked questions should reference an open or fulfilled request (LOW `question_blocked_no_request`) and fulfilled requests must point at existing manifest sources (MEDIUM `request_fulfilled_missing_source`); malformed request lines are reported (MEDIUM `source_request_invalid`).
+- `validate_source_requests`: check the source-request artifact — blocked questions should reference an open or fulfilled request (LOW `question_blocked_no_request`) and fulfilled requests must point at existing manifest sources (MEDIUM `request_fulfilled_missing_source`); malformed request lines are reported (MEDIUM `source_request_invalid`). Under `orchestration.acquisition: delegated` this pass also reports a fulfilment no delegated acquisition work order ever scoped (LOW `delegated_fulfilment_unattributed`), an attempt-audit event naming a request the store no longer has (LOW `source_request_attempt_orphaned`), an unreadable attempt audit (MEDIUM `source_request_attempt_audit_invalid`), and an attempt audit approaching the controller's bounded read guard, after which delegated acquisition stops verifying (LOW `source_request_attempt_audit_large`). All four are delegation-specific: a workspace acquiring through its own providers never sees them.
 - `validate_output_license_status`: require reusable output pages under `outputs.default_dir` to cite fetched sources with concrete license metadata. If an output page cites a manifest source whose `provenance.retrieved_by` is set and whose `provenance.license` is missing, null, or empty, lint reports LOW `output_license_missing`.
 - `validate_questions`: validate question task records, including answered/blocked consistency, coverage manifests, and claim hygiene — answered questions with `coverage_required: true` but missing, blocked, or invalid coverage emit HIGH `question_coverage_missing`, `question_coverage_blocked`, or `question_coverage_invalid`; `in_progress` questions without `claimed_by`/`claimed_at` emit MEDIUM `question_claim_missing`, and claims older than `run.claim_staleness_hours` emit LOW `question_claim_stale`. Questions in `human_review` emit MEDIUM `question_human_review_pending`; under `review.escalation_scope: question` they additionally emit HIGH `question_human_review_stale` once `human_review_requested_at` is older than `review.max_pending_review_hours`, or MEDIUM `question_human_review_undated` when that timestamp is missing or unparseable.
 - `detect_prompt_injection_patterns`: default-on weak reviewer-awareness heuristic. When enabled, lint scans normalized Markdown records, question pages, and parsed manifest `provenance.notes` values for instruction-like phrases, structural prompt-injection shapes, and large base64-like blobs after Unicode/zero-width normalization. It reports LOW `source_prompt_injection_pattern` findings and never reads raw files, opens provenance sidecars, or fetches provenance URLs.

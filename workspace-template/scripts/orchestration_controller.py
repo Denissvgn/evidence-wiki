@@ -38,10 +38,21 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from _orchestration_config import (
+    ACQUISITION_MODE_DELEGATED,
+    ACQUISITION_MODE_PROVIDERS,
+    ACQUISITION_MODES,
+    DEFAULT_MAX_ATTEMPTS_PER_REQUEST,
+    MAX_MAX_ATTEMPTS_PER_REQUEST,
+    OrchestrationConfigError,
+    orchestration_config,
+    valid_agent_id,
+)
 from _provider_registry import ProviderListError, validate_provider_ids
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
+from source_failure_taxonomy import is_attempt_failure_code, is_retryable_attempt_failure_code
 
 SCHEMA_VERSION = "1.0"
 SESSION_ARTIFACT_TYPE = "orchestration_session"
@@ -63,6 +74,10 @@ MAX_SCOPE_IDS = 256
 MAX_SCOPE_ID_LENGTH = 200
 MAX_REASON_SLUGS = 5
 AWAITING_REVIEW_TERMINAL_REASON = "All remaining questions await human review"
+# Stable prefix a host may match to distinguish "the acquirer kept failing" from the other
+# reasons a session ends blocked_on_sources. The machine-readable detail travels in the
+# session_finished event's `exhausted_requests` map.
+DELEGATED_EXHAUSTED_TERMINAL_REASON = "Delegated acquisition exhausted its attempts for every open source request"
 MAX_ARTIFACT_PATH_LENGTH = 512
 MAX_TRUSTED_STATIC_INPUT_BYTES = 32 * 1024 * 1024
 MAX_TRUSTED_STATIC_INPUT_ENTRIES = 10_000
@@ -1108,6 +1123,32 @@ def valid_recovery_state(value: Any) -> bool:
     )
 
 
+def valid_session_acquisition(document: dict[str, Any]) -> bool:
+    """Validate the optional frozen acquisition posture on a session document.
+
+    Every field is optional so pre-delegation sessions still load, but a session that
+    declares delegation must name its acquirer: routing and work-order addressing both
+    read it, and a delegated session without one would fail later and less legibly.
+    """
+    mode = document.get("acquisition_mode")
+    if mode is not None and mode not in ACQUISITION_MODES:
+        return False
+    acquirer = document.get("acquirer_agent_id")
+    if acquirer is not None and not valid_agent_id(acquirer):
+        return False
+    if mode == ACQUISITION_MODE_DELEGATED and acquirer is None:
+        return False
+    attempts = document.get("max_attempts_per_request")
+    if attempts is not None and (
+        isinstance(attempts, bool)
+        or not isinstance(attempts, int)
+        or attempts < 1
+        or attempts > MAX_MAX_ATTEMPTS_PER_REQUEST
+    ):
+        return False
+    return True
+
+
 def load_session(project_root: Path, orchestration_id: str) -> dict[str, Any]:
     path = session_path(project_root, orchestration_id)
     if not path.is_file():
@@ -1131,6 +1172,7 @@ def load_session(project_root: Path, orchestration_id: str) -> dict[str, Any]:
             "pending_trusted_static_inputs" in document
             and not valid_pending_trusted_static_inputs(document.get("pending_trusted_static_inputs"))
         )
+        or not valid_session_acquisition(document)
     ):
         raise OrchestrationControllerError(
             "ORCHESTRATION_STATE_INVALID",
@@ -1307,6 +1349,63 @@ def provider_policy(config: dict[str, Any]) -> dict[str, Any]:
     return policy
 
 
+def acquisition_policy(config: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the declared acquisition mode, refusing a contradictory posture.
+
+    Delegation says an external acquirer fulfils source requests; enabled workspace
+    acquisition providers say this workspace fetches them itself. A workspace declaring
+    both has not stated who acquires, and guessing either way is silent: preferring
+    providers would never address the acquirer, preferring delegation would leave
+    authorized providers unused. Both are refused here, before durable state exists.
+    """
+    try:
+        declared = orchestration_config(config)
+    except OrchestrationConfigError as exc:
+        raise OrchestrationControllerError(
+            exc.error_code,
+            exc.message,
+            recoverable=False,
+            remediation=exc.remediation,
+        ) from exc
+    if declared["acquisition_mode"] == ACQUISITION_MODE_DELEGATED:
+        policy = provider_policy(config)
+        if policy["acquisition"]["enabled"]:
+            raise OrchestrationControllerError(
+                "CONFIG_INVALID",
+                (
+                    "research.yml declares orchestration.acquisition: delegated while "
+                    "integrations.acquisition is enabled; exactly one of them acquires evidence"
+                ),
+                recoverable=False,
+                remediation=(
+                    "Disable integrations.acquisition.providers, or remove "
+                    "orchestration.acquisition: delegated."
+                ),
+                details={"acquisition_providers": policy["acquisition"]["providers"]},
+            )
+    return declared
+
+
+def session_acquisition_policy(session: dict[str, Any]) -> dict[str, Any]:
+    """Read one session's frozen acquisition posture.
+
+    Sessions created before delegation existed carry none of these fields; they ran under
+    the only mode there was, so a missing mode reads as ``providers`` rather than as a
+    malformed session.
+    """
+    mode = session.get("acquisition_mode")
+    return {
+        "acquisition_mode": mode if mode in ACQUISITION_MODES else ACQUISITION_MODE_PROVIDERS,
+        "acquirer_agent_id": session.get("acquirer_agent_id"),
+        "max_attempts_per_request": (
+            session.get("max_attempts_per_request")
+            if isinstance(session.get("max_attempts_per_request"), int)
+            and not isinstance(session.get("max_attempts_per_request"), bool)
+            else DEFAULT_MAX_ATTEMPTS_PER_REQUEST
+        ),
+    }
+
+
 def verify_runtime_guards(
     project_root: Path,
     session: dict[str, Any],
@@ -1338,6 +1437,7 @@ def verify_runtime_guards(
             },
         )
     verify_provider_policy_unchanged(project_root, session, work_order)
+    verify_delegation_unchanged(project_root, session)
     return status
 
 
@@ -1372,6 +1472,35 @@ def verify_provider_policy_unchanged(
             recoverable=False,
             remediation="Restore the work order's explicit provider allow-list or start a new orchestration session.",
             details={"removed_providers": removed, "current_provider_policy": current},
+        )
+
+
+def verify_delegation_unchanged(project_root: Path, session: dict[str, Any]) -> None:
+    """Refuse a session whose declared acquirer changed after it started.
+
+    A pending action is already protected: ``research.yml`` is a trusted static input, so
+    editing it under one is ``ORCHESTRATION_TRUSTED_INPUT_CHANGED``. This guard covers the
+    planning gaps between actions, where the file is not pinned. Who acquires evidence
+    decides which work orders a session may issue and who may execute them, so a session
+    that started under one answer must not silently continue under another.
+    """
+    expected = session_acquisition_policy(session)
+    current = acquisition_policy(load_config(project_root))
+    changed = {
+        field: {"expected": expected[field], "current": current[field]}
+        for field in ("acquisition_mode", "acquirer_agent_id")
+        if expected[field] != current[field]
+    }
+    if changed:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_DELEGATION_CHANGED",
+            "the declared acquisition mode or acquirer changed after the session started",
+            recoverable=False,
+            remediation=(
+                "Restore the research.yml orchestration: section this session started under, "
+                "or start a new session under the new declaration."
+            ),
+            details={"changed": changed},
         )
 
 
@@ -2370,11 +2499,18 @@ def matching_normalized_source_records(
     project_root: Path,
     config: dict[str, Any],
     request_ids: list[str],
-    candidate_ids: list[str],
+    candidate_ids: list[str] | None,
 ) -> dict[str, dict[str, str]]:
-    """Fingerprint exact pre-existing normalized evidence for scoped reconciliation."""
+    """Fingerprint exact pre-existing normalized evidence for scoped reconciliation.
+
+    ``candidate_ids`` of ``None`` correlates on the source request alone. Delegated
+    acquisition has no candidate store — the acquirer chooses how to obtain the evidence —
+    so requiring a candidate id would make this baseline permanently empty and silently
+    remove the reuse path the provider mode has: an unchanged source delivered before this
+    order was issued can satisfy a scoped request without being fetched again.
+    """
     request_scope = set(request_ids)
-    candidate_scope = set(candidate_ids)
+    candidate_scope = set(candidate_ids) if candidate_ids is not None else None
     normalize_sources = load_sibling_module("normalize_sources")
     manifest_relative, normalized_relative = normalize_sources.source_paths(config)
     records = normalize_sources.load_manifest(project_root / manifest_relative)
@@ -2391,7 +2527,7 @@ def matching_normalized_source_records(
         if (
             not isinstance(provenance, dict)
             or provenance.get("request_id") not in request_scope
-            or provenance.get("candidate_id") not in candidate_scope
+            or (candidate_scope is not None and provenance.get("candidate_id") not in candidate_scope)
             or not isinstance(source_id, str)
             or not source_id
             or source_id in matching
@@ -3049,6 +3185,135 @@ def research_question_scope_limit(
     return configured
 
 
+def delegated_request_partition(
+    project_root: Path,
+    config: dict[str, Any],
+    session: dict[str, Any],
+    requests: list[dict[str, Any]],
+    max_attempts: int,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Split open requests into ones worth delegating again and ones this session retired.
+
+    Exhaustion is derived from the durable attempt audit rather than a counter, so the
+    decision survives a crashed or replaced session and stays checkable from artifacts.
+    Only this session's events count: a new session gets a fresh look at every request,
+    which is the supported way to retry after fixing a host-side cause. Editing the
+    append-only audit is not.
+    """
+    source_requests = load_sibling_module("source_requests")
+    events = request_attempt_audit_events(project_root, config, error_code="SOURCE_REQUESTS_INVALID")
+    failures = source_requests.attempt_failures_by_request(
+        events,
+        orchestration_id=session["orchestration_id"],
+    )
+
+    routable: list[dict[str, Any]] = []
+    exhausted: dict[str, str] = {}
+    for request in requests:
+        request_id = request.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            continue
+        attempts = failures.get(request_id, [])
+        if not attempts:
+            routable.append(request)
+            continue
+        # The audit is append-only, so file order is chronological and the last entry is
+        # the most recent attempt.
+        last_code = str(attempts[-1].get("failure_code") or "")
+        if not is_retryable_attempt_failure_code(last_code):
+            # A standing refusal — authorization, site policy, a pending human decision —
+            # will answer the same way next time, so it retires the request immediately
+            # instead of spending the remaining budget proving it.
+            exhausted[request_id] = last_code
+        elif len(attempts) >= max_attempts:
+            exhausted[request_id] = last_code
+        else:
+            routable.append(request)
+    return routable, exhausted
+
+
+def delegated_acquisition_route(
+    project_root: Path,
+    config: dict[str, Any],
+    session: dict[str, Any],
+    status: dict[str, Any],
+    posture: dict[str, Any],
+) -> tuple[str | None, dict[str, Any]]:
+    """Route one delegated acquisition order, or retire the session.
+
+    Delegation replaces the provider walk rather than extending it: there are no
+    candidates to review and no discovery route to compose, because the acquirer chooses
+    how to obtain the evidence. One order carries every routable request, so a host with
+    parallel connectors is not forced through one protocol round trip per request.
+    """
+    requests = open_requests(project_root, config)
+    routable, exhausted = delegated_request_partition(
+        project_root,
+        config,
+        session,
+        requests,
+        posture["max_attempts_per_request"],
+    )
+
+    if not routable:
+        if exhausted:
+            reason = (
+                f"{DELEGATED_EXHAUSTED_TERMINAL_REASON}: "
+                f"{len(exhausted)} request(s) ({summarize_reason_slugs(sorted(exhausted))}). "
+                "Fix the acquirer-side cause, then start a new session."
+            )
+        else:
+            # Readiness says blocked-on-sources but no open request explains it. Lint
+            # reports a blocked question without a linked open request as HIGH, which
+            # normally flips the verdict first; reaching here means the workspace
+            # disagrees with itself, so say that rather than blaming the acquirer.
+            reason = (
+                "Delegated acquisition has no open source request to fulfil while the workspace "
+                "reports blocked_on_sources. Reconcile the blocked questions with their source requests."
+            )
+        return None, {
+            "terminal_status": "blocked_on_sources",
+            "reason": reason,
+            "workspace_status": status,
+            "event_data": {"exhausted_requests": dict(sorted(exhausted.items()))},
+        }
+
+    # Truncation is not a loss: requests dropped by the cap stay open and are scoped by
+    # the next order once this one completes.
+    request_ids = bounded_scope_ids(
+        [request.get("request_id") for request in routable],
+        "delegated acquisition request scope",
+        truncate=True,
+    )
+    scoped = set(request_ids)
+    question_slugs = bounded_scope_ids(
+        [
+            slug
+            for request in routable
+            if request.get("request_id") in scoped
+            for slug in request.get("question_slugs", [])
+            if isinstance(slug, str)
+        ],
+        "question scope for delegated acquisition",
+        truncate=True,
+    )
+    if rollover_exhausted_child_for_phase(project_root, status, session, "acquisition"):
+        if session.get("status") == PAUSED_STATUS:
+            return None, {"paused": True, "workspace_status": status}
+    return "acquisition", {
+        "status": status,
+        "scope": {
+            "question_slugs": question_slugs,
+            "request_ids": request_ids,
+            # Delegated acquisition has no candidate store: the acquirer decides how to
+            # obtain the evidence, and the controller verifies what was delivered.
+            "candidate_ids": [],
+        },
+        "delegated": True,
+        "acquirer_agent_id": posture["acquirer_agent_id"],
+    }
+
+
 def choose_route(
     project_root: Path,
     session: dict[str, Any],
@@ -3109,6 +3374,13 @@ def choose_route(
         }
 
     if verdict == "blocked_on_sources":
+        posture = session_acquisition_policy(session)
+        if posture["acquisition_mode"] == ACQUISITION_MODE_DELEGATED:
+            # Returns before the provider walk rather than around it: delegation and
+            # enabled workspace providers are mutually exclusive (refused at start), so
+            # the candidate and discovery arms below have nothing to say about a
+            # delegated workspace and must not run for one.
+            return delegated_acquisition_route(project_root, config, session, status, posture)
         requests = open_requests(project_root, config)
         candidates = load_candidates(project_root, config)
         acquisition = policy["acquisition"]
@@ -3346,6 +3618,7 @@ def action_spec(
             {"check": "raw_tree_unchanged", "before": raw_tree_snapshot(project_root, config)},
         ]
     elif route == "acquisition":
+        delegated = bool(context.get("delegated"))
         scoped_question_slugs = [
             value for value in scope.get("question_slugs", []) if isinstance(value, str)
         ]
@@ -3361,15 +3634,34 @@ def action_spec(
             project_root,
             config,
             scoped_request_ids,
-            scoped_candidate_ids,
+            # Delegated orders correlate pre-existing evidence by request alone; there is
+            # no candidate store to name.
+            None if delegated else scoped_candidate_ids,
         )
         matching_source_ids_before = sorted(matching_source_records_before)
         manifest_records_before = manifest_record_fingerprint_snapshot(project_root, config)
         raw_tree_before = raw_tree_snapshot(project_root, config, include_entries=True)
         candidate_records_before = candidate_record_fingerprint_snapshot(load_candidates(project_root, config))
         run_id = advance_child(project_root, session, "fetching")
-        skill = "research-acquire"
-        inputs.extend(["sources/source-requests.jsonl", candidates_input, "sources/manifest.jsonl"])
+        # The child run is the same audit continuity for a delegated acquirer as for a
+        # managed worker: one bounded attempt, one run state, one rollover budget.
+        if delegated:
+            skill = "research-acquire-delegated"
+            # No candidate store to read; the attempt audit is where a failed attempt is
+            # recorded, so name it as an input the acquirer is expected to write.
+            inputs.extend(
+                [
+                    "sources/source-requests.jsonl",
+                    "sources/manifest.jsonl",
+                    relative_workspace_path(
+                        project_root,
+                        load_sibling_module("source_requests").request_attempt_audit_path(project_root, config),
+                    ),
+                ]
+            )
+        else:
+            skill = "research-acquire"
+            inputs.extend(["sources/source-requests.jsonl", candidates_input, "sources/manifest.jsonl"])
         postconditions = [
             {"check": "request_fulfilled_with_normalized_source"},
             {
@@ -3386,6 +3678,14 @@ def action_spec(
                 "candidate_record_fingerprints_before": candidate_records_before,
                 "candidate_audit_record_fingerprints_before": (
                     candidate_audit_record_fingerprint_snapshot(project_root, config)
+                ),
+                # Delegated acquisition proves a failed attempt by appending to this audit,
+                # so submission needs the exact pre-action set to tell a new event from a
+                # rewritten one. Captured for both modes: the provider arm's baseline is
+                # simply empty, and one shape keeps the replay guard and the sidecar
+                # externalization from needing a mode branch.
+                "request_attempt_audit_record_fingerprints_before": (
+                    request_attempt_audit_record_fingerprint_snapshot(project_root, config)
                 ),
                 "source_request_record_fingerprints_before": source_request_record_fingerprint_snapshot(
                     project_root,
@@ -3425,7 +3725,7 @@ def action_spec(
         ]
     else:  # pragma: no cover - internal guard
         raise OrchestrationControllerError("ORCHESTRATION_STATE_INVALID", f"unknown route: {route}")
-    return {
+    spec: dict[str, Any] = {
         "phase": route,
         "skill": skill,
         "run_id": run_id,
@@ -3435,6 +3735,12 @@ def action_spec(
         "inputs": sorted(set(inputs)),
         "required_postconditions": postconditions,
     }
+    if route == "acquisition" and context.get("delegated"):
+        # Additive, and only on the orders they describe: an order without them is a
+        # provider-mode order, which is what every pre-delegation order is.
+        spec["acquisition_mode"] = ACQUISITION_MODE_DELEGATED
+        spec["assigned_agent_id"] = context["acquirer_agent_id"]
+    return spec
 
 
 INTEGRITY_BASELINE_FIELDS = frozenset(
@@ -3445,6 +3751,7 @@ INTEGRITY_BASELINE_FIELDS = frozenset(
         "candidate_states_before",
         "candidate_record_fingerprints_before",
         "candidate_audit_record_fingerprints_before",
+        "request_attempt_audit_record_fingerprints_before",
         "selected_candidate_ids_before",
         "blocked_questions_before",
         "matching_source_ids_before",
@@ -3661,6 +3968,9 @@ def issue_work_order(project_root: Path, session: dict[str, Any], spec: dict[str
         "phase": spec["phase"],
         "skill": spec["skill"],
         "run_id": spec["run_id"],
+        # The session owner, unchanged: the acquirer is who the order is addressed to,
+        # not who may drive the protocol. Single-driver ownership is not renegotiated by
+        # delegation.
         "agent_id": session["agent_id"],
         "scope": spec["scope"],
         "provider_policy": spec["provider_policy"],
@@ -3673,6 +3983,9 @@ def issue_work_order(project_root: Path, session: dict[str, Any], spec: dict[str
             "attempt": 1,
         },
     }
+    for field in ("acquisition_mode", "assigned_agent_id"):
+        if field in spec:
+            work_order[field] = spec[field]
     externalize_integrity_baselines(project_root, work_order)
     encoded_order = (json.dumps(work_order, indent=2, sort_keys=False, ensure_ascii=False) + "\n").encode("utf-8")
     if len(encoded_order) > MAX_WORK_ORDER_BYTES:
@@ -3836,6 +4149,10 @@ def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any
             )
         now = timestamp_utc()
         config = load_config(project_root)
+        # Resolved before the session document and its directories are created, so a
+        # contradictory or malformed declaration leaves no session behind. (The lock file
+        # this block already took remains, as it does for every in-lock refusal.)
+        declared_acquisition = acquisition_policy(config)
         project = config.get("project") if isinstance(config.get("project"), dict) else {}
         handoff = project.get("handoff") if isinstance(project.get("handoff"), dict) else None
         session: dict[str, Any] = {
@@ -3868,6 +4185,11 @@ def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any
                 "total_timeout_seconds": args.total_timeout_seconds,
             },
             "provider_policy": provider_policy(config),
+            # Frozen at start like provider_policy, and for the same reason: a session
+            # must not have who-acquires changed underneath the work orders it issued.
+            # Written explicitly in both modes so a providers-mode session created now is
+            # distinguishable from one created before delegation existed.
+            **declared_acquisition,
             "failure_records": [],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3927,6 +4249,13 @@ def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
             return replay_work_order(project_root, session, resume=args.resume, retained_order=order)
         if pause_if_limited(project_root, session):
             return session
+        # Routing re-reads research.yml and adopts the current provider policy, because a
+        # fresh order is issued under whatever authorization exists now. The acquisition
+        # mode is deliberately not adopted that way: who acquires is a property of the
+        # session, frozen at start, and silently switching it mid-session would change
+        # which orders the session may issue and who may execute them. Every other path
+        # reaches this check through verify_runtime_guards; a first `next` does not.
+        verify_delegation_unchanged(project_root, session)
         route, context = choose_route(project_root, session)
         if route is None:
             if session.get("status") == PAUSED_STATUS:
@@ -4234,6 +4563,606 @@ def candidate_audit_record_fingerprint_snapshot(
         id_field="event_id",
         label="candidate lifecycle audit",
     )
+
+
+def request_attempt_audit_events(
+    project_root: Path,
+    config: dict[str, Any],
+    *,
+    error_code: str = "ORCHESTRATION_POSTCONDITION_FAILED",
+) -> list[dict[str, Any]]:
+    """Read the bounded append-only request-attempt audit used to prove attempt failure.
+
+    One reader with one set of safety properties — bounded, containment-checked, and fatal
+    on a malformed line — serves both callers. ``error_code`` lets each report in its own
+    vocabulary: routing reads the audit as a workspace input, while submission reads it as
+    a postcondition guard.
+    """
+    source_requests = load_sibling_module("source_requests")
+    path = source_requests.request_attempt_audit_path(project_root, config)
+    payload = bounded_regular_bytes(
+        path,
+        max_bytes=MAX_SCOPE_GUARD_BYTES,
+        error_code=error_code,
+        label="source request attempt audit",
+        missing_ok=True,
+        containment_root=project_root,
+    )
+    if payload is None:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in payload.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise OrchestrationControllerError(
+                error_code,
+                f"invalid source request attempt audit JSON: {exc}",
+                recoverable=True,
+                remediation="Restore the append-only attempt audit before submitting this action.",
+            ) from exc
+        if not isinstance(event, dict) or not isinstance(event.get("event_id"), str):
+            raise OrchestrationControllerError(
+                error_code,
+                "source request attempt audit contains an event without a stable event_id",
+                recoverable=True,
+                remediation="Restore the append-only attempt audit before submitting this action.",
+            )
+        events.append(event)
+        if len(events) > MAX_SCOPE_GUARD_ENTRIES:
+            raise OrchestrationControllerError(
+                error_code,
+                "source request attempt audit exceeds the bounded entry guard",
+                recoverable=False,
+                remediation="Archive the workspace; the attempt audit has outgrown the bounded verification guard.",
+            )
+    return events
+
+
+def request_attempt_audit_record_fingerprint_snapshot(
+    project_root: Path,
+    config: dict[str, Any],
+) -> dict[str, str]:
+    return record_fingerprint_snapshot(
+        request_attempt_audit_events(project_root, config),
+        id_field="event_id",
+        label="source request attempt audit",
+    )
+
+
+def delegated_fulfilment_correlation_failures(
+    fulfilled: list[dict[str, Any]],
+    by_source_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return fulfilments whose evidence is not linked to the request it claims to satisfy.
+
+    Delegated acquisition has no candidate store, so the correlation is the provenance
+    sidecar's ``request_id`` alone. That field only reaches a manifest record from a
+    sidecar delivered beside the artifact, which is what makes "the source carries a
+    provenance sidecar" checkable rather than merely asserted.
+
+    **CR-4 seam.** When a source request grows a structured ``scope``, ``--match-scope``
+    verification is one added predicate in this function — compare the request's declared
+    scope keys against the record's delivery/provenance metadata — with no change to the
+    verifier arm that calls it.
+    """
+    failures: list[dict[str, Any]] = []
+    for request in fulfilled:
+        request_id = str(request.get("request_id") or "")
+        source_id = str(request.get("source_id") or "")
+        record = by_source_id.get(source_id)
+        provenance = record.get("provenance") if isinstance(record, dict) else None
+        provenance_request_id = provenance.get("request_id") if isinstance(provenance, dict) else None
+        if not isinstance(provenance, dict) or provenance_request_id != request_id:
+            failures.append(
+                {
+                    "request_id": request_id,
+                    "source_id": source_id,
+                    "has_provenance": isinstance(provenance, dict),
+                    "provenance_request_id": provenance_request_id,
+                }
+            )
+    return failures
+
+
+def verify_delegated_acquisition_postconditions(
+    project_root: Path,
+    session: dict[str, Any],
+    work_order: dict[str, Any],
+    *,
+    config: dict[str, Any],
+    status: dict[str, Any],
+    run_id: Any,
+    current: Any,
+    controller: ModuleType,
+    apply_effects: bool,
+) -> tuple[str | None, str | None]:
+    """Verify one completed delegated acquisition action from durable artifacts.
+
+    A sibling of the provider arm rather than a branch inside it: the two share most of
+    their evidence checks but differ in what they are allowed to expect, and interleaving
+    them would make it impossible to see at a glance that provider verification is
+    unchanged.
+
+    The differences are exactly five. Per-request outcomes replace all-must-be-fulfilled,
+    because one order carries the whole routable backlog. Evidence correlates by request
+    alone, because there is no candidate. A question is reopened only when *every* request
+    blocking it was fulfilled. Candidate records may not change at all. And a request the
+    acquirer could not satisfy must be accounted for by a new, append-only attempt-failure
+    event naming this action.
+    """
+    scope = work_order.get("scope") if isinstance(work_order.get("scope"), dict) else {}
+    request_ids = [value for value in scope.get("request_ids", []) if isinstance(value, str)]
+    scoped_requests = set(request_ids)
+    action_id = work_order.get("action_id")
+
+    def require(
+        condition: bool,
+        message: str,
+        details: dict[str, Any] | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if not condition:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                message,
+                recoverable=True,
+                remediation=remediation or "Complete the persisted work order and resubmit the same action id.",
+                details=details,
+            )
+
+    def recorded_postcondition(check: str) -> dict[str, Any]:
+        return next(
+            (
+                item
+                for item in work_order.get("required_postconditions", [])
+                if isinstance(item, dict) and item.get("check") == check
+            ),
+            {},
+        )
+
+    require(
+        bool(scoped_requests) and valid_scope_id_list(request_ids),
+        "delegated acquisition lacks a bounded request scope",
+    )
+    require(
+        not [value for value in scope.get("candidate_ids", []) if isinstance(value, str) and value],
+        "delegated acquisition work order carries a candidate scope",
+        remediation="Start a fresh orchestration session; delegated acquisition has no candidate store.",
+    )
+
+    manifest_guard = recorded_postcondition("manifest_records_increased")
+    before_manifest = int(manifest_guard.get("before", 0) or 0)
+    matching_source_ids_before = manifest_guard.get("matching_source_ids_before")
+    matching_source_records_before = manifest_guard.get("matching_source_records_before")
+    manifest_records_before = manifest_guard.get("manifest_record_fingerprints_before")
+    raw_tree_before = manifest_guard.get("raw_tree_before")
+    candidate_records_before = manifest_guard.get("candidate_record_fingerprints_before")
+    attempt_audit_before = manifest_guard.get("request_attempt_audit_record_fingerprints_before")
+    source_requests_before = manifest_guard.get("source_request_record_fingerprints_before")
+    normalized_files_before = manifest_guard.get("normalized_file_fingerprints_before")
+    question_files_before = manifest_guard.get("question_file_fingerprints_before")
+    require(
+        valid_scope_id_list(matching_source_ids_before)
+        and valid_matching_source_record_snapshot(matching_source_records_before)
+        and set(matching_source_ids_before) == set(matching_source_records_before)
+        and valid_record_fingerprint_snapshot(manifest_records_before)
+        and set(matching_source_ids_before) <= set(manifest_records_before)
+        and before_manifest == len(manifest_records_before)
+        and valid_raw_tree_snapshot(raw_tree_before, include_entries=True)
+        and valid_record_fingerprint_snapshot(candidate_records_before)
+        and valid_record_fingerprint_snapshot(attempt_audit_before)
+        and valid_record_fingerprint_snapshot(source_requests_before)
+        and valid_file_fingerprint_snapshot(normalized_files_before, prefix="sources/")
+        and valid_question_file_fingerprint_snapshot(question_files_before),
+        "delegated acquisition work order lacks a valid bounded evidence integrity baseline",
+        remediation="Start a fresh orchestration session; never infer matching evidence after execution.",
+    )
+
+    source_requests = load_sibling_module("source_requests")
+    all_requests = source_requests.load_requests(source_requests.requests_path(project_root, config))
+    requests_by_id = {
+        str(item.get("request_id")): item
+        for item in all_requests
+        if isinstance(item, dict) and isinstance(item.get("request_id"), str)
+    }
+    require(
+        scoped_requests <= set(requests_by_id),
+        "delegated acquisition removed scoped source requests",
+        {"missing_request_ids": sorted(scoped_requests - set(requests_by_id))},
+        "Restore the source-request store; an attempted request is never deleted.",
+    )
+
+    # --- per-request outcomes ---------------------------------------------------------
+    current_attempt_events = request_attempt_audit_events(project_root, config)
+    current_attempt_fingerprints = record_fingerprint_snapshot(
+        current_attempt_events,
+        id_field="event_id",
+        label="source request attempt audit",
+    )
+    new_attempt_event_ids = set(current_attempt_fingerprints) - set(attempt_audit_before)
+    attempt_audit_violations = fingerprint_scope_violations(
+        attempt_audit_before,
+        current_attempt_fingerprints,
+        mutable_ids=set(),
+        allowed_new_ids=new_attempt_event_ids,
+    )
+    require(
+        not any(attempt_audit_violations.values()),
+        "delegated acquisition rewrote or removed recorded acquisition attempts",
+        {"attempt_audit_violations": attempt_audit_violations},
+        "Restore the append-only attempt audit; a recorded attempt is evidence and is never edited.",
+    )
+
+    failed_requests: dict[str, list[dict[str, Any]]] = {}
+    unattributable_events: list[dict[str, Any]] = []
+    for event in current_attempt_events:
+        if event.get("event_id") not in new_attempt_event_ids:
+            continue
+        event_request_id = event.get("request_id")
+        failure_code = event.get("failure_code")
+        if (
+            event_request_id not in scoped_requests
+            or event.get("action_id") != action_id
+            or not is_attempt_failure_code(failure_code)
+        ):
+            unattributable_events.append(
+                {
+                    "event_id": event.get("event_id"),
+                    "request_id": event_request_id,
+                    "action_id": event.get("action_id"),
+                    "failure_code": failure_code,
+                }
+            )
+            continue
+        failed_requests.setdefault(str(event_request_id), []).append(event)
+    require(
+        not unattributable_events,
+        "delegated acquisition recorded attempt failures outside this action's request scope",
+        {"unattributable_events": unattributable_events},
+        (
+            "Record an attempt failure only for a scoped request, with this work order's action id and a "
+            "documented failure code."
+        ),
+    )
+
+    fulfilled = [
+        requests_by_id[request_id]
+        for request_id in request_ids
+        if requests_by_id[request_id].get("status") == "fulfilled"
+    ]
+    fulfilled_request_ids = {str(item.get("request_id")) for item in fulfilled}
+    failed_request_ids = set(failed_requests)
+    require(
+        not (fulfilled_request_ids & failed_request_ids),
+        "a scoped request is recorded as both fulfilled and failed by this action",
+        {"request_ids": sorted(fulfilled_request_ids & failed_request_ids)},
+        "A fulfilled request has evidence; remove the contradictory attempt failure or the fulfilment.",
+    )
+    unaccounted = scoped_requests - fulfilled_request_ids - failed_request_ids
+    require(
+        not unaccounted,
+        "delegated acquisition left scoped requests with neither a fulfilment nor a recorded attempt failure",
+        {"request_ids": sorted(unaccounted)},
+        (
+            "Fulfil each scoped request, or record why the attempt produced nothing with "
+            "source_requests.py record-attempt-failure using this action id."
+        ),
+    )
+    require(
+        all(item.get("source_id") for item in fulfilled),
+        "fulfilled request lacks a manifest source id",
+        {"request_ids": sorted(
+            str(item.get("request_id")) for item in fulfilled if not item.get("source_id")
+        )},
+    )
+
+    # --- delivered evidence -----------------------------------------------------------
+    normalize_sources = load_sibling_module("normalize_sources")
+    manifest_relative, normalized_relative = normalize_sources.source_paths(config)
+    manifest_records = normalize_sources.load_manifest(project_root / manifest_relative)
+    by_source_id = normalize_sources.records_by_source_id(manifest_records)
+    current_manifest_fingerprints = record_fingerprint_snapshot(
+        manifest_records,
+        id_field="id",
+        label="evidence manifest",
+    )
+    normalized_root = project_root / normalized_relative
+    missing_normalized: list[str] = []
+    unusable_normalized: list[dict[str, Any]] = []
+    for request in fulfilled:
+        source_id = str(request.get("source_id") or "")
+        record = by_source_id.get(source_id)
+        normalized_path = (
+            normalize_sources.normalized_output_path_for_record(record, normalized_root)
+            if isinstance(record, dict)
+            else None
+        )
+        if not isinstance(normalized_path, Path) or not normalized_path.is_file():
+            missing_normalized.append(source_id)
+            continue
+        quality_failure = normalized_source_quality_failure(project_root, normalized_path, record)
+        if quality_failure is not None:
+            unusable_normalized.append({"source_id": source_id, **quality_failure})
+    require(
+        not missing_normalized,
+        "fulfilled source requests do not have normalized evidence",
+        {"source_ids": missing_normalized},
+    )
+    require(
+        not unusable_normalized,
+        "fulfilled source requests do not have usable normalized evidence",
+        {"quality_failures": unusable_normalized},
+        (
+            "Normalize the delivered source successfully before fulfillment; failed or stubbed records and "
+            "PDFs without extracted text cannot satisfy a source request."
+        ),
+    )
+    correlation_failures = delegated_fulfilment_correlation_failures(fulfilled, by_source_id)
+    require(
+        not correlation_failures,
+        "fulfilled evidence is not linked to its source request by a provenance sidecar",
+        {"correlation_failures": correlation_failures},
+        (
+            "Deliver each source with a .provenance.yml sidecar whose request_id names the request it "
+            "fulfils, then re-run source_inventory.py before fulfilling."
+        ),
+    )
+
+    # --- question transitions ---------------------------------------------------------
+    question_guard = recorded_postcondition("linked_blocked_questions_reopened")
+    blocked_questions_before = question_guard.get("blocked_questions_before")
+    require(
+        valid_blocked_question_baseline(blocked_questions_before),
+        "delegated acquisition work order lacks a valid blocked-question baseline",
+        remediation="Start a fresh orchestration session; never infer question transitions after execution.",
+    )
+    fulfilled_by_request_id = {str(item.get("request_id")): item for item in fulfilled}
+    current_question_evidence = scoped_question_evidence_snapshot(
+        project_root,
+        config,
+        list(blocked_questions_before),
+    )
+    # A question is unblocked only when every request blocking it was fulfilled. One
+    # unfulfilled blocker — scoped and failed, or outside this order entirely — leaves the
+    # question exactly as it was.
+    fully_unblocked = {
+        slug
+        for slug, before in blocked_questions_before.items()
+        if set(before.get("blocking_request_ids", [])) <= fulfilled_request_ids
+        and before.get("blocking_request_ids")
+    }
+    question_transition_failures: list[dict[str, Any]] = []
+    for slug in sorted(fully_unblocked):
+        before = blocked_questions_before[slug]
+        expected_source_ids = {
+            str(fulfilled_by_request_id[request_id].get("source_id"))
+            for request_id in before.get("blocking_request_ids", [])
+        }
+        current_question = current_question_evidence.get(slug, {})
+        required_source_ids = set(before.get("source_ids_before", [])) | expected_source_ids
+        if (
+            current_question.get("status") != "open"
+            or set(current_question.get("blocking_request_ids", []))
+            or not required_source_ids <= set(current_question.get("source_ids", []))
+        ):
+            question_transition_failures.append(
+                {
+                    "question_slug": slug,
+                    "before": before,
+                    "after": current_question or None,
+                    "expected_source_ids": sorted(required_source_ids),
+                }
+            )
+    require(
+        not question_transition_failures,
+        "delegated acquisition did not reopen every fully unblocked question with its fulfilled source",
+        {"question_transition_failures": question_transition_failures},
+        (
+            "Use question_resolve.py reopen for each question whose blocking requests were all fulfilled, so it "
+            "is exactly open, carries the fulfilled source id, and has no remaining blocking links."
+        ),
+    )
+
+    # --- bounded scope: nothing outside this action's outcomes may change --------------
+    current_source_request_fingerprints = record_fingerprint_snapshot(
+        all_requests,
+        id_field="request_id",
+        label="source-request store",
+    )
+    request_scope_violations = fingerprint_scope_violations(
+        source_requests_before,
+        current_source_request_fingerprints,
+        # Only a fulfilled request's record changes. A failed attempt lives in the audit,
+        # so the request itself must be byte-stable.
+        mutable_ids=fulfilled_request_ids,
+    )
+    require(
+        not any(request_scope_violations.values()),
+        "delegated acquisition changed source requests outside the fulfilled request scope",
+        {"source_request_scope_violations": request_scope_violations},
+        "Restore every unfulfilled request; record its failed attempt in the audit instead of editing it.",
+    )
+    current_question_files = question_file_fingerprint_snapshot(project_root, config)
+    question_scope_violations = fingerprint_scope_violations(
+        question_files_before,
+        current_question_files,
+        mutable_ids={f"{slug}.md" for slug in fully_unblocked},
+    )
+    require(
+        not any(question_scope_violations.values()),
+        "delegated acquisition changed a question that was not fully unblocked by this action",
+        {"question_scope_violations": question_scope_violations},
+        "Restore every question with a remaining unfulfilled blocking request; reopen only fully unblocked ones.",
+    )
+
+    fulfilled_source_ids = {
+        str(item.get("source_id"))
+        for item in fulfilled
+        if isinstance(item.get("source_id"), str) and item.get("source_id")
+    }
+    manifest_scope_violations = fingerprint_scope_violations(
+        manifest_records_before,
+        current_manifest_fingerprints,
+        mutable_ids=set(),
+        allowed_new_ids=fulfilled_source_ids,
+    )
+    require(
+        not any(manifest_scope_violations.values()),
+        "delegated acquisition changed, removed, or added evidence-manifest records outside fulfilled source scope",
+        {
+            "manifest_scope_violations": manifest_scope_violations,
+            "fulfilled_source_ids": sorted(fulfilled_source_ids),
+        },
+        "Restore existing and out-of-scope manifest records; only fulfilled scoped sources may be appended.",
+    )
+    expected_new_source_ids = fulfilled_source_ids - set(manifest_records_before)
+    actual_new_source_ids = set(current_manifest_fingerprints) - set(manifest_records_before)
+    require(
+        actual_new_source_ids == expected_new_source_ids,
+        "fulfilled sources are not exactly accounted for by pre-existing matches or new manifest ids",
+        {
+            "expected_new_source_ids": sorted(expected_new_source_ids),
+            "actual_new_source_ids": sorted(actual_new_source_ids),
+            "matching_source_ids_before": matching_source_ids_before,
+        },
+    )
+    reconciliation_failures: list[dict[str, Any]] = []
+    for source_id in sorted(fulfilled_source_ids & set(manifest_records_before)):
+        expected = matching_source_records_before.get(source_id)
+        record = by_source_id.get(source_id)
+        normalized_path = (
+            normalize_sources.normalized_output_path_for_record(record, normalized_root)
+            if isinstance(record, dict)
+            else None
+        )
+        normalized_fingerprint = (
+            file_digest(
+                normalized_path,
+                max_bytes=MAX_VERIFICATION_ARTIFACT_BYTES,
+                containment_root=project_root,
+            )
+            if isinstance(normalized_path, Path) and normalized_path.is_file()
+            else None
+        )
+        if (
+            not isinstance(expected, dict)
+            or current_manifest_fingerprints.get(source_id) != expected.get("record_fingerprint")
+            or normalized_fingerprint != expected.get("normalized_fingerprint")
+        ):
+            reconciliation_failures.append(
+                {
+                    "source_id": source_id,
+                    "was_scoped_match": isinstance(expected, dict),
+                    "record_unchanged": isinstance(expected, dict)
+                    and current_manifest_fingerprints.get(source_id) == expected.get("record_fingerprint"),
+                    "normalized_unchanged": isinstance(expected, dict)
+                    and normalized_fingerprint == expected.get("normalized_fingerprint"),
+                }
+            )
+    require(
+        not reconciliation_failures,
+        "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+        {"reconciliation_failures": reconciliation_failures},
+        "Use only the unchanged scoped pre-existing source or deliver a genuinely new source id.",
+    )
+
+    current_normalized_files = normalized_file_fingerprint_snapshot(project_root, config)
+    allowed_new_normalized_paths: set[str] = set()
+    for source_id in expected_new_source_ids:
+        record = by_source_id.get(source_id)
+        if not isinstance(record, dict):
+            continue
+        normalized_path = normalize_sources.normalized_output_path_for_record(record, normalized_root)
+        allowed_new_normalized_paths.add(relative_workspace_path(project_root, normalized_path))
+    normalized_scope_violations = fingerprint_scope_violations(
+        normalized_files_before,
+        current_normalized_files,
+        mutable_ids=set(),
+        allowed_new_ids=allowed_new_normalized_paths,
+    )
+    require(
+        not any(normalized_scope_violations.values()),
+        "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
+        {"normalized_scope_violations": normalized_scope_violations},
+        "Restore existing normalized evidence and keep new outputs limited to newly fulfilled sources.",
+    )
+    require(
+        (set(current_normalized_files) - set(normalized_files_before)) == allowed_new_normalized_paths,
+        "new fulfilled sources do not map exactly to newly created normalized outputs",
+        {
+            "expected_new_normalized_paths": sorted(allowed_new_normalized_paths),
+            "actual_new_normalized_paths": sorted(
+                set(current_normalized_files) - set(normalized_files_before)
+            ),
+        },
+    )
+
+    current_raw_tree = raw_tree_snapshot(project_root, config, include_entries=True)
+    before_raw_entries = raw_tree_before["entries"]
+    current_raw_entries = current_raw_tree["entries"]
+    raw_existing_changes = fingerprint_scope_violations(
+        before_raw_entries,
+        current_raw_entries,
+        mutable_ids=set(),
+        allowed_new_ids=set(current_raw_entries) - set(before_raw_entries),
+    )
+    allowed_new_raw_paths: set[str] = set()
+    for source_id in expected_new_source_ids:
+        record = by_source_id.get(source_id)
+        raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
+        if not isinstance(raw_paths, list):
+            continue
+        for raw_path in raw_paths:
+            if isinstance(raw_path, str) and raw_path.startswith("raw/") and safe_snapshot_relative_path(raw_path):
+                allowed_new_raw_paths.add(raw_path)
+                allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
+    actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
+    unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
+    require(
+        not any(raw_existing_changes.values()) and not unexpected_new_raw_paths,
+        "delegated acquisition changed raw evidence outside newly fulfilled manifest source scope",
+        {
+            "raw_scope_violations": raw_existing_changes,
+            "unexpected_new_raw_paths": unexpected_new_raw_paths[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+            "allowed_new_raw_paths": sorted(allowed_new_raw_paths)[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+        },
+        "Restore existing raw evidence and remove deliveries not referenced by newly fulfilled scoped sources.",
+    )
+
+    current_candidate_fingerprints = candidate_record_fingerprint_snapshot(
+        load_candidates(project_root, config)
+    )
+    candidate_scope_violations = fingerprint_scope_violations(
+        candidate_records_before,
+        current_candidate_fingerprints,
+        # Delegated acquisition never touches the candidate store: no candidate was
+        # selected for it, so any change came from somewhere this order does not authorize.
+        mutable_ids=set(),
+    )
+    require(
+        not any(candidate_scope_violations.values()),
+        "delegated acquisition changed candidate records",
+        {"candidate_scope_violations": candidate_scope_violations},
+        "Restore the candidate store; delegated acquisition has no candidate to transition.",
+    )
+
+    require(current in {"fetching", "evidence_ready"}, "delegated acquisition child run is in an invalid state")
+    if not fulfilled:
+        # Every scoped request failed, and each failure is recorded. The action itself is
+        # complete: the acquirer did what the order asked and proved it. Return to planning
+        # so routing re-reads the audit and either retries within budget or retires the
+        # session. The child run stays in `fetching`, which the next acquisition order
+        # reuses idempotently.
+        return "planning", (
+            f"delegated acquisition recorded {len(failed_request_ids)} attempt failure(s) and no fulfilment"
+        )
+    if apply_effects and current == "fetching":
+        controller.run_transition(project_root, child_args(run_id, session["agent_id"], to_state="evidence_ready"))
+    return "research", None
 
 
 def verify_action_postconditions(
@@ -4632,6 +5561,18 @@ def verify_action_postconditions(
         return "acquisition", None
 
     if phase == "acquisition":
+        if work_order.get("acquisition_mode") == ACQUISITION_MODE_DELEGATED:
+            return verify_delegated_acquisition_postconditions(
+                project_root,
+                session,
+                work_order,
+                config=config,
+                status=status,
+                run_id=run_id,
+                current=current,
+                controller=controller,
+                apply_effects=apply_effects,
+            )
         requests = open_requests(project_root, config)
         still_open = {str(item.get("request_id")) for item in requests}
         require(not set(request_ids) & still_open, "acquisition did not fulfill the scoped source request")
@@ -5154,6 +6095,180 @@ def verify_action_postconditions(
     raise OrchestrationControllerError("ORCHESTRATION_STATE_INVALID", f"unsupported submitted phase: {phase}")
 
 
+def verify_blocked_delegated_acquisition_postconditions(
+    project_root: Path,
+    work_order: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Classify a blocked delegated acquisition: the attempt ran, and changed nothing.
+
+    The provider path has a second bounded outcome — an audited candidate route failure
+    completes the attempt — because a candidate is the unit that can be exhausted there.
+    Delegated acquisition has no candidates, and its equivalent of "this attempt produced
+    nothing" is a *completed* result whose scoped requests carry recorded attempt failures.
+    So `blocked` keeps exactly one meaning here: the attempt was aborted before it changed
+    anything durable, and `resume` replays the same order.
+
+    That makes verification a strict no-change check rather than the provider path's
+    partial-delivery allowance. Nothing is lost by it: a delegate that already delivered
+    evidence can fulfil the request, and one that already knows a request failed can record
+    that failure — both are `completed`, which is the honest description of an action that
+    changed the workspace.
+    """
+    config = load_config(project_root)
+    scope = work_order.get("scope") if isinstance(work_order.get("scope"), dict) else {}
+    request_ids = [value for value in scope.get("request_ids", []) if isinstance(value, str)]
+    request_scope = set(request_ids)
+
+    def require(
+        condition: bool,
+        message: str,
+        details: dict[str, Any] | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if not condition:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                message,
+                recoverable=True,
+                remediation=remediation or (
+                    "Restore the workspace to its pre-action state and replay the same action, or report the "
+                    "work actually done as completed."
+                ),
+                details=details,
+            )
+
+    require(
+        bool(request_scope) and valid_scope_id_list(request_ids),
+        "blocked delegated acquisition lacks a bounded request scope",
+    )
+    require(
+        not [value for value in scope.get("candidate_ids", []) if isinstance(value, str) and value],
+        "blocked delegated acquisition work order carries a candidate scope",
+        remediation="Start a fresh orchestration session; delegated acquisition has no candidate store.",
+    )
+
+    postconditions = {
+        item.get("check"): item
+        for item in work_order.get("required_postconditions", [])
+        if isinstance(item, dict) and isinstance(item.get("check"), str)
+    }
+    manifest_guard = postconditions.get("manifest_records_increased", {})
+    manifest_records_before = manifest_guard.get("manifest_record_fingerprints_before")
+    raw_tree_before = manifest_guard.get("raw_tree_before")
+    candidate_records_before = manifest_guard.get("candidate_record_fingerprints_before")
+    attempt_audit_before = manifest_guard.get("request_attempt_audit_record_fingerprints_before")
+    source_requests_before = manifest_guard.get("source_request_record_fingerprints_before")
+    normalized_files_before = manifest_guard.get("normalized_file_fingerprints_before")
+    question_files_before = manifest_guard.get("question_file_fingerprints_before")
+    before_manifest = manifest_guard.get("before")
+    require(
+        valid_record_fingerprint_snapshot(manifest_records_before)
+        and isinstance(before_manifest, int)
+        and not isinstance(before_manifest, bool)
+        and before_manifest == len(manifest_records_before)
+        and valid_raw_tree_snapshot(raw_tree_before, include_entries=True)
+        and valid_record_fingerprint_snapshot(candidate_records_before)
+        and valid_record_fingerprint_snapshot(attempt_audit_before)
+        and valid_record_fingerprint_snapshot(source_requests_before)
+        and request_scope <= set(source_requests_before)
+        and valid_file_fingerprint_snapshot(normalized_files_before, prefix="sources/")
+        and valid_question_file_fingerprint_snapshot(question_files_before),
+        "blocked delegated acquisition lacks its exact pre-action integrity baseline",
+        remediation="Preserve this action for audit and start a fresh orchestration; do not infer a baseline.",
+    )
+
+    def require_unchanged(
+        before: dict[str, str],
+        after: dict[str, str],
+        message: str,
+        detail_key: str,
+        remediation: str,
+    ) -> None:
+        require(
+            after == before,
+            message,
+            {detail_key: fingerprint_scope_violations(before, after, mutable_ids=set())},
+            remediation,
+        )
+
+    require_unchanged(
+        source_requests_before,
+        source_request_record_fingerprint_snapshot(project_root, config),
+        "blocked delegated acquisition changed the source-request store",
+        "source_request_scope_violations",
+        "Restore every request; a blocked attempt cannot fulfill a request. Report a fulfilment as completed.",
+    )
+    require_unchanged(
+        question_files_before,
+        question_file_fingerprint_snapshot(project_root, config),
+        "blocked delegated acquisition changed question files",
+        "question_scope_violations",
+        "Restore every question; a blocked attempt cannot reopen a question.",
+    )
+    require_unchanged(
+        attempt_audit_before,
+        record_fingerprint_snapshot(
+            request_attempt_audit_events(project_root, config),
+            id_field="event_id",
+            label="source request attempt audit",
+        ),
+        "blocked delegated acquisition recorded an acquisition attempt",
+        "attempt_audit_violations",
+        (
+            "A recorded attempt failure is durable evidence that the action ran, so report it as completed "
+            "rather than blocked."
+        ),
+    )
+    require_unchanged(
+        candidate_records_before,
+        candidate_record_fingerprint_snapshot(load_candidates(project_root, config)),
+        "blocked delegated acquisition changed candidate records",
+        "candidate_scope_violations",
+        "Restore the candidate store; delegated acquisition has no candidate to transition.",
+    )
+
+    normalize_sources = load_sibling_module("normalize_sources")
+    manifest_relative, _ = normalize_sources.source_paths(config)
+    require_unchanged(
+        manifest_records_before,
+        record_fingerprint_snapshot(
+            normalize_sources.load_manifest(project_root / manifest_relative),
+            id_field="id",
+            label="evidence manifest",
+        ),
+        "blocked delegated acquisition changed the evidence manifest",
+        "manifest_scope_violations",
+        "Remove the inventoried delivery, or fulfil the request it satisfies and report the action as completed.",
+    )
+    require_unchanged(
+        normalized_files_before,
+        normalized_file_fingerprint_snapshot(project_root, config),
+        "blocked delegated acquisition changed normalized evidence",
+        "normalized_scope_violations",
+        "Remove the normalized output, or fulfil the request it satisfies and report the action as completed.",
+    )
+    require_unchanged(
+        raw_tree_before["entries"],
+        raw_tree_snapshot(project_root, config, include_entries=True)["entries"],
+        "blocked delegated acquisition changed raw evidence",
+        "raw_scope_violations",
+        "Remove the delivered files, or inventory and fulfil them and report the action as completed.",
+    )
+
+    controller = load_sibling_module("run_controller")
+    run_id = work_order.get("run_id")
+    run_state = controller.load_run_state(project_root, run_id) if isinstance(run_id, str) else None
+    current_child_state = (
+        run_state.get("state", {}).get("current") if isinstance(run_state, dict) else None
+    )
+    require(
+        current_child_state in {"fetching", "evidence_ready"},
+        "blocked delegated acquisition child run is in an invalid state",
+        {"child_state": current_child_state},
+    )
+    return PAUSED_STATUS, "The delegated acquisition changed nothing and can be replayed after resume."
+
+
 def verify_blocked_action_postconditions(
     project_root: Path,
     session: dict[str, Any],
@@ -5169,6 +6284,8 @@ def verify_blocked_action_postconditions(
     work_order = require_action_baselines(work_order, project_root)
     if work_order.get("phase") != "acquisition":
         return PAUSED_STATUS, None
+    if work_order.get("acquisition_mode") == ACQUISITION_MODE_DELEGATED:
+        return verify_blocked_delegated_acquisition_postconditions(project_root, work_order)
 
     config = load_config(project_root)
     scope = work_order.get("scope") if isinstance(work_order.get("scope"), dict) else {}

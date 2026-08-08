@@ -28,6 +28,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _normalization_config import NormalizationConfigError, adapter_summaries, normalization_config
+from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
 from _script_errors import handle_system_exit, json_mode_requested
 from _workspace_health import evaluate_workspace_health
 
@@ -497,6 +498,61 @@ def normalization_adapters_check(project_root: Path, yaml_module: Any | None) ->
     )
 
 
+def acquisition_mode_check(project_root: Path, yaml_module: Any | None) -> dict[str, Any]:
+    """Report who acquires evidence for this workspace.
+
+    The same question doctor answers about normalizer adapters: what is this workspace
+    authorized to do, read from the declaration rather than by watching it run. Under
+    delegation the answer is "nothing" — the workspace fetches nothing itself — and the
+    acquirer's identity is the thing an auditor needs to see.
+    """
+    config = load_research_config(project_root, yaml_module)
+    try:
+        settings = orchestration_config(config)
+    except OrchestrationConfigError as exc:
+        return check_item(
+            "acquisition_mode",
+            "Acquisition mode",
+            "degraded",
+            False,
+            f"The research.yml orchestration section is invalid: {exc.message}",
+            "Orchestration refuses to start a session while the section is invalid.",
+            exc.remediation,
+            details={"error_code": exc.error_code},
+        )
+
+    if not is_delegated(settings):
+        return check_item(
+            "acquisition_mode",
+            "Acquisition mode",
+            "ok",
+            False,
+            "This workspace acquires evidence through its own configured providers.",
+            "Acquisition work orders are issued only for sources an enabled provider can fetch.",
+            "No action required.",
+            details={"acquisition_mode": settings["acquisition_mode"], "acquirer_agent_id": None},
+        )
+
+    return check_item(
+        "acquisition_mode",
+        "Acquisition mode",
+        "ok",
+        False,
+        f"Acquisition is delegated to {settings['acquirer_agent_id']}.",
+        (
+            "The workspace fetches nothing itself: acquisition work orders are addressed to that acquirer, "
+            "which supplies its own connectors, credentials, and egress policy. Managed runners refuse this "
+            "workspace; drive it with orchestrate start/next/submit."
+        ),
+        "Confirm the named acquirer is the host you intended to authorize.",
+        details={
+            "acquisition_mode": settings["acquisition_mode"],
+            "acquirer_agent_id": settings["acquirer_agent_id"],
+            "max_attempts_per_request": settings["max_attempts_per_request"],
+        },
+    )
+
+
 def secret_exposure_check(project_root: Path) -> dict[str, Any]:
     candidates = [project_root / ".env"]
     readable: list[str] = []
@@ -580,6 +636,7 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
         contract_check(project_root, yaml_module),
         semantic_retrieval_check(project_root, yaml_module),
         normalization_adapters_check(project_root, yaml_module),
+        acquisition_mode_check(project_root, yaml_module),
         secret_exposure_check(project_root),
         check_item(
             "workspace_health",

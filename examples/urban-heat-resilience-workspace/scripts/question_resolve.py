@@ -75,6 +75,8 @@ _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _delegation_gate import DelegationGateError, require_sanctioned_mutation
+from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError
 from _workspace_module_loader import load_workspace_module
@@ -809,6 +811,30 @@ def transition_resolution(
         }
 
 
+def require_in_order_question_mutation(project_root: Path, config: dict[str, Any], slug: str) -> None:
+    """Refuse reopening a question that no pending work order scopes, under delegation.
+
+    A workspace that does not delegate acquisition is never gated: its questions are
+    reopened by an in-workspace acquire agent inside its own work order, or by an operator
+    who is not driving a protocol at all.
+    """
+    try:
+        delegated = is_delegated(orchestration_config(config))
+    except OrchestrationConfigError as exc:
+        raise ResolveError(EXIT_INVALID, exc.error_code, f"invalid research.yml: {exc.message}") from exc
+    require_sanctioned_mutation(
+        project_root,
+        delegated,
+        question_slug=slug,
+        error_code="QUESTION_REOPEN_DELEGATED",
+        subject=f"question {slug}",
+        remediation=(
+            "Reopen this question while executing the work order that scopes it, or finish the active "
+            "session first."
+        ),
+    )
+
+
 def transition_reopen(
     page_path: Path,
     project_root: Path,
@@ -838,6 +864,10 @@ def transition_reopen(
                 "STATUS_NOT_REOPENABLE",
                 f"question {slug} has status '{status}'; only blocked questions can be reopened",
             )
+        # Under delegated acquisition this transition must belong to a pending work order.
+        # Reopen has no no-op path to exempt: a question that is not blocked was already
+        # refused above, so everything reaching here mutates the page.
+        require_in_order_question_mutation(project_root, config, slug)
         source_ids = validate_source_ids(project_root, config, unique_nonempty(args.source_id, "--source-id"))
         if not source_ids:
             raise ResolveError(EXIT_INVALID, "VALUE_INVALID", "reopen requires at least one --source-id")
@@ -1147,6 +1177,20 @@ def main(argv: list[str] | None = None) -> int:
             result = transition_review(page_path, args)
         else:
             result = transition_resolution(page_path, project_root, config, args)
+    except DelegationGateError as error:
+        details = {"action": action, "slug": slug, "agent_id": agent_id}
+        details.update(error.details)
+        if json_mode:
+            emit_error(
+                error.message,
+                json_mode=True,
+                error_code=error.error_code,
+                remediation=error.remediation,
+                details=details,
+            )
+        else:
+            print(f"refused ({error.error_code}): {error.message}", file=sys.stderr)
+        return EXIT_INVALID
     except ResolveError as error:
         if json_mode:
             details = {"action": action, "slug": slug, "agent_id": agent_id}

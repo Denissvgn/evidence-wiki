@@ -41,6 +41,9 @@ ANSWER_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-answer.md
 SCOUT_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-scout.md"
 RUN_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-run.md"
 RESEARCH_ACQUIRE_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-acquire.md"
+DELEGATED_ACQUIRE_SKILL = (
+    REPO_ROOT / "workspace-template" / "skills" / "research-acquire-delegated.md"
+)
 RESEARCH_DISCOVER_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-discover.md"
 JURISDICTIONS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "discovery" / "jurisdictions.yml"
 LEGAL_RESULTS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "discovery" / "legal-search-results.jsonl"
@@ -515,6 +518,143 @@ class DocumentedWorkflowTests(unittest.TestCase):
 
         self.assertIn("workspace-template/docs/acquisition.md", readme)
         self.assertIn("docs/acquisition.md", template_readme)
+
+    def test_every_skill_a_work_order_can_name_ships_and_is_a_distribution_anchor(self):
+        # The controller writes a skill id into each work order; a distribution missing
+        # that file hands a worker — or an external acquirer — a dangling pointer to its
+        # own playbook. This keeps the required-asset manifest in step with the routes.
+        import re as _re
+
+        from evidence_wiki.resources import REQUIRED_STARTER_ASSETS
+
+        controller = (
+            REPO_ROOT / "workspace-template" / "scripts" / "orchestration_controller.py"
+        ).read_text(encoding="utf-8")
+        named = set(_re.findall(r'^\s*skill = "([a-z0-9-]+)"', controller, _re.MULTILINE))
+        self.assertIn("research-acquire-delegated", named, "the delegated route lost its skill id")
+
+        for skill_id in sorted(named):
+            with self.subTest(skill=skill_id):
+                path = REPO_ROOT / "workspace-template" / "skills" / f"{skill_id}.md"
+                self.assertTrue(path.is_file(), f"{skill_id} is named by a work order but has no skill file")
+                self.assertIn(f"skills/{skill_id}.md", REQUIRED_STARTER_ASSETS)
+
+    def test_delegated_acquire_skill_documents_the_external_acquirer_loop(self):
+        self.assertTrue(DELEGATED_ACQUIRE_SKILL.is_file(), "delegated acquire skill is missing")
+
+        skill = DELEGATED_ACQUIRE_SKILL.read_text(encoding="utf-8")
+        for expected in (
+            "## Use When",
+            "Inputs:",
+            "## Operating Rules",
+            "## Workflow",
+            "## Outcome Semantics",
+            "## Completion Checklist",
+            "acquisition_mode: delegated",
+            "python3 scripts/source_requests.py list --status open --format json",
+            "python3 scripts/source_inventory.py --report",
+            "python3 scripts/normalize_sources.py --all",
+            "python3 scripts/source_requests.py fulfill --request-id",
+            "python3 scripts/source_requests.py record-attempt-failure",
+            "python3 scripts/question_resolve.py reopen --slug",
+            "docs/source-delivery.md",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, skill)
+
+        collapsed = re.sub(r"\s+", " ", skill)
+        # The three things an acquirer most easily gets wrong, stated outright.
+        self.assertIn("exactly one of two durable outcomes", collapsed)
+        self.assertIn("partial** batch is still `completed`", collapsed)
+
+        # Asserted inside the Outcome Semantics section, not anywhere in the file: the
+        # completion checklist restates these in passing, so a whole-file search would
+        # stay green even if the definitions themselves were gutted.
+        semantics = re.sub(
+            r"\s+", " ", skill.split("## Outcome Semantics", 1)[1].split("## Completion Checklist", 1)[0]
+        )
+        self.assertIn("nothing durable changed", semantics)
+        self.assertIn("Reserve `failed` for", semantics)
+        self.assertIn("Never claim terminal `blocked_on_sources`", semantics)
+
+        # It must not instruct the acquirer to drive the workspace's provider layer.
+        # Naming those tools to contrast against them is the point of the orientation
+        # paragraph, so this checks for invocations rather than mentions.
+        for absent in (
+            "python3 scripts/fetch_sources.py",
+            "python3 scripts/discover_sources.py",
+            "plan-fetch --request-id",
+        ):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, skill)
+        self.assertIn("This is not `research-acquire`", skill)
+
+    def test_delivery_contract_points_at_the_delegated_acquirer_playbook(self):
+        delivery = SOURCE_DELIVERY_DOC.read_text(encoding="utf-8")
+        self.assertIn("../skills/research-acquire-delegated.md", delivery)
+        self.assertIn("orchestration.acquisition: delegated", delivery)
+
+    def test_delivery_contract_states_request_id_is_mandatory_under_delegation(self):
+        # The sidecar's request_id is the only link between a delivered artifact and the
+        # request it fulfils when there is no candidate id, so a delegated delivery that
+        # omits it is refused at submission. The contract has to say so where an
+        # implementer reads the field, not only in the orchestration doc.
+        delivery = re.sub(r"\s+", " ", SOURCE_DELIVERY_DOC.read_text(encoding="utf-8"))
+
+        self.assertIn("`request_id` stops being optional", delivery)
+        self.assertIn("required for delegated acquisition", delivery)
+        self.assertIn("ORCHESTRATION_POSTCONDITION_FAILED", delivery)
+
+    def test_delegated_acquisition_is_documented_where_hosts_look(self):
+        orchestration = re.sub(r"\s+", " ", ORCHESTRATION_DOC.read_text(encoding="utf-8"))
+
+        self.assertIn("## Delegated Acquisition", ORCHESTRATION_DOC.read_text(encoding="utf-8"))
+        # The declaration, and the property that keeps it from being a provider grant.
+        self.assertIn("acquirer_agent_id: autoseller-orchestrator", orchestration)
+        self.assertIn("Delegation is not a provider grant", orchestration)
+        # The three result rules an acquirer most easily gets wrong.
+        self.assertIn("fulfilment **or** a recorded attempt failure", orchestration)
+        self.assertIn("batch is therefore `completed`", orchestration)
+        self.assertIn("`blocked` means the attempt changed nothing durable", orchestration)
+        # Retry semantics and the gate.
+        self.assertIn("scoped to the current session", orchestration)
+        self.assertIn("SOURCE_REQUEST_FULFILL_DELEGATED", orchestration)
+        self.assertIn("QUESTION_REOPEN_DELEGATED", orchestration)
+        self.assertIn("research-acquire-delegated.md", orchestration)
+
+    def test_the_delegated_terminal_reason_prefix_is_published_verbatim(self):
+        # A host matches this string to tell "the acquirer kept failing" from the other
+        # reasons a session ends blocked_on_sources, so the doc and the controller
+        # constant must agree character for character.
+        controller = load_script_module(
+            "documented_workflows_controller",
+            REPO_ROOT / "workspace-template" / "scripts" / "orchestration_controller.py",
+        )
+        prefix = controller.DELEGATED_EXHAUSTED_TERMINAL_REASON
+
+        for doc in (ORCHESTRATION_DOC, HANDOFF_DOC):
+            with self.subTest(doc=doc.name):
+                self.assertIn(prefix, re.sub(r"\s+", " ", doc.read_text(encoding="utf-8")))
+
+    def test_the_handoff_publishes_the_delegated_wire_fields(self):
+        handoff = re.sub(r"\s+", " ", HANDOFF_DOC.read_text(encoding="utf-8"))
+
+        for field in ("`acquisition_mode`", "`assigned_agent_id`", "`max_attempts_per_request`"):
+            with self.subTest(field=field):
+                self.assertIn(field, handoff)
+        # The distinction a host must not collapse.
+        self.assertIn("being addressed does not grant the right to drive the protocol", handoff)
+        self.assertIn("exhausted_requests", handoff)
+
+    def test_the_changelog_frames_the_delegated_acquisition_change(self):
+        changelog = re.sub(r"\s+", " ", (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+
+        self.assertIn("external acquirer", changelog)
+        # Spelled as the YAML block a reader would copy, not the dotted form used in prose.
+        self.assertIn("orchestration: acquisition: delegated", changelog)
+        # The problem it removes, stated so a reader knows why the feature exists.
+        self.assertIn("no work order accounts for", changelog)
+        self.assertIn("`acquisition: providers` remains the default", changelog)
 
     def test_research_acquire_skill_documents_safe_fetch_loop(self):
         self.assertTrue(RESEARCH_ACQUIRE_SKILL.is_file(), "research-acquire skill is missing")

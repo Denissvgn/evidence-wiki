@@ -67,6 +67,20 @@ except ImportError as exc:  # pragma: no cover - environment guard
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_REQUESTS_PATH = "sources/source-requests.jsonl"
+ATTEMPT_AUDIT_FILENAME = "source-request-attempts.jsonl"
+ATTEMPT_EVENT_TYPE = "source_request_attempt_failed"
+# A detail is operator context, not a payload. Long connector diagnostics are truncated
+# rather than refused: losing the tail of a message is a smaller harm than refusing to
+# record that the attempt failed at all.
+MAX_ATTEMPT_DETAIL_LENGTH = 500
+ATTEMPT_EVENT_REQUIRED_FIELDS = (
+    "event_id",
+    "request_id",
+    "orchestration_id",
+    "action_id",
+    "failure_code",
+    "recorded_at",
+)
 REQUEST_KINDS = ("paper", "dataset", "web", "code", "other")
 REQUEST_PRIORITIES = ("high", "medium", "low")
 REQUEST_STATUSES = ("open", "fulfilled")
@@ -81,8 +95,11 @@ SAFE_OUTPUT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _delegation_gate import DelegationGateError, require_sanctioned_mutation
+from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
+from source_failure_taxonomy import ATTEMPT_FAILURE_CODES, is_attempt_failure_code
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -153,6 +170,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Manifest source id of the delivered evidence.",
     )
     fulfill_parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Report format. Defaults to text.",
+    )
+
+    attempt_parser = subparsers.add_parser(
+        "record-attempt-failure",
+        help="Record that one acquisition attempt for a request produced no evidence.",
+    )
+    attempt_parser.add_argument("--request-id", required=True, help="Open request the attempt was for.")
+    attempt_parser.add_argument(
+        "--failure-code",
+        required=True,
+        # Deliberately not an argparse `choices` list, unlike `add --kind`. The caller
+        # here is an external acquirer driving this command programmatically, and argparse
+        # answers an invalid choice with a usage dump on stderr rather than the shared
+        # error envelope. Validating in the command keeps the failure machine-readable
+        # under `--format json` with a stable ATTEMPT_FAILURE_CODE_INVALID code.
+        help=f"Why the attempt produced nothing: {', '.join(ATTEMPT_FAILURE_CODES)}. See docs/source-delivery.md.",
+    )
+    attempt_parser.add_argument(
+        "--orchestration-id",
+        required=True,
+        help="Session the attempt belongs to; attempts are counted per session.",
+    )
+    attempt_parser.add_argument(
+        "--action-id",
+        required=True,
+        help="Work order the attempt was executed under.",
+    )
+    attempt_parser.add_argument(
+        "--detail",
+        default=None,
+        help=f"Optional operator context, truncated to {MAX_ATTEMPT_DETAIL_LENGTH} characters.",
+    )
+    attempt_parser.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
@@ -351,6 +405,124 @@ def _write_requests_unlocked(path: Path, records: list[dict[str, Any]]) -> None:
 def write_requests(path: Path, records: list[dict[str, Any]]) -> None:
     with workspace_lock(source_requests_lock_path(path), purpose="source request mutation"):
         _write_requests_unlocked(path, records)
+
+
+def workspace_delegates_acquisition(config: dict[str, Any]) -> bool:
+    """Return whether research.yml declares an external acquirer.
+
+    A malformed section is reported through this script's own error envelope rather than
+    silently reading as "not delegated": treating a broken declaration as absent would
+    quietly reopen the out-of-band path the gate exists to close.
+    """
+    try:
+        return is_delegated(orchestration_config(config))
+    except OrchestrationConfigError as exc:
+        raise SystemExit(f"Invalid research.yml: {exc.message}") from exc
+
+
+def require_in_order_request_mutation(project_root: Path, config: dict[str, Any], request_id: str) -> None:
+    require_sanctioned_mutation(
+        project_root,
+        workspace_delegates_acquisition(config),
+        request_id=request_id,
+        error_code="SOURCE_REQUEST_FULFILL_DELEGATED",
+        subject=f"source request {request_id}",
+        remediation=(
+            "Fulfil or record an attempt against this request while executing the delegated acquisition "
+            "work order that scopes it, or finish the active session first."
+        ),
+    )
+
+
+def request_attempt_audit_path(project_root: Path, config: dict[str, Any]) -> Path:
+    """Return the append-only attempt audit beside the request store."""
+    return requests_path(project_root, config).with_name(ATTEMPT_AUDIT_FILENAME)
+
+
+def generate_attempt_event_id() -> str:
+    """Return a fresh attempt-event identity.
+
+    Random rather than content-derived, unlike ``generate_request_id``. A request id
+    hashes its content so that re-adding the same request is an idempotent no-op; an
+    attempt has no such dedup semantics — two throttled attempts on one request in the
+    same second are two events. Deriving the id from (request, timestamp, count) made it
+    collide exactly then, and `event_id` is the identity the controller fingerprints, so a
+    collision would hide one attempt behind another. This matches the candidate lifecycle
+    audit, which is the precedent for an append-only event store here.
+    """
+    return f"attempt-{uuid.uuid4().hex}"
+
+
+def bounded_attempt_detail(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) <= MAX_ATTEMPT_DETAIL_LENGTH:
+        return text
+    return text[: MAX_ATTEMPT_DETAIL_LENGTH - 1] + "…"
+
+
+def load_attempt_events(path: Path) -> list[dict[str, Any]]:
+    """Load every recorded attempt-failure event.
+
+    Readers are deliberately tolerant of **unknown keys** while strict about the fields
+    they rely on. The event shape is expected to grow — a structured request scope is the
+    next likely addition — and a reader written today must not refuse events written by a
+    later version of this package. Writers stay strict: nothing here emits an unknown key.
+
+    A malformed line is fatal rather than skipped. This is an audit whose absence is
+    evidence: silently dropping an unreadable event would let a request look
+    never-attempted, which is exactly the claim the audit exists to disprove.
+    """
+    events: list[dict[str, Any]] = []
+    if not path.exists():
+        return events
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Invalid JSONL in {path.name} line {line_number}: {exc}") from exc
+        if not isinstance(event, dict):
+            raise SystemExit(f"Invalid attempt event in {path.name} line {line_number}: expected a JSON object")
+        missing = [field for field in ATTEMPT_EVENT_REQUIRED_FIELDS if not isinstance(event.get(field), str)]
+        if missing:
+            raise SystemExit(
+                f"Invalid attempt event in {path.name} line {line_number}: "
+                f"missing or non-string {', '.join(missing)}"
+            )
+        events.append(event)
+    return events
+
+
+def attempt_failures_by_request(
+    events: list[dict[str, Any]],
+    orchestration_id: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Group attempt failures by request id, oldest first, optionally for one session.
+
+    The session filter is how a router counts attempts per session rather than for all
+    time: a new session gets a fresh look at every request, so a host-side fix is applied
+    by starting one rather than by editing this append-only audit. Callers that want the
+    whole history — lint, an operator report — pass no filter.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        if orchestration_id is not None and event.get("orchestration_id") != orchestration_id:
+            continue
+        grouped.setdefault(str(event["request_id"]), []).append(event)
+    return grouped
+
+
+def append_attempt_event(path: Path, event: dict[str, Any]) -> None:
+    """Append one attempt event. Called while holding the source-request lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=False) + "\n")
 
 
 def append_log_entry(log_path: Path, entry: str) -> None:
@@ -1590,6 +1762,10 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
                 f"Request {request_id} is already fulfilled by source {target.get('source_id')}; "
                 "record a new request instead of relinking it."
             )
+        # Gated here rather than at the top of the command: the idempotent re-fulfil above
+        # returns without touching anything, and refusing a no-op would break a delegate
+        # replaying its own action.
+        require_in_order_request_mutation(project_root, config, request_id)
         if source_id not in manifest_source_ids(project_root, config):
             raise SystemExit(
                 f"Unknown source id: {source_id} (not in the manifest). "
@@ -1615,6 +1791,69 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
         "updated": True,
         "request": target,
         "requests_path": relative_label(project_root, path),
+    }
+
+
+def run_record_attempt_failure(args: argparse.Namespace) -> dict[str, Any]:
+    project_root = Path(args.project_root).expanduser().resolve()
+    config = load_config(project_root)
+    path = requests_path(project_root, config)
+    audit_path = request_attempt_audit_path(project_root, config)
+
+    request_id = args.request_id.strip()
+    orchestration_id = args.orchestration_id.strip()
+    action_id = args.action_id.strip()
+    failure_code = args.failure_code.strip()
+    if not request_id or not orchestration_id or not action_id:
+        raise SystemExit("--request-id, --orchestration-id, and --action-id must be non-empty strings")
+    if not is_attempt_failure_code(failure_code):
+        raise SystemExit(
+            f"Unknown attempt failure code: {failure_code}. "
+            f"Use one of: {', '.join(ATTEMPT_FAILURE_CODES)}"
+        )
+
+    with workspace_lock(source_requests_lock_path(path), purpose="source request mutation"):
+        records = load_requests(path)
+        target = next((record for record in records if record.get("request_id") == request_id), None)
+        if target is None:
+            raise SystemExit(f"Unknown request id: {request_id} (no record in {relative_label(project_root, path)})")
+        if target.get("status") == "fulfilled":
+            # A fulfilled request has evidence; recording an attempt failure against it
+            # would put the audit and the store in disagreement about what happened.
+            raise SystemExit(
+                f"Request already fulfilled: {request_id} was fulfilled by source "
+                f"{target.get('source_id')}; a fulfilled request has no failed attempt to record."
+            )
+        require_in_order_request_mutation(project_root, config, request_id)
+        now = timestamp_utc()
+        event: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "event_type": ATTEMPT_EVENT_TYPE,
+            "event_id": generate_attempt_event_id(),
+            "request_id": request_id,
+            "orchestration_id": orchestration_id,
+            "action_id": action_id,
+            "failure_code": failure_code,
+            "detail": bounded_attempt_detail(getattr(args, "detail", None)),
+            "recorded_at": now,
+        }
+        append_attempt_event(audit_path, event)
+
+    append_log_entry(
+        project_root / "log.md",
+        (
+            f"## [{now.split('T', 1)[0]}] source-request | Recorded a failed acquisition attempt\n\n"
+            f"- Request: `{request_id}` failed with `{failure_code}`.\n"
+            f"- Action: `{action_id}` of orchestration `{orchestration_id}`.\n"
+        ),
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "action": "record-attempt-failure",
+        "recorded": True,
+        "event": event,
+        "request": target,
+        "attempts_path": relative_label(project_root, audit_path),
     }
 
 
@@ -1710,6 +1949,17 @@ def render_text_report(report: dict[str, Any]) -> str:
     if report.get("action") == "fulfill":
         verb = "Fulfilled" if report["updated"] else "Already fulfilled (no-op)"
         return f"{verb}:\n  {request_summary(report['request'])}\n"
+    if report.get("action") == "record-attempt-failure":
+        event = report["event"]
+        lines = [
+            f"Recorded attempt failure {event['failure_code']}:",
+            f"  {request_summary(report['request'])}",
+            f"  Action: {event['action_id']} of orchestration {event['orchestration_id']}",
+        ]
+        if event.get("detail"):
+            lines.append(f"  Detail: {event['detail']}")
+        lines.append(f"  Audit: {report['attempts_path']}")
+        return "\n".join(lines) + "\n"
     if report.get("action") == "plan-fetch":
         lines = [
             f"Fetch plan for {report['request'].get('request_id', '?')}: {report['plan_status']}",
@@ -1756,8 +2006,19 @@ def main(argv: list[str] | None = None) -> int:
             report = run_list(args)
         elif args.command == "fulfill":
             report = run_fulfill(args)
+        elif args.command == "record-attempt-failure":
+            report = run_record_attempt_failure(args)
         else:
             report = run_plan_fetch(args)
+    except DelegationGateError as exc:
+        emit_error(
+            exc.message,
+            json_mode=json_mode,
+            error_code=exc.error_code,
+            remediation=exc.remediation,
+            details=exc.details,
+        )
+        return EXIT_INVALID
     except LockUnavailableError as exc:
         emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
         return EXIT_INVALID

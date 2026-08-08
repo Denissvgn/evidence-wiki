@@ -1441,6 +1441,7 @@ class OptionalSectionFooterTests(unittest.TestCase):
 
         self.assertIn("# review:", text)
         self.assertIn("# normalization:", text)
+        self.assertIn("# orchestration:", text)
         self.assertIn("docs/research-yml.md", text)
 
     def test_delivered_blocks_are_verbatim_from_the_starter(self):
@@ -1449,7 +1450,11 @@ class OptionalSectionFooterTests(unittest.TestCase):
         starter_text = (self.STARTER / "research.yml").read_text(encoding="utf-8")
         blocks = INIT.optional_section_examples(self.STARTER)
 
-        self.assertEqual(2, len(blocks), "expected the review and normalization examples")
+        self.assertEqual(
+            3,
+            len(blocks),
+            "expected the review, normalization, and orchestration examples",
+        )
         for block in blocks:
             with self.subTest(block=block.splitlines()[0]):
                 self.assertIn(block, starter_text)
@@ -1475,6 +1480,7 @@ class OptionalSectionFooterTests(unittest.TestCase):
 
         self.assertNotIn("review", document)
         self.assertNotIn("normalization", document)
+        self.assertNotIn("orchestration", document)
         self.assertIn("project", document)
 
     def test_force_reinit_does_not_duplicate_the_footer(self):
@@ -1487,6 +1493,10 @@ class OptionalSectionFooterTests(unittest.TestCase):
         self.assertEqual(1, text.count("# normalization:"))
 
     def test_a_newly_commented_section_is_delivered_without_code_changes(self):
+        # Counted relative to the real starter rather than pinned: this test is about the
+        # mechanism delivering one more section, not about how many the starter ships.
+        baseline = len(INIT.optional_section_examples(self.STARTER))
+
         with tempfile.TemporaryDirectory() as tmpdir:
             starter = Path(tmpdir) / "starter"
             shutil.copytree(self.STARTER, starter)
@@ -1499,7 +1509,7 @@ class OptionalSectionFooterTests(unittest.TestCase):
 
             blocks = INIT.optional_section_examples(starter)
 
-        self.assertEqual(3, len(blocks))
+        self.assertEqual(baseline + 1, len(blocks))
         self.assertIn("# future_section:", blocks[-1])
 
     def test_unreadable_starter_config_degrades_to_no_footer(self):

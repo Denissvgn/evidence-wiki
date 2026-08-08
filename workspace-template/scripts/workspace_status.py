@@ -2136,6 +2136,15 @@ def summarize_orchestration_session(
             if isinstance(recovery, dict)
             else None
         ),
+        # The acquisition posture the session froze at start. A session created before
+        # delegated acquisition existed carries neither field and reads as `providers`,
+        # which is the only mode it could have run under.
+        "acquisition_mode": (
+            document.get("acquisition_mode")
+            if document.get("acquisition_mode") in {"providers", "delegated"}
+            else "providers"
+        ),
+        "acquirer_agent_id": document.get("acquirer_agent_id"),
         "active_run_id": document.get("active_run_id"),
         "child_run_ids": list(document.get("child_run_ids") or []),
         "action_count": int(document.get("action_count", 0) or 0),

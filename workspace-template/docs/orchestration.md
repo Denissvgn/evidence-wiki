@@ -254,6 +254,15 @@ new fulfilled source IDs. An unchanged pre-existing source is reusable only
 when both its manifest record and normalized output exactly match the protected
 baseline.
 
+A **delegated** acquisition action is bounded the same way, with three
+differences that follow from having no candidate store: it may not change
+candidate records at all, a scoped request it did not fulfil must be
+byte-identical (its failure lives in the attempt audit, not in the request), and
+it may append to that append-only audit but never rewrite an event that existed
+when the order was issued. Question files are mutable only for questions whose
+*every* blocking request was fulfilled. Pre-existing evidence is reusable on the
+same terms as above, correlated by `provenance.request_id` alone.
+
 `blocked_on_sources`, `no_ship`, and `failed` remain terminal child-run states.
 The parent never reopens those records. For example, an initial research run
 against an empty workspace can block and create a source request; the parent
@@ -295,6 +304,78 @@ The parent declares `complete` only after fresh publication-readiness evaluation
 returns `ship`, then writes `answers.json` through the deterministic answer
 exporter. `workspace_status.py` remains read-only and exposes only an additive
 summary of the newest parent session.
+
+## Delegated Acquisition
+
+A workspace that disables its own acquisition providers has no route to the
+acquisition phase: the controller has nobody to address the work to, so open
+source requests terminate the session `blocked_on_sources` however good the
+host's own fetching is. `research.yml` can name that host instead:
+
+```yaml
+orchestration:
+  acquisition: delegated          # default: providers
+  acquirer_agent_id: autoseller-orchestrator
+  max_attempts_per_request: 2     # optional, default 2, maximum 10
+```
+
+The mode is resolved once, at `orchestrate start`, and frozen into the session
+alongside `provider_policy`. Declaring it together with an enabled
+`integrations.acquisition` is refused there — exactly one of them acquires. A
+session whose declaration changes while it is running is refused with
+`ORCHESTRATION_DELEGATION_CHANGED`; under a pending action the trusted-static-input
+guard answers first with `ORCHESTRATION_TRUSTED_INPUT_CHANGED`. Delegation is not
+a provider grant: the effective provider policy stays empty and the package still
+fetches nothing.
+
+**Routing.** Under the `blocked_on_sources` verdict the controller skips the
+candidate and discovery arms entirely and issues one acquisition work order
+scoped to every open request still worth attempting, addressed to
+`assigned_agent_id`, with `acquisition_mode: delegated`, an empty `candidate_ids`
+scope, and the `research-acquire-delegated` skill. Batching is deliberate: a host
+with parallel connectors should not be forced through one protocol round trip per
+request.
+
+**Execution.** The acquirer works *inside the pending order* — deliver under
+`docs/source-delivery.md` with `request_id` stamped in the sidecar, inventory,
+normalize, `source_requests.py fulfill`, `question_resolve.py reopen` — and
+records anything it could not obtain with
+`source_requests.py record-attempt-failure`. See
+[../skills/research-acquire-delegated.md](../skills/research-acquire-delegated.md)
+for the full sequence. Managed `orchestrate run` and `resume` refuse a delegated
+workspace with `RUNNER_DELEGATED_ACQUISITION_UNSUPPORTED`: the order is addressed
+to the host's own connectors, which no managed worker can be.
+
+**Result semantics.** Every scoped request must end the action with a fulfilment
+**or** a recorded attempt failure naming that action; a request with neither
+fails the postconditions. A **partial** batch is therefore `completed`, not
+degraded — that is the ordinary shape of a delegated action. `blocked` means the
+attempt changed nothing durable at all and `resume` replays the same order;
+unlike the provider path, no partial delivery is tolerated, because a delegate
+holding delivered evidence can simply fulfil it. `failed` remains reserved for an
+unrecoverable condition, never a throttled or unauthorized connector.
+
+**Retry and exhaustion.** Attempts are counted from the durable audit and scoped
+to the current session, so a new session gets a fresh look at every request —
+that is the supported way to retry after fixing a host-side cause, rather than
+editing an append-only audit. A request is retired when it reaches
+`max_attempts_per_request` or when its most recent failure is a standing decision
+(`not_authorized`, `robots_or_terms_blocked`, `license_or_terms_unknown`,
+`manual_review_required`). When every open request is retired the session
+terminates `blocked_on_sources` with a reason beginning
+`Delegated acquisition exhausted its attempts for every open source request`, and
+the `session_finished` event carries `exhausted_requests` mapping each request id
+to its last failure code, so a host branches on data rather than prose.
+
+**Fulfilment stays inside the protocol.** While a delegated session is live,
+`source_requests.py fulfill`, `record-attempt-failure`, and
+`question_resolve.py reopen` are refused for anything no pending work order
+scopes — `SOURCE_REQUEST_FULFILL_DELEGATED` and `QUESTION_REOPEN_DELEGATED`. A
+request is sanctioned by a pending delegated acquisition order that scopes it; a
+question by any pending order that scopes its slug, since research orders
+legitimately mutate their own questions. An identical re-fulfil is a no-op and
+stays allowed. Without the `orchestration:` section, or with every session
+terminal, nothing is gated and these commands behave exactly as before.
 
 ## Provider And Runner Boundaries
 

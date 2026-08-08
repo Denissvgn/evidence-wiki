@@ -106,6 +106,12 @@ ReviewConfigError = _review_config.ReviewConfigError
 review_config = _review_config.review_config
 _normalized_contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract")
 
+# Half of the controller's MAX_SCOPE_GUARD_BYTES bounded read. Past that guard the
+# controller refuses to verify a delegated acquisition at all, so the warning has to arrive
+# with room to act on it. Fixed rather than configurable: it describes a package-internal
+# limit, and a knob would imply the limit itself is negotiable.
+ATTEMPT_AUDIT_WARNING_BYTES = 4 * 1024 * 1024
+
 
 @dataclass
 class Issue:
@@ -2274,12 +2280,165 @@ def load_source_request_records(
     return records
 
 
+def delegated_acquisition_request_scopes(project_root: Path) -> set[str]:
+    """Return every request id some delegated acquisition work order has scoped.
+
+    Read from the durable work orders rather than from session events: an order is the
+    artifact that authorized the fulfilment, and it survives even when its session has
+    long since terminated.
+    """
+    scoped: set[str] = set()
+    orders_root = project_root / "runs" / "orchestrations"
+    if not orders_root.is_dir():
+        return scoped
+    for order_path in sorted(orders_root.glob("*/work-orders/*.json")):
+        try:
+            document = json.loads(order_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            # Lint reports, it does not adjudicate. An unreadable order simply cannot
+            # vouch for a fulfilment; the controller refuses to run against one anyway.
+            continue
+        if not isinstance(document, dict):
+            continue
+        if document.get("phase") != "acquisition" or document.get("acquisition_mode") != "delegated":
+            continue
+        scope = document.get("scope")
+        if not isinstance(scope, dict):
+            continue
+        scoped.update(
+            value for value in scope.get("request_ids", []) if isinstance(value, str) and value
+        )
+    return scoped
+
+
+def check_delegated_acquisition_records(
+    project_root: Path,
+    config: dict[str, Any],
+    requests: list[dict[str, Any]],
+    requests_label: str,
+    results: dict[str, Any],
+) -> None:
+    """Report delegated-acquisition residue the work-order path cannot account for.
+
+    Two gaps the CLI gate cannot close, plus one growth warning:
+
+    - a request fulfilled while no delegated order ever scoped it — the gate only refuses
+      mutations while a session is *live*, so a fulfilment recorded with none running
+      leaves exactly this trace;
+    - an attempt event naming a request the store does not have, which means the audit and
+      the store disagree about what was attempted;
+    - an attempt audit approaching the controller's bounded-read cap, after which delegated
+      orders stop verifying at all.
+
+    All LOW: none of them makes current evidence untrustworthy, and a HIGH would freeze
+    orchestration over history.
+    """
+    stats = results["stats"]
+    source_requests = load_workspace_module(_SCRIPT_DIR, "source_requests")
+    orchestration_config = load_workspace_module(_SCRIPT_DIR, "_orchestration_config")
+    try:
+        delegated = orchestration_config.is_delegated(orchestration_config.orchestration_config(config))
+    except orchestration_config.OrchestrationConfigError:
+        # A malformed section is reported by every command that must act on it; lint's job
+        # here is the residue check, which simply does not apply.
+        return
+    if not delegated:
+        return
+
+    scoped_by_orders = delegated_acquisition_request_scopes(project_root)
+    unattributed = sorted(
+        str(record.get("request_id"))
+        for record in requests
+        if record.get("status") == "fulfilled" and isinstance(record.get("request_id"), str)
+        and record["request_id"] not in scoped_by_orders
+    )
+    stats["delegated_unattributed_fulfilments"] = len(unattributed)
+    for request_id in unattributed:
+        issue(
+            results,
+            "LOW",
+            "delegated_fulfilment_unattributed",
+            f"Fulfilled source request is not scoped by any delegated acquisition work order: {request_id}",
+            [requests_label],
+            (
+                "Fulfil requests while executing the delegated acquisition work order that scopes them so the "
+                "audit trail accounts for the mutation."
+            ),
+            field="status",
+            expected="fulfilled inside a delegated acquisition work order",
+            actual="fulfilled with no scoping work order",
+        )
+
+    audit_path = source_requests.request_attempt_audit_path(project_root, config)
+    audit_label = project_relative(project_root, audit_path)
+    try:
+        events = source_requests.load_attempt_events(audit_path)
+    except SystemExit as exc:
+        issue(
+            results,
+            "MEDIUM",
+            "source_request_attempt_audit_invalid",
+            f"Source request attempt audit is unreadable: {exc}",
+            [audit_label],
+            "Restore the append-only attempt audit; delegated acquisition cannot be verified without it.",
+        )
+        return
+
+    known_request_ids = {
+        record["request_id"] for record in requests if isinstance(record.get("request_id"), str)
+    }
+    orphaned = sorted(
+        {
+            str(event.get("request_id"))
+            for event in events
+            if event.get("request_id") not in known_request_ids
+        }
+    )
+    stats["source_request_attempt_events"] = len(events)
+    stats["source_request_attempt_orphans"] = len(orphaned)
+    for request_id in orphaned:
+        issue(
+            results,
+            "LOW",
+            "source_request_attempt_orphaned",
+            f"Attempt audit records a request the source-request store does not have: {request_id}",
+            [audit_label, requests_label],
+            "Restore the source-request store; an attempt is evidence about a request that should still exist.",
+            field="request_id",
+            expected="request id present in the source-request store",
+            actual="absent",
+        )
+
+    if audit_path.is_file():
+        audit_bytes = audit_path.stat().st_size
+        stats["source_request_attempt_audit_bytes"] = audit_bytes
+        if audit_bytes > ATTEMPT_AUDIT_WARNING_BYTES:
+            issue(
+                results,
+                "LOW",
+                "source_request_attempt_audit_large",
+                (
+                    f"Source request attempt audit is {audit_bytes // (1024 * 1024)} MiB; the controller stops "
+                    "verifying delegated acquisition once it exceeds its bounded read guard."
+                ),
+                [audit_label],
+                (
+                    "Archive this workspace before the audit reaches the guard; the append-only stores have no "
+                    "compaction yet."
+                ),
+                field="size_bytes",
+                expected=f"at most {ATTEMPT_AUDIT_WARNING_BYTES} bytes",
+                actual=str(audit_bytes),
+            )
+
+
 def check_source_requests(
     project_root: Path,
     requests_path: Path,
     manifest_records: list[dict[str, Any]],
     wiki_files: list[Path],
     results: dict[str, Any],
+    config: dict[str, Any] | None = None,
 ) -> None:
     stats = results["stats"]
     requests = load_source_request_records(requests_path, project_root, results)
@@ -2336,6 +2495,9 @@ def check_source_requests(
     stats["source_requests_total"] = len(requests)
     stats["source_requests_open"] = status_counts["open"]
     stats["source_requests_fulfilled"] = status_counts["fulfilled"]
+
+    if config is not None:
+        check_delegated_acquisition_records(project_root, config, requests, requests_label, results)
 
 
 def answered_question_is_grounded(question_frontmatter: dict[str, Any], answer_path: Path) -> bool:
@@ -3541,7 +3703,9 @@ def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if validate_academic_publication_metadata:
         check_output_academic_publication_metadata(project_root, manifest_path, manifest_records, output_root, results)
     if validate_source_requests:
-        check_source_requests(project_root, source_requests_path, manifest_records, wiki_files, results)
+        check_source_requests(
+            project_root, source_requests_path, manifest_records, wiki_files, results, config
+        )
     if detect_prompt_injection_patterns:
         check_prompt_injection_patterns(project_root, normalized_root, wiki_root, manifest_path, manifest_records, results)
     if lint_config.get("validate_claims", True):

@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+- Let a registered external acquirer fulfil source requests, so a host that
+  already owns fetching infrastructure — rate limits, credential custody, egress
+  policy, compliance logging — can supply evidence without the workspace fetching
+  anything. Previously such a host had no sanctioned path: with
+  `integrations.acquisition.providers: []` the controller had no provider to
+  address acquisition work to, so the phase was unreachable and the only way to
+  close a blocked question was to run `source_requests.py fulfill` out of band,
+  after `submit` returned. That produced exactly the thing the integrity baseline
+  exists to prevent — a mutation of durable evidence state that no work order
+  accounts for. `research.yml` can now name the acquirer instead:
+
+  ```yaml
+  orchestration:
+    acquisition: delegated
+    acquirer_agent_id: autoseller-orchestrator
+  ```
+
+  Under that declaration the controller issues acquisition work orders scoped to
+  the open requests and addressed to `assigned_agent_id`, and the acquirer does
+  its delivery, fulfilment, and question reopening *inside* the pending order.
+  Submission verifies the result the same way it verifies a provider acquisition:
+  every scoped request must end with a fulfilment whose evidence is normalized and
+  linked by a provenance sidecar's `request_id`, or with a structured failure in a
+  new append-only attempt audit naming that action. A partial batch is `completed`;
+  `blocked` means nothing durable changed. While a delegated session is live, the
+  workspace commands refuse mutations no pending order scopes
+  (`SOURCE_REQUEST_FULFILL_DELEGATED`, `QUESTION_REOPEN_DELEGATED`), which is what
+  makes "fulfilment stays inside the protocol" enforceable rather than advisory.
+
+  Failed attempts use the shared delivery taxonomy plus three connector-level
+  codes (`provider_throttled`, `not_authorized`, `no_result`); a request is retired
+  after `max_attempts_per_request` attempts within a session, or immediately on a
+  standing refusal, after which the session terminates `blocked_on_sources` with a
+  stable reason prefix and an `exhausted_requests` map. Attempts are counted per
+  session, so starting a new one is the supported retry after a host-side fix.
+
+  Everything is opt-in and additive: `acquisition: providers` remains the default
+  and is unchanged, the session and work-order schemas stay at `1.0` with optional
+  fields, and managed `orchestrate run`/`resume` refuse a delegated workspace up
+  front, since a delegated order is addressed to the host's own connectors. See
+  `docs/orchestration.md`, `skills/research-acquire-delegated.md`, and the
+  `orchestration:` section of `docs/research-yml.md`.
+
 - Promote `docs/normalized-source-format.md` to a versioned public contract so an
   external normalizer can produce first-class normalized records for source kinds
   this package does not extract itself. Every record now declares the contract

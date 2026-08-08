@@ -145,6 +145,37 @@ the parent to terminal `blocked_on_sources`, and only after artifact-derived
 route exhaustion. Submit `failed` only when execution is unrecoverable and the
 entire parent should terminate as `failed`.
 
+### Delegated Acquisition Fields
+
+A workspace declaring `orchestration.acquisition: delegated` (see
+[research-yml.md](research-yml.md)) adds two optional fields to the published
+work-order document and three to the session document. All five are additive at
+schema version `1.0`: an artifact without them is a providers-mode artifact,
+which is what every artifact issued before delegated acquisition existed is.
+
+| Artifact | Field | Meaning |
+|---|---|---|
+| work order | `acquisition_mode` | `providers` or `delegated`. Absent means `providers`. |
+| work order | `assigned_agent_id` | The acquirer this order is addressed to. Distinct from `agent_id`, which stays the session owner: being addressed does not grant the right to drive the protocol, and `next`/`submit` still accept only the owner. |
+| session | `acquisition_mode`, `acquirer_agent_id` | The posture frozen at `start`. |
+| session | `max_attempts_per_request` | Attempts, counted within this session, before a request is retired. |
+
+A delegated acquisition order carries an empty `candidate_ids` scope and the
+`research-acquire-delegated` skill. Its result reports per-request outcomes
+nowhere: the controller reads them from the source-request store and the
+append-only attempt audit, because a claim in a summary is not evidence. Every
+scoped request must end the action with a fulfilment **or** a recorded attempt
+failure naming that action, so a **partial** batch submits `completed`. Submit
+`blocked` only when nothing durable changed at all — unlike the provider path, a
+delegated `blocked` tolerates no partial delivery.
+
+When a delegated session retires every open request it terminates
+`blocked_on_sources` with a reason beginning with the stable prefix
+`Delegated acquisition exhausted its attempts for every open source request`,
+and its `session_finished` event carries
+`data.exhausted_requests` mapping each request id to its last failure code.
+Match the prefix or read the map; do not parse the rest of the sentence.
+
 High-stakes questions can also carry facet-level answerability state in
 `sources/coverage/<slug>.yml`. The schema is documented in
 [coverage-manifest.md](coverage-manifest.md); later tooling evaluates those
@@ -354,7 +385,7 @@ errors that prevent the report from being built.
 | `intake_questions.py` | `python3 scripts/intake_questions.py --format json`, or any `--dry-run` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `HANDOFF_SIGNATURE_INVALID`, `INTAKE_FIELD_TOO_LONG`, `INTAKE_TOTAL_CAP_EXCEEDED`, `INTAKE_RATE_LIMITED`, `WORKSPACE_UNREADABLE` |
 | `lint.py` | `python3 scripts/lint.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `WORKSPACE_UNREADABLE` |
 | `normalize_sources.py` | `python3 scripts/normalize_sources.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `SOURCE_UNKNOWN`, `WORKSPACE_UNREADABLE` |
-| `orchestration_controller.py` | `python3 scripts/orchestration_controller.py start\|next\|submit\|status --format json` | `CONFIG_MISSING`, `CONFIG_INVALID`, `ORCHESTRATION_ID_INVALID`, `ACTION_ID_INVALID`, `AGENT_ID_INVALID`, `ORCHESTRATION_EXISTS`, `ORCHESTRATION_UNKNOWN`, `ORCHESTRATION_STATE_INVALID`, `ORCHESTRATION_EVENTS_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`, `ORCHESTRATION_WRITE_FAILED`, `ORCHESTRATION_WORKSPACE_UNSAFE`, `ORCHESTRATION_PROVIDER_POLICY_CHANGED`, `ORCHESTRATION_CONTROL_REPAIR_REQUIRED`, `ORCHESTRATION_TRUSTED_INPUT_UNSAFE`, `ORCHESTRATION_TRUSTED_INPUT_CHANGED`, `ORCHESTRATION_LEGACY_ACTION_UNBOUND`, `ACTION_NOT_PENDING`, `RESULT_UNREADABLE`, `RESULT_INVALID`, `RESULT_CONFLICT`, `ORCHESTRATION_POSTCONDITION_FAILED`, `WORK_ORDER_INVALID`, `CANDIDATE_STORE_INVALID`, `SOURCE_REQUESTS_INVALID`, `WORKSPACE_UNREADABLE` |
+| `orchestration_controller.py` | `python3 scripts/orchestration_controller.py start\|next\|submit\|status --format json` | `CONFIG_MISSING`, `CONFIG_INVALID`, `ORCHESTRATION_ID_INVALID`, `ACTION_ID_INVALID`, `AGENT_ID_INVALID`, `ORCHESTRATION_EXISTS`, `ORCHESTRATION_UNKNOWN`, `ORCHESTRATION_STATE_INVALID`, `ORCHESTRATION_EVENTS_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`, `ORCHESTRATION_WRITE_FAILED`, `ORCHESTRATION_WORKSPACE_UNSAFE`, `ORCHESTRATION_PROVIDER_POLICY_CHANGED`, `ORCHESTRATION_DELEGATION_CHANGED`, `ORCHESTRATION_CONTROL_REPAIR_REQUIRED`, `ORCHESTRATION_TRUSTED_INPUT_UNSAFE`, `ORCHESTRATION_TRUSTED_INPUT_CHANGED`, `ORCHESTRATION_LEGACY_ACTION_UNBOUND`, `ACTION_NOT_PENDING`, `RESULT_UNREADABLE`, `RESULT_INVALID`, `RESULT_CONFLICT`, `ORCHESTRATION_POSTCONDITION_FAILED`, `WORK_ORDER_INVALID`, `CANDIDATE_STORE_INVALID`, `SOURCE_REQUESTS_INVALID`, `WORKSPACE_UNREADABLE` |
 | `query_index.py` | `python3 scripts/query_index.py QUERY --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `QUERY_MISSING`, `WORKSPACE_UNREADABLE` |
 | `question_claim.py` | `python3 scripts/question_claim.py claim --slug SLUG --agent-id AGENT --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `CLAIM_NOT_STALE`, `STEAL_THRESHOLD_REQUIRED`, `STEAL_FLAG_REQUIRED`, `STEAL_NOT_APPLICABLE`, `STATUS_NOT_CLAIMABLE`, `STATUS_NOT_RELEASABLE`, `SLUG_INVALID`, `SLUG_UNKNOWN`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
 | `question_resolve.py` | `python3 scripts/question_resolve.py answer\|block\|defer\|reject\|reopen --slug SLUG --agent-id AGENT ... --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `STATUS_NOT_RESOLVABLE`, `STATUS_NOT_REOPENABLE`, `SOURCE_NOT_NORMALIZED`, `QUESTION_NOT_CLAIMED`, `ANSWER_SOURCE_REQUIRED`, `COVERAGE_REQUIRED`, `COVERAGE_BLOCKED`, `COVERAGE_MANIFEST_INVALID`, `ANSWER_PAGE_INVALID`, `ANSWER_PAGE_MISSING`, `SOURCE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_LINKED`, `RESOLUTION_REASON_INVALID`, `VALUE_INVALID`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
@@ -374,6 +405,7 @@ result:
 | Code | Meaning | Typical remediation |
 |------|---------|---------------------|
 | `RUNNER_ISOLATION_UNAVAILABLE` | The selected runner/runtime or platform cannot enforce the required permission profile. | For Codex, install CLI 0.138+ outside the writable workspace and reinstall it if the npm/pnpm/bun platform runtime is missing; EvidenceWiki grants only that native runtime tree read-only. For Claude, install `bubblewrap` and `socat` on Linux/WSL2 or use the built-in `sandbox-exec` and `touch` on macOS. Do not use managed Claude on native Windows; use WSL2, a container, or an external protocol host with equivalent isolation. No worker or parent session was started by preflight. |
+| `RUNNER_DELEGATED_ACQUISITION_UNSUPPORTED` | The workspace declares `orchestration.acquisition: delegated`, so acquisition work orders are addressed to an external acquirer no managed worker can be. | Drive this workspace with `orchestrate start/next/submit`, which is the mode delegation is designed for, or remove the declaration to acquire through workspace providers. Refused before the runner is resolved and before `run` creates a session, so nothing was started. |
 | `CONTROL_ARTIFACT_UNSAFE` | The host cannot construct the bounded snapshot of tripwire-protected controls because a tripwire root is too large or contains a link or special file. | Inspect the named workspace-relative path, restore a bounded regular-file tree, and resume the same action. Preventive-only read-only roots are sandbox controls, not recursively hashed tripwire roots. |
 | `CONTROL_ARTIFACT_TAMPERED` | A worker changed tripwire-protected path membership, file type, mode, or content. Timestamp-only drift is not included. | Inspect the exact workspace-relative changes and any quarantined valid result. No result was submitted and no file was automatically restored or rolled back. Restore the issued control state, then resume with `--acknowledge-control-repair`; the controller still checks its trusted-input fingerprint. Start a new session for intentional static-control changes. |
 | `CONTROL_REPAIR_REQUIRED` | A prior host attempt detected control drift and managed resume is paused before any controller or worker command. | Inspect the retained attempt and any quarantine, restore the issued state, then rerun `orchestrate resume --acknowledge-control-repair`. The flag acknowledges inspection; it does not accept quarantine or bypass fingerprints. |
@@ -413,6 +445,10 @@ Stable error codes:
 | `ORCHESTRATION_OWNER_MISMATCH` | A command supplied a different agent id from the session owner. | Retry with the owning `agent_id` or start a separately owned session. |
 | `ORCHESTRATION_WORKSPACE_UNSAFE` | Workspace health or a HIGH validation finding makes the next action unsafe. | Resolve the reported health or validation findings, then request the same next action again. |
 | `ORCHESTRATION_PROVIDER_POLICY_CHANGED` | The retained session's explicit provider authority no longer matches `research.yml`. | Restore the reviewed provider policy or start a new parent session for the changed policy. |
+| `ORCHESTRATION_DELEGATION_CHANGED` | The retained session's declared acquisition mode or acquirer no longer matches `research.yml` `orchestration:`. | Restore the declaration the session started under, or start a new parent session under the new one. |
+| `SOURCE_REQUEST_FULFILL_DELEGATED` | Under `orchestration.acquisition: delegated`, `source_requests.py fulfill` or `record-attempt-failure` named a request that no live session's pending work order scopes. | Fulfil or record the attempt while executing the delegated acquisition work order that scopes the request, or finish the active session first. An identical re-fulfil (same request and source id) is a no-op and stays allowed. |
+| `QUESTION_REOPEN_DELEGATED` | Under `orchestration.acquisition: delegated`, `question_resolve.py reopen` named a question that no live session's pending work order scopes. | Reopen the question while executing the work order that scopes it — any phase — or finish the active session first. |
+| `ORCHESTRATION_STATE_UNREADABLE` | A workspace command could not read a session or work order while deciding whether a mutation is scoped by a pending action. | Restore `runs/orchestrations/`; unreadable control state fails closed rather than permitting the mutation. |
 | `ORCHESTRATION_CONTROL_REPAIR_REQUIRED` | The workspace controller found a required `runs/orchestration-guards/<orchestration_id>.json` marker before `next` or `submit`. | Restore the issued state and use managed `orchestrate resume --acknowledge-control-repair`; direct protocol submission stays fail-closed until the marker is acknowledged. |
 | `ACTION_NOT_PENDING` | `submit` named an action other than the persisted pending action. | Call `next` and submit the returned action id. |
 | `RESULT_INVALID` | A work result violates the version 1.0 schema or safe-path rules. | Return only action id, outcome, bounded summary, and workspace-relative artifact paths. |

@@ -246,6 +246,26 @@ run:
 #       # Optional; defaults to 120 seconds, maximum 3600.
 #       timeout_seconds: 120
 
+# Who acquires evidence for this workspace. The section is optional; leaving it out keeps
+# the providers mode, where the orchestration controller issues acquisition work orders
+# only for sources an enabled integrations.acquisition provider can fetch.
+#
+# acquisition: delegated names an external acquirer instead — a host with its own
+# connectors, credentials, and egress policy. The controller then issues acquisition work
+# orders addressed to that acquirer, which fulfils the scoped requests while its order is
+# pending, so fulfilment stays inside the protocol instead of happening between actions
+# where no work order accounts for it. Delegation is not a provider grant: it authorizes
+# no network access, and integrations.acquisition.providers must stay empty.
+# orchestration:
+#   # providers (default): this workspace acquires through its enabled providers.
+#   # delegated: an external acquirer fulfils source requests through work orders.
+#   acquisition: delegated
+#   # Required under delegation; the agent id work orders are addressed to.
+#   acquirer_agent_id: autoseller-orchestrator
+#   # Recorded attempt failures that retire one request within a session (default 2,
+#   # maximum 10). There is no unlimited value.
+#   max_attempts_per_request: 2
+
 lint:
   validate_structure: true
   validate_frontmatter: true
