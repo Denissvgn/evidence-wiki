@@ -225,10 +225,12 @@ Counts reuse the collection logic of `scripts/question_status.py`.
 | `by_status` | mapping | Counts keyed by lifecycle status. |
 | `by_priority` | mapping | Counts keyed by priority. |
 | `actionable` | integer | `open` plus `in_progress` questions. |
+| `human_review` | integer | `human_review` questions awaiting a recorded review. |
 | `blocked` | integer | `blocked` questions. |
 | `answered` | integer | `answered` questions. |
 | `claimed` | integer | `in_progress` questions with a non-empty `claimed_by` holder. |
 | `actionable_slugs` | list | Slugs of actionable questions. |
+| `human_review_slugs` | list | Slugs of questions awaiting a recorded human review. |
 | `blocked_slugs` | list | Slugs of blocked questions. |
 | `claimed_slugs` | list | Slugs of currently claimed `in_progress` questions. |
 | `stale_claim_slugs` | list | Claimed question slugs whose `claimed_at` is missing, unparseable, or older than `run.claim_staleness_hours`. |
@@ -340,8 +342,39 @@ source manifest.
 |-------|------|---------|
 | `verdict` | string | One of `complete`, `in_progress`, `blocked_on_sources`, `attention_required`. |
 | `reasons` | list | Human-readable reasons naming the exact questions or checks behind the verdict. |
+| `questions_awaiting_review` | integer | Questions in `human_review` awaiting a recorded review. Always present, under both escalation scopes. |
 | `verdict_reasons` | list | Machine-readable reason objects with stable `code` values such as `blocked_on_linked_source_requests`, `blocked_request_link_missing`, and `actionable_questions_remaining`. |
 | `budget_state` | mapping, optional | Present when a runner supplies at least one per-run counter flag or a run-controller snapshot is selected; gives used/remaining run budget, stop signal, and machine-readable stop reasons. |
+
+### Human Review Escalation Scope
+
+`research.yml` `review.escalation_scope` decides how far one pending human
+review reaches. See `docs/research-yml.md` for the configuration contract.
+
+| Scope | Verdict effect of a `human_review` question | `questions_awaiting_review` |
+|-------|---------------------------------------------|------------------------------|
+| `workspace` (default) | Sets `attention_required`, so orchestration refuses to operate over the whole workspace. | Reported. |
+| `question` | None directly. Other questions keep their normal verdict; the parked question is reported instead. | Reported. |
+
+Under both scopes the question is excluded from `actionable_slugs` — scheduling
+already ignores `human_review` — and `verdict_reasons` gains an informational
+`questions_awaiting_review` entry (`severity: info`, with `count` and
+`question_slugs`) whenever the counter is non-zero. Informational entries are
+appended last and never replace the reason that explains the verdict.
+
+Under `question` scope, a workspace whose only remaining work is pending reviews
+reports `in_progress` with the structured code `questions_awaiting_review_only`,
+never `complete`: the answers exist but nobody has reviewed them, so
+`--check-complete` exits `1` rather than `0`. Recording the outstanding reviews
+is what moves such a workspace to `complete`.
+
+The scope only moves *where* the reviewer waits. It does not weaken publication:
+`publication_readiness.py` still reports a pending review as a `no_ship` safety
+reason under either scope.
+
+An invalid `review` section is not silently defaulted — `workspace_status.py`
+exits `2` with error code `CONFIG_INVALID` rather than reporting a verdict
+computed from a misread configuration.
 
 `readiness.budget_state` is additive to the verdict. It never changes verdict
 rules or `--check-complete` exit codes; it only tells a loop whether the
@@ -406,7 +439,11 @@ because it mutates `log.md`.
 `scripts/fleet_status.py --target PATH --target OTHER --format json` aggregates
 the same status contract across local workspaces. Each target reports path,
 readiness verdict, budget state when present, active-run count, stale-run count,
-and the selected `run_controller` block. Unreadable targets are returned as
+`questions_awaiting_review`, and the selected `run_controller` block. The
+fleet-level `counts.questions_awaiting_review` sums that counter across targets,
+so an operator can see how much of a fleet is waiting on reviewers rather than
+on research — which the verdict alone no longer shows under
+`review.escalation_scope: question`. Unreadable targets are returned as
 per-target `WORKSPACE_UNREADABLE` errors without aborting the whole fleet
 report. The packaged CLI exposes the same command as:
 
@@ -424,21 +461,21 @@ HOURS` for explicit recovery.
 
 The rule set is fixed for schema version 1.0 and evaluated in this order:
 
-1. `attention_required`: smoke validation failed or could not run, lint reported HIGH issues, lint could not run, or a blocked question lacks a valid linked open source request.
-2. `complete`: no actionable questions, no blocked questions, smoke passed, no HIGH lint issues. An empty backlog is reported as complete with an explanatory reason so orchestrators can distinguish "done" from "not yet started".
+1. `attention_required`: smoke validation failed or could not run, lint reported HIGH issues, lint could not run, a blocked question lacks a valid linked open source request, or — under the default `review.escalation_scope: workspace` — a question awaits human review.
+2. `complete`: no actionable questions, no blocked questions, no questions awaiting human review, smoke passed, no HIGH lint issues. An empty backlog is reported as complete with an explanatory reason so orchestrators can distinguish "done" from "not yet started".
 3. `blocked_on_sources`: no actionable questions, but blocked questions remain and every blocked question has `blocking_request_ids` linked to open source requests. Deliver the requested evidence and reopen the blocked questions to proceed.
-4. `in_progress`: actionable questions remain.
+4. `in_progress`: actionable questions remain, or under `review.escalation_scope: question` the only remaining work is pending human reviews (structured code `questions_awaiting_review_only`).
 
 ## Exit Codes
 
 | Mode | Exit code | Meaning |
 |------|-----------|---------|
 | default | 0 | Status document produced (any verdict). |
-| default | 2 | Shared health is `invalid`, or selected/discovered run-state is malformed. The JSON/text health report is still printed. |
+| default | 2 | Shared health is `invalid`, the `review` section is invalid, or selected/discovered run-state is malformed. The JSON/text health report is still printed unless the workspace config itself was rejected. |
 | `--check-complete` | 0 | Verdict is `complete`. |
 | `--check-complete` | 1 | Verdict is `in_progress`. |
 | `--check-complete` | 3 | Verdict is `blocked_on_sources`. |
-| `--check-complete` | 2 | Shared health is `invalid`, or selected/discovered run-state is malformed. |
+| `--check-complete` | 2 | Shared health is `invalid`, the `review` section is invalid, or selected/discovered run-state is malformed. |
 | `--check-complete` | 4 | Verdict is `attention_required`. |
 
 An orchestrator polling `--check-complete` can distinguish done, still-working, needs-sources, broken, and attention-required states by exit code alone. The document is printed in every non-error case, so the same invocation also provides the detail. Budget exhaustion is not a verdict; when counters are supplied, read `readiness.budget_state.should_stop` and `readiness.budget_state.stop_reasons` from the printed document on exit `1`.

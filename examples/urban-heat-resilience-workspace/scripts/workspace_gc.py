@@ -17,6 +17,7 @@ from typing import Any
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _script_errors import emit_error
 from _workspace_locks import LockUnavailableError, workspace_lock
 
 SCHEMA_VERSION = "1.0"
@@ -259,15 +260,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = build_report(project_root, args.older_than_days, args.apply)
     except (LockUnavailableError, OSError, tarfile.TarError) as exc:
-        error_code = getattr(exc, "error_code", "WORKSPACE_UNREADABLE")
-        if args.format == "json":
-            payload = {"schema_version": SCHEMA_VERSION, "error_code": error_code, "message": str(exc)}
-            remediation = getattr(exc, "remediation", None)
-            if remediation:
-                payload["remediation"] = remediation
-            print(json.dumps(payload))
-        else:
-            print(f"workspace-gc failed: {exc}", file=sys.stderr)
+        # Fatal errors belong on stderr with stdout left empty, so a caller reading
+        # stdout in json mode parses one report document or nothing — never an error
+        # object shaped like a report. The shared helper also keeps this envelope the
+        # same shape as every other script's.
+        emit_error(
+            str(exc),
+            json_mode=args.format == "json",
+            error_code=getattr(exc, "error_code", "WORKSPACE_UNREADABLE"),
+            remediation=getattr(exc, "remediation", None),
+        )
         return EXIT_INVALID
     if args.format == "json":
         print(json.dumps(report, indent=2, sort_keys=False))

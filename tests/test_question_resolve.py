@@ -32,6 +32,7 @@ INIT = load_script_module("research_question_resolve_init", "init_research_works
 REQUESTS = load_script_module("research_question_resolve_requests", "source_requests.py")
 LINT = load_script_module("research_question_resolve_lint", "lint.py")
 NORMALIZE = load_script_module("research_question_resolve_normalize", "normalize_sources.py")
+INVENTORY = load_script_module("research_question_resolve_inventory", "source_inventory.py")
 
 
 class QuestionResolveTests(unittest.TestCase):
@@ -207,6 +208,81 @@ class QuestionResolveTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def write_two_policy_manual_review_coverage(self, target: Path, slug: str = "which-benchmarks") -> list[str]:
+        """Park the question behind one base and one pack-declared manual-review policy."""
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config["domain_pack"] = {
+            "name": "market-data",
+            "policy_vocabularies": {
+                "freshness_policy": {
+                    "pack:market-data/quote-48h": "Require a reviewer to confirm the quote is under 48 hours old.",
+                }
+            },
+        }
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        coverage = target / "sources" / "coverage" / f"{slug}.yml"
+        coverage.parent.mkdir(parents=True, exist_ok=True)
+        coverage.write_text(
+            yaml.safe_dump(
+                {
+                    "schema_version": "1.0",
+                    "question_slug": slug,
+                    "created_at": "2026-06-14T00:00:00Z",
+                    "updated_at": "2026-06-14T00:00:00Z",
+                    "coverage_profile": "two-policy-manual-review-fixture",
+                    "coverage_verdict": "pending",
+                    "required_facets": [
+                        {
+                            "facet_id": "reviewed-evidence",
+                            "description": "Require reviewer sign-off for this source.",
+                            "required": True,
+                            "evidence_path": "academic_method_existence",
+                            "source_policy": "manual_review_required",
+                            "freshness_policy": "pack:market-data/quote-48h",
+                            "identity_policy": "none",
+                            "min_sources": 1,
+                            "accepted_source_ids": ["raw:bench-survey-2026"],
+                            "blocking_request_ids": [],
+                            "facet_verdict": "pending",
+                        }
+                    ],
+                    "optional_facets": [],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return ["manual_review_required", "pack:market-data/quote-48h"]
+
+    def park_for_review(self, target: Path, *, two_policies: bool = False) -> list[str]:
+        """Answer the fixture question under coverage so it parks in human_review."""
+        self.run_claim(target, "which-benchmarks")
+        self.seed_manifest(target)
+        if two_policies:
+            policies = self.write_two_policy_manual_review_coverage(target)
+        else:
+            self.write_manual_review_coverage(target)
+            policies = ["manual_review_required"]
+        answer = self.write_answer_page(target)
+        code, payload, stderr = self.run_resolve(
+            target,
+            "answer",
+            "--slug",
+            "which-benchmarks",
+            "--agent-id",
+            "agent-a",
+            "--answer-page",
+            answer.relative_to(target).as_posix(),
+            "--source-id",
+            "raw:bench-survey-2026",
+            "--require-coverage",
+        )
+        self.assertEqual(0, code, stderr)
+        self.assertEqual("human_review", payload["status"])
+        self.assertEqual(policies, sorted(self.page_frontmatter(target, "which-benchmarks")["human_review_policies"]))
+        return policies
+
     def page_frontmatter(self, target: Path, slug: str) -> dict:
         text = (target / "wiki" / "questions" / f"{slug}.md").read_text(encoding="utf-8")
         return yaml.safe_load(text.split("---\n", 2)[1])
@@ -282,6 +358,76 @@ class QuestionResolveTests(unittest.TestCase):
             self.assertEqual("in_progress", frontmatter["status"])
             self.assertEqual("agent-a", frontmatter["claimed_by"])
             self.assertIn("claimed_at", frontmatter)
+
+    def test_an_unknown_slug_is_refused_with_an_envelope_not_a_traceback(self):
+        """`question_page_path` raises ClaimError, which main() did not catch.
+
+        Every other refusal in this script reaches a host as a JSON envelope on stdout or
+        stderr. An unhandled ClaimError reached it as a traceback instead — which, for a
+        host parsing that stream as JSON, is indistinguishable from the process crashing.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+
+            code, payload, _ = self.run_resolve(
+                target,
+                "answer",
+                "--slug",
+                "no-such-question",
+                "--agent-id",
+                "agent-a",
+                "--answer-page",
+                "wiki/synthesis/example.md",
+                "--source-id",
+                "raw:whatever",
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual("SLUG_UNKNOWN", payload["error_code"])
+        self.assertEqual("answer", payload["details"]["action"])
+        self.assertEqual("no-such-question", payload["details"]["slug"])
+        self.assertEqual("agent-a", payload["details"]["agent_id"])
+
+    def test_a_slug_with_path_separators_is_refused_with_an_envelope(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+
+            code, payload, _ = self.run_resolve(
+                target,
+                "answer",
+                "--slug",
+                "../escape",
+                "--agent-id",
+                "agent-a",
+                "--answer-page",
+                "wiki/synthesis/example.md",
+                "--source-id",
+                "raw:whatever",
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual("SLUG_INVALID", payload["error_code"])
+
+    def test_every_verb_refuses_an_unknown_slug_with_an_envelope(self):
+        """The handler sits in main(), so it must cover every verb, nested one included."""
+        verbs = (
+            ("answer", "--answer-page", "wiki/synthesis/example.md", "--source-id", "raw:x"),
+            ("block", "--blocked-reason", "why"),
+            ("defer", "--reason", "why"),
+            ("reject", "--reason", "why"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            results = {}
+            for verb, *extra in verbs:
+                results[verb] = self.run_resolve(
+                    target, verb, "--slug", "no-such-question", "--agent-id", "agent-a", *extra
+                )
+
+        for verb, (code, payload, _) in results.items():
+            with self.subTest(verb=verb):
+                self.assertEqual(2, code)
+                self.assertEqual("SLUG_UNKNOWN", payload["error_code"])
 
     def test_answer_allow_uncited_succeeds_without_source_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -466,6 +612,386 @@ class QuestionResolveTests(unittest.TestCase):
             self.assertEqual("reviewer-a", frontmatter["approved_by"])
             self.assertIn("approved_at", frontmatter)
 
+    def test_answer_stamps_human_review_requested_at_when_parking(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target)
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+
+            requested_at = frontmatter["human_review_requested_at"]
+            self.assertIsInstance(requested_at, str)
+            self.assertRegex(requested_at, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            self.assertNotIn("human_reviews", frontmatter)
+
+    def test_review_accepting_one_of_two_policies_keeps_the_question_parked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("human_review", payload["status"])
+            self.assertEqual(["pack:market-data/quote-48h"], payload["reviewed_policies"])
+            self.assertEqual(["manual_review_required"], payload["pending_policies"])
+            self.assertEqual("approval-queue-42", payload["review_ref"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("human_review", frontmatter["status"])
+            self.assertEqual("pending", frontmatter["human_review_status"])
+            self.assertNotIn("human_review_approved", frontmatter)
+            self.assertEqual(1, len(frontmatter["human_reviews"]))
+            self.assertEqual(
+                {
+                    "policy": "pack:market-data/quote-48h",
+                    "verdict": "accepted",
+                    "reviewed_by": "ops-principal",
+                    "review_ref": "approval-queue-42",
+                },
+                {
+                    key: value
+                    for key, value in frontmatter["human_reviews"][0].items()
+                    if key != "reviewed_at"
+                },
+            )
+            self.assertRegex(frontmatter["human_reviews"][0]["reviewed_at"], r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_review_accepting_every_policy_answers_with_legacy_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "reviewer-b",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("answered", payload["status"])
+            self.assertEqual([], payload["pending_policies"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("answered", frontmatter["status"])
+            self.assertTrue(frontmatter["human_review_approved"])
+            self.assertEqual("approved", frontmatter["human_review_status"])
+            self.assertEqual("reviewer-b", frontmatter["approved_by"])
+            self.assertIn("approved_at", frontmatter)
+            self.assertEqual(
+                ["pack:market-data/quote-48h", "manual_review_required"],
+                [entry["policy"] for entry in frontmatter["human_reviews"]],
+            )
+            self.assertEqual(
+                ["ops-principal", "reviewer-b"],
+                [entry["reviewed_by"] for entry in frontmatter["human_reviews"]],
+            )
+
+    def test_review_rejection_reopens_the_question_and_retains_the_entry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target)
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "rejected",
+                "--reviewed-by",
+                "ops-principal",
+                "--note",
+                "The cited survey predates the reporting window.",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("open", payload["status"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("open", frontmatter["status"])
+            self.assertEqual("rejected", frontmatter["human_review_status"])
+            self.assertNotIn("human_review_approved", frontmatter)
+            self.assertNotIn("approved_by", frontmatter)
+            self.assertNotIn("claimed_by", frontmatter)
+            self.assertNotIn("human_review_requested_at", frontmatter)
+            self.assertNotIn("blocked_reason", frontmatter)
+            entry = frontmatter["human_reviews"][0]
+            self.assertEqual("rejected", entry["verdict"])
+            self.assertEqual("The cited survey predates the reporting window.", entry["note"])
+
+    def test_re_answer_after_rejection_reparks_with_a_fresh_review_cycle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target)
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "rejected",
+                "--reviewed-by",
+                "ops-principal",
+                "--note",
+                "Needs a newer survey.",
+            )
+            answer = self.write_answer_page(target)
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "answer",
+                "--slug",
+                "which-benchmarks",
+                "--agent-id",
+                "agent-a",
+                "--answer-page",
+                answer.relative_to(target).as_posix(),
+                "--source-id",
+                "raw:bench-survey-2026",
+                "--require-coverage",
+                "--allow-unclaimed",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("human_review", payload["status"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("pending", frontmatter["human_review_status"])
+            self.assertIn("human_review_requested_at", frontmatter)
+            # A new answer opens a new review cycle: the superseded rejection must not linger
+            # where a completion check could read it.
+            self.assertNotIn("human_reviews", frontmatter)
+
+    def test_review_refuses_unknown_policy_wrong_status_and_bad_verdict(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target)
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:other/not-declared",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+            )
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("REVIEW_POLICY_UNKNOWN", error["error_code"])
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "approved",
+                "--reviewed-by",
+                "ops-principal",
+            )
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("REVIEW_VERDICT_INVALID", error["error_code"])
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "   ",
+            )
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("REVIEWER_INVALID", error["error_code"])
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "needs-evidence",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+            )
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("STATUS_NOT_REVIEWABLE", error["error_code"])
+
+    def test_review_refuses_a_second_accepted_review_for_one_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+            )
+
+            code, error, _ = self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "someone-else",
+            )
+
+            self.assertEqual(RESOLVE.EXIT_INVALID, code)
+            self.assertEqual("REVIEW_ALREADY_RECORDED", error["error_code"])
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual(1, len(frontmatter["human_reviews"]))
+
+    def test_approve_records_an_entry_for_every_pending_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "approve",
+                "--slug",
+                "which-benchmarks",
+                "--reviewer",
+                "reviewer-a",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("answered", payload["status"])
+            self.assertEqual([], payload["pending_policies"])
+
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual("answered", frontmatter["status"])
+            self.assertEqual(
+                ["manual_review_required", "pack:market-data/quote-48h"],
+                sorted(entry["policy"] for entry in frontmatter["human_reviews"]),
+            )
+            for entry in frontmatter["human_reviews"]:
+                self.assertEqual("accepted", entry["verdict"])
+                self.assertEqual("reviewer-a", entry["reviewed_by"])
+                self.assertNotIn("review_ref", entry)
+
+    def test_approve_completes_a_partially_reviewed_question(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "approve",
+                "--slug",
+                "which-benchmarks",
+                "--reviewer",
+                "reviewer-a",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("answered", payload["status"])
+            frontmatter = self.page_frontmatter(target, "which-benchmarks")
+            self.assertEqual(2, len(frontmatter["human_reviews"]))
+            self.assertEqual("approval-queue-42", frontmatter["human_reviews"][0]["review_ref"])
+            self.assertEqual("reviewer-a", frontmatter["human_reviews"][1]["reviewed_by"])
+
+    def test_review_appends_a_log_entry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.park_for_review(target, two_policies=True)
+
+            self.run_resolve(
+                target,
+                "review",
+                "--slug",
+                "which-benchmarks",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+
+            log = (target / "log.md").read_text(encoding="utf-8")
+            self.assertIn("- Question: `which-benchmarks` (review).", log)
+            self.assertIn("- Reviewer: ops-principal.", log)
+            self.assertIn("- Reviewed accepted: pack:market-data/quote-48h.", log)
+            self.assertIn("- Review reference: approval-queue-42.", log)
+            self.assertIn("- Still pending review: manual_review_required.", log)
+
     def test_block_requires_linked_request_and_clears_claim(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
@@ -579,6 +1105,323 @@ class QuestionResolveTests(unittest.TestCase):
 
             # The reopened question is actionable again: it can be claimed and answered.
             self.run_claim(target, "needs-evidence", agent_id="agent-b")
+
+    # -- CR-4 T6: scope-based request -> source pairing on reopen -------------------
+    #
+    # Delivery is exercised through the real chain (raw file + .provenance.yml sidecar
+    # -> source_inventory.py -> normalize_sources.py) rather than a hand-written
+    # manifest, because the sidecar `scope` reaching `provenance.scope` on the manifest
+    # record is half of what these tests are asserting.
+
+    def deliver_scoped_source(self, target: Path, name: str, scope: dict | None) -> None:
+        """Write one delivered raw file plus its provenance sidecar; no inventory yet."""
+        destination = target / "raw" / "papers"
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / f"{name}.html").write_text(
+            f"<html><head><title>{name}</title></head><body><h1>{name}</h1>"
+            f"<p>Delivered evidence for {name}. It states the measured value plainly.</p>"
+            "</body></html>\n",
+            encoding="utf-8",
+        )
+        sidecar = {
+            "origin_url": f"https://example.test/{name}",
+            "license": "CC-BY-4.0",
+            "retrieved_at": "2026-08-09T12:00:00Z",
+            "retrieved_by": "fetch-agent/manual-web",
+        }
+        if scope is not None:
+            sidecar["scope"] = scope
+        (destination / f"{name}.html.provenance.yml").write_text(
+            yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
+        )
+
+    def inventory_and_normalize(self, target: Path) -> None:
+        for module, args in ((INVENTORY, ["--report"]), (NORMALIZE, ["--all"])):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = module.main(["--project-root", str(target), *args])
+            self.assertEqual(0, code or 0, stdout.getvalue() + stderr.getvalue())
+
+    def source_id_for(self, target: Path, raw_path: str) -> str:
+        for line in (target / "sources" / "manifest.jsonl").read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if raw_path in record.get("raw_paths", []):
+                return str(record["id"])
+        raise AssertionError(f"no manifest record for {raw_path}")
+
+    def set_request_scope(self, target: Path, request_id: str, scope: dict) -> None:
+        """Stamp a structured scope onto an existing request record.
+
+        ``source_requests.py add --scope`` is a sibling CR-4 unit; the record shape is
+        the contract between them, so these tests write the field directly rather than
+        depending on the flag's landing order.
+        """
+        path = target / "sources" / "source-requests.jsonl"
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("request_id") == request_id:
+                record["scope"] = scope
+            lines.append(json.dumps(record, sort_keys=True, separators=(",", ":")))
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def block_on_requests(self, target: Path, slug: str, request_ids: list[str]) -> None:
+        self.run_claim(target, slug)
+        args = ["block", "--slug", slug, "--agent-id", "agent-a", "--blocked-reason", "Needs delivered evidence."]
+        for request_id in request_ids:
+            args.extend(["--request-id", request_id])
+        code, _, stderr = self.run_resolve(target, *args)
+        self.assertEqual(0, code, stderr)
+
+    def two_scoped_requests_blocked(self, target: Path) -> tuple[str, str]:
+        heat = self.add_request(target, "needs-evidence", query_or_identifier="Heat index readings 2026")
+        shade = self.add_request(target, "needs-evidence", query_or_identifier="Shade cover survey 2026")
+        self.set_request_scope(target, heat, {"facet_id": "heat-index"})
+        self.set_request_scope(target, shade, {"facet_id": "shade-cover"})
+        self.block_on_requests(target, "needs-evidence", [heat, shade])
+        return heat, shade
+
+    def test_reopen_pairs_scoped_requests_with_matching_sources_in_any_order(self):
+        """The CR's literal acceptance criterion: pairing is semantic, not positional."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            heat_request, shade_request = self.two_scoped_requests_blocked(target)
+            self.deliver_scoped_source(target, "heat-index", {"facet_id": "heat-index"})
+            self.deliver_scoped_source(target, "shade-cover", {"facet_id": "shade-cover"})
+            self.inventory_and_normalize(target)
+            heat_source = self.source_id_for(target, "raw/papers/heat-index.html")
+            shade_source = self.source_id_for(target, "raw/papers/shade-cover.html")
+
+            # Sources and requests are supplied in deliberately mismatched positional
+            # order: zipping the two lists would pair heat with shade and vice versa.
+            code, payload, stderr = self.run_resolve(
+                target,
+                "reopen",
+                "--slug",
+                "needs-evidence",
+                "--agent-id",
+                "fetch-agent",
+                "--source-id",
+                shade_source,
+                "--source-id",
+                heat_source,
+                "--request-id",
+                heat_request,
+                "--request-id",
+                shade_request,
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("open", payload["status"])
+            self.assertEqual(
+                [
+                    {"request_id": heat_request, "source_id": heat_source},
+                    {"request_id": shade_request, "source_id": shade_source},
+                ],
+                payload["pairs"],
+            )
+            self.assertEqual("open", self.page_frontmatter(target, "needs-evidence")["status"])
+            log = (target / "log.md").read_text(encoding="utf-8")
+            self.assertIn(f"{heat_request} -> {heat_source}", log)
+            self.assertIn(f"{shade_request} -> {shade_source}", log)
+
+    def test_reopen_refuses_source_contradicting_the_scoped_request(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            request_id = self.add_request(target, "needs-evidence", query_or_identifier="Heat index readings 2026")
+            self.set_request_scope(target, request_id, {"facet_id": "heat-index"})
+            self.block_on_requests(target, "needs-evidence", [request_id])
+            self.deliver_scoped_source(target, "shade-cover", {"facet_id": "shade-cover"})
+            self.inventory_and_normalize(target)
+            wrong_source = self.source_id_for(target, "raw/papers/shade-cover.html")
+            before = (target / "wiki" / "questions" / "needs-evidence.md").read_text(encoding="utf-8")
+
+            code, payload, _ = self.run_resolve(
+                target,
+                "reopen",
+                "--slug",
+                "needs-evidence",
+                "--agent-id",
+                "fetch-agent",
+                "--source-id",
+                wrong_source,
+                "--request-id",
+                request_id,
+            )
+
+            self.assertEqual(2, code)
+            self.assertEqual("REQUEST_SCOPE_MISMATCH", payload["error_code"])
+            details = payload["details"]
+            self.assertEqual("no_matching_source", details["reason"])
+            self.assertEqual(request_id, details["request_id"])
+            self.assertEqual({"facet_id": "heat-index"}, details["request_scope"])
+            self.assertEqual(
+                [
+                    {
+                        "source_id": wrong_source,
+                        "conflicts": [
+                            {"key": "facet_id", "request_value": "heat-index", "source_value": "shade-cover"}
+                        ],
+                    }
+                ],
+                details["rejected_sources"],
+            )
+            self.assertIn("facet_id", payload["message"])
+            self.assertIn("heat-index", payload["message"])
+            self.assertIn("shade-cover", payload["message"])
+            self.assertIn("remediation", payload)
+            self.assertEqual("blocked", self.page_frontmatter(target, "needs-evidence")["status"])
+            self.assertEqual(before, (target / "wiki" / "questions" / "needs-evidence.md").read_text(encoding="utf-8"))
+
+    def test_reopen_refuses_two_scoped_requests_competing_for_one_source(self):
+        """One source cannot answer two scoped requests: the assignment is ambiguous."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            heat_request, shade_request = self.two_scoped_requests_blocked(target)
+            # A single delivery that contradicts neither request: absence is compatible,
+            # so it is a candidate for both — and therefore proof of neither.
+            self.deliver_scoped_source(target, "combined-survey", None)
+            self.inventory_and_normalize(target)
+            only_source = self.source_id_for(target, "raw/papers/combined-survey.html")
+            before = (target / "wiki" / "questions" / "needs-evidence.md").read_text(encoding="utf-8")
+
+            code, payload, _ = self.run_resolve(
+                target,
+                "reopen",
+                "--slug",
+                "needs-evidence",
+                "--agent-id",
+                "fetch-agent",
+                "--source-id",
+                only_source,
+                "--request-id",
+                heat_request,
+                "--request-id",
+                shade_request,
+            )
+
+            self.assertEqual(2, code)
+            self.assertEqual("REQUEST_SCOPE_MISMATCH", payload["error_code"])
+            details = payload["details"]
+            self.assertEqual("ambiguous_assignment", details["reason"])
+            self.assertEqual(sorted([heat_request, shade_request]), details["request_ids"])
+            self.assertEqual([only_source], details["source_ids"])
+            self.assertEqual(
+                [[only_source], [only_source]],
+                [entry["candidate_source_ids"] for entry in details["requests"]],
+            )
+            self.assertEqual("blocked", self.page_frontmatter(target, "needs-evidence")["status"])
+            self.assertEqual(before, (target / "wiki" / "questions" / "needs-evidence.md").read_text(encoding="utf-8"))
+
+    def test_reopen_leaves_scope_less_requests_unpaired(self):
+        """Nothing declares scope, so nothing pairs and reopen behaves exactly as before."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            first = self.add_request(target, "needs-evidence", query_or_identifier="Heat index readings 2026")
+            second = self.add_request(target, "needs-evidence", query_or_identifier="Shade cover survey 2026")
+            self.block_on_requests(target, "needs-evidence", [first, second])
+            self.deliver_scoped_source(target, "combined-survey", None)
+            self.inventory_and_normalize(target)
+            source_id = self.source_id_for(target, "raw/papers/combined-survey.html")
+
+            def refuse_lookup(source_id_value: str) -> dict:
+                raise AssertionError(f"pairing read provenance scope for {source_id_value}")
+
+            # A workspace where nothing declares scope must not pay for pairing at all:
+            # no manifest record is read for a provenance scope that cannot matter.
+            with mock.patch.object(RESOLVE, "source_scope_resolver", return_value=refuse_lookup):
+                code, payload, stderr = self.run_resolve(
+                    target,
+                    "reopen",
+                    "--slug",
+                    "needs-evidence",
+                    "--agent-id",
+                    "fetch-agent",
+                    "--source-id",
+                    source_id,
+                    "--request-id",
+                    first,
+                    "--request-id",
+                    second,
+                )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("open", payload["status"])
+            self.assertEqual([], payload["pairs"])
+            self.assertEqual([first, second], payload["request_ids"])
+            self.assertNotIn("Paired by declared scope", (target / "log.md").read_text(encoding="utf-8"))
+
+    def test_reopen_pairs_a_scoped_request_and_ignores_its_scope_less_sibling(self):
+        """A partially adopted workspace: only the scoped request gets a pair."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            scoped = self.add_request(target, "needs-evidence", query_or_identifier="Heat index readings 2026")
+            unscoped = self.add_request(target, "needs-evidence", query_or_identifier="Shade cover survey 2026")
+            self.set_request_scope(target, scoped, {"facet_id": "heat-index"})
+            self.block_on_requests(target, "needs-evidence", [scoped, unscoped])
+            self.deliver_scoped_source(target, "heat-index", {"facet_id": "heat-index"})
+            self.deliver_scoped_source(target, "combined-survey", None)
+            self.inventory_and_normalize(target)
+            heat_source = self.source_id_for(target, "raw/papers/heat-index.html")
+            other_source = self.source_id_for(target, "raw/papers/combined-survey.html")
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "reopen",
+                "--slug",
+                "needs-evidence",
+                "--agent-id",
+                "fetch-agent",
+                "--source-id",
+                other_source,
+                "--source-id",
+                heat_source,
+                "--request-id",
+                scoped,
+                "--request-id",
+                unscoped,
+            )
+
+            self.assertEqual(0, code, stderr)
+            # The unstamped source does not contradict the scoped request, but the stamped
+            # one corroborates it, so the pairing names the source that actually agrees.
+            self.assertEqual([{"request_id": scoped, "source_id": heat_source}], payload["pairs"])
+
+    def test_reopen_does_not_mutate_request_records(self):
+        """Fulfilment stays single-writer: reopen computes pairs, it does not record them."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            heat_request, shade_request = self.two_scoped_requests_blocked(target)
+            self.deliver_scoped_source(target, "heat-index", {"facet_id": "heat-index"})
+            self.deliver_scoped_source(target, "shade-cover", {"facet_id": "shade-cover"})
+            self.inventory_and_normalize(target)
+            requests_path = target / "sources" / "source-requests.jsonl"
+            before = requests_path.read_bytes()
+
+            code, payload, stderr = self.run_resolve(
+                target,
+                "reopen",
+                "--slug",
+                "needs-evidence",
+                "--agent-id",
+                "fetch-agent",
+                "--source-id",
+                self.source_id_for(target, "raw/papers/heat-index.html"),
+                "--source-id",
+                self.source_id_for(target, "raw/papers/shade-cover.html"),
+                "--request-id",
+                heat_request,
+                "--request-id",
+                shade_request,
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(2, len(payload["pairs"]))
+            self.assertEqual(before, requests_path.read_bytes())
 
     def test_reopen_refuses_non_blocked_question(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2219,7 +2219,9 @@ class FetchSourcesTests(unittest.TestCase):
         record = next(
             item for item in records if item["raw_paths"] == ["raw/papers/openalex-W260100003-metadata.json"]
         )
-        self.assertEqual("unknown", record["kind"])
+        # An OpenAlex metadata snapshot is a structured payload, not an unclassifiable
+        # blob; inventory names it rather than filing it under `unknown`.
+        self.assertEqual("structured_data", record["kind"])
         self.assertIsNone(record["provenance"]["license"])
         self.assertEqual("metadata_only", record["provenance"]["academic_source_type"])
 

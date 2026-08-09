@@ -1798,8 +1798,67 @@ def write_init_report(target: Path, config: dict[str, Any], options: InitOptions
     write_private_text(path, render_init_report(config, options, domain_pack), target)
 
 
-def write_yaml(path: Path, value: dict[str, Any], root: Path) -> None:
-    write_private_text(path, yaml.safe_dump(value, sort_keys=False, allow_unicode=False), root)
+# A commented-out top-level key in the starter config, such as `# review:`. Nested
+# commented keys are indented past the single space this allows, so they do not match.
+COMMENTED_SECTION_RE = re.compile(r"^#\s?[A-Za-z_][A-Za-z0-9_]*:\s*$")
+
+OPTIONAL_SECTION_FOOTER_HEADING = (
+    "# ---------------------------------------------------------------------------\n"
+    "# Optional sections, shown commented out. None of them are active in this\n"
+    "# workspace. Uncomment a block to enable it, then re-run\n"
+    "# `python3 scripts/smoke_validate_workspace.py --format json`.\n"
+    "# Every section and key is documented in docs/research-yml.md.\n"
+    "# ---------------------------------------------------------------------------\n"
+)
+
+
+def optional_section_examples(starter_root: Path) -> list[str]:
+    """Commented-out optional sections declared in the starter config.
+
+    Generated configs are dumped from parsed YAML, so the starter's comments never
+    survive into a workspace. Optional sections would then be invisible to the operator
+    who has to enable them, which is the one class of comment that has to be delivered
+    rather than merely documented.
+
+    A comment block qualifies when it declares a commented-out top-level key, so prose
+    annotating an active section stays behind and a newly added optional section is
+    delivered without touching this function.
+    """
+    try:
+        text = (starter_root / "research.yml").read_text(encoding="utf-8")
+    except OSError:
+        # The footer is a convenience; a starter we cannot re-read is not worth
+        # failing an otherwise valid initialization over.
+        return []
+
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in text.replace("\r\n", "\n").split("\n"):
+        if line.startswith("#"):
+            current.append(line)
+            continue
+        if current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+
+    return [
+        "\n".join(block)
+        for block in blocks
+        if any(COMMENTED_SECTION_RE.match(line) for line in block)
+    ]
+
+
+def render_optional_section_footer(starter_root: Path) -> str:
+    examples = optional_section_examples(starter_root)
+    if not examples:
+        return ""
+    return "\n" + OPTIONAL_SECTION_FOOTER_HEADING + "\n" + "\n\n".join(examples) + "\n"
+
+
+def write_yaml(path: Path, value: dict[str, Any], root: Path, *, footer: str = "") -> None:
+    write_private_text(path, yaml.safe_dump(value, sort_keys=False, allow_unicode=False) + footer, root)
 
 
 def ensure_configured_directories(target: Path, config: dict[str, Any]) -> None:
@@ -2046,7 +2105,12 @@ def render_log(config: dict[str, Any], options: InitOptions, domain_pack: Domain
 
 def write_workspace_files(target: Path, config: dict[str, Any], options: InitOptions, domain_pack: DomainPackSelection | None) -> None:
     seed_questions = normalize_seed_questions(options.profile)
-    write_yaml(target / "research.yml", config, target)
+    write_yaml(
+        target / "research.yml",
+        config,
+        target,
+        footer=render_optional_section_footer(options.starter_root),
+    )
     ensure_configured_directories(target, config)
     write_question_pages(target, config, seed_questions)
     write_private_text(target / "index.md", render_index(config, seed_questions), target)

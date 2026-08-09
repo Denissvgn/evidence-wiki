@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import yaml
@@ -34,6 +35,8 @@ INTAKE = load_script_module("orchestration_controller_intake", SCRIPTS / "intake
 CONTROLLER = load_script_module("orchestration_controller_under_test", SCRIPTS / "orchestration_controller.py")
 RUN_CONTROLLER = load_script_module("orchestration_child_run_controller", SCRIPTS / "run_controller.py")
 STATUS = load_script_module("orchestration_workspace_status", SCRIPTS / "workspace_status.py")
+LINT = load_script_module("orchestration_lint", SCRIPTS / "lint.py")
+DOCTOR = load_script_module("orchestration_doctor", SCRIPTS / "doctor.py")
 SOURCE_REQUESTS = load_script_module("orchestration_source_requests", SCRIPTS / "source_requests.py")
 CLAIM = load_script_module("orchestration_question_claim", SCRIPTS / "question_claim.py")
 RESOLVE = load_script_module("orchestration_question_resolve", SCRIPTS / "question_resolve.py")
@@ -88,6 +91,81 @@ def openalex_payload() -> bytes:
 
 
 class OrchestrationControllerTests(unittest.TestCase):
+    def test_answered_slug_filter_accepts_anchor_only_grounding(self):
+        """A question grounded only by anchors reaches the verifier like any other.
+
+        The entries are parsed by the verifier rather than hand-written, so the filter is
+        tested against the entry shape grounding actually has, not a guess at it.
+        """
+        anchor_only = VERIFY_QUOTES.grounding_entries(
+            {
+                "grounding": [
+                    {
+                        "claim": "The current supplier price is 23.99 EUR.",
+                        "source_id": "data:keepa-b0abc123",
+                        "anchor": {"pointer": "supplier_quote/price", "expected": "23.99 EUR"},
+                    }
+                ]
+            },
+            "anchor-only",
+        )
+        quote_only = VERIFY_QUOTES.grounding_entries(
+            {
+                "grounding": [
+                    {
+                        "claim": "The survey is retained evidence.",
+                        "source_id": "raw:bench-survey-2026",
+                        "quote": "Benchmark Survey 2026",
+                    }
+                ]
+            },
+            "quote-only",
+        )
+        self.assertEqual(["anchor"], [entry["form"] for entry in anchor_only])
+
+        selected = CONTROLLER.answered_grounded_slugs(
+            {
+                "questions": [
+                    {"slug": "anchor-only", "status": "answered", "grounding": anchor_only},
+                    {"slug": "quote-only", "status": "answered", "grounding": quote_only},
+                    {"slug": "mixed", "status": "answered", "grounding": anchor_only + quote_only},
+                    {"slug": "ungrounded", "status": "answered", "grounding": []},
+                    {"slug": "not-answered", "status": "open", "grounding": anchor_only},
+                    {"slug": "grounding-not-a-list", "status": "answered", "grounding": {}},
+                ]
+            }
+        )
+
+        self.assertEqual(["anchor-only", "quote-only", "mixed"], selected)
+
+    def test_empty_quote_verification_report_matches_the_real_report_shape(self):
+        """The persisted artifact has one schema whether or not a run had grounding.
+
+        Compared against `verify_quotes.build_report`'s own output rather than a second
+        hardcoded literal: a literal here would only prove this file agrees with itself.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "quote-shape-workspace"
+            (target / "wiki" / "questions").mkdir(parents=True)
+            (target / "research.yml").write_text("project:\n  name: Quote Shape\n", encoding="utf-8")
+            (target / "wiki" / "questions" / "shape.md").write_text(
+                "---\nstatus: answered\n---\n\n# Shape\n",
+                encoding="utf-8",
+            )
+
+            real = VERIFY_QUOTES.build_report(target, SimpleNamespace(slug=["shape"]))
+
+        empty = CONTROLLER.empty_quote_verification_report()
+
+        self.assertEqual(list(real), list(empty))
+        self.assertEqual(list(real["counts"]), list(empty["counts"]))
+        self.assertEqual(list(real["counts"]["by_form"]), list(empty["counts"]["by_form"]))
+        self.assertEqual({"quote": 0, "anchor": 0}, empty["counts"]["by_form"])
+        self.assertEqual(0, sum(empty["counts"][key] for key in empty["counts"] if key != "by_form"))
+        self.assertEqual([], empty["questions"])
+        self.assertEqual("verified", empty["overall_result"])
+        self.assertFalse(empty["network_io_executed"])
+
     def run_module(self, module, argv: list[str]) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -319,7 +397,35 @@ class OrchestrationControllerTests(unittest.TestCase):
         )
         self.assertEqual(0, code, stderr)
 
-    def block_question(self, target: Path, slug: str = "test-question") -> str:
+    def events(self, target: Path, orchestration_id: str) -> list[dict]:
+        text = CONTROLLER.events_path(target, orchestration_id).read_text(encoding="utf-8")
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+    def set_review_scope(self, target: Path, scope: str) -> None:
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config.setdefault("review", {})["escalation_scope"] = scope
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def park_question_for_review(self, target: Path, slug: str) -> None:
+        """Record the frontmatter `question_resolve.py answer --require-coverage` writes when parking."""
+        page = target / "wiki" / "questions" / f"{slug}.md"
+        text = page.read_text(encoding="utf-8")
+        self.assertIn("status: open", text)
+        page.write_text(
+            text.replace(
+                "status: open",
+                "status: human_review\n"
+                "human_review_required: true\n"
+                "human_review_status: pending\n"
+                "human_review_policies:\n"
+                "  - pack:fixture-pack/manual-check",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+    def block_question(self, target: Path, slug: str = "test-question", priority: str = "high") -> str:
         self.assert_json_script_ok(
             CLAIM,
             [
@@ -347,7 +453,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                 "--rationale",
                 "The scoped question cannot be answered from delivered evidence.",
                 "--priority",
-                "high",
+                priority,
                 "--question-slug",
                 slug,
                 "--format",
@@ -2054,6 +2160,155 @@ class OrchestrationControllerTests(unittest.TestCase):
         ):
             verify([historical, authorized, injected])
 
+    def parked_review_workspace(self, root: Path, scope: str) -> Path:
+        """Two questions, one parked in human_review, under the requested escalation scope."""
+        target = self.init_workspace(root, question=True)
+        self.add_questions(
+            root,
+            target,
+            [
+                {
+                    "id": "parked-question",
+                    "question": "Which recorded review clears this parked question?",
+                    "priority": "high",
+                }
+            ],
+        )
+        self.set_review_scope(target, scope)
+        self.park_question_for_review(target, "parked-question")
+        return target
+
+    def test_question_scope_issues_work_for_the_unparked_question(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "question")
+            self.start(target)
+
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("orchestration_work_order", order["artifact_type"])
+            self.assertEqual("research", order["phase"])
+            self.assertEqual(["test-question"], order["scope"]["question_slugs"])
+
+            self.block_question(target, "test-question")
+            code, accepted, stderr = self.submit(
+                root,
+                target,
+                order["action_id"],
+                summary="Created a scoped source request and durably blocked the question on it.",
+                artifacts=["sources/source-requests.jsonl", "wiki/questions/test-question.md"],
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("active", accepted["status"])
+
+    def test_question_scope_runtime_guards_accept_a_review_parked_mid_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "question")
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            session = CONTROLLER.load_session(target, "orch-test")
+            retained = json.loads(
+                CONTROLLER.work_order_path(target, "orch-test", order["action_id"]).read_text(encoding="utf-8")
+            )
+
+            status = CONTROLLER.verify_runtime_guards(target, session, retained)
+
+            self.assertEqual("in_progress", status["readiness"]["verdict"])
+            self.assertEqual(1, status["readiness"]["questions_awaiting_review"])
+
+            # The guard passed, so submission proceeds to result validation instead of refusing
+            # the workspace outright.
+            code, error, _ = self.submit(
+                root,
+                target,
+                order["action_id"],
+                summary="The worker returned without processing its scoped question.",
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
+
+    def test_question_scope_terminates_no_ship_when_every_question_awaits_review(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "question")
+            self.park_question_for_review(target, "test-question")
+            self.start(target)
+
+            code, finished, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            # A terminal no_ship session is reported, not raised: the document is the payload.
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, stderr)
+            self.assertEqual("no_ship", finished["status"])
+            self.assertEqual("no_ship", finished["verdict"])
+            self.assertTrue(finished["pause_reason"].startswith(CONTROLLER.AWAITING_REVIEW_TERMINAL_REASON))
+            self.assertIn("parked-question", finished["pause_reason"])
+
+            events = self.events(target, "orch-test")
+            finished_event = [event for event in events if event["event_type"] == "session_finished"][-1]
+            self.assertEqual(2, finished_event["data"]["questions_awaiting_review"])
+            self.assertEqual(
+                ["parked-question", "test-question"],
+                sorted(finished_event["data"]["question_slugs"]),
+            )
+
+    def test_workspace_scope_keeps_the_0_2_4_freeze(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "workspace")
+            self.start(target)
+
+            code, finished, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, stderr)
+            self.assertEqual("no_ship", finished["status"])
+            self.assertEqual(
+                "Workspace health or HIGH validation findings require operator attention.",
+                finished["pause_reason"],
+            )
+            self.assertFalse(finished["pause_reason"].startswith(CONTROLLER.AWAITING_REVIEW_TERMINAL_REASON))
+
+    def test_workspace_scope_refuses_submit_after_a_review_is_parked_mid_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [{"id": "parked-question", "question": "Which review clears this?", "priority": "high"}],
+            )
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.park_question_for_review(target, "parked-question")
+
+            code, error, _ = self.submit(root, target, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_WORKSPACE_UNSAFE", error["error_code"])
+            self.assertEqual("attention_required", error["details"]["readiness_verdict"])
+            self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
+
+    def test_review_scope_flip_during_a_pending_action_is_refused_as_static_input_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.parked_review_workspace(root, "question")
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.set_review_scope(target, "workspace")
+
+            code, error, _ = self.submit(root, target, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_TRUSTED_INPUT_CHANGED", error["error_code"])
+            self.assertTrue(
+                any(path.startswith("research.yml ") for path in error["details"]["changed_paths"]),
+                error["details"]["changed_paths"],
+            )
+            self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
+
     def test_completed_research_requires_terminal_scoped_progress_and_accepts_linked_source_block(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -3179,6 +3434,2156 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
             self.assertEqual("ORCHESTRATION_PROVIDER_POLICY_CHANGED", error["error_code"])
             self.assertEqual(order["action_id"], CONTROLLER.load_session(target, "orch-test")["pending_action_id"])
+
+    # -- delegated acquisition: declaration captured at start, drift refused after ----
+
+    def declare_delegation(self, target: Path, **section) -> None:
+        """Write a research.yml orchestration: section, defaulting to a valid delegation."""
+        declaration = {"acquisition": "delegated", "acquirer_agent_id": "acquirer-1"}
+        declaration.update(section)
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if declaration:
+            config["orchestration"] = declaration
+        else:
+            config.pop("orchestration", None)
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def test_start_captures_the_declared_acquisition_posture(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target, max_attempts_per_request=4)
+
+            session = self.start(target)
+
+            self.assertEqual("delegated", session["acquisition_mode"])
+            self.assertEqual("acquirer-1", session["acquirer_agent_id"])
+            self.assertEqual(4, session["max_attempts_per_request"])
+            # Delegation is not a provider grant: the session's authorization is unchanged.
+            self.assertEqual(
+                {"enabled": False, "providers": []},
+                session["provider_policy"]["acquisition"],
+            )
+            self.assertEqual(session, CONTROLLER.load_session(target, "orch-test"))
+
+    def test_start_records_providers_mode_explicitly(self):
+        # Written rather than left absent, so a session created now is distinguishable
+        # from one created before delegation existed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+
+            session = self.start(target)
+
+            self.assertEqual("providers", session["acquisition_mode"])
+            self.assertIsNone(session["acquirer_agent_id"])
+            self.assertEqual(
+                CONTROLLER.DEFAULT_MAX_ATTEMPTS_PER_REQUEST,
+                session["max_attempts_per_request"],
+            )
+
+    def test_start_refuses_delegation_alongside_enabled_acquisition_providers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            self.declare_delegation(target)
+
+            code, error, _ = self.controller(
+                target, "start", "--orchestration-id", "orch-test", "--agent-id", "agent-test"
+            )
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("CONFIG_INVALID", error["error_code"])
+            self.assertIn("exactly one of them acquires evidence", error["message"])
+            # No session document: the contradiction is caught before durable state exists.
+            self.assertFalse(CONTROLLER.session_path(target, "orch-test").exists())
+
+    def test_start_refuses_a_malformed_declaration_through_the_config_error_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target, acquirer_agent_id=None)
+
+            code, error, _ = self.controller(
+                target, "start", "--orchestration-id", "orch-test", "--agent-id", "agent-test"
+            )
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("CONFIG_INVALID", error["error_code"])
+            self.assertIn("acquirer_agent_id is required", error["message"])
+            self.assertFalse(CONTROLLER.session_path(target, "orch-test").exists())
+
+    def test_changing_the_acquirer_between_actions_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target)
+            self.start(target)
+            self.declare_delegation(target, acquirer_agent_id="someone-else")
+
+            code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_DELEGATION_CHANGED", error["error_code"])
+            self.assertEqual(
+                {"expected": "acquirer-1", "current": "someone-else"},
+                error["details"]["changed"]["acquirer_agent_id"],
+            )
+            self.assertFalse(error["recoverable"])
+
+    def test_turning_delegation_on_under_a_running_session_is_refused(self):
+        # The session was planned in providers mode; a mid-flight switch would change
+        # which work orders it may issue and who may execute them.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            self.declare_delegation(target)
+
+            code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_DELEGATION_CHANGED", error["error_code"])
+            self.assertEqual(
+                {"expected": "providers", "current": "delegated"},
+                error["details"]["changed"]["acquisition_mode"],
+            )
+
+    def test_turning_delegation_off_under_a_running_session_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target)
+            self.start(target)
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config.pop("orchestration")
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+            code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_DELEGATION_CHANGED", error["error_code"])
+
+    def test_an_unchanged_declaration_does_not_refuse(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target)
+            self.start(target)
+
+            code, payload, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(0, code, stderr)
+            # A2 does not route delegated acquisition yet (that is C1); what matters here
+            # is that the guard let the session proceed on its own declaration.
+            self.assertNotEqual("ORCHESTRATION_DELEGATION_CHANGED", payload.get("error_code"))
+
+    def test_changing_the_attempts_budget_between_actions_is_allowed(self):
+        # The budget bounds retries; unlike who acquires, changing it cannot make a
+        # pending order unexecutable, and the router reads the session's frozen value.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target, max_attempts_per_request=2)
+            self.start(target)
+            self.declare_delegation(target, max_attempts_per_request=5)
+
+            code, payload, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(0, code, stderr)
+            self.assertNotEqual("ORCHESTRATION_DELEGATION_CHANGED", payload.get("error_code"))
+            self.assertEqual(2, CONTROLLER.load_session(target, "orch-test")["max_attempts_per_request"])
+
+    def test_a_session_predating_delegation_still_loads_and_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            session_path = CONTROLLER.session_path(target, "orch-test")
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            for field in ("acquisition_mode", "acquirer_agent_id", "max_attempts_per_request"):
+                session.pop(field)
+            session_path.write_text(json.dumps(session, indent=2) + "\n", encoding="utf-8")
+
+            loaded = CONTROLLER.load_session(target, "orch-test")
+            self.assertNotIn("acquisition_mode", loaded)
+            self.assertEqual(
+                "providers",
+                CONTROLLER.session_acquisition_policy(loaded)["acquisition_mode"],
+            )
+
+            code, payload, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertNotEqual("ORCHESTRATION_DELEGATION_CHANGED", payload.get("error_code"))
+
+    def test_a_delegated_session_without_an_acquirer_is_an_invalid_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target)
+            self.start(target)
+            session_path = CONTROLLER.session_path(target, "orch-test")
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            session["acquirer_agent_id"] = None
+            session_path.write_text(json.dumps(session, indent=2) + "\n", encoding="utf-8")
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                CONTROLLER.load_session(target, "orch-test")
+            self.assertEqual("ORCHESTRATION_STATE_INVALID", caught.exception.error_code)
+
+    def test_delegation_drift_under_a_pending_action_is_refused_as_trusted_input_drift(self):
+        # research.yml is a trusted static input, so under a pending action the earlier,
+        # stricter guard answers first. Pinned so the layering stays visible: the
+        # delegation guard is for the planning gaps, not a replacement for this.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.declare_delegation(target, acquirer_agent_id="someone-else")
+
+            code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_TRUSTED_INPUT_CHANGED", error["error_code"])
+            self.assertEqual(order["action_id"], CONTROLLER.load_session(target, "orch-test")["pending_action_id"])
+
+    def test_legacy_pending_work_refuses_a_changed_acquirer_on_replay(self):
+        # A session predating trusted-input binding has no fingerprint to compare, so the
+        # replay path is where the delegation guard actually earns its call site.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            session = CONTROLLER.load_session(target, "orch-test")
+            session.pop("pending_trusted_static_inputs")
+            CONTROLLER.write_json_atomic(CONTROLLER.session_path(target, "orch-test"), session)
+            CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"]).unlink()
+            self.declare_delegation(target, acquirer_agent_id="someone-else")
+
+            code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_DELEGATION_CHANGED", error["error_code"])
+            self.assertEqual(order["action_id"], CONTROLLER.load_session(target, "orch-test")["pending_action_id"])
+
+    # -- delegated acquisition: routing under blocked_on_sources ----------------------
+
+    def delegated_session(self, target: Path, orchestration_id: str = "orch-test", **section) -> dict:
+        self.declare_delegation(target, **section)
+        return self.start(target, orchestration_id)
+
+    def record_attempt(self, target: Path, request_id: str, *, code: str, session: str, action: str) -> None:
+        self.assert_json_script_ok(
+            SOURCE_REQUESTS,
+            [
+                "--project-root", str(target),
+                "record-attempt-failure",
+                "--request-id", request_id,
+                "--failure-code", code,
+                "--orchestration-id", session,
+                "--action-id", action,
+                "--format", "json",
+            ],
+        )
+
+    def route_for(self, target: Path, orchestration_id: str = "orch-test") -> tuple:
+        session = CONTROLLER.load_session(target, orchestration_id)
+        return CONTROLLER.choose_route(target, session)
+
+    def test_delegated_routing_issues_an_acquisition_order_without_candidates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.delegated_session(target)
+
+            route, context = self.route_for(target)
+
+            self.assertEqual("acquisition", route)
+            self.assertTrue(context["delegated"])
+            self.assertEqual("acquirer-1", context["acquirer_agent_id"])
+            self.assertEqual([request_id], context["scope"]["request_ids"])
+            self.assertEqual(["test-question"], context["scope"]["question_slugs"])
+            self.assertEqual([], context["scope"]["candidate_ids"])
+
+    def test_one_order_carries_every_routable_request(self):
+        # Batched on purpose: a host with parallel connectors should not be forced through
+        # one protocol round trip per request.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [{"id": "second-question", "question": "What else is missing?", "priority": "high"}],
+            )
+            first = self.block_question(target)
+            second = self.block_question(target, slug="second-question")
+            self.delegated_session(target)
+
+            _, context = self.route_for(target)
+
+            self.assertEqual({first, second}, set(context["scope"]["request_ids"]))
+            self.assertEqual({"test-question", "second-question"}, set(context["scope"]["question_slugs"]))
+
+    def test_a_request_at_its_attempt_budget_is_not_rerouted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            # Recorded before the session starts: once one is live, the delegation gate
+            # refuses an attempt no pending work order scopes — which is D3's whole point.
+            for index in range(2):
+                self.record_attempt(
+                    target, request_id, code="provider_throttled", session="orch-test", action=f"a{index}"
+                )
+            self.delegated_session(target)
+
+            route, context = self.route_for(target)
+
+            self.assertIsNone(route)
+            self.assertEqual("blocked_on_sources", context["terminal_status"])
+            # Spelled out rather than compared against the constant: the prefix is a
+            # stable string hosts branch on, so asserting `startswith(CONTROLLER.CONST)`
+            # would only prove the code uses its own value, whatever that value became.
+            self.assertTrue(
+                context["reason"].startswith(
+                    "Delegated acquisition exhausted its attempts for every open source request"
+                ),
+                context["reason"],
+            )
+            self.assertEqual(
+                "Delegated acquisition exhausted its attempts for every open source request",
+                CONTROLLER.DELEGATED_EXHAUSTED_TERMINAL_REASON,
+            )
+            self.assertEqual(
+                {"exhausted_requests": {request_id: "provider_throttled"}},
+                context["event_data"],
+            )
+
+    def test_one_attempt_below_the_budget_still_routes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.record_attempt(target, request_id, code="provider_throttled", session="orch-test", action="a0")
+            self.delegated_session(target)
+
+            route, context = self.route_for(target)
+
+            self.assertEqual("acquisition", route)
+            self.assertEqual([request_id], context["scope"]["request_ids"])
+
+    def test_a_standing_refusal_retires_a_request_on_its_first_attempt(self):
+        # not_authorized will answer the same way next time, so spending the rest of the
+        # budget proving that is waste the router can see coming.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.record_attempt(target, request_id, code="not_authorized", session="orch-test", action="a0")
+            self.delegated_session(target)
+
+            route, context = self.route_for(target)
+
+            self.assertIsNone(route)
+            self.assertEqual({"exhausted_requests": {request_id: "not_authorized"}}, context["event_data"])
+
+    def test_a_configured_budget_replaces_the_default(self):
+        # Two workspaces rather than one with a mid-test recording: with a session live the
+        # delegation gate refuses an attempt no pending order scopes, so the history has to
+        # exist before the session starts.
+        for recorded, expected_route in ((2, "acquisition"), (3, None)):
+            with self.subTest(recorded_attempts=recorded), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                target = self.init_workspace(root, question=True)
+                request_id = self.block_question(target)
+                for index in range(recorded):
+                    self.record_attempt(
+                        target, request_id, code="provider_throttled", session="orch-test", action=f"a{index}"
+                    )
+                self.delegated_session(target, max_attempts_per_request=3)
+
+                route, _ = self.route_for(target)
+
+                self.assertEqual(expected_route, route)
+
+    def test_only_this_sessions_attempts_count(self):
+        # The per-session rule: a new session gets a fresh look at every request, which is
+        # the supported way to retry after fixing a host-side cause. The audit keeps the
+        # earlier session's events; only the routing read is scoped.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            for index in range(2):
+                self.record_attempt(
+                    target, request_id, code="provider_throttled", session="orch-first", action=f"a{index}"
+                )
+            self.delegated_session(target, orchestration_id="orch-first")
+            self.assertIsNone(self.route_for(target, "orch-first")[0])
+
+            self.start(target, "orch-second")
+            route, context = self.route_for(target, "orch-second")
+
+            self.assertEqual("acquisition", route)
+            self.assertEqual([request_id], context["scope"]["request_ids"])
+            audit = target / "sources" / "source-request-attempts.jsonl"
+            self.assertEqual(2, len(audit.read_text(encoding="utf-8").strip().splitlines()))
+
+    def test_a_partially_exhausted_backlog_routes_only_what_remains(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [{"id": "second-question", "question": "What else is missing?", "priority": "high"}],
+            )
+            retired = self.block_question(target)
+            live = self.block_question(target, slug="second-question")
+            self.record_attempt(target, retired, code="not_authorized", session="orch-test", action="a0")
+            self.delegated_session(target)
+
+            route, context = self.route_for(target)
+
+            self.assertEqual("acquisition", route)
+            self.assertEqual([live], context["scope"]["request_ids"])
+            self.assertEqual(["second-question"], context["scope"]["question_slugs"])
+
+    def test_question_scope_is_built_from_the_scoped_requests_only(self):
+        # Above the scope cap the order carries only the requests that fit, and its
+        # question scope must be derived from those. The distinguishing case is a scoped
+        # request with no linked question: deriving slugs from every open request instead
+        # would put a dropped request's question in scope, authorizing the delegate to
+        # mutate a question this order never scoped. (With one slug per request the two
+        # spellings truncate identically, so a count-based assertion proves nothing.)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            unlinked = self.assert_json_script_ok(
+                SOURCE_REQUESTS,
+                [
+                    "--project-root", str(target),
+                    "add", "--kind", "other",
+                    "--query-or-identifier", "standing background evidence",
+                    "--rationale", "Not linked to any question.",
+                    "--priority", "high",
+                    "--format", "json",
+                ],
+            )["request"]["request_id"]
+            # Lower priority so the unlinked request sorts first deterministically.
+            # Open requests tie-break on created_at then request_id, and a request id is a
+            # hash over its creation timestamp — so two same-priority requests created in
+            # the same second order unpredictably from run to run.
+            self.block_question(target, priority="medium")
+            self.delegated_session(target)
+
+            # Patching the cap keeps the case deterministic; building 257 blocked
+            # questions would test the same branch far more slowly.
+            original_cap = CONTROLLER.MAX_SCOPE_IDS
+            CONTROLLER.MAX_SCOPE_IDS = 1
+            self.addCleanup(setattr, CONTROLLER, "MAX_SCOPE_IDS", original_cap)
+
+            _, context = self.route_for(target)
+
+            self.assertEqual([unlinked], context["scope"]["request_ids"])
+            self.assertEqual(
+                [],
+                context["scope"]["question_slugs"],
+                "the dropped request's question must not ride along in scope",
+            )
+
+    def test_delegated_orders_carry_no_provider_authority(self):
+        # Delegation is not a provider grant. The order's policy must stay the workspace's
+        # real (empty) one so verify_provider_policy_unchanged has nothing to widen.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.block_question(target)
+            session = self.delegated_session(target)
+
+            self.route_for(target)
+
+            self.assertEqual(
+                {"enabled": False, "providers": []},
+                session["provider_policy"]["acquisition"],
+            )
+
+    def test_providers_mode_still_walks_candidates_and_discovery(self):
+        # The delegated arm returns before the provider walk; this pins that the walk is
+        # still reached when the session is not delegated.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            self.block_question(target)
+            self.start(target)
+
+            route, context = self.route_for(target)
+
+            self.assertEqual("discovery", route)
+            self.assertNotIn("delegated", context)
+
+    def test_a_corrupt_attempt_audit_refuses_rather_than_routing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.block_question(target)
+            self.delegated_session(target)
+            audit = target / "sources" / "source-request-attempts.jsonl"
+            audit.write_text("{not json\n", encoding="utf-8")
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                self.route_for(target)
+            self.assertEqual("SOURCE_REQUESTS_INVALID", caught.exception.error_code)
+
+    # -- delegated acquisition: the issued work order --------------------------------
+
+    def issue_delegated_order(self, target: Path, orchestration_id: str = "orch-test") -> dict:
+        code, order, stderr = self.controller(target, "next", "--orchestration-id", orchestration_id)
+        self.assertEqual(0, code, stderr)
+        return order
+
+    def test_a_delegated_order_names_its_acquirer_and_skill(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            session = self.delegated_session(target)
+
+            order = self.issue_delegated_order(target)
+
+            self.assertEqual("acquisition", order["phase"])
+            self.assertEqual("delegated", order["acquisition_mode"])
+            self.assertEqual("acquirer-1", order["assigned_agent_id"])
+            self.assertEqual("research-acquire-delegated", order["skill"])
+            self.assertEqual([request_id], order["scope"]["request_ids"])
+            self.assertEqual([], order["scope"]["candidate_ids"])
+            # Addressed to the acquirer, still owned by the session driver: being the
+            # addressee does not grant the right to drive the protocol.
+            self.assertEqual(session["agent_id"], order["agent_id"])
+            self.assertNotEqual(order["assigned_agent_id"], order["agent_id"])
+
+    def test_a_delegated_order_carries_no_provider_authority(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.block_question(target)
+            self.delegated_session(target)
+
+            order = self.issue_delegated_order(target)
+
+            self.assertEqual(
+                {"discovery": {"enabled": False, "providers": []},
+                 "acquisition": {"enabled": False, "providers": []}},
+                order["provider_policy"],
+            )
+
+    def test_a_delegated_order_names_the_attempt_audit_and_not_the_candidate_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.block_question(target)
+            self.delegated_session(target)
+
+            order = self.issue_delegated_order(target)
+
+            self.assertIn("sources/source-request-attempts.jsonl", order["inputs"])
+            self.assertNotIn("sources/discovery/candidates.jsonl", order["inputs"])
+
+    def test_a_delegated_order_keeps_the_provider_postcondition_check_names(self):
+        # The verifier branches on acquisition_mode; the check names stay stable so the
+        # published per-check schemas need no new shapes.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.block_question(target)
+            self.delegated_session(target)
+
+            order = self.issue_delegated_order(target)
+
+            self.assertEqual(
+                [
+                    "request_fulfilled_with_normalized_source",
+                    "linked_blocked_questions_reopened",
+                    "manifest_records_increased",
+                    "controller_integrity_baseline",
+                ],
+                [check["check"] for check in order["required_postconditions"]],
+            )
+
+    def test_a_delegated_order_baselines_the_attempt_audit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.record_attempt(
+                target, request_id, code="provider_throttled", session="orch-test", action="pre-order"
+            )
+            self.delegated_session(target)
+
+            order = self.issue_delegated_order(target)
+            hydrated = self.hydrated_order(target, order)
+            manifest_guard = next(
+                check for check in hydrated["required_postconditions"]
+                if check["check"] == "manifest_records_increased"
+            )
+
+            baseline = manifest_guard["request_attempt_audit_record_fingerprints_before"]
+            self.assertEqual(1, len(baseline), "the attempt recorded before issue is in the baseline")
+            # It travels in the protected sidecar, not the published order.
+            published = next(
+                check for check in order["required_postconditions"]
+                if check["check"] == "manifest_records_increased"
+            )
+            self.assertNotIn("request_attempt_audit_record_fingerprints_before", published)
+
+    def test_a_delegated_order_replays_without_losing_its_baseline(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.block_question(target)
+            self.delegated_session(target)
+            first = self.issue_delegated_order(target)
+
+            second = self.issue_delegated_order(target)
+
+            self.assertEqual(first["action_id"], second["action_id"])
+            self.assertEqual(first, second)
+            # The guard that refuses replaying an order without a trustworthy baseline.
+            CONTROLLER.require_acquisition_evidence_baselines(self.hydrated_order(target, second))
+
+    def test_a_pre_delegation_provider_order_still_replays(self):
+        # Orders issued before delegated acquisition existed carry neither new field.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            self.start(target)
+            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            order_path = CONTROLLER.work_order_path(target, "orch-test", order["action_id"])
+            stored = json.loads(order_path.read_text(encoding="utf-8"))
+            self.assertNotIn("acquisition_mode", stored)
+            self.assertNotIn("assigned_agent_id", stored)
+
+            code, replayed, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(order["action_id"], replayed["action_id"])
+
+    def test_a_delegated_order_stays_small_with_a_large_request_scope(self):
+        # The baseline maps grow with the workspace; they belong in the protected sidecar,
+        # not the 256 KiB published order.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.block_question(target)
+            for index in range(60):
+                self.assert_json_script_ok(
+                    SOURCE_REQUESTS,
+                    [
+                        "--project-root", str(target),
+                        "add", "--kind", "other",
+                        "--query-or-identifier", f"bulk evidence request {index}",
+                        "--rationale", "Bulk scope for the work-order size guard.",
+                        "--format", "json",
+                    ],
+                )
+            self.delegated_session(target)
+
+            order = self.issue_delegated_order(target)
+
+            self.assertEqual(61, len(order["scope"]["request_ids"]))
+            encoded = len(json.dumps(order).encode("utf-8"))
+            self.assertLess(encoded, CONTROLLER.MAX_WORK_ORDER_BYTES)
+            self.assertLess(encoded, 32 * 1024, f"published order grew to {encoded} bytes")
+
+    def test_a_delegated_order_can_reuse_evidence_delivered_before_it_was_issued(self):
+        # Provider orders may reconcile an unchanged pre-existing scoped source rather than
+        # re-fetching it. Delegated orders correlate by request alone, because there is no
+        # candidate id to match; without that the baseline would always be empty and the
+        # reuse path would silently disappear.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            links = target / "raw" / "links"
+            links.mkdir(parents=True, exist_ok=True)
+            (links / "quote.txt").write_text("https://example.org/quote\n", encoding="utf-8")
+            (links / "quote.txt.provenance.yml").write_text(
+                "origin_url: https://example.org/quote\n"
+                "retrieved_at: 2026-08-08T00:00:00Z\n"
+                "retrieved_by: acquirer-1\n"
+                f"request_id: {request_id}\n",
+                encoding="utf-8",
+            )
+            self.assert_json_script_ok(
+                INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
+            )
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
+            self.delegated_session(target)
+
+            order = self.issue_delegated_order(target)
+            hydrated = self.hydrated_order(target, order)
+            manifest_guard = next(
+                check for check in hydrated["required_postconditions"]
+                if check["check"] == "manifest_records_increased"
+            )
+
+            self.assertEqual(
+                1,
+                len(manifest_guard["matching_source_ids_before"]),
+                "a source already delivered for the scoped request must be reconcilable",
+            )
+
+    def test_candidate_correlation_is_required_in_provider_mode_and_skipped_when_delegated(self):
+        # `matching_normalized_source_records` gained an optional candidate scope for
+        # delegated orders. Provider orders must keep correlating on the candidate: a
+        # source belonging to a different candidate on the same request is not evidence
+        # this order may reconcile against.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            links = target / "raw" / "links"
+            links.mkdir(parents=True, exist_ok=True)
+            (links / "quote.txt").write_text("https://example.org/quote\n", encoding="utf-8")
+            (links / "quote.txt.provenance.yml").write_text(
+                "origin_url: https://example.org/quote\n"
+                "retrieved_at: 2026-08-08T00:00:00Z\n"
+                "retrieved_by: fetcher\n"
+                f"request_id: {request_id}\n"
+                "candidate_id: cand-scoped\n",
+                encoding="utf-8",
+            )
+            self.assert_json_script_ok(
+                INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
+            )
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
+            config = CONTROLLER.load_config(target)
+
+            matched = CONTROLLER.matching_normalized_source_records(
+                target, config, [request_id], ["cand-scoped"]
+            )
+            self.assertEqual(1, len(matched), "the scoped candidate's source is reconcilable")
+
+            other = CONTROLLER.matching_normalized_source_records(
+                target, config, [request_id], ["cand-different"]
+            )
+            self.assertEqual({}, other, "another candidate's source is not in this order's baseline")
+
+            delegated = CONTROLLER.matching_normalized_source_records(target, config, [request_id], None)
+            self.assertEqual(
+                set(matched),
+                set(delegated),
+                "delegated orders correlate by request alone, since there is no candidate to name",
+            )
+
+    def test_a_provider_order_baselines_only_its_own_candidates_evidence(self):
+        # The call-site half of the correlation rule. A provider acquisition order is
+        # scoped to one selected candidate; a source delivered for a *different* candidate
+        # on the same request must not be reconcilable against this order, or the
+        # one-candidate-at-a-time boundary stops meaning anything.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            request_id = self.block_question(target)
+            self.append_selected_acquisition_candidates(target, request_id, ["cand-scoped"])
+            links = target / "raw" / "links"
+            links.mkdir(parents=True, exist_ok=True)
+            (links / "other.txt").write_text("https://example.org/other\n", encoding="utf-8")
+            (links / "other.txt.provenance.yml").write_text(
+                "origin_url: https://example.org/other\n"
+                "retrieved_at: 2026-08-08T00:00:00Z\n"
+                "retrieved_by: fetcher\n"
+                f"request_id: {request_id}\n"
+                "candidate_id: cand-someone-else\n",
+                encoding="utf-8",
+            )
+            self.assert_json_script_ok(
+                INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
+            )
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
+            self.start(target)
+
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("acquisition", order["phase"])
+            manifest_guard = next(
+                check for check in self.hydrated_order(target, order)["required_postconditions"]
+                if check["check"] == "manifest_records_increased"
+            )
+
+            self.assertEqual(
+                [],
+                manifest_guard["matching_source_ids_before"],
+                "another candidate's delivered source is not this order's reconcilable evidence",
+            )
+
+    # -- delegated acquisition: completed-path verification --------------------------
+
+    def deliver_for_request(
+        self,
+        target: Path,
+        request_id: str,
+        *,
+        name: str = "supplier-quote",
+        sidecar_request_id: str | None = "",
+        with_sidecar: bool = True,
+    ) -> str:
+        """Deliver one acquirer-style artifact with a provenance sidecar, no candidate."""
+        relative = f"raw/papers/{name}.html"
+        path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"<html><head><title>{name} evidence</title></head>"
+            "<body>The named supplier quotes 23.99 EUR per unit with a 50 unit minimum order.</body>"
+            "</html>\n",
+            encoding="utf-8",
+        )
+        if with_sidecar:
+            sidecar = {
+                "origin_url": f"https://supplier.example/{name}",
+                "retrieved_at": "2026-08-08T00:00:00Z",
+                "retrieved_by": "acquirer-1",
+                "license": "CC-BY-4.0",
+                "checksum": f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+            }
+            stamped = request_id if sidecar_request_id == "" else sidecar_request_id
+            if stamped is not None:
+                sidecar["request_id"] = stamped
+            (target / f"{relative}.provenance.yml").write_text(
+                yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
+            )
+        self.assert_json_script_ok(
+            INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
+        )
+        self.assert_json_script_ok(
+            NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+        )
+        manifest = (target / "sources" / "manifest.jsonl").read_text(encoding="utf-8")
+        for line in manifest.splitlines():
+            record = json.loads(line)
+            if relative in record.get("raw_paths", []):
+                return str(record["id"])
+        raise AssertionError(f"no manifest record for {relative}")
+
+    def fulfil_and_reopen(self, target: Path, request_id: str, source_id: str, slug: str | None) -> None:
+        self.assert_json_script_ok(
+            SOURCE_REQUESTS,
+            [
+                "--project-root", str(target), "fulfill",
+                "--request-id", request_id, "--source-id", source_id, "--format", "json",
+            ],
+        )
+        if slug is not None:
+            self.assert_json_script_ok(
+                RESOLVE,
+                [
+                    "--project-root", str(target), "reopen", "--slug", slug,
+                    "--agent-id", "acquirer-1", "--source-id", source_id,
+                    "--request-id", request_id, "--format", "json",
+                ],
+            )
+
+    def submit_delegated(self, target: Path, action_id: str = "action-0001", **overrides) -> tuple:
+        result = {
+            "schema_version": "1.0",
+            "action_id": action_id,
+            "outcome": "completed",
+            "summary": "Delegated acquisition finished its scoped requests.",
+            "artifacts": [],
+        }
+        result.update(overrides)
+        result_path = target / "delegated-result.json"
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        return self.controller(
+            target,
+            "submit",
+            "--orchestration-id", "orch-test",
+            "--action-id", action_id,
+            "--result-file", str(result_path),
+        )
+
+    def delegated_action(self, root: Path) -> tuple[Path, str]:
+        """A workspace with one blocked question and a pending delegated order."""
+        target = self.init_workspace(root, question=True)
+        request_id = self.block_question(target)
+        self.delegated_session(target)
+        code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+        self.assertEqual(0, code, stderr)
+        self.assertEqual("delegated", order["acquisition_mode"])
+        return target, request_id
+
+    def test_a_delegated_fulfilment_passes_and_returns_to_research(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+
+            code, session, stderr = self.submit_delegated(target)
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("research", session["phase"])
+            self.assertEqual("action-0001", session["last_completed_action_id"])
+
+    def test_a_fulfilment_without_a_provenance_sidecar_is_refused(self):
+        # CR AC2: the refusal must name the missing artifact.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id, with_sidecar=False)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
+            self.assertIn("provenance sidecar", error["message"])
+            self.assertEqual(
+                [request_id],
+                [item["request_id"] for item in error["details"]["correlation_failures"]],
+            )
+
+    def test_a_sidecar_naming_another_request_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id, sidecar_request_id="req-somewhere-else")
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            failure = error["details"]["correlation_failures"][0]
+            self.assertTrue(failure["has_provenance"])
+            self.assertEqual("req-somewhere-else", failure["provenance_request_id"])
+
+    def test_a_fulfilment_without_a_normalized_record_is_refused_by_source_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+            for path in (target / "sources" / "normalized").glob("*.md"):
+                path.unlink()
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("do not have normalized evidence", error["message"])
+            self.assertEqual([source_id], error["details"]["source_ids"])
+
+    def test_a_recorded_attempt_failure_completes_the_action_and_returns_to_planning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            self.record_attempt(
+                target, request_id, code="provider_throttled", session="orch-test", action="action-0001"
+            )
+
+            code, session, stderr = self.submit_delegated(target)
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("planning", session["phase"])
+            # The question stays blocked and the request stays open; nothing was invented.
+            question = (target / "wiki" / "questions" / "test-question.md").read_text(encoding="utf-8")
+            self.assertIn("status: blocked", question)
+
+    def test_a_scoped_request_with_no_outcome_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("neither a fulfilment nor a recorded attempt failure", error["message"])
+            self.assertEqual([request_id], error["details"]["request_ids"])
+
+    def test_an_attempt_failure_for_another_action_does_not_account_for_a_request(self):
+        # The event must name *this* action; a failure recorded under a different action id
+        # is someone else's evidence.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            self.record_attempt(
+                target, request_id, code="no_result", session="orch-test", action="action-9999"
+            )
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("outside this action's request scope", error["message"])
+
+    def test_rewriting_an_attempt_recorded_before_this_action_is_refused(self):
+        # The append-only guarantee is about history. An event this action created and
+        # then corrected is indistinguishable from one written correctly — both leave the
+        # same durable artifact — so the protected set is what existed at issue time.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.record_attempt(
+                target, request_id, code="provider_throttled", session="orch-test", action="earlier-action"
+            )
+            self.delegated_session(target)
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+
+            audit = target / "sources" / "source-request-attempts.jsonl"
+            event = json.loads(audit.read_text(encoding="utf-8").splitlines()[0])
+            event["failure_code"] = "not_authorized"
+            audit.write_text(json.dumps(event) + "\n", encoding="utf-8")
+            self.record_attempt(
+                target, request_id, code="no_result", session="orch-test", action=order["action_id"]
+            )
+
+            code, error, _ = self.submit_delegated(target, action_id=order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("rewrote or removed recorded acquisition attempts", error["message"])
+
+    def test_a_partial_batch_reopens_only_the_fully_unblocked_question(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [{"id": "second-question", "question": "What else is missing?", "priority": "high"}],
+            )
+            fulfilled_request = self.block_question(target)
+            failed_request = self.block_question(target, slug="second-question")
+            self.delegated_session(target)
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertEqual({fulfilled_request, failed_request}, set(order["scope"]["request_ids"]))
+
+            source_id = self.deliver_for_request(target, fulfilled_request)
+            self.fulfil_and_reopen(target, fulfilled_request, source_id, "test-question")
+            self.record_attempt(
+                target, failed_request, code="no_result", session="orch-test", action="action-0001"
+            )
+
+            code, session, stderr = self.submit_delegated(target)
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("research", session["phase"], "a partial batch still made progress")
+            self.assertIn(
+                "status: open",
+                (target / "wiki" / "questions" / "test-question.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "status: blocked",
+                (target / "wiki" / "questions" / "second-question.md").read_text(encoding="utf-8"),
+            )
+
+    def test_reopening_a_question_whose_other_blocker_failed_is_refused(self):
+        # The question is blocked by two requests; only one was fulfilled, so reopening it
+        # claims evidence the action did not produce.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            # One question blocked by two requests: `block` links both at once, since a
+            # question already blocked cannot be blocked again.
+            self.assert_json_script_ok(
+                CLAIM,
+                [
+                    "--project-root", str(target), "claim", "--slug", "test-question",
+                    "--agent-id", "agent-test", "--format", "json",
+                ],
+            )
+            request_ids = [
+                self.assert_json_script_ok(
+                    SOURCE_REQUESTS,
+                    [
+                        "--project-root", str(target), "add", "--kind", "other",
+                        "--query-or-identifier", f"gap {index} for the same question",
+                        "--rationale", "Blocks the question.", "--priority", "high",
+                        "--question-slug", "test-question", "--format", "json",
+                    ],
+                )["request"]["request_id"]
+                for index in range(2)
+            ]
+            first, second = request_ids
+            self.assert_json_script_ok(
+                RESOLVE,
+                [
+                    "--project-root", str(target), "block", "--slug", "test-question",
+                    "--agent-id", "agent-test", "--blocked-reason", "Two gaps remain.",
+                    "--request-id", first, "--request-id", second, "--format", "json",
+                ],
+            )
+            self.delegated_session(target)
+            self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            source_id = self.deliver_for_request(target, first)
+            self.fulfil_and_reopen(target, first, source_id, "test-question")
+            self.record_attempt(target, second, code="no_result", session="orch-test", action="action-0001")
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("not fully unblocked", error["message"])
+
+    def test_an_attempt_failure_for_an_unscoped_request_is_refused(self):
+        # An order scopes only the requests routing judged retryable. Recording a failure
+        # against one it excluded is evidence about work this action was not authorized to
+        # do, and would let an exhausted request accumulate attempts it never received.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [{"id": "second-question", "question": "What else is missing?", "priority": "high"}],
+            )
+            scoped = self.block_question(target)
+            exhausted = self.block_question(target, slug="second-question")
+            for index in range(2):
+                self.record_attempt(
+                    target, exhausted, code="provider_throttled", session="orch-test", action=f"earlier-{index}"
+                )
+            self.delegated_session(target)
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertEqual([scoped], order["scope"]["request_ids"], "the exhausted request is out of scope")
+
+            self.record_attempt(
+                target, scoped, code="no_result", session="orch-test", action=order["action_id"]
+            )
+            # Written straight to the audit: the delegation gate refuses this through the
+            # CLI, which is the first line of defence. The postcondition is the second, and
+            # it must hold for an audit file however its content arrived.
+            audit = target / "sources" / "source-request-attempts.jsonl"
+            with audit.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "schema_version": "1.0",
+                            "event_type": "source_request_attempt_failed",
+                            "event_id": "attempt-outofscope0000000000000000",
+                            "request_id": exhausted,
+                            "orchestration_id": "orch-test",
+                            "action_id": order["action_id"],
+                            "failure_code": "no_result",
+                            "detail": None,
+                            "recorded_at": "2026-08-08T00:00:00Z",
+                        }
+                    )
+                    + "\n"
+                )
+
+            code, error, _ = self.submit_delegated(target, action_id=order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("outside this action's request scope", error["message"])
+            self.assertEqual(
+                [exhausted],
+                [item["request_id"] for item in error["details"]["unattributable_events"]],
+            )
+
+    def test_an_attempt_event_with_an_undocumented_failure_code_is_refused(self):
+        # The controller does not trust the audit's content just because it is on disk: a
+        # code outside the taxonomy explains nothing a router could act on.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            audit = target / "sources" / "source-request-attempts.jsonl"
+            audit.parent.mkdir(parents=True, exist_ok=True)
+            audit.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "event_type": "source_request_attempt_failed",
+                        "event_id": "attempt-handwritten00000000000000",
+                        "request_id": request_id,
+                        "orchestration_id": "orch-test",
+                        "action_id": "action-0001",
+                        "failure_code": "the-connector-was-sad",
+                        "detail": None,
+                        "recorded_at": "2026-08-08T00:00:00Z",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("outside this action's request scope", error["message"])
+            self.assertEqual(
+                "the-connector-was-sad",
+                error["details"]["unattributable_events"][0]["failure_code"],
+            )
+
+    def test_a_fully_unblocked_question_left_blocked_is_refused(self):
+        # Fulfilment alone is not the outcome: the question the evidence was for must
+        # actually reopen, or research never picks it up again. Through `submit` the
+        # earlier runtime guard answers first — a blocked question whose only request is
+        # fulfilled is a HIGH lint finding, which flips the readiness verdict — so this
+        # asserts the refusal happens and the next case pins the postcondition itself.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, slug=None)
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_WORKSPACE_UNSAFE", error["error_code"])
+
+    def test_the_question_transition_postcondition_names_the_unreopened_question(self):
+        # The guard behind the runtime refusal above, exercised directly. It is the check
+        # that would answer if lint ever stopped flagging that state, and it names the
+        # question rather than the workspace.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, slug=None)
+            order = self.hydrated_order(
+                target,
+                CONTROLLER.load_json_object(
+                    CONTROLLER.work_order_path(target, "orch-test", "action-0001"),
+                    error_code="WORK_ORDER_INVALID",
+                    label="work order",
+                ),
+            )
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                CONTROLLER.verify_delegated_acquisition_postconditions(
+                    target,
+                    CONTROLLER.load_session(target, "orch-test"),
+                    order,
+                    config=CONTROLLER.load_config(target),
+                    status=CONTROLLER.fresh_workspace_status(target),
+                    run_id=order.get("run_id"),
+                    current="fetching",
+                    controller=CONTROLLER.load_sibling_module("run_controller"),
+                    apply_effects=False,
+                )
+
+            self.assertIn("did not reopen every fully unblocked question", str(caught.exception))
+            self.assertEqual(
+                ["test-question"],
+                [item["question_slug"] for item in caught.exception.details["question_transition_failures"]],
+            )
+
+    def test_changing_a_pre_existing_candidate_record_is_refused(self):
+        # The candidate store is out of bounds for a delegated action in both directions:
+        # nothing may be added, and nothing already there may be altered.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.append_selected_acquisition_candidates(target, request_id, ["cand-preexisting"])
+            self.delegated_session(target)
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+            store = target / "sources" / "discovery" / "candidates.jsonl"
+            record = json.loads(store.read_text(encoding="utf-8").splitlines()[0])
+            # A benign field: changing the lifecycle state instead would trip the candidate
+            # store's own consistency guard before this check is reached.
+            record["selected_by"] = "acquirer-1"
+            store.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+            code, error, _ = self.submit_delegated(target, action_id=order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("changed candidate records", error["message"])
+            self.assertEqual(
+                ["cand-preexisting"],
+                error["details"]["candidate_scope_violations"]["changed_outside_scope"],
+            )
+
+    def test_editing_a_failed_requests_record_is_refused(self):
+        # A failed attempt lives in the audit; the request record itself must be untouched.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            self.record_attempt(
+                target, request_id, code="no_result", session="orch-test", action="action-0001"
+            )
+            store = target / "sources" / "source-requests.jsonl"
+            record = json.loads(store.read_text(encoding="utf-8").splitlines()[0])
+            record["rationale"] = "edited out of band"
+            store.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("outside the fulfilled request scope", error["message"])
+
+    def test_touching_the_candidate_store_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+            self.append_selected_acquisition_candidates(target, request_id, ["cand-invented"])
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("changed candidate records", error["message"])
+
+    def test_the_delegated_arm_requires_its_attempt_audit_baseline(self):
+        # C2 captures the baseline; a work order without it cannot tell a new event from a
+        # rewritten one, so verification refuses rather than guessing.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            order = CONTROLLER.hydrate_integrity_baselines(
+                target,
+                CONTROLLER.load_json_object(
+                    CONTROLLER.work_order_path(target, "orch-test", "action-0001"),
+                    error_code="WORK_ORDER_INVALID",
+                    label="work order",
+                ),
+            )
+            for check in order["required_postconditions"]:
+                if check["check"] == "manifest_records_increased":
+                    check.pop("request_attempt_audit_record_fingerprints_before")
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                CONTROLLER.verify_delegated_acquisition_postconditions(
+                    target,
+                    CONTROLLER.load_session(target, "orch-test"),
+                    order,
+                    config=CONTROLLER.load_config(target),
+                    status=CONTROLLER.fresh_workspace_status(target),
+                    run_id=order.get("run_id"),
+                    current="fetching",
+                    controller=CONTROLLER.load_sibling_module("run_controller"),
+                    apply_effects=False,
+                )
+            self.assertIn("bounded evidence integrity baseline", str(caught.exception))
+
+    # -- delegated acquisition: blocked-path verification -----------------------------
+
+    def test_a_blocked_delegated_action_pauses_and_replays_the_same_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, _ = self.delegated_action(Path(tmpdir))
+
+            code, session, stderr = self.submit_delegated(
+                target, outcome="blocked", summary="The acquirer's connector was unavailable."
+            )
+
+            self.assertEqual(CONTROLLER.EXIT_PAUSED, code, stderr)
+            self.assertEqual(CONTROLLER.PAUSED_STATUS, session["status"])
+            self.assertEqual("action-0001", session["pending_action_id"])
+
+            code, replayed, stderr = self.controller(
+                target, "next", "--orchestration-id", "orch-test", "--resume"
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("action-0001", replayed["action_id"])
+            self.assertEqual("delegated", replayed["acquisition_mode"])
+
+    def test_a_blocked_delegated_action_that_fulfilled_a_request_is_refused(self):
+        # CR-3's own acceptance case, in the delegated shape: a blocked attempt cannot
+        # fulfil a request. The work actually done must be reported as completed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+
+            code, error, _ = self.submit_delegated(target, outcome="blocked", summary="Aborted.")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
+            self.assertIn("changed the source-request store", error["message"])
+            self.assertIn("cannot fulfill a request", error["remediation"])
+
+    def test_a_blocked_delegated_action_that_recorded_an_attempt_is_refused(self):
+        # Recording a failure is the delegated way of saying "this request produced
+        # nothing" — durable evidence that the action ran, which is `completed`.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            self.record_attempt(
+                target, request_id, code="provider_throttled", session="orch-test", action="action-0001"
+            )
+
+            code, error, _ = self.submit_delegated(target, outcome="blocked", summary="Aborted.")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("recorded an acquisition attempt", error["message"])
+            self.assertIn("report it as completed", error["remediation"])
+
+    def test_a_blocked_delegated_action_that_inventoried_a_delivery_is_refused(self):
+        # Strict no-change, unlike the provider path's correlated partial-delivery
+        # allowance: a delegate holding delivered evidence can fulfil it instead.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            self.deliver_for_request(target, request_id)
+
+            code, error, _ = self.submit_delegated(target, outcome="blocked", summary="Aborted.")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("changed the evidence manifest", error["message"])
+
+    def test_a_blocked_delegated_action_that_only_wrote_raw_files_is_refused(self):
+        # Delivered but not inventoried: the manifest and normalized trees are untouched,
+        # so this is the case that exercises the raw-tree check on its own.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            path = target / "raw" / "papers" / "half-delivered.html"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("<html><body>A partial delivery.</body></html>\n", encoding="utf-8")
+
+            code, error, _ = self.submit_delegated(target, outcome="blocked", summary="Aborted.")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("changed raw evidence", error["message"])
+            self.assertIn(
+                "raw/papers/half-delivered.html",
+                error["details"]["raw_scope_violations"]["added_outside_scope"],
+            )
+
+    def test_a_delegated_blocked_order_carrying_a_candidate_scope_is_refused(self):
+        # Defensive: C2 never emits one, so this is reachable only through a tampered or
+        # hand-built order — which is exactly when a candidate-shaped check must not run.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, _ = self.delegated_action(Path(tmpdir))
+            order = self.hydrated_order(
+                target,
+                CONTROLLER.load_json_object(
+                    CONTROLLER.work_order_path(target, "orch-test", "action-0001"),
+                    error_code="WORK_ORDER_INVALID",
+                    label="work order",
+                ),
+            )
+            order["scope"]["candidate_ids"] = ["cand-smuggled"]
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                CONTROLLER.verify_blocked_delegated_acquisition_postconditions(target, order)
+
+            self.assertIn("carries a candidate scope", str(caught.exception))
+
+    def test_a_blocked_delegated_action_that_touched_a_question_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, _ = self.delegated_action(Path(tmpdir))
+            question = target / "wiki" / "questions" / "test-question.md"
+            question.write_text(
+                question.read_text(encoding="utf-8") + "\nAn out-of-band note.\n", encoding="utf-8"
+            )
+
+            code, error, _ = self.submit_delegated(target, outcome="blocked", summary="Aborted.")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("changed question files", error["message"])
+
+    def test_a_blocked_delegated_action_that_touched_the_candidate_store_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            self.append_selected_acquisition_candidates(target, request_id, ["cand-invented"])
+
+            code, error, _ = self.submit_delegated(target, outcome="blocked", summary="Aborted.")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertIn("changed candidate records", error["message"])
+
+    def test_the_provider_blocked_path_still_allows_its_candidate_route_failure(self):
+        # The delegated branch returns before the provider classifier; this pins that a
+        # provider order still reaches it and still refuses a candidate-free scope.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            request_id = self.block_question(target)
+            self.append_selected_acquisition_candidates(target, request_id, ["cand-provider"])
+            self.start(target)
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("acquisition", order["phase"])
+            self.assertNotIn("acquisition_mode", order)
+
+            result_path = target / "provider-result.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "action_id": order["action_id"],
+                        "outcome": "blocked",
+                        "summary": "The provider was unavailable.",
+                        "artifacts": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            code, session, stderr = self.controller(
+                target,
+                "submit",
+                "--orchestration-id", "orch-test",
+                "--action-id", order["action_id"],
+                "--result-file", str(result_path),
+            )
+
+            self.assertEqual(CONTROLLER.EXIT_PAUSED, code, stderr)
+            self.assertEqual(CONTROLLER.PAUSED_STATUS, session["status"])
+
+    # -- delegated acquisition: the out-of-band gate (CR AC3) -------------------------
+
+    def try_fulfil(self, target: Path, request_id: str, source_id: str) -> tuple:
+        return self.json_script(
+            SOURCE_REQUESTS,
+            [
+                "--project-root", str(target), "fulfill",
+                "--request-id", request_id, "--source-id", source_id, "--format", "json",
+            ],
+        )
+
+    def try_reopen(self, target: Path, slug: str, request_id: str, source_id: str) -> tuple:
+        return self.json_script(
+            RESOLVE,
+            [
+                "--project-root", str(target), "reopen", "--slug", slug,
+                "--agent-id", "acquirer-1", "--source-id", source_id,
+                "--request-id", request_id, "--format", "json",
+            ],
+        )
+
+    def test_fulfilling_out_of_band_during_a_live_session_is_refused(self):
+        # CR AC3: with delegation on, a direct fulfil against a request scoped to an active
+        # session is refused. Here the session's pending order is a *research* order, which
+        # sanctions questions but never a fulfilment.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.add_questions(
+                root,
+                target,
+                [{"id": "second-question", "question": "Something answerable.", "priority": "high"}],
+            )
+            self.delegated_session(target)
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("research", order["phase"], "an actionable question routes to research first")
+            source_id = self.deliver_for_request(target, request_id)
+
+            code, error, _ = self.try_fulfil(target, request_id, source_id)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("SOURCE_REQUEST_FULFILL_DELEGATED", error["error_code"])
+            self.assertEqual(
+                [{"orchestration_id": "orch-test", "pending_action_id": order["action_id"]}],
+                error["details"]["live_sessions"],
+            )
+            self.assertIn("while executing the delegated acquisition", error["remediation"])
+
+    def test_fulfilling_inside_the_delegated_order_that_scopes_it_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+
+            code, report, stderr = self.try_fulfil(target, request_id, source_id)
+
+            self.assertEqual(0, code, stderr)
+            self.assertTrue(report["updated"])
+
+    def test_fulfilling_with_every_session_terminal_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.delegated_session(target)
+            session_path = CONTROLLER.session_path(target, "orch-test")
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            session["status"] = "no_ship"
+            session["pending_action_id"] = None
+            session_path.write_text(json.dumps(session, indent=2) + "\n", encoding="utf-8")
+            source_id = self.deliver_for_request(target, request_id)
+
+            code, report, stderr = self.try_fulfil(target, request_id, source_id)
+
+            self.assertEqual(0, code, stderr)
+            self.assertTrue(report["updated"])
+
+    def test_a_providers_workspace_is_never_gated(self):
+        # Backward compatibility: without the orchestration: section nothing changes, even
+        # with a live session holding a pending order.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.enable_academic_providers(target)
+            self.append_selected_acquisition_candidates(target, request_id, ["cand-provider"])
+            self.start(target)
+            self.controller(target, "next", "--orchestration-id", "orch-test")
+            source_id = self.deliver_for_request(target, request_id)
+
+            code, report, stderr = self.try_fulfil(target, request_id, source_id)
+
+            self.assertEqual(0, code, stderr)
+            self.assertTrue(report["updated"])
+
+    def test_an_idempotent_refulfil_is_never_gated(self):
+        # A repeat with the same source id changes nothing, so refusing it would break a
+        # delegate replaying its own action after an interruption.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.try_fulfil(target, request_id, source_id)
+            self.controller(target, "submit", "--orchestration-id", "orch-test", "--action-id", "action-0001",
+                            "--result-file", self.blocked_result_file(target, "action-0001"))
+
+            code, report, stderr = self.try_fulfil(target, request_id, source_id)
+
+            self.assertEqual(0, code, stderr)
+            self.assertFalse(report["updated"], "a same-source refulfil is a no-op")
+
+    def test_recording_an_attempt_out_of_band_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.delegated_session(target)
+
+            code, error, _ = self.json_script(
+                SOURCE_REQUESTS,
+                [
+                    "--project-root", str(target), "record-attempt-failure",
+                    "--request-id", request_id, "--failure-code", "no_result",
+                    "--orchestration-id", "orch-test", "--action-id", "action-0001", "--format", "json",
+                ],
+            )
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("SOURCE_REQUEST_FULFILL_DELEGATED", error["error_code"])
+
+    def test_reopening_out_of_band_during_a_live_session_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.try_fulfil(target, request_id, source_id)
+            # End the action, leaving the session live with no pending order.
+            self.controller(target, "submit", "--orchestration-id", "orch-test", "--action-id", "action-0001",
+                            "--result-file", self.blocked_result_file(target, "action-0001"))
+            session_path = CONTROLLER.session_path(target, "orch-test")
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            session["pending_action_id"] = None
+            session_path.write_text(json.dumps(session, indent=2) + "\n", encoding="utf-8")
+
+            code, error, _ = self.try_reopen(target, "test-question", request_id, source_id)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("QUESTION_REOPEN_DELEGATED", error["error_code"])
+            self.assertIn("while executing the work order that scopes it", error["remediation"])
+
+    def test_reopening_inside_an_order_that_scopes_the_question_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.try_fulfil(target, request_id, source_id)
+
+            code, report, stderr = self.try_reopen(target, "test-question", request_id, source_id)
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("open", report["status"])
+
+    def test_a_delegated_order_sanctions_only_the_requests_it_scopes(self):
+        # A pending delegated acquisition order is not blanket permission: fulfilling a
+        # request it did not scope is still a mutation nothing accounts for.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.add_questions(
+                root,
+                target,
+                [{"id": "second-question", "question": "What else is missing?", "priority": "high"}],
+            )
+            scoped = self.block_question(target)
+            unscoped = self.block_question(target, slug="second-question")
+            # Exhausting one request keeps it out of the order's scope while leaving it open.
+            for index in range(2):
+                self.record_attempt(
+                    target, unscoped, code="provider_throttled", session="orch-test", action=f"earlier-{index}"
+                )
+            self.delegated_session(target)
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertEqual([scoped], order["scope"]["request_ids"])
+            source_id = self.deliver_for_request(target, unscoped, name="unscoped-evidence")
+
+            code, error, _ = self.try_fulfil(target, unscoped, source_id)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("SOURCE_REQUEST_FULFILL_DELEGATED", error["error_code"])
+
+    def test_a_malformed_delegation_section_closes_the_gate(self):
+        # Reading a broken declaration as "not delegated" would silently reopen the
+        # out-of-band path this gate exists to close.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.delegated_session(target)
+            source_id = self.deliver_for_request(target, request_id)
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["orchestration"] = {"acquisition": "delegated", "acquirer_agent_id": ""}
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+            code, error, _ = self.try_fulfil(target, request_id, source_id)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("CONFIG_INVALID", error["error_code"])
+            self.assertIn("acquirer_agent_id", error["message"])
+
+    def test_an_unreadable_session_closes_the_gate_rather_than_opening_it(self):
+        # Corruption is not evidence that a mutation is sanctioned.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            CONTROLLER.session_path(target, "orch-test").write_text("{not json\n", encoding="utf-8")
+
+            code, error, _ = self.try_fulfil(target, request_id, source_id)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_STATE_UNREADABLE", error["error_code"])
+
+    def blocked_result_file(self, target: Path, action_id: str) -> str:
+        path = target / f"blocked-{action_id}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "action_id": action_id,
+                    "outcome": "completed",
+                    "summary": "Delivered the scoped evidence.",
+                    "artifacts": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return str(path)
+
+    # -- delegated acquisition: surfacing (status, lint, doctor) ----------------------
+
+    def lint_report(self, target: Path) -> dict:
+        return LINT.run_checks(target, LINT.load_config(target))
+
+    def lint_categories(self, target: Path, prefix: str) -> list[str]:
+        return sorted(
+            issue["category"]
+            for issue in self.lint_report(target)["issues"]
+            if issue["category"].startswith(prefix)
+        )
+
+    def test_status_surfaces_the_sessions_acquisition_posture(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.delegated_session(target)
+
+            summary = self.assert_json_script_ok(
+                STATUS, ["--project-root", str(target), "--format", "json"]
+            )["orchestration"]
+
+            self.assertEqual("delegated", summary["acquisition_mode"])
+            self.assertEqual("acquirer-1", summary["acquirer_agent_id"])
+
+            # The MCP read surface returns the same document, so every other service sees
+            # the posture too. Asserted rather than assumed, since a future filter there
+            # would silently drop it.
+            mcp = load_script_module("orchestration_serve_mcp", SCRIPTS / "serve_mcp.py")
+            payload = mcp.ResearchWikiMcpServer(target).call_tool_payload("workspace_status", {})
+            self.assertEqual("delegated", payload["orchestration"]["acquisition_mode"])
+            self.assertEqual("acquirer-1", payload["orchestration"]["acquirer_agent_id"])
+
+    def test_status_reports_a_pre_delegation_session_as_providers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            session_path = CONTROLLER.session_path(target, "orch-test")
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            for field in ("acquisition_mode", "acquirer_agent_id"):
+                session.pop(field)
+            session_path.write_text(json.dumps(session, indent=2) + "\n", encoding="utf-8")
+
+            summary = self.assert_json_script_ok(
+                STATUS, ["--project-root", str(target), "--format", "json"]
+            )["orchestration"]
+
+            self.assertEqual("providers", summary["acquisition_mode"])
+            self.assertIsNone(summary["acquirer_agent_id"])
+
+    def test_lint_reports_a_fulfilment_no_work_order_accounts_for(self):
+        # The residue the D3 gate cannot close: the gate only refuses while a session is
+        # live, so a fulfilment recorded with none running leaves exactly this trace.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.declare_delegation(target)
+            source_id = self.deliver_for_request(target, request_id)
+            self.assert_json_script_ok(
+                SOURCE_REQUESTS,
+                [
+                    "--project-root", str(target), "fulfill",
+                    "--request-id", request_id, "--source-id", source_id, "--format", "json",
+                ],
+            )
+
+            report = self.lint_report(target)
+
+            categories = [issue["category"] for issue in report["issues"]]
+            self.assertIn("delegated_fulfilment_unattributed", categories)
+            self.assertEqual(1, report["stats"]["delegated_unattributed_fulfilments"])
+            offender = next(
+                issue for issue in report["issues"]
+                if issue["category"] == "delegated_fulfilment_unattributed"
+            )
+            self.assertEqual("LOW", offender["severity"])
+            self.assertIn(request_id, offender["message"])
+
+    def test_lint_stays_quiet_when_the_work_order_accounts_for_the_fulfilment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+
+            report = self.lint_report(target)
+
+            self.assertEqual([], self.lint_categories(target, "delegated_"))
+            self.assertEqual(0, report["stats"]["delegated_unattributed_fulfilments"])
+
+    def test_lint_does_not_gate_a_providers_workspace(self):
+        # The checks are delegation-specific; a workspace acquiring through its own
+        # providers must not grow findings about work orders it never issues.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            source_id = self.deliver_for_request(target, request_id)
+            self.assert_json_script_ok(
+                SOURCE_REQUESTS,
+                [
+                    "--project-root", str(target), "fulfill",
+                    "--request-id", request_id, "--source-id", source_id, "--format", "json",
+                ],
+            )
+
+            report = self.lint_report(target)
+
+            self.assertEqual([], self.lint_categories(target, "delegated_"))
+            self.assertNotIn("delegated_unattributed_fulfilments", report["stats"])
+
+    def test_lint_reports_an_attempt_event_for_a_request_the_store_lost(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.declare_delegation(target)
+            self.record_attempt(
+                target, request_id, code="no_result", session="orch-gone", action="action-0001"
+            )
+            store = target / "sources" / "source-requests.jsonl"
+            store.write_text("", encoding="utf-8")
+
+            report = self.lint_report(target)
+
+            offender = next(
+                issue for issue in report["issues"]
+                if issue["category"] == "source_request_attempt_orphaned"
+            )
+            self.assertEqual("LOW", offender["severity"])
+            self.assertIn(request_id, offender["message"])
+            self.assertEqual(1, report["stats"]["source_request_attempt_orphans"])
+
+    def test_lint_warns_before_the_attempt_audit_outgrows_the_read_guard(self):
+        # The warning has to arrive with room to act: past the controller's bounded read,
+        # delegated acquisition stops verifying at all.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            self.declare_delegation(target)
+            self.record_attempt(
+                target, request_id, code="no_result", session="orch-1", action="action-0001"
+            )
+            audit = target / "sources" / "source-request-attempts.jsonl"
+            line = audit.read_text(encoding="utf-8").splitlines()[0]
+            with audit.open("a", encoding="utf-8") as handle:
+                # Distinct event ids so the padding is a plausible audit, not one line
+                # repeated; size is what the check reads, but a valid file keeps the other
+                # checks meaningful.
+                for index in range(LINT.ATTEMPT_AUDIT_WARNING_BYTES // len(line) + 8):
+                    event = json.loads(line)
+                    event["event_id"] = f"attempt-{index:032d}"
+                    handle.write(json.dumps(event) + "\n")
+
+            report = self.lint_report(target)
+
+            offender = next(
+                issue for issue in report["issues"]
+                if issue["category"] == "source_request_attempt_audit_large"
+            )
+            self.assertEqual("LOW", offender["severity"])
+            self.assertGreater(
+                report["stats"]["source_request_attempt_audit_bytes"],
+                LINT.ATTEMPT_AUDIT_WARNING_BYTES,
+            )
+
+    def test_the_audit_warning_threshold_leaves_room_below_the_controller_guard(self):
+        # The two constants have to stay related: a warning at or above the guard would
+        # arrive only once verification had already stopped working.
+        self.assertLess(LINT.ATTEMPT_AUDIT_WARNING_BYTES, CONTROLLER.MAX_SCOPE_GUARD_BYTES)
+
+    def test_doctor_reports_the_delegation_posture(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.declare_delegation(target, max_attempts_per_request=4)
+
+            report = self.assert_json_script_ok(
+                DOCTOR, ["--project-root", str(target), "--format", "json"]
+            )
+            check = next(item for item in report["checks"] if item["id"] == "acquisition_mode")
+
+            self.assertEqual("ok", check["status"])
+            self.assertIn("acquirer-1", check["message"])
+            self.assertEqual(
+                {
+                    "acquisition_mode": "delegated",
+                    "acquirer_agent_id": "acquirer-1",
+                    "max_attempts_per_request": 4,
+                },
+                check["details"],
+            )
+            self.assertIn("Managed runners refuse this workspace", check["implication"])
+
+    def test_doctor_reports_a_providers_workspace_as_self_acquiring(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+
+            report = self.assert_json_script_ok(
+                DOCTOR, ["--project-root", str(target), "--format", "json"]
+            )
+            check = next(item for item in report["checks"] if item["id"] == "acquisition_mode")
+
+            self.assertEqual("ok", check["status"])
+            self.assertEqual("providers", check["details"]["acquisition_mode"])
+            self.assertIsNone(check["details"]["acquirer_agent_id"])
+
+    def test_doctor_degrades_on_a_malformed_orchestration_section(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["orchestration"] = {"acquisition": "sideways"}
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+            report = self.assert_json_script_ok(
+                DOCTOR, ["--project-root", str(target), "--format", "json"]
+            )
+            check = next(item for item in report["checks"] if item["id"] == "acquisition_mode")
+
+            self.assertEqual("degraded", check["status"])
+            self.assertEqual("CONFIG_INVALID", check["details"]["error_code"])
+
+    # -- delegated acquisition: providers-mode backward compatibility ----------------
+
+    VOLATILE_KEYS = frozenset(
+        {
+            "issued_at", "expires_at", "started_at", "updated_at", "completed_at",
+            "window_started_at", "occurred_at", "recorded_at",
+            "fingerprint", "total_bytes", "entry_count",
+            "run_id", "active_run_id", "child_run_ids",
+        }
+    )
+
+    def stable(self, value, *, aliases: dict[str, str] | None = None):
+        """Normalize what cannot be equal across two runs, so the rest can be compared.
+
+        Two kinds of noise. Timestamps and content fingerprints are dropped outright.
+        Request ids are *substituted* rather than dropped, because where an id appears is
+        exactly what the differential is checking — but a request id is a hash over its
+        creation timestamp, so the literal value differs between runs that straddle a
+        second boundary. Dropping them instead would have hidden a scope change; leaving
+        them made the comparison flaky.
+        """
+        aliases = aliases or {}
+        if isinstance(value, dict):
+            # Keys are aliased too: baseline maps are keyed *by* request id, so
+            # substituting only values would leave the two runs trivially unequal.
+            return {
+                self.stable(key, aliases=aliases): self.stable(item, aliases=aliases)
+                for key, item in value.items()
+                if key not in self.VOLATILE_KEYS
+            }
+        if isinstance(value, list):
+            return [self.stable(item, aliases=aliases) for item in value]
+        if isinstance(value, str):
+            for actual, placeholder in aliases.items():
+                value = value.replace(actual, placeholder)
+            # A content hash over workspace bytes cannot match when those bytes
+            # legitimately differ — the question file and candidate record both embed the
+            # run's request id. The *key set* of a fingerprint map is what this
+            # differential checks (which artifacts are baselined); the digests are not
+            # comparable and are normalized rather than dropped, so a map that lost an
+            # entry still fails.
+            if value.startswith("sha256:"):
+                return "<sha256>"
+        return value
+
+    def provider_scenario(self, root: Path, *, inert_section: bool) -> dict:
+        """Drive the provider acquisition path, returning what a differential compares.
+
+        The scenario is identical in both runs except for the presence of an inert
+        `orchestration: {acquisition: providers}` section, which is the whole variable
+        under test: declaring the default explicitly must change nothing.
+        """
+        target = self.init_workspace(root, question=True)
+        self.enable_academic_providers(target)
+        if inert_section:
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["orchestration"] = {"acquisition": "providers"}
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        request_id = self.block_question(target)
+        self.append_selected_acquisition_candidates(target, request_id, ["cand-differential"])
+
+        session = self.start(target)
+        code, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+        self.assertEqual(0, code)
+        self.assertEqual("acquisition", order["phase"])
+
+        # A completed claim with no work done, and a blocked claim with nothing changed:
+        # the two submission arms this CR touched, exercised without the full acquisition.
+        refused_code, refused, _ = self.submit_delegated(target, outcome="completed")
+        blocked_code, blocked, _ = self.submit_delegated(
+            target, outcome="blocked", summary="Nothing to do."
+        )
+        aliases = {request_id: "<request>"}
+        return {
+            "session": self.stable(session, aliases=aliases),
+            "order": self.stable(order, aliases=aliases),
+            "hydrated_order": self.stable(self.hydrated_order(target, order), aliases=aliases),
+            "refused": (refused_code, self.stable(refused, aliases=aliases)),
+            "blocked": (blocked_code, self.stable(blocked, aliases=aliases)),
+            "final_session": self.stable(
+                CONTROLLER.load_session(target, "orch-test"), aliases=aliases
+            ),
+        }
+
+    def test_declaring_the_default_acquisition_mode_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            without = self.provider_scenario(Path(tmpdir) / "without", inert_section=False)
+            with_section = self.provider_scenario(Path(tmpdir) / "with", inert_section=True)
+
+        # Compared whole, not field by field: a differential that lists what to check
+        # cannot notice something new appearing.
+        self.assertEqual(without, with_section)
+
+        # And the run is worth comparing. Two equal empty structures would satisfy the
+        # assertion above, so what survived stabilization is checked explicitly.
+        self.assertEqual("acquisition", without["order"]["phase"])
+        self.assertEqual("research-acquire", without["order"]["skill"])
+        self.assertTrue(without["order"]["scope"]["request_ids"])
+        self.assertTrue(without["order"]["scope"]["candidate_ids"])
+        self.assertTrue(without["hydrated_order"]["required_postconditions"])
+        self.assertEqual("active", without["session"]["status"])
+        self.assertNotIn("acquisition_mode", without["order"])
+        self.assertNotIn("assigned_agent_id", without["order"])
+        self.assertEqual(CONTROLLER.EXIT_INVALID, without["refused"][0])
+        self.assertEqual(CONTROLLER.EXIT_PAUSED, without["blocked"][0])
+
+    def test_the_volatile_key_filter_actually_drops_something(self):
+        # Guards the failure mode CR-2's differential hit: a renamed key silently stops
+        # being filtered, the comparison starts passing for the wrong reason, and the
+        # suite goes green while comparing nothing.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir), question=True)
+            session = self.start(target)
+
+        self.assertNotEqual(
+            session, self.stable(session), "no volatile key was dropped from a session"
+        )
+        for key in ("started_at", "updated_at"):
+            self.assertIn(key, session)
+            self.assertNotIn(key, self.stable(session))
+
+    def test_a_pre_delegation_session_and_order_still_replay_and_submit(self):
+        # Artifacts written before delegated acquisition existed carry none of the new
+        # fields. They must keep working, including through submission — the controller
+        # reads a missing mode as `providers` and never writes the fields back.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.enable_academic_providers(target)
+            request_id = self.block_question(target)
+            self.append_selected_acquisition_candidates(target, request_id, ["cand-legacy"])
+            self.start(target)
+            code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+
+            session_path = CONTROLLER.session_path(target, "orch-test")
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            for field in ("acquisition_mode", "acquirer_agent_id", "max_attempts_per_request"):
+                session.pop(field)
+            session_path.write_text(json.dumps(session, indent=2) + "\n", encoding="utf-8")
+            order_path = CONTROLLER.work_order_path(target, "orch-test", order["action_id"])
+            stored = json.loads(order_path.read_text(encoding="utf-8"))
+            self.assertNotIn("acquisition_mode", stored, "a provider order never had the field")
+
+            # Replay returns the same order.
+            code, replayed, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(order["action_id"], replayed["action_id"])
+
+            # And submission works: the blocked arm accepts an untouched workspace.
+            code, paused, stderr = self.submit_delegated(
+                target, action_id=order["action_id"], outcome="blocked", summary="Provider offline."
+            )
+
+            self.assertEqual(CONTROLLER.EXIT_PAUSED, code, stderr)
+            self.assertEqual(CONTROLLER.PAUSED_STATUS, paused["status"])
+            # The controller read the session but did not backfill the new fields.
+            reloaded = json.loads(session_path.read_text(encoding="utf-8"))
+            self.assertNotIn("acquisition_mode", reloaded)
+            self.assertEqual(
+                "providers",
+                CONTROLLER.session_acquisition_policy(reloaded)["acquisition_mode"],
+            )
+
+    def test_invalid_session_acquisition_fields_are_refused_field_by_field(self):
+        cases = {
+            "unknown mode": {"acquisition_mode": "external"},
+            "control character in acquirer": {
+                "acquisition_mode": "delegated",
+                "acquirer_agent_id": "acq\nuirer",
+            },
+            "attempts below range": {"max_attempts_per_request": 0},
+            "attempts above range": {
+                "max_attempts_per_request": CONTROLLER.MAX_MAX_ATTEMPTS_PER_REQUEST + 1
+            },
+            "boolean attempts": {"max_attempts_per_request": True},
+            "non-integer attempts": {"max_attempts_per_request": "2"},
+        }
+        for label, overrides in cases.items():
+            with self.subTest(case=label):
+                document = {
+                    "acquisition_mode": "providers",
+                    "acquirer_agent_id": None,
+                    "max_attempts_per_request": 2,
+                }
+                document.update(overrides)
+                self.assertFalse(CONTROLLER.valid_session_acquisition(document))
 
     def test_empty_raw_end_to_end_research_discovers_acquires_reopens_and_exports(self):
         with tempfile.TemporaryDirectory() as tmpdir:

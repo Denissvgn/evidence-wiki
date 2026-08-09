@@ -184,7 +184,30 @@ def frontmatter_mapping(frontmatter_lines: list[str]) -> dict[str, Any]:
 
 
 def render_scalar(value: str, quote: bool) -> str:
-    return f'"{value}"' if quote else value
+    """Render a frontmatter scalar that reloads as the string it was given.
+
+    ``claimed_by`` carries ``--agent-id`` verbatim, so this is host input on the first
+    write of a question's lifecycle. Emitting it raw let an id retype itself on the way
+    back (``007`` to an int, ``true`` to a bool, ``null`` to None, padding silently
+    stripped) and, for an id starting with ``-`` or containing ``: ``, made the page stop
+    being YAML at all — which strands the question, since the release path has to read the
+    page it can no longer parse. Interpolating into ``"..."`` was no safer: it escapes
+    nothing, so an id containing a quote or backslash breaks the same way.
+
+    ``question_resolve.py`` states the same property for the fields it writes; both ask
+    the loader rather than predicting it, so neither can drift from YAML's actual rules.
+    """
+    if not value:
+        return '""'
+    if not quote:
+        try:
+            if yaml.safe_load(f"probe: {value}") == {"probe": value}:
+                return value
+        except yaml.YAMLError:
+            pass
+    # `ensure_ascii=False`: a double-quoted YAML scalar carries literal UTF-8, so escaping
+    # it would only make the page harder for the human who opens it.
+    return json.dumps(value, ensure_ascii=False)
 
 
 def set_frontmatter_field(lines: list[str], key: str, rendered_value: str) -> list[str]:

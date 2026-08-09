@@ -28,7 +28,7 @@ except ImportError as exc:  # pragma: no cover - environment guard
 
 
 NORMALIZER_NAME = "normalize_sources.py"
-NORMALIZER_VERSION = 2
+NORMALIZER_VERSION = 3
 OVERRIDABLE_EVIDENCE_USABILITY_REASONS = {"html_javascript_shell"}
 MAX_INCLUDE_DEPTH = 24
 MAX_UNRESOLVED_MACROS = 30
@@ -180,11 +180,37 @@ CODEBASE_MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 CODEBASE_SUPPORTED_ARTIFACT_SUFFIXES = {".json", ".md", ".txt"}
 NORMALIZATION_REPORT_SCHEMA_VERSION = "1.0"
 NORMALIZATION_REPORT_DOCUMENT_TYPE = "source_normalization_report"
+# Selection method for records handled by a configured external normalizer.
+ADAPTER_METHOD = "adapter"
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+# The contract module owns the record format this script writes, so the version stamped
+# into output and the path a source id resolves to are defined in exactly one place.
+from _normalization_config import NormalizationConfigError, adapter_for_kind, normalization_config
+from _normalized_contract import (
+    NORMALIZED_FORMAT_VERSION,
+    STRUCTURED_VIEW_SUFFIX,
+    expected_structured_path,
+    safe_source_id,
+)
+from _normalized_contract import (
+    validate_record as validate_normalized_record,
+)
+from _normalizer_adapter import (
+    EXTRACTION_METHOD as ADAPTER_EXTRACTION_METHOD,
+)
+from _normalizer_adapter import (
+    AdapterError,
+    build_request,
+    run_adapter,
+)
 from _script_errors import emit_error, handle_system_exit
+
+# Aliased because this module already has a `content_hash` — that one hashes a record's
+# extracted content, this one hashes the sidecar bytes a `structured_view` block binds.
+from _structured_view import content_hash as structured_view_content_hash
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import unusable_evidence_reasons as delivery_unusable_evidence_reasons
 
@@ -225,6 +251,16 @@ class NormalizedSource:
     extracted_title: str | None = None
     pdf_extractor: str | None = None
     pdf_extractor_version: str | None = None
+    # Adapter records only: the producing tool's declared identity and its own verdict
+    # on the extraction, which the body cannot express.
+    adapter_status: str | None = None
+    adapter_name: str | None = None
+    adapter_version: str | None = None
+    rendered_coverage: dict[str, Any] | None = None
+    # The uncapped structured rendering of this source, when it has one. It becomes the
+    # record's structured-view sidecar; `None` means the record binds no sidecar, which
+    # is every source that is not structured evidence.
+    structured: dict[str, Any] | None = None
 
 
 @dataclass
@@ -424,16 +460,6 @@ def load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def safe_source_id(source_id: str) -> str:
-    value = source_id.lower().replace(":", "__colon__")
-    value = re.sub(r"[/\s]+", "-", value)
-    value = re.sub(r"[^a-z0-9._-]+", "-", value)
-    value = re.sub(r"-{2,}", "-", value)
-    value = value.replace("__colon__", "--")
-    value = value.replace("-.", ".").strip("-")
-    return value or "source"
-
-
 def unique_values(values: list[str]) -> list[str]:
     unique: list[str] = []
     seen: set[str] = set()
@@ -506,11 +532,52 @@ def stored_pdf_extractor(frontmatter: dict[str, Any]) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
+def stored_normalizer_identity(frontmatter: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Producer name and version a record claims, both as written."""
+    normalizer = frontmatter.get("normalizer")
+    if not isinstance(normalizer, dict):
+        return None, None
+    name = normalizer.get("name")
+    version = normalizer.get("version")
+    return (
+        name if isinstance(name, str) and name else None,
+        str(version) if isinstance(version, (str, int)) and not isinstance(version, bool) else None,
+    )
+
+
+# The two extraction methods that can produce a structured-view sidecar: an adapter
+# supplies one in its result, and the native tabular path renders one from the parse it
+# already runs. Every other method — papers, PDFs, web links, codebases — has no
+# structured view to gain, so none of them is touched by the rule below.
+STRUCTURED_VIEW_EXTRACTION_METHODS = frozenset({"table_text", ADAPTER_EXTRACTION_METHOD})
+
+
+def missing_structured_view_key(frontmatter: dict[str, Any]) -> bool:
+    """True for a record that could carry a structured view but predates the field.
+
+    Deliberately the narrowest signal that works. `structured_view` is now written
+    unconditionally — `null` when there is nothing to bind — so a record missing the key
+    entirely was written before sidecars existed. Without this it would stay
+    `skipped_existing` forever and never gain the structured view anchor-form grounding
+    resolves against. The rule is self-limiting: after one regeneration the key is
+    present whatever its value, so it never fires for that record again.
+
+    The two blunter instruments were considered and rejected. Raising NORMALIZER_VERSION
+    would re-write every record in the workspace to reach the few that can carry a
+    sidecar; raising NORMALIZED_FORMAT_VERSION would invalidate all of them at once,
+    since ACCEPTED_NORMALIZED_FORMATS holds a single version.
+    """
+    if "structured_view" in frontmatter:
+        return False
+    return frontmatter.get("extraction_method") in STRUCTURED_VIEW_EXTRACTION_METHODS
+
+
 def is_stale(
     record: dict[str, Any],
     output_path: Path,
     *,
     pdf_extractor: str | None = None,
+    adapter: Any = None,
 ) -> bool:
     """True when raw inputs or the deterministic extraction profile changed.
 
@@ -521,9 +588,29 @@ def is_stale(
     additionally stale when their explicitly recorded extractor differs from the
     configured extractor; extractor patch versions remain provenance rather than an
     implicit rewrite trigger.
+
+    ``normalizer.version`` is the only rewrite trigger for record shape, so raising
+    NORMALIZED_FORMAT_VERSION requires raising NORMALIZER_VERSION with it; otherwise
+    records keep claiming a contract version whose shape they no longer have.
+
+    Adapter records are versioned by their adapter, not by this script. Comparing them
+    to NORMALIZER_VERSION would mark every one of them stale on every run — the stored
+    version is the adapter's, and a string like ``"1.4.0"`` is not this script's integer
+    — so each run would re-execute the adapter to reproduce a record it already had.
+    They are stale when the configured adapter identity changes or the raw payload does.
+
+    One further trigger, narrow and one-shot: a record whose extraction method can emit a
+    structured-view sidecar but which carries no `structured_view` key at all — see
+    ``missing_structured_view_key``.
     """
     frontmatter = read_output_frontmatter(output_path)
-    if stored_normalizer_version(frontmatter) != NORMALIZER_VERSION:
+    if missing_structured_view_key(frontmatter):
+        return True
+    if adapter is not None:
+        stored_name, stored_version = stored_normalizer_identity(frontmatter)
+        if (stored_name, stored_version) != (adapter.name, adapter.version):
+            return True
+    elif stored_normalizer_version(frontmatter) != NORMALIZER_VERSION:
         return True
     if pdf_extractor is not None and stored_pdf_extractor(frontmatter) != pdf_extractor:
         return True
@@ -749,7 +836,17 @@ def table_raw_path(record: dict[str, Any]) -> str | None:
     return None
 
 
-def normalization_method(project_root: Path, record: dict[str, Any]) -> str | None:
+def normalization_method(
+    project_root: Path,
+    record: dict[str, Any],
+    adapters: tuple[Any, ...] = (),
+) -> str | None:
+    """Which extractor handles a record, or ``None`` when nothing does.
+
+    Adapters are consulted last: `_normalization_config` already refuses to map a kind
+    this package extracts itself, so an adapter fills a gap rather than shadowing a
+    built-in extractor. Callers that pass no adapters get the pre-adapter behaviour.
+    """
     if is_codebase_record(record):
         return "codebase"
     if is_latex_record(record):
@@ -766,13 +863,19 @@ def normalization_method(project_root: Path, record: dict[str, Any]) -> str | No
         return "html"
     if record.get("kind") == "table" and table_raw_path(record) is not None:
         return "table"
+    if adapters and adapter_for_kind(adapters, record.get("kind")) is not None:
+        return ADAPTER_METHOD
     return None
 
 
-def eligible_records(project_root: Path, records: list[dict[str, Any]]) -> list[EligibleRecord]:
+def eligible_records(
+    project_root: Path,
+    records: list[dict[str, Any]],
+    adapters: tuple[Any, ...] = (),
+) -> list[EligibleRecord]:
     eligible: list[EligibleRecord] = []
     for record in records:
-        method = normalization_method(project_root, record)
+        method = normalization_method(project_root, record, adapters)
         if method:
             eligible.append(EligibleRecord(record=record, method=method))
     return eligible
@@ -800,6 +903,13 @@ def normalized_output_path_for_record(record: dict[str, Any], normalized_root: P
     return normalized_root / f"{safe_source_id(record_id(record))}.md"
 
 
+def staleness_adapter(item: EligibleRecord, adapters: tuple[Any, ...]) -> Any:
+    """The adapter that owns a record's freshness, or ``None`` for native output."""
+    if item.method != ADAPTER_METHOD:
+        return None
+    return adapter_for_kind(adapters, item.record.get("kind"))
+
+
 def select_eligible_records(
     args: argparse.Namespace,
     records: list[dict[str, Any]],
@@ -807,6 +917,7 @@ def select_eligible_records(
     normalized_root: Path,
     *,
     pdf_extractor: str | None = None,
+    adapters: tuple[Any, ...] = (),
 ) -> tuple[list[EligibleRecord], int, str]:
     by_id = records_by_source_id(records)
     eligible_by_id = eligible_by_source_id(eligible)
@@ -833,6 +944,7 @@ def select_eligible_records(
             item.record,
             output_path,
             pdf_extractor=desired_pdf_extractor,
+            adapter=staleness_adapter(item, adapters),
         ):
             pending.append(item)
     return pending, skipped_unsupported, "pending"
@@ -865,7 +977,70 @@ def normalize_selected_record(
         return normalize_table_record(project_root, item.record)
     if item.method == "codebase":
         return normalize_codebase_record(project_root, config, item.record)
+    if item.method == ADAPTER_METHOD:
+        return normalize_adapter_record(project_root, config, item.record)
     raise RuntimeError(f"Unsupported normalization method: {item.method}")
+
+
+def record_raw_paths(record: dict[str, Any]) -> list[str]:
+    value = record.get("raw_paths")
+    if not isinstance(value, list):
+        return []
+    return [path for path in value if isinstance(path, str) and path]
+
+
+def normalize_adapter_record(
+    project_root: Path,
+    config: dict[str, Any],
+    record: dict[str, Any],
+    adapters: tuple[Any, ...] | None = None,
+) -> NormalizedSource:
+    """Normalize one record through the external adapter configured for its kind.
+
+    The adapter supplies content; this function supplies none of the record's identity.
+    Everything the rest of the workspace trusts — the producer stamped into
+    `normalizer`, the raw fingerprint, the section structure — is derived here from the
+    manifest and the validated response, so a buggy adapter cannot make a record claim
+    more than it earned.
+    """
+    configured = normalization_config(config)["adapters"] if adapters is None else adapters
+    source_id = record_id(record)
+    adapter = adapter_for_kind(configured, record.get("kind"))
+    if adapter is None:
+        raise AdapterError(f"{source_id}: no normalizer adapter is configured for kind {record.get('kind')!r}")
+
+    raw_paths_value = record_raw_paths(record)
+    request = build_request(
+        project_root,
+        record,
+        raw_paths=raw_paths_value,
+        normalized_format=NORMALIZED_FORMAT_VERSION,
+    )
+    result = run_adapter(adapter, request, source_id=source_id, project_root=project_root)
+
+    return NormalizedSource(
+        record=record,
+        extraction_method=ADAPTER_EXTRACTION_METHOD,
+        title=result.title or source_id,
+        authors=[],
+        abstract=result.abstract,
+        outline=list(result.outline),
+        extracted_text=result.body_markdown,
+        media=[],
+        links=[],
+        bibliography_files=[],
+        included_paths=[],
+        warnings=list(result.warnings),
+        # A `partial` adapter result must not read as a clean extraction. `status_for`
+        # infers status from the body alone, which cannot see that the adapter capped
+        # or dropped content, so the adapter's own verdict is carried in a warning the
+        # renderer and the report both surface.
+        adapter_status=result.status,
+        adapter_name=result.name,
+        adapter_version=result.version,
+        rendered_coverage=result.rendered_coverage,
+        structured=result.structured,
+    )
 
 
 def resolve_include_path(current_file: Path, include_name: str) -> Path:
@@ -2649,6 +2824,60 @@ def render_sample_table(header: list[str], sample_rows: list[list[str]]) -> list
     return lines
 
 
+def table_header_problem(header: list[str]) -> str | None:
+    """Why ``header`` cannot name a table's columns, or ``None`` when it can.
+
+    A structured view keys every row by its column name, so the names have to be usable
+    as keys: present, non-empty, and distinct. An empty name gives a pointer nothing to
+    say, and a repeated one makes `rows/41/price` ambiguous — the last column of that
+    name would silently win, and an anchor would cite a value the reader cannot locate
+    in the file. Both are refusals rather than repairs (no `price_2` invention), because
+    a synthesized name addresses a column the source never had.
+    """
+    if not header:
+        return "the table has no header row"
+    if any(not cell for cell in header):
+        return "the header has an empty column name"
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for cell in header:
+        if cell in seen and cell not in duplicates:
+            duplicates.append(cell)
+        seen.add(cell)
+    if duplicates:
+        return "the header repeats column name(s): " + ", ".join(duplicates)
+    return None
+
+
+def table_structured_skip_reason(
+    header: list[str],
+    header_problem: str | None,
+    truncated: bool,
+    ragged_rows: int,
+) -> str | None:
+    """Why this table gets no structured view, or ``None`` when it earns one.
+
+    Fail-closed, and deliberately the only authority on the question: a table that
+    cannot be addressed faithfully gets no sidecar at all rather than a partial one.
+    Skipping costs nothing a reader had — the record still renders its sample table, so
+    the source degrades to exactly the quote-form behaviour it has today — whereas a
+    half-truthful sidecar would let an anchor claim the file says something it does not.
+
+    Truncation is the subtle one. `read_table_text` stops at `TABLE_MAX_BYTES`, so every
+    row past the ceiling is invisible to the parse; a sidecar built from what was read
+    would look complete and address `rows/N` positions that mean nothing in the real
+    file. The ceiling is inherited, not escapable, so the honest move is to decline.
+    """
+    if truncated:
+        return (
+            f"the row scan stopped at the {TABLE_MAX_BYTES}-byte read ceiling, so a "
+            "structured view could only cover part of the table"
+        )
+    if ragged_rows:
+        return f"{ragged_rows} row(s) do not match the {len(header)}-column header"
+    return header_problem
+
+
 def normalize_table_record(project_root: Path, record: dict[str, Any]) -> NormalizedSource:
     source_id = record_id(record)
     warnings = manifest_warnings(record)
@@ -2695,19 +2924,47 @@ def normalize_table_record(project_root: Path, record: dict[str, Any]) -> Normal
     delimiter = infer_table_delimiter(text[:8192], suffix)
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     header: list[str] = []
+    # Seeded from the empty header rather than from `None`, so "the loop never found a
+    # header" is a refusal by default instead of an acceptance by default. Fail-closed
+    # has to survive the paths nobody reached, or it is only a convention.
+    header_problem: str | None = table_header_problem(header)
     sample_rows: list[list[str]] = []
+    # Every row, header-keyed, for the structured view — the uncapped complement to the
+    # 20-row, 80-char-per-cell sample the body renders. `collecting` mirrors the three
+    # conditions `table_structured_skip_reason` weighs, so that it is False by the end of
+    # the loop for exactly the tables that get no sidecar; it exists only so a table
+    # already known to be unemittable stops paying for rows nothing will read.
+    structured_rows: list[dict[str, str]] = []
+    collecting = not truncated and header_problem is None
     row_count = 0
     ragged_rows = 0
     first_ragged_line: int | None = None
     for line_number, row in enumerate(reader, start=1):
         if not header:
+            # Recomputed, never latched: a leading blank line leaves `header` empty and
+            # brings this branch round again, and a verdict carried over from that
+            # non-header would disqualify the real header on the next line — emitting
+            # `rows: []` for a table that has rows, the one outcome fail-closed forbids.
+            # Safe to recompute because no data row can have been seen yet: `ragged_rows`
+            # is only ever counted once `header` is non-empty, which ends this branch.
             header = [cell.strip() for cell in row]
+            header_problem = table_header_problem(header)
+            collecting = not truncated and header_problem is None
             continue
         row_count += 1
         if len(row) != len(header):
             ragged_rows += 1
             if first_ragged_line is None:
                 first_ragged_line = line_number
+            collecting = False
+            structured_rows = []
+        elif collecting:
+            # Cells verbatim: `escape_table_cell`'s whitespace collapse and 80-char
+            # ellipsis are render-time concessions to a Markdown table, and applying them
+            # here would make an anchor's `expected` match a truncation of the evidence
+            # rather than the evidence. No type inference either — CSV is untyped, so
+            # "007" stays "007" and canonical equality compares it as the string it is.
+            structured_rows.append(dict(zip(header, row, strict=True)))
         if len(sample_rows) < TABLE_SAMPLE_ROWS:
             sample_rows.append(row)
     if ragged_rows:
@@ -2715,6 +2972,14 @@ def normalize_table_record(project_root: Path, record: dict[str, Any]) -> Normal
             f"{raw_path}: {ragged_rows} row(s) do not match the {len(header)}-column header "
             f"(first at line {first_ragged_line})"
         )
+    structured_skip_reason = table_structured_skip_reason(
+        header, header_problem, truncated, ragged_rows
+    )
+    structured: dict[str, Any] | None = None
+    if structured_skip_reason is None:
+        structured = {"columns": list(header), "rows": structured_rows}
+    else:
+        warnings.append(f"{raw_path}: no structured view emitted: {structured_skip_reason}")
 
     delimiter_label = "tab" if delimiter == "\t" else f"`{delimiter}`"
     row_count_label = f"at least {row_count} (truncated)" if truncated else str(row_count)
@@ -2740,6 +3005,7 @@ def normalize_table_record(project_root: Path, record: dict[str, Any]) -> Normal
         bibliography_files=[],
         included_paths=[],
         warnings=unique_values(warnings),
+        structured=structured,
     )
 
 
@@ -3212,6 +3478,11 @@ def raw_paths(record: dict[str, Any], included_paths: list[str]) -> list[str]:
 
 
 def status_for(source: NormalizedSource) -> str:
+    if source.adapter_status is not None:
+        # The adapter's own verdict wins. Status is inferred from the body everywhere
+        # else, but a rendering that capped or dropped payload content looks complete
+        # from the outside — only the adapter knows it is `partial`.
+        return source.adapter_status
     if source.extraction_method in {"link_stub", "web_stub", "codebase_stub"}:
         return "stubbed"
     if source.extraction_method == "codebase_context":
@@ -3326,6 +3597,7 @@ def frontmatter_for(
     manifest_records: list[dict[str, Any]] | None = None,
     project_root: Path | None = None,
     normalized_at: str | None = None,
+    structured_view: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     record = source.record
     metadata = record_metadata(record)
@@ -3341,6 +3613,7 @@ def frontmatter_for(
     unusable_reasons = record_unusable_evidence_reasons(record)
     frontmatter: dict[str, Any] = {
         "type": "normalized_source",
+        "normalized_format": NORMALIZED_FORMAT_VERSION,
         "source_id": record.get("id"),
         "source_kind": record.get("kind"),
         "status": status_for(source),
@@ -3351,9 +3624,12 @@ def frontmatter_for(
         "normalized_at": normalized_at,
         "raw_paths": raw_paths(record, source.included_paths),
         "manifest_path": manifest_path,
+        # An adapter-produced record names the adapter as its producer, not this
+        # script: the content is the adapter's, and staleness for these records is
+        # decided by comparing this identity to the configured one.
         "normalizer": {
-            "name": NORMALIZER_NAME,
-            "version": NORMALIZER_VERSION,
+            "name": source.adapter_name or NORMALIZER_NAME,
+            "version": source.adapter_version if source.adapter_name else NORMALIZER_VERSION,
         },
         "parse_warnings": source.warnings,
         "title": source.title,
@@ -3398,6 +3674,15 @@ def frontmatter_for(
         }
         if source.pdf_extractor
         else None,
+        # How much of the payload this rendering actually contains. Grounding is by
+        # containment, so capped-away content is citable but never quotable; this is
+        # what makes that visible instead of silent.
+        "rendered_coverage": source.rendered_coverage,
+        # The uncapped complement to that coverage: where `rendered_coverage` measures
+        # what the body lost, this binds the file that lost nothing. Passed in rather
+        # than derived from `source`, because the digest can only be computed from bytes
+        # that are already on disk — see `write_normalized_source`.
+        "structured_view": structured_view,
         "content_hash": content_hash(source),
         "raw_fingerprint": record_raw_fingerprint(record),
         "references_source_ids": matched_reference_source_ids(source, manifest_records, project_root) or None,
@@ -3548,6 +3833,91 @@ def normalized_output_path(source: NormalizedSource, normalized_root: Path) -> P
     return normalized_output_path_for_record(source.record, normalized_root)
 
 
+def structured_view_path_for_record(output_path: Path) -> Path:
+    """The sidecar belonging to a record file, named the way the record is.
+
+    Both names are built from the same `safe_source_id`, so the sidecar can be found
+    from the record without re-reading the record — which matters on the cleanup path,
+    where the record may be the malformed thing being removed.
+    """
+    return output_path.with_name(output_path.stem + STRUCTURED_VIEW_SUFFIX)
+
+
+def render_structured_view(payload: dict[str, Any]) -> bytes:
+    """The exact bytes a structured-view sidecar holds, for a given payload.
+
+    Deterministic by construction: keys sorted, two-space indent, one trailing newline,
+    UTF-8, no ASCII escaping. The record binds these bytes by digest, so the same payload
+    has to render identically on every machine and every run — otherwise re-normalizing
+    an unchanged source would produce a different hash and invalidate a binding nothing
+    had a reason to change. Sorted keys also make the file diffable, which is the whole
+    argument for indenting a machine-read artifact at all.
+    """
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        separators=(",", ": "),
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def declared_structured_path(sidecar: Path, project_root: Path | None) -> str:
+    """The sidecar's location as the record declares it.
+
+    Workspace-relative and POSIX-spelled, like every other path in the frontmatter, so a
+    reader resolves them all the same way. The contract requires the declaration to be a
+    relative, traversal-free tail of the sidecar's canonical location; when the caller
+    did not say where the workspace root is, the bare filename is the longest tail that
+    is still certainly relative.
+    """
+    if project_root is not None:
+        try:
+            return sidecar.resolve().relative_to(Path(project_root).resolve()).as_posix()
+        except ValueError:
+            pass
+    return sidecar.name
+
+
+def sync_structured_view(
+    payload: dict[str, Any] | None,
+    normalized_root: Path,
+    source_id: str,
+    *,
+    project_root: Path | None = None,
+) -> dict[str, str] | None:
+    """Put a record's structured-view sidecar into the state ``payload`` describes.
+
+    Both directions live in one function because the contract makes them one decision.
+    A sidecar no record declares is a violation, so bytes may never be written without
+    the binding this returns for the frontmatter; and a regenerated record that stops
+    declaring a view must take its now-stale sidecar with it, or leave behind a file
+    every consumer in the package is blind to (they all glob `*.md`).
+
+    Written with the same dot-prefixed temporary plus `Path.replace` as the record, so a
+    reader never observes half a sidecar: the digest a record binds either matches the
+    file or the file is not there.
+
+    Returns the `{path, content_hash}` block to stamp, or ``None`` when the record binds
+    no structured view. Native tabular emission (CR-7 T13) is the second caller.
+    """
+    sidecar = expected_structured_path(normalized_root, source_id)
+    if payload is None:
+        sidecar.unlink(missing_ok=True)
+        return None
+    data = render_structured_view(payload)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = sidecar.with_name(f".{sidecar.name}.tmp")
+    temporary_path.write_bytes(data)
+    temporary_path.replace(sidecar)
+    return {
+        "path": declared_structured_path(sidecar, project_root),
+        "content_hash": structured_view_content_hash(data),
+    }
+
+
 def write_normalized_source(
     source: NormalizedSource,
     normalized_root: Path,
@@ -3562,6 +3932,17 @@ def write_normalized_source(
     existed = output_path.exists()
     if existed and not force:
         return output_path, "skipped_existing"
+    # Sidecar first, record second. `frontmatter_for` has to stamp a digest of bytes,
+    # which means those bytes exist before the record that binds them does; and it makes
+    # the worst outcome of an interrupted write an undeclared sidecar — inert, detected
+    # by the contract, collected on the adapter failure path — rather than a record
+    # pointing at a file that was never written.
+    structured_view = sync_structured_view(
+        source.structured,
+        normalized_root,
+        record_id(source.record),
+        project_root=project_root,
+    )
     frontmatter = frontmatter_for(
         source,
         manifest_path,
@@ -3570,6 +3951,7 @@ def write_normalized_source(
         normalized_at=normalized_at,
         manifest_records=manifest_records,
         project_root=project_root,
+        structured_view=structured_view,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(f".{output_path.name}.tmp")
@@ -3611,6 +3993,7 @@ def empty_summary(
         "html": 0,
         "tables": 0,
         "codebase": 0,
+        "adapter": 0,
     }
 
 
@@ -3670,7 +4053,8 @@ def render_normalization_log_entry(data: dict[str, Any]) -> str:
         f"links={summary['links']} "
         f"html={summary['html']} "
         f"tables={summary['tables']} "
-        f"codebase={summary['codebase']}\n"
+        f"codebase={summary['codebase']} "
+        f"adapter={summary['adapter']}\n"
     )
 
 
@@ -3694,6 +4078,7 @@ def print_summary(summary: dict[str, int | str]) -> None:
         f"html={summary['html']} "
         f"tables={summary['tables']} "
         f"codebase={summary['codebase']} "
+        f"adapter={summary['adapter']} "
         f"partial={summary['partial']} "
         f"failed={summary['failed']}",
         file=sys.stderr,
@@ -3701,7 +4086,7 @@ def print_summary(summary: dict[str, int | str]) -> None:
 
 
 def normalization_report_summary(summary: dict[str, int | str]) -> dict[str, Any]:
-    method_keys = ("latex", "pdf", "links", "html", "tables", "codebase")
+    method_keys = ("latex", "pdf", "links", "html", "tables", "codebase", "adapter")
     skipped_existing = int(summary["skipped_existing"])
     skipped_unsupported = int(summary["skipped_unsupported"])
     return {
@@ -3753,6 +4138,44 @@ def relative_output_path(project_root: Path, output_path: Path) -> str:
     return output_path.relative_to(project_root).as_posix()
 
 
+def verify_adapter_output(
+    project_root: Path,
+    output_path: Path,
+    records: list[dict[str, Any]],
+    normalized_root: Path,
+) -> None:
+    """Hold this script's own adapter rendering to the published record contract.
+
+    Lint checks foreign records because it cannot trust their writer. Here the writer is
+    this script, so a violation is a bug in the rendering above rather than in the
+    adapter's content — and shipping it would put a non-conforming record into the
+    workspace under the package's own name. The written files are removed so a failed
+    action never leaves evidence behind.
+
+    The sidecar goes with the record, and has to: nothing else would ever collect it.
+    Every consumer in this package enumerates normalized evidence by globbing `*.md`,
+    and `workspace_gc.py` sweeps `runs/`, so a structured view whose record was just
+    removed would sit in `sources/normalized/` unread and uncollected — and the contract
+    would rightly report it as a sidecar no record declares, on every run, until someone
+    deleted it by hand.
+    """
+    violations = validate_normalized_record(
+        output_path,
+        manifest_by_id=records_by_source_id(records),
+        normalized_root=normalized_root,
+    )
+    if not violations:
+        return
+    output_path.unlink(missing_ok=True)
+    structured_view_path_for_record(output_path).unlink(missing_ok=True)
+    first = violations[0]
+    field = f" (field: {first.field})" if first.field else ""
+    raise AdapterError(
+        f"{relative_output_path(project_root, output_path)}: adapter output did not satisfy the record "
+        f"contract — {first.code}{field}: {first.message}"
+    )
+
+
 def run_normalization(args: argparse.Namespace) -> int:
     json_output = args.format == "json"
     project_root = Path(args.project_root).resolve()
@@ -3764,7 +4187,8 @@ def run_normalization(args: argparse.Namespace) -> int:
     date_text = today_utc()
     run_timestamp = timestamp_utc()
     normalized_at = run_timestamp
-    eligible = eligible_records(project_root, records)
+    configured_adapters = normalization_config(config)["adapters"]
+    eligible = eligible_records(project_root, records, configured_adapters)
     selected_pdf_extractor_name = pdf_extractor_name(config, args.pdf_extractor)
     selected, skipped_unsupported, selector = select_eligible_records(
         args,
@@ -3772,6 +4196,7 @@ def run_normalization(args: argparse.Namespace) -> int:
         eligible,
         normalized_root,
         pdf_extractor=selected_pdf_extractor_name,
+        adapters=configured_adapters,
     )
     summary = empty_summary(len(selected), skipped_unsupported, selector)
     actions: list[dict[str, Any]] = []
@@ -3808,6 +4233,7 @@ def run_normalization(args: argparse.Namespace) -> int:
             item.record,
             output_path,
             pdf_extractor=desired_pdf_extractor,
+            adapter=staleness_adapter(item, configured_adapters),
         )
         if existed and not args.force and not stale:
             summary["skipped_existing"] += 1
@@ -3912,6 +4338,8 @@ def run_normalization(args: argparse.Namespace) -> int:
                 project_root=project_root,
                 force=True,
             )
+            if item.method == ADAPTER_METHOD:
+                verify_adapter_output(project_root, output_path, records, normalized_root)
         except Exception as exc:
             summary["failed"] += 1
             output_text = relative_output_path(project_root, output_path)
@@ -3966,6 +4394,14 @@ def run_normalization(args: argparse.Namespace) -> int:
                 }
                 if source.pdf_extractor
                 else None,
+                # Which external tool produced this record, so a report reader can tell
+                # without opening the record itself.
+                "adapter": {
+                    "name": source.adapter_name,
+                    "version": source.adapter_version,
+                }
+                if source.adapter_name
+                else None,
             }
         )
         if not json_output:
@@ -4017,6 +4453,18 @@ def main(argv: list[str] | None = None) -> int:
         return run_normalization(args)
     except LockUnavailableError as exc:
         emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
+        return 2
+    except NormalizationConfigError as exc:
+        # A misconfigured adapter section is a fatal setup error, not a per-source
+        # failure: it is read before any record is selected. Report it through the
+        # shared envelope so a host gets the code and remediation instead of a
+        # traceback.
+        emit_error(
+            exc.message,
+            json_mode=json_mode,
+            error_code=exc.error_code,
+            remediation=exc.remediation,
+        )
         return 2
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=2)

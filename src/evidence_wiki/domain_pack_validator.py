@@ -42,6 +42,7 @@ class LoadedScripts:
     coverage: ModuleType
     errors: ModuleType
     evidence: ModuleType
+    request_kinds: ModuleType
 
 
 def _load_script(script_path: Path, module_name: str) -> ModuleType:
@@ -58,6 +59,7 @@ def load_scripts(starter_root: Path) -> LoadedScripts:
         coverage=_load_script(scripts_dir / "coverage_manifest.py", "domain_pack_validator_coverage"),
         errors=_load_script(scripts_dir / "_script_errors.py", "domain_pack_validator_errors"),
         evidence=_load_script(scripts_dir / "_evidence_policies.py", "domain_pack_validator_evidence"),
+        request_kinds=_load_script(scripts_dir / "_request_kinds.py", "domain_pack_validator_request_kinds"),
     )
 
 
@@ -390,6 +392,42 @@ def policy_vocabularies_check(scripts: LoadedScripts, domain_pack: Any) -> tuple
         "policy_vocabularies",
         "pass",
         f"Domain pack declares {declared_count} namespaced policy vocabulary extension(s).",
+        ["research.overlay.yml"],
+    )
+
+
+def request_kinds_check(scripts: LoadedScripts, domain_pack: Any) -> tuple[dict[str, dict[str, str]], dict[str, Any]]:
+    """Validate ``domain_pack.request_kinds`` before the pack can ship.
+
+    The findings come from the workspace's own ``_request_kinds.declaration_errors``
+    rather than a second implementation here, so this gate and the runtime refusal in
+    ``source_requests.py add`` can never disagree about what a pack declared.
+    """
+    if not isinstance(domain_pack, dict):
+        return {}, check(
+            "request_kinds",
+            "pass",
+            "No domain-pack request kinds declared.",
+            ["research.overlay.yml"],
+        )
+    errors = scripts.request_kinds.declaration_errors(domain_pack)
+    if errors:
+        return {}, check("request_kinds", "fail", "; ".join(errors), ["research.overlay.yml"])
+    try:
+        declared = scripts.request_kinds.declared_pack_kinds({"domain_pack": domain_pack})
+    except scripts.request_kinds.RequestKindError as exc:  # pragma: no cover - guarded by declaration_errors
+        return {}, check("request_kinds", "fail", str(exc), ["research.overlay.yml"])
+    if not declared:
+        return declared, check(
+            "request_kinds",
+            "pass",
+            "No domain-pack request kinds declared.",
+            ["research.overlay.yml"],
+        )
+    return declared, check(
+        "request_kinds",
+        "pass",
+        f"Domain pack declares {len(declared)} namespaced request kind(s).",
         ["research.overlay.yml"],
     )
 
@@ -734,6 +772,7 @@ def unsafe_pack_payload(pack_path: Path, tree_safety: dict[str, Any]) -> dict[st
             "coverage_templates": {},
             "human_gated": False,
             "policy_vocabularies": {},
+            "request_kinds": {},
         },
         "checks": [
             tree_safety,
@@ -857,6 +896,9 @@ def validate_domain_pack(selection: str, *, root: Path | None = None) -> dict[st
     merged_policy_vocabularies = None
     if isinstance(domain_pack, dict) and vocabulary_check["status"] == "pass":
         merged_policy_vocabularies = scripts.coverage.merged_policy_vocabularies({"domain_pack": domain_pack})
+    request_kinds, request_kinds_result = request_kinds_check(scripts, domain_pack)
+    domain_pack_info["request_kinds"] = request_kinds
+    checks.append(request_kinds_result)
     coverage_templates, templates_check = coverage_templates_check(
         scripts,
         pack_path,

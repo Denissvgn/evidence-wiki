@@ -83,17 +83,35 @@ python3 scripts/question_resolve.py answer \
 - Add the `source_ids` that ground the answer when they are not already carried by the answer page.
 - For high-stakes answers, run `scripts/coverage_manifest.py evaluate --slug example-question --format json` and pass `--require-coverage` only when the evaluated `coverage_verdict` is `pass`; the resolver then persists `coverage_required: true` and `coverage_manifest: sources/coverage/<slug>.yml` for status, lint, and export.
 - For standards answers, choose the `standards-compliance` templates where applicable and confirm exported citations carry `citations[].standards` before treating the answer as standards-backed.
-- Before using `--require-grounding`, add question frontmatter `grounding` entries with `claim`, `source_id`, `quote`, and optional `location_hint`. Copy each quote from retrieved bytes or normalized source text, never from browsing summaries, upstream briefs, or paraphrases. The quote must appear in the cited normalized record after whitespace/case normalization. Example:
+- Before using `--require-grounding`, write the question's `grounding` entries. Every entry carries `claim`, `source_id`, and exactly **one** form of evidence:
+  - **quote form** — `quote`, with optional `location_hint`. Copy the quote from retrieved bytes or normalized source text, never from browsing summaries, upstream briefs, or paraphrases. It must appear in the cited normalized record after whitespace/case normalization.
+  - **anchor form** — `anchor` with `pointer` and `expected`. The pointer is an RFC 6901 path (leading `/` optional) into the cited record's structured-view sidecar, and `expected` is the value that field holds, compared by equality rather than containment.
+
+  Prefer anchor form whenever the cited record has a structured view: a quote against structured evidence proves the record contains a sentence, not that the claim's number is the one the source states. Use quote form for prose records, and for any record whose normalizer emits no sidecar.
 
 ```yaml
 grounding:
-  - claim: The product spec is vendor-controlled.
-    source_id: web:vendor-official-product-spec
-    quote: Vendor-controlled product specification.
-    location_hint: Official product spec
+  - claim: "Current supplier price is 23.99 EUR"
+    source_id: data--keepa--b0abc123
+    anchor:
+      pointer: "supplier_quote/price"
+      expected: "23.99 EUR"
+  - claim: "The product spec is vendor-controlled."
+    source_id: "web:vendor-official-product-spec"
+    quote: "Vendor-controlled product specification."
+    location_hint: "Official product spec"
 ```
 
-- For high-stakes answers, pass `--require-grounding` together with `--require-coverage`; the resolver refuses missing grounding (`GROUNDING_REQUIRED`) or quote mismatches (`GROUNDING_QUOTE_INVALID`) before writing terminal state.
+- **Do not hand-edit `grounding` in question frontmatter.** Write the entries to a YAML file and let the resolver write the block, so it lands in the canonical serialization under the question's own lock:
+
+```bash
+python3 scripts/question_resolve.py grounding set --slug <slug> \
+  --from-file grounding.yml --agent-id <agent-id> --format json
+```
+
+  `grounding set` replaces the whole block (it never merges) and drops any stale `verified_by`/`grounding_verified_at` stamp, because the entries those attested no longer exist. It does not verify — run `python3 scripts/verify_quotes.py --slug <slug> --format json` for that. Pass the same file to `answer --grounding-file grounding.yml` to record grounding and resolve the question in one atomic write. `grounding: []` clears a question's grounding; `grounding:` with nothing after it is refused as an unfinished edit.
+
+- For high-stakes answers, pass `--require-grounding` together with `--require-coverage`; the resolver refuses missing grounding (`GROUNDING_REQUIRED`), quote mismatches (`GROUNDING_QUOTE_INVALID`), anchor failures (`GROUNDING_ANCHOR_INVALID`), malformed entries (`GROUNDING_INVALID`), and an unusable grounding file (`GROUNDING_FILE_INVALID`) before writing terminal state.
 - Point `answer_page` at an existing workspace-relative wiki page.
 - Record the answer detail on the linked page, not in the question frontmatter.
 

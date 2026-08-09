@@ -232,9 +232,15 @@ def official_source_summary(project_root: Path, config: dict[str, Any]) -> dict[
         {
             "request_id": record.get("request_id"),
             "status": record.get("status"),
+            # A report that groups by kind is one of the reasons pack-declared kinds
+            # exist; projecting the record without it renders every non-documentary
+            # request indistinguishable. `scope` rides along when the request declares
+            # one, and is omitted otherwise, exactly as the stored record omits it.
+            "kind": record.get("kind"),
             "query_or_identifier": record.get("query_or_identifier"),
             "rationale": record.get("rationale"),
             "question_slugs": record.get("question_slugs") if isinstance(record.get("question_slugs"), list) else [],
+            **({"scope": record["scope"]} if isinstance(record.get("scope"), dict) and record["scope"] else {}),
         }
         for record in request_records
         if record.get("status") == "open"
@@ -242,6 +248,7 @@ def official_source_summary(project_root: Path, config: dict[str, Any]) -> dict[
     return {
         "final_verdict": status.get("readiness", {}).get("verdict"),
         "verdict_reasons": status.get("readiness", {}).get("verdict_reasons", []),
+        "questions_awaiting_review": int(status.get("readiness", {}).get("questions_awaiting_review", 0) or 0),
         "blocked_request_ids": status.get("questions", {}).get("blocked_open_request_ids", []),
         "open_requests": open_requests,
         "candidate_summary": status.get("candidates", {}) if isinstance(status.get("candidates"), dict) else {},

@@ -71,6 +71,7 @@ except ImportError as exc:  # pragma: no cover - environment guard
 SCHEMA_VERSION = "1.0"
 EXIT_OK = 0
 EXIT_UNREADABLE = 2
+HUMAN_REVIEW_ENTRY_FIELDS = ("policy", "verdict", "reviewed_by", "review_ref", "note", "reviewed_at")
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -510,6 +511,26 @@ def flattened_policy_results(value: Any) -> list[dict[str, Any]]:
     return flattened
 
 
+def recorded_human_reviews(frontmatter: dict[str, Any]) -> list[dict[str, Any]]:
+    """Export the per-policy review entries `question_resolve.py review` retains.
+
+    This is audit visibility, not a gate: `human_review_state` still decides whether a record
+    is pending. Auditors read these entries to see which policy was reviewed by whom, and
+    which host-side reference the reviewer acted on.
+    """
+    value = frontmatter.get("human_reviews")
+    if not isinstance(value, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        entry = {field: text_field(item, field) or None for field in HUMAN_REVIEW_ENTRY_FIELDS}
+        if entry["policy"] and entry["verdict"]:
+            entries.append(entry)
+    return entries
+
+
 def human_review_state(frontmatter: dict[str, Any], policy_results: list[dict[str, Any]]) -> dict[str, Any]:
     manual_policies = sorted(
         {
@@ -569,7 +590,20 @@ def grounding_for_question(
     config: dict[str, Any],
     slug: str,
     warnings: list[str],
-) -> tuple[list[dict[str, str]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """A question's declared grounding entries, and the verifier's verdict on them.
+
+    Both are passed through as the verifier produced them, whichever evidence form each
+    entry carries: a quote entry is flat, an anchor entry nests ``anchor: {pointer,
+    expected}``, and the per-entry results carry ``form`` and ``policy`` beside the
+    pointer and resolved value an anchor was decided on. Nothing here summarizes or
+    re-renders that — the export and the MCP question detail are the same document, and a
+    host reading either sees exactly what the verifier saw.
+
+    A shape violation in either form is fatal to this question only: it becomes a warning
+    plus a verdict envelope carrying the stable ``error_code``, so one malformed entry
+    cannot take the export down with it.
+    """
     verify_quotes = load_sibling_module("verify_quotes")
     try:
         entries = verify_quotes.grounding_entries(frontmatter, slug)
@@ -586,6 +620,9 @@ def grounding_for_question(
             "slug": slug,
             "question_page": workspace_relative(question_path, project_root) or question_path.name,
             "grounding_count": 0,
+            # Counted from nothing rather than restated, so this refusal carries the same
+            # keys a real verification does and adding a form can never leave it behind.
+            "by_form": verify_quotes.count_by_form([]),
             "all_verified": False,
             "grounding": [],
             "error_code": exc.error_code,
@@ -656,6 +693,7 @@ def build_question_record(
     record["policy_results"] = policy_results
     record["currentness"] = currentness_results(policy_results)
     record["human_review"] = human_review_state(frontmatter, policy_results)
+    record["human_reviews"] = recorded_human_reviews(frontmatter)
     record["candidate_trace"] = candidate_trace_for_sources(combined_ids, candidates)
     record["citation_verification"] = citation_verification_for_sources(combined_ids, citation_verification_by_source)
     confidence = text_field(frontmatter, "confidence")

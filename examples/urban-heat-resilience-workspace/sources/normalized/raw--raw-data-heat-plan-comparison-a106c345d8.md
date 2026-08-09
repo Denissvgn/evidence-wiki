@@ -1,8 +1,10 @@
 ---
 type: normalized_source
+normalized_format: 1
 source_id: raw:raw-data-heat-plan-comparison-a106c345d8
 source_kind: table
 status: content_extracted
+evidence_usable: true
 created: 2026-05-31
 updated: 2026-05-31
 raw_paths:

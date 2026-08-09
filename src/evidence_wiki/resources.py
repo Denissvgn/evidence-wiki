@@ -46,7 +46,11 @@ REQUIRED_STARTER_ASSETS = (
     "docs/source-delivery.md",
     "docs/workspace-status.md",
     "docs/workspace-system.md",
+    # Exactly the skills an orchestration work order can name. A distribution missing one
+    # would hand a worker or an external acquirer a dangling pointer to its own playbook,
+    # so they are distribution anchors rather than optional documentation.
     "skills/research-acquire.md",
+    "skills/research-acquire-delegated.md",
     "skills/research-discover.md",
     "skills/research-run.md",
     "skills/research-verify.md",

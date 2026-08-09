@@ -61,12 +61,20 @@ GROUNDING_LINT_CATEGORIES = {
     "question_grounding_self_verified",
 }
 CONTRADICTION_LINT_CATEGORIES = {"claim_conflict"}
+# The evidence form a grounding entry cited, as `verify_quotes.py` tags each per-entry
+# result. A literal rather than an import: what readiness reads is a *report document*,
+# which may equally have arrived embedded from a worker or off disk, so the value belongs
+# to that document's schema rather than to whichever verifier happens to be importable.
+GROUNDING_FORM_ANCHOR = "anchor"
 REASON_POLICY = {
     "coverage": "required_facet_coverage",
     "source_quality": "resolved_questions_and_usable_sources",
     "discovery_quality": "candidate_lifecycle_integrity",
     "citation_identity": "citation_identity_quorum",
-    "grounding": "retained_quote_evidence",
+    # Both grounding policies, named in full: a claim reaches publication either through a
+    # retained quote or through an anchor into the cited record's structured view, and a
+    # label naming only the first would misreport every anchor failure it covers.
+    "grounding": "retained_quote_evidence_or_structured_anchor_evidence",
     "contradiction": "contradiction_adjudication",
     "currentness": "declared_freshness_policy",
     "curation": "publication_license_and_provenance",
@@ -77,6 +85,8 @@ REASON_ARTIFACTS = {
     "source_quality": ["wiki/questions/", "sources/manifest.jsonl"],
     "discovery_quality": ["sources/discovery/candidates.jsonl"],
     "citation_identity": ["citation-verification.json"],
+    # `sources/normalized/` covers the sidecars too — they live beside the records — so it
+    # is named once, the way every other reason names a tree it points an operator at.
     "grounding": ["wiki/questions/", "sources/normalized/"],
     "contradiction": ["wiki/claims/", "sources/normalized/"],
     "currentness": ["sources/coverage/", "sources/manifest.jsonl"],
@@ -88,7 +98,10 @@ REASON_REMEDIATION = {
     "source_quality": "Resolve the named question or repair the affected retained source artifact, then rerun readiness.",
     "discovery_quality": "Repair the candidate lifecycle record with an explicit audited transition and rerun readiness.",
     "citation_identity": "Correct or reacquire the exact cited work, rerun citation verification, and retain the verification artifact.",
-    "grounding": "Correct the quote and page/section anchor against retained normalized evidence, then rerun quote verification.",
+    "grounding": (
+        "Correct the quote and page/section anchor, or the structured-view pointer and its expected value, "
+        "against retained normalized evidence, then rerun grounding verification."
+    ),
     "contradiction": "Adjudicate the conflicting retained claims and record the disposition without deleting counter-evidence.",
     "currentness": "Replace or date-qualify stale evidence according to the named freshness policy, then rerun coverage.",
     "curation": "Record the missing license, terms, source note, checksum, and candidate provenance before publication.",
@@ -353,6 +366,30 @@ def classify_workspace_status(status: dict[str, Any], reasons: dict[str, list[st
     return False, False, False
 
 
+def grounding_failure_reason(slug: str, result: dict[str, Any]) -> str:
+    """One publication-blocking sentence about a grounding entry that did not verify.
+
+    The two evidence forms fail for different reasons and are repaired by different edits,
+    so each is described by what it actually cited. An anchor names the pointer it walked,
+    because that pointer *is* the repair site: a reader told only that a claim returned
+    ``anchor_value_mismatch`` has no way to know which field of the structured view to go
+    and look at, and a reader told to fix a quote would go looking for one this entry
+    never carried.
+
+    Quote-form entries keep their wording byte for byte. This gate is published, its
+    sentences are read by hosts and asserted by tests, and nothing about a quote failure
+    changed — so neither does how it reads. An untagged entry is a report written before
+    the form tag existed, which is to say a quote.
+    """
+    claim = result.get("claim", "<unknown>")
+    source_id = result.get("source_id", "<unknown>")
+    outcome = result.get("result", "<unknown>")
+    if result.get("form") == GROUNDING_FORM_ANCHOR:
+        pointer = result.get("pointer") or "<unknown>"
+        return f"{slug} grounding claim {claim} anchored at {pointer} in {source_id} returned {outcome}."
+    return f"{slug} grounding claim {claim} from {source_id} returned {outcome}."
+
+
 def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tuple[bool, bool, bool]:
     no_ship = False
     blocked = False
@@ -363,7 +400,12 @@ def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tu
             continue
         slug = question.get("slug", "<unknown>")
         human_review = question.get("human_review") if isinstance(question.get("human_review"), dict) else {}
-        if human_review.get("pending") is True or question.get("status") == "human_review":
+        status = question.get("status")
+        # A pending review only gates a question that carries an answer to review. A question
+        # returned to open by a rejected review is ordinary research work again: it retains
+        # human_review_required until it is answered afresh, and it independently holds the
+        # workspace verdict at in_progress, so it can never reach ship through this branch.
+        if status == "human_review" or (status == "answered" and human_review.get("pending") is True):
             no_ship = True
             append_reason(reasons, "safety", f"{slug} is pending required human review approval.")
         evidence_strength = question.get("evidence_strength")
@@ -395,14 +437,7 @@ def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tu
             for result in grounding_results:
                 if not isinstance(result, dict) or result.get("result") == "verified":
                     continue
-                append_reason(
-                    reasons,
-                    "grounding",
-                    (
-                        f"{slug} grounding claim {result.get('claim', '<unknown>')} "
-                        f"from {result.get('source_id', '<unknown>')} returned {result.get('result', '<unknown>')}."
-                    ),
-                )
+                append_reason(reasons, "grounding", grounding_failure_reason(str(slug), result))
         facets = question.get("coverage_facets") if isinstance(question.get("coverage_facets"), list) else []
         for facet in facets:
             if not isinstance(facet, dict):

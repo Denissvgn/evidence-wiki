@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -29,6 +30,7 @@ def load_script_module(name: str, path: Path):
 
 READINESS = load_script_module("research_publication_readiness", READINESS_SCRIPT_PATH)
 INIT = load_script_module("research_publication_readiness_init", INIT_SCRIPT_PATH)
+RESOLVE = load_script_module("research_publication_readiness_resolve", SCRIPTS / "question_resolve.py")
 
 
 class PublicationReadinessTests(unittest.TestCase):
@@ -459,6 +461,193 @@ evidence_strength: corroborated""",
         self.assertEqual(0, code)
         self.assertEqual("ship", document["verdict"])
 
+    def test_answered_question_with_an_unrecorded_review_still_blocks_publication(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.write_ship_ready_vendor_fixture(target)
+            question = target / "wiki" / "questions" / "vendor-product-spec.md"
+            text = question.read_text(encoding="utf-8")
+            # Answered, never reviewed: the record claims a required review that nobody recorded.
+            text = text.replace(
+                "answered_by: answer-agent",
+                "answered_by: answer-agent\n"
+                "human_review_required: true\n"
+                "human_review_policies:\n"
+                "  - manual_review_required",
+                1,
+            )
+            question.write_text(text, encoding="utf-8")
+
+            code, document = self.run_readiness(target)
+
+        self.assertEqual(1, code)
+        self.assertEqual("no_ship", document["verdict"])
+        self.assertTrue(
+            any("pending required human review" in reason for reason in document["reasons"]["safety"])
+        )
+
+    def anchor_ground_vendor_question(self, target: Path, *, expected: str) -> None:
+        """Re-ground the ship-ready fixture on a structured-view anchor instead of a quote.
+
+        Emits the sidecar, binds it to the normalized record by content hash the way the
+        normalizer does, and swaps the question's one grounding entry to anchor form, so
+        the readiness gate reads a real anchor verification rather than a hand-written
+        report of one.
+        """
+        safe_id = "web--vendor-official-product-spec"
+        normalized_dir = target / "sources" / "normalized"
+        sidecar_bytes = (
+            json.dumps(
+                {"product": {"spec_version": "4.2.0", "release_channel": "stable"}},
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+        (normalized_dir / f"{safe_id}.structured.json").write_bytes(sidecar_bytes)
+        record = normalized_dir / f"{safe_id}.md"
+        declaration_anchor = "  date_not_available: Official vendor spec page exposes no publication date.\n---"
+        record.write_text(
+            record.read_text(encoding="utf-8").replace(
+                declaration_anchor,
+                "  date_not_available: Official vendor spec page exposes no publication date.\n"
+                "structured_view:\n"
+                f"  path: sources/normalized/{safe_id}.structured.json\n"
+                f"  content_hash: sha256:{hashlib.sha256(sidecar_bytes).hexdigest()}\n"
+                "---",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        question = target / "wiki" / "questions" / "vendor-product-spec.md"
+        question.write_text(
+            question.read_text(encoding="utf-8").replace(
+                "    quote: Vendor-controlled product specification.\n    location_hint: Official product spec",
+                "    anchor:\n      pointer: product/spec_version\n      expected: " + json.dumps(expected),
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+    def park_vendor_question_for_review(self, target: Path, policies: list[str]) -> None:
+        """Park the ship-ready fixture behind the named manual-review policies."""
+        question = target / "wiki" / "questions" / "vendor-product-spec.md"
+        text = question.read_text(encoding="utf-8")
+        text = text.replace("status: answered", "status: human_review", 1)
+        policy_lines = "".join(f"\n  - {policy}" for policy in policies)
+        text = text.replace(
+            "answered_by: answer-agent",
+            "answered_by: answer-agent\n"
+            "human_review_required: true\n"
+            "human_review_status: pending\n"
+            'human_review_requested_at: "2026-07-02T13:00:00Z"\n'
+            f"human_review_policies:{policy_lines}",
+            1,
+        )
+        question.write_text(text, encoding="utf-8")
+
+    def run_review(self, target: Path, *args: str) -> tuple[int, dict]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = RESOLVE.main(["--project-root", str(target), "review", *args, "--format", "json"])
+        return int(code or 0), json.loads(stdout.getvalue() or stderr.getvalue())
+
+    def test_recorded_external_review_satisfies_the_safety_gate_per_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.write_ship_ready_vendor_fixture(target)
+            self.park_vendor_question_for_review(
+                target,
+                ["manual_review_required", "pack:market-data/quote-48h"],
+            )
+
+            code, parked = self.run_readiness(target)
+            self.assertEqual(1, code)
+            self.assertEqual("no_ship", parked["verdict"])
+            self.assertTrue(
+                any("pending required human review" in reason for reason in parked["reasons"]["safety"])
+            )
+
+            code, _ = self.run_review(
+                target,
+                "--slug",
+                "vendor-product-spec",
+                "--policy",
+                "pack:market-data/quote-48h",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-42",
+            )
+            self.assertEqual(0, code)
+
+            code, partial = self.run_readiness(target)
+            self.assertEqual(1, code, "one accepted policy must not clear a second pending policy")
+            self.assertEqual("no_ship", partial["verdict"])
+            self.assertTrue(
+                any("pending required human review" in reason for reason in partial["reasons"]["safety"])
+            )
+
+            code, _ = self.run_review(
+                target,
+                "--slug",
+                "vendor-product-spec",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "accepted",
+                "--reviewed-by",
+                "ops-principal",
+                "--review-ref",
+                "approval-queue-43",
+            )
+            self.assertEqual(0, code)
+
+            code, reviewed = self.run_readiness(target)
+
+        self.assertEqual(0, code)
+        self.assertEqual("ship", reviewed["verdict"])
+        self.assertEqual([], reviewed["reasons"]["safety"])
+
+    def test_rejected_question_returns_to_ordinary_open_work(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.write_ship_ready_vendor_fixture(target)
+            self.park_vendor_question_for_review(target, ["manual_review_required"])
+
+            code, _ = self.run_review(
+                target,
+                "--slug",
+                "vendor-product-spec",
+                "--policy",
+                "manual_review_required",
+                "--verdict",
+                "rejected",
+                "--reviewed-by",
+                "ops-principal",
+                "--note",
+                "The cited spec page predates the reporting window.",
+            )
+            self.assertEqual(0, code)
+
+            code, document = self.run_readiness(target)
+            question_status = yaml.safe_load(
+                (target / "wiki" / "questions" / "vendor-product-spec.md")
+                .read_text(encoding="utf-8")
+                .split("---\n", 2)[1]
+            )["status"]
+
+        self.assertEqual("open", question_status)
+        self.assertNotEqual("no_ship", document["verdict"])
+        self.assertEqual("attention_required", document["verdict"])
+        self.assertEqual([], document["reasons"]["safety"])
+        self.assertTrue(
+            any("actionable research questions" in reason for reason in document["reasons"]["source_quality"])
+        )
+
     def test_publication_readiness_blocks_on_failed_coverage(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
@@ -577,6 +766,130 @@ evidence_strength: corroborated""",
         self.assertEqual("no_ship", document["verdict"])
         self.assertTrue(any("The product spec is vendor-controlled" in reason for reason in document["reasons"]["grounding"]))
         self.assertTrue(any("web:vendor-official-product-spec" in reason for reason in document["reasons"]["grounding"]))
+
+    def test_quote_grounding_failure_reason_wording_is_unchanged(self):
+        """The published quote sentence is byte-identical, with or without a form tag.
+
+        Reports predating the form tag — embedded worker artifacts, bundles already on
+        disk — carry no `form` at all. They are quote-form reports, and must read as the
+        gate has always read them.
+        """
+        tagged = {
+            "claim": "The product spec is vendor-controlled.",
+            "source_id": "web:vendor-official-product-spec",
+            "form": "quote",
+            "result": "quote_not_at_anchor",
+        }
+        untagged = {key: value for key, value in tagged.items() if key != "form"}
+        expected = (
+            "vendor-product-spec grounding claim The product spec is vendor-controlled. "
+            "from web:vendor-official-product-spec returned quote_not_at_anchor."
+        )
+
+        self.assertEqual(expected, READINESS.grounding_failure_reason("vendor-product-spec", tagged))
+        self.assertEqual(expected, READINESS.grounding_failure_reason("vendor-product-spec", untagged))
+        self.assertEqual(
+            "vendor-product-spec grounding claim <unknown> from <unknown> returned <unknown>.",
+            READINESS.grounding_failure_reason("vendor-product-spec", {}),
+        )
+
+    def test_anchor_grounding_failure_reason_names_the_pointer_not_a_quote(self):
+        reason = READINESS.grounding_failure_reason(
+            "vendor-product-spec",
+            {
+                "claim": "The spec version is 4.2.0.",
+                "source_id": "web:vendor-official-product-spec",
+                "form": "anchor",
+                "pointer": "/product/spec_version",
+                "expected": "9.9.9",
+                "resolved": "4.2.0",
+                "result": "anchor_value_mismatch",
+            },
+        )
+
+        self.assertEqual(
+            "vendor-product-spec grounding claim The spec version is 4.2.0. "
+            "anchored at /product/spec_version in web:vendor-official-product-spec "
+            "returned anchor_value_mismatch.",
+            reason,
+        )
+        self.assertNotIn("quote", reason)
+
+    def test_grounding_reason_contract_covers_both_evidence_policies(self):
+        contract = READINESS.structured_reason_contract(
+            "grounding",
+            "vendor-product-spec grounding claim C anchored at /product/spec_version in S returned anchor_value_mismatch.",
+        )
+
+        self.assertIn("retained_quote_evidence", contract["policy"])
+        self.assertIn("structured_anchor_evidence", contract["policy"])
+        # The sidecars live beside the records, so the tree is named once — the same way
+        # every other reason names a directory it points an operator at.
+        self.assertIn("sources/normalized/", contract["artifacts"])
+        self.assertIn("pointer", contract["remediation"])
+        self.assertIn("quote", contract["remediation"])
+
+    def test_readiness_reports_an_embedded_anchor_failure_with_pointer_and_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.write_ship_ready_vendor_fixture(target)
+            inputs = copy.deepcopy(self.clean_embedded_inputs())
+            inputs["export"]["questions"][0]["grounding_verification"] = {
+                "all_verified": False,
+                "by_form": {"quote": 0, "anchor": 1},
+                "grounding": [
+                    {
+                        "claim": "The spec version is 4.2.0.",
+                        "source_id": "web:vendor-official-product-spec",
+                        "form": "anchor",
+                        "pointer": "/product/spec_version",
+                        "expected": "9.9.9",
+                        "resolved": "4.2.0",
+                        "result": "anchor_value_mismatch",
+                        "policy": "structured_anchor_evidence",
+                    }
+                ],
+            }
+
+            document = READINESS.build_readiness_document(target, embedded_inputs=inputs)
+
+        self.assertEqual("no_ship", document["verdict"])
+        grounding_reasons = document["reasons"]["grounding"]
+        self.assertEqual(
+            [
+                "vendor-product-spec grounding claim The spec version is 4.2.0. "
+                "anchored at /product/spec_version in web:vendor-official-product-spec "
+                "returned anchor_value_mismatch."
+            ],
+            grounding_reasons,
+        )
+        blockers = [item for item in document["verdict_reasons"] if item.get("category") == "grounding"]
+        self.assertEqual(1, len(blockers), blockers)
+        self.assertIn("structured_anchor_evidence", blockers[0]["policy"])
+        self.assertIn("sources/normalized/", blockers[0]["artifacts"])
+
+    def test_publication_readiness_no_ships_failed_grounding_anchor(self):
+        """A real anchor verification that mismatched, rendered by the published gate."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.write_ship_ready_vendor_fixture(target)
+            self.anchor_ground_vendor_question(target, expected="9.9.9")
+
+            code, document = self.run_readiness(target)
+
+        self.assertEqual(1, code)
+        self.assertEqual("no_ship", document["verdict"])
+        anchor_reasons = [
+            reason for reason in document["reasons"]["grounding"] if "anchored at" in reason
+        ]
+        self.assertEqual(
+            [
+                "vendor-product-spec grounding claim The product spec is vendor-controlled. "
+                "anchored at /product/spec_version in web:vendor-official-product-spec "
+                "returned anchor_value_mismatch."
+            ],
+            anchor_reasons,
+        )
 
     def test_publication_readiness_no_ships_when_workspace_leaks_secret(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -200,6 +200,14 @@ def _contract_payload() -> dict:
             starter_root / "scripts" / "discover_sources.py",
             "evidence_wiki_discover_sources",
         )
+        normalized_contract_module = _load_script(
+            starter_root / "scripts" / "_normalized_contract.py",
+            "evidence_wiki_normalized_contract",
+        )
+        normalize_sources_module = _load_script(
+            starter_root / "scripts" / "normalize_sources.py",
+            "evidence_wiki_normalize_sources",
+        )
         mcp_module = _load_script(
             starter_root / "scripts" / "serve_mcp.py",
             "evidence_wiki_serve_mcp",
@@ -294,6 +302,16 @@ def _contract_payload() -> dict:
                 "publication_readiness": publication_readiness_module.SCHEMA_VERSION,
                 "fleet_status": fleet_status_module.SCHEMA_VERSION,
                 "error_envelope": script_errors_module.SCHEMA_VERSION,
+            },
+            "normalized_source_format": {
+                "version": normalized_contract_module.NORMALIZED_FORMAT_VERSION,
+                "accepted_versions": sorted(normalized_contract_module.ACCEPTED_NORMALIZED_FORMATS),
+                "violation_codes": list(normalized_contract_module.VIOLATION_CODES),
+                "normalizer": {
+                    "name": normalize_sources_module.NORMALIZER_NAME,
+                    "version": normalize_sources_module.NORMALIZER_VERSION,
+                },
+                "contract_document": normalized_contract_module.CONTRACT_DOCUMENT,
             },
             "artifact_schema_documents": public_orchestration_schema_documents(),
             "policy_vocabularies": policy_vocabularies,
@@ -503,6 +521,41 @@ def _run_questions(args: list[str]) -> int:
         return int(module.main(forwarded) or 0)
 
 
+_NORMALIZE_SCRIPTS = {
+    "verify": ("normalize_verify.py", "evidence_wiki_normalize_verify"),
+}
+
+
+def _print_normalize_help() -> None:
+    print(
+        "evidence-wiki normalize: normalized-record contract utilities\n\n"
+        "Usage:\n"
+        "  evidence-wiki normalize verify [--target PATH] [--source-id ID ...] [--format json|text]\n\n"
+        "`verify` checks normalized records against the published record contract\n"
+        "(docs/normalized-source-format.md) and reports each breach with a stable\n"
+        "code. Records written by an external normalizer are checked exactly as\n"
+        "records this package wrote. Exits 1 when any record fails.\n\n"
+        "--target points at the workspace root (forwarded as --project-root;\n"
+        "defaults to the current directory)."
+    )
+
+
+def _run_normalize(args: list[str]) -> int:
+    if not args or args[0] in {"-h", "--help"}:
+        _print_normalize_help()
+        return 0
+    subcommand = args.pop(0)
+    if subcommand not in _NORMALIZE_SCRIPTS:
+        parser = argparse.ArgumentParser(prog="evidence-wiki normalize")
+        parser.error(f"unknown normalize subcommand: {subcommand}")
+        return 2
+    forwarded = _forward_target(args, prog=f"evidence-wiki normalize {subcommand}")
+    script_name, module_name = _NORMALIZE_SCRIPTS[subcommand]
+    with assets_root() as root:
+        module = _load_script(root / STARTER_DIR / "scripts" / script_name, module_name)
+        return int(module.main(forwarded) or 0)
+
+
 def _print_pack_help() -> None:
     print(
         "evidence-wiki pack: domain pack utilities\n\n"
@@ -542,6 +595,7 @@ def _print_help() -> None:
         "  evidence-wiki questions add|export [--target PATH] [options]\n"
         "  evidence-wiki status [--target PATH] [--format text|json]\n"
         "  evidence-wiki export [--target PATH] [--format json]\n"
+        "  evidence-wiki normalize verify [--target PATH] [--source-id ID] [--format json|text]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
         "  evidence-wiki doctor [--target PATH] [--format text|json]\n"
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
@@ -574,12 +628,16 @@ def _print_help() -> None:
         "Contract prints the supported contract and schema versions as JSON so\n"
         "orchestrators can negotiate compatibility before deploy or upgrade.\n\n"
         "Doctor checks local runtime dependencies, optional tools, workspace\n"
-        "write permissions, and contract metadata before an unattended run.\n\n"
+        "write permissions, contract metadata, and which external normalizer\n"
+        "adapters a workspace is authorized to execute, before an unattended run.\n\n"
         "Fleet-status aggregates workspace status for multiple local targets and\n"
         "continues reporting when one target is unreadable.\n\n"
         "Questions forwards to the packaged question lifecycle scripts: `add`\n"
         "injects a validated question batch into a workspace, `export` emits\n"
         "structured answers with citations for downstream agents.\n\n"
+        "Normalize verify checks normalized records against the published record\n"
+        "contract, so a host writing records with its own normalizer can prove they\n"
+        "conform instead of matching an internal format by inspection.\n\n"
         "Pack validation checks reusable domain packs before they are shipped or\n"
         "used during deployment.\n\n"
         "Serve-mcp starts an optional stdio MCP server exposing read/append-only\n"
@@ -611,6 +669,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_upgrader(args)
     if command == "questions":
         return _run_questions(args)
+    if command == "normalize":
+        return _run_normalize(args)
     if command == "pack":
         return _run_pack(args)
     if command == "doctor":

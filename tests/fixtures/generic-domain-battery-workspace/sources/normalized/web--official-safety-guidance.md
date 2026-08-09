@@ -1,4 +1,17 @@
 ---
+type: normalized_source
+normalized_format: 1
+source_kind: html
+status: content_extracted
+created: 2026-07-04
+updated: 2026-07-04
+raw_paths:
+  - raw/web/official-safety-guidance.html
+manifest_path: sources/manifest.jsonl
+normalizer:
+  name: manual
+  version: 1
+parse_warnings: []
 source_id: web:official-safety-guidance
 title: Battery Collection Best Practices
 kind: html
@@ -30,6 +43,23 @@ provenance:
   evidence_usability_override_applied: true
 ---
 
+# Battery Collection Best Practices
+
+## Citation Metadata
+
+- URL: https://www.epa.gov/recycle/battery-collection-best-practices
+- Publisher: US Environmental Protection Agency
+
+## Abstract
+
+Fixture capture of Battery Collection Best Practices.
+
+## Outline
+
+- Battery Collection Best Practices
+
+## Extracted Text
+
 JavaScript appears to be disabled on this computer. Please click here to see any active alerts.
 
 Last updated on May 6, 2026.
@@ -39,3 +69,19 @@ Battery collection sites should separate damaged, defective, or recalled batteri
 Collection bins should include clear signage, staff inspection, terminal protection, and instructions that keep loose lithium-ion batteries away from ordinary trash.
 
 Operators should train staff to identify swelling, heat, punctures, or other warning signs before accepting a battery into a public collection bin.
+
+## Figures and Tables
+
+- None recorded.
+
+## Links
+
+- https://www.epa.gov/recycle/battery-collection-best-practices
+
+## Raw Source Paths
+
+- `raw/web/official-safety-guidance.html`
+
+## Parse Warnings
+
+- None recorded.

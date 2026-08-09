@@ -3,6 +3,7 @@ type: normalized_source
 source_id: link:example-org-urban-heat-cooling-centers-dae8f9eb9f
 source_kind: web_link
 status: stubbed
+evidence_usable: true
 created: '2026-05-31'
 updated: '2026-05-31'
 raw_paths:

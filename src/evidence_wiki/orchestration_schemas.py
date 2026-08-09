@@ -51,6 +51,10 @@ SESSION_PHASES = (
     "paused",
 )
 WORK_ORDER_PHASES = ("research", "discovery", "candidate_review", "acquisition", "verification")
+# Who acquires evidence for a session. Declared literally rather than imported: this
+# package publishes the wire contract without loading workspace code. Kept in step with
+# `_orchestration_config.ACQUISITION_MODES` by `tests/test_orchestration_config.py`.
+ACQUISITION_MODES = ("providers", "delegated")
 AGENT_ID_PATTERN = r"^[^\u0000-\u001F\u007F]*\S[^\u0000-\u001F\u007F]*$"
 
 
@@ -261,6 +265,20 @@ ORCHESTRATION_SESSION_SCHEMA: dict[str, Any] = {
         "window_started_at": {"$ref": "#/$defs/timestamp"},
         "limits": {"$ref": "#/$defs/limits"},
         "provider_policy": {"$ref": "#/$defs/provider_policy"},
+        # The acquisition posture frozen at session start. Optional for read
+        # compatibility with sessions created before delegated acquisition existed during
+        # schema version 1.0; a session without them ran under `providers`, the only mode
+        # there was. Current writers always emit all three.
+        "acquisition_mode": {"type": "string", "enum": list(ACQUISITION_MODES)},
+        "acquirer_agent_id": _nullable(
+            {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160,
+                "pattern": AGENT_ID_PATTERN,
+            }
+        ),
+        "max_attempts_per_request": {"type": "integer", "minimum": 1},
         "failure_records": {
             "type": "array",
             "items": {"$ref": "#/$defs/failure_record"},
@@ -502,6 +520,17 @@ ORCHESTRATION_WORK_ORDER_SCHEMA: dict[str, Any] = {
         "skill": {"type": "string", "pattern": SKILL_ID_PATTERN},
         "run_id": _nullable({"$ref": "#/$defs/stable_id"}),
         "agent_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": AGENT_ID_PATTERN,
+        },
+        # Present only on delegated acquisition orders. Absent means `providers`, which is
+        # what every order issued before delegated acquisition existed carries.
+        "acquisition_mode": {"type": "string", "enum": list(ACQUISITION_MODES)},
+        # The acquirer an order is addressed to. Distinct from `agent_id`, which stays the
+        # session owner: being addressed does not grant the right to drive the protocol.
+        "assigned_agent_id": {
             "type": "string",
             "minLength": 1,
             "maxLength": 160,

@@ -75,6 +75,7 @@ wiki:
           - open
           - in_progress
           - answered
+          - human_review
           - blocked
           - deferred
           - rejected

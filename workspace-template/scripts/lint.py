@@ -100,6 +100,34 @@ workspace_lock = _workspace_locks.workspace_lock
 _source_failure_taxonomy = load_workspace_module(_SCRIPT_DIR, "source_failure_taxonomy")
 delivery_unusable_evidence_reasons = _source_failure_taxonomy.unusable_evidence_reasons
 coverage_manifest = load_workspace_module(_SCRIPT_DIR, "coverage_manifest")
+_request_scope = load_workspace_module(_SCRIPT_DIR, "_request_scope")
+FACET_SCOPE_KEY = _request_scope.FACET_SCOPE_KEY
+normalize_scope = _request_scope.normalize_scope
+_review_config = load_workspace_module(_SCRIPT_DIR, "_review_config")
+ESCALATION_SCOPE_QUESTION = _review_config.ESCALATION_SCOPE_QUESTION
+ReviewConfigError = _review_config.ReviewConfigError
+review_config = _review_config.review_config
+_normalized_contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract")
+_verify_quotes = load_workspace_module(_SCRIPT_DIR, "verify_quotes")
+
+# `sources/normalized/<safe id>.structured.json`, borrowed rather than spelled again so a
+# sidecar the normalizer writes and lint looks for can never be two different filenames.
+STRUCTURED_SIDECAR_SUFFIX = _normalized_contract.STRUCTURED_VIEW_SUFFIX
+# One migration counter per grounding form, derived from the forms verify_quotes defines so
+# the stat block cannot describe a set of forms the validator no longer recognises.
+GROUNDING_FORM_STATS = {
+    form: f"grounding_entries_{form}" for form in _verify_quotes.GROUNDING_FORMS
+}
+# `grounding_entries` names the offending question in the error it raises; lint discards
+# that error and reports its own finding against the page path, so the slug is a label for
+# an exception that never escapes.
+GROUNDING_ENTRY_SLUG = "<lint>"
+
+# Half of the controller's MAX_SCOPE_GUARD_BYTES bounded read. Past that guard the
+# controller refuses to verify a delegated acquisition at all, so the warning has to arrive
+# with room to act on it. Fixed rather than configurable: it describes a package-internal
+# limit, and a knob would imply the limit itself is negotiable.
+ATTEMPT_AUDIT_WARNING_BYTES = 4 * 1024 * 1024
 
 
 @dataclass
@@ -1087,6 +1115,177 @@ def index_normalized_sources(
         else:
             unknown_paths.append(path)
     return indexed, manual_ids, unknown_paths, failed_paths
+
+
+def structured_sidecar_record_path(sidecar_path: Path) -> Path:
+    """The normalized record a structured-view sidecar must sit beside."""
+    stem = sidecar_path.name[: -len(STRUCTURED_SIDECAR_SUFFIX)]
+    return sidecar_path.with_name(f"{stem}.md")
+
+
+def orphaned_structured_sidecars(normalized_root: Path, record_paths: list[Path]) -> list[Path]:
+    """Structured-view sidecars with no normalized record beside them at all.
+
+    A peer pass to ``index_normalized_sources``, which globs ``*.md`` — as does every
+    other consumer in the workspace. That is what makes this file reachable by nothing:
+    an anchor resolves a sidecar only through the record that binds it, so a sidecar
+    whose record was never written, or was deleted out from under it, is inert bytes no
+    tool will ever open. The record contract already reports the neighbouring case (a
+    sidecar beside a record that fails to *declare* it); this is the case where there is
+    no record to declare anything.
+
+    ``record_paths`` is the caller's existing listing of normalized records rather than a
+    walk of our own: the directory has already been enumerated once by the time this runs,
+    and doing it again would traverse a tree of thousands to serve the lowest-severity
+    finding in the file.
+    """
+    if not normalized_root.is_dir():
+        return []
+    sidecars = sorted(
+        normalized_root.rglob(f"*{STRUCTURED_SIDECAR_SUFFIX}"),
+        key=lambda value: value.as_posix(),
+    )
+    if not sidecars:
+        return []
+    records = {path.as_posix() for path in record_paths}
+    return [path for path in sidecars if structured_sidecar_record_path(path).as_posix() not in records]
+
+
+def min_rendered_coverage_ratio(config: dict[str, Any]) -> float | None:
+    """Threshold below which a rendering is reported as thin, or ``None`` when unset.
+
+    Off by default. A low ratio is not a defect — a renderer may legitimately cap a
+    long series — so this is a visibility control an operator opts into, never a gate.
+    An unusable value disables the notice rather than failing the run, matching how
+    lint treats its other tunables.
+    """
+    value = config.get("min_rendered_coverage_ratio")
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    ratio = float(value)
+    return ratio if 0.0 <= ratio <= 1.0 else None
+
+
+def check_rendered_coverage_ratio(
+    project_root: Path,
+    path: Path,
+    frontmatter: dict[str, Any],
+    threshold: float | None,
+    results: dict[str, Any],
+) -> bool:
+    """Report a record whose body renders less of its payload than the operator wants.
+
+    Grounding is by containment, so the un-rendered part is citable but not quotable.
+    Reported LOW: what to do about it is a judgement call about the renderer's caps,
+    not something lint can decide.
+    """
+    if threshold is None:
+        return False
+    block = frontmatter.get("rendered_coverage")
+    if not isinstance(block, dict):
+        return False
+    ratio = block.get("ratio")
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or float(ratio) >= threshold:
+        return False
+
+    label = project_relative(project_root, path)
+    source_id = frontmatter.get("source_id")
+    issue(
+        results,
+        "LOW",
+        "normalized_low_rendered_coverage",
+        (
+            f"Normalized record renders {float(ratio):.0%} of its structured content "
+            f"(below the configured {threshold:.0%}): {label}"
+        ),
+        [label],
+        (
+            "Content the body does not render is citable but not quotable. Raise the "
+            "renderer's caps, or accept the ratio and rely on the raw source for the rest."
+        ),
+        field="rendered_coverage.ratio",
+        expected=f">= {threshold}",
+        actual=ratio,
+        source_id=source_id if isinstance(source_id, str) and source_id else None,
+    )
+    return True
+
+
+def check_normalized_record_contract(
+    project_root: Path,
+    normalized_root: Path,
+    manifest_by_id: dict[str, dict[str, Any]],
+    results: dict[str, Any],
+    min_coverage_ratio: float | None = None,
+) -> tuple[int, int, int]:
+    """Hold externally produced records to the published record contract.
+
+    A record from another tool is evidence on the same terms as one this package wrote,
+    which is only safe if "conforms" is checked rather than assumed. Records that name
+    no producing tool are left alone: they predate the contract rather than claim it,
+    and lint's job here is to widen what is accepted, not to newly fail records that a
+    re-normalization repairs on its own. `normalize_verify.py` checks every record
+    regardless, for callers that want the stricter reading.
+
+    Returns the number of foreign records seen, the number of violations reported, and
+    the number of records reported as thinly rendered.
+    """
+    if not normalized_root.is_dir():
+        return 0, 0, 0
+
+    foreign_records = 0
+    violation_count = 0
+    low_coverage_records = 0
+    for path in sorted(normalized_root.rglob("*.md"), key=lambda value: value.as_posix()):
+        frontmatter, _ = load_frontmatter(path)
+        if not isinstance(frontmatter, dict):
+            continue
+        # Coverage applies to any record that declares it, whoever wrote it — a thin
+        # rendering is a thin rendering regardless of origin.
+        if check_rendered_coverage_ratio(project_root, path, frontmatter, min_coverage_ratio, results):
+            low_coverage_records += 1
+        if not _normalized_contract.declares_foreign_normalizer(frontmatter):
+            continue
+        foreign_records += 1
+        violations = _normalized_contract.validate_record(
+            path,
+            manifest_by_id=manifest_by_id,
+            normalized_root=normalized_root,
+        )
+        if not violations:
+            continue
+        violation_count += len(violations)
+        label = project_relative(project_root, path)
+        first = violations[0]
+        source_id = frontmatter.get("source_id")
+        detail = f" (field: {first.field})" if first.field else ""
+        # MEDIUM, not HIGH: a HIGH finding stops the orchestration controller from
+        # issuing the next work order, and a record that breaks the contract must not
+        # freeze research across the whole workspace. The gates that actually decide
+        # whether this record can support an answer — quote verification and the
+        # reopen check — fail closed on their own.
+        issue(
+            results,
+            "MEDIUM",
+            "normalized_record_contract_violation",
+            (
+                f"Externally produced normalized record does not match the record contract: "
+                f"{label} — {first.code}{detail}: {first.message}"
+            ),
+            [label],
+            (
+                f"{first.remediation} Run `normalize_verify.py --source-id "
+                f"{source_id}` for the full report."
+                if isinstance(source_id, str) and source_id
+                else f"{first.remediation} Run `normalize_verify.py` for the full report."
+            ),
+            field=first.field,
+            expected=first.expected,
+            actual=first.actual,
+            source_id=source_id if isinstance(source_id, str) and source_id else None,
+            code=first.code,
+        )
+    return foreign_records, violation_count, low_coverage_records
 
 
 def index_source_notes(
@@ -2132,16 +2331,326 @@ def load_source_request_records(
     return records
 
 
+def delegated_acquisition_request_scopes(project_root: Path) -> set[str]:
+    """Return every request id some delegated acquisition work order has scoped.
+
+    Read from the durable work orders rather than from session events: an order is the
+    artifact that authorized the fulfilment, and it survives even when its session has
+    long since terminated.
+    """
+    scoped: set[str] = set()
+    orders_root = project_root / "runs" / "orchestrations"
+    if not orders_root.is_dir():
+        return scoped
+    for order_path in sorted(orders_root.glob("*/work-orders/*.json")):
+        try:
+            document = json.loads(order_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            # Lint reports, it does not adjudicate. An unreadable order simply cannot
+            # vouch for a fulfilment; the controller refuses to run against one anyway.
+            continue
+        if not isinstance(document, dict):
+            continue
+        if document.get("phase") != "acquisition" or document.get("acquisition_mode") != "delegated":
+            continue
+        scope = document.get("scope")
+        if not isinstance(scope, dict):
+            continue
+        scoped.update(
+            value for value in scope.get("request_ids", []) if isinstance(value, str) and value
+        )
+    return scoped
+
+
+def check_delegated_acquisition_records(
+    project_root: Path,
+    config: dict[str, Any],
+    requests: list[dict[str, Any]],
+    requests_label: str,
+    results: dict[str, Any],
+) -> None:
+    """Report delegated-acquisition residue the work-order path cannot account for.
+
+    Two gaps the CLI gate cannot close, plus one growth warning:
+
+    - a request fulfilled while no delegated order ever scoped it — the gate only refuses
+      mutations while a session is *live*, so a fulfilment recorded with none running
+      leaves exactly this trace;
+    - an attempt event naming a request the store does not have, which means the audit and
+      the store disagree about what was attempted;
+    - an attempt audit approaching the controller's bounded-read cap, after which delegated
+      orders stop verifying at all.
+
+    All LOW: none of them makes current evidence untrustworthy, and a HIGH would freeze
+    orchestration over history.
+    """
+    stats = results["stats"]
+    source_requests = load_workspace_module(_SCRIPT_DIR, "source_requests")
+    orchestration_config = load_workspace_module(_SCRIPT_DIR, "_orchestration_config")
+    try:
+        delegated = orchestration_config.is_delegated(orchestration_config.orchestration_config(config))
+    except orchestration_config.OrchestrationConfigError:
+        # A malformed section is reported by every command that must act on it; lint's job
+        # here is the residue check, which simply does not apply.
+        return
+    if not delegated:
+        return
+
+    scoped_by_orders = delegated_acquisition_request_scopes(project_root)
+    unattributed = sorted(
+        str(record.get("request_id"))
+        for record in requests
+        if record.get("status") == "fulfilled" and isinstance(record.get("request_id"), str)
+        and record["request_id"] not in scoped_by_orders
+    )
+    stats["delegated_unattributed_fulfilments"] = len(unattributed)
+    for request_id in unattributed:
+        issue(
+            results,
+            "LOW",
+            "delegated_fulfilment_unattributed",
+            f"Fulfilled source request is not scoped by any delegated acquisition work order: {request_id}",
+            [requests_label],
+            (
+                "Fulfil requests while executing the delegated acquisition work order that scopes them so the "
+                "audit trail accounts for the mutation."
+            ),
+            field="status",
+            expected="fulfilled inside a delegated acquisition work order",
+            actual="fulfilled with no scoping work order",
+        )
+
+    audit_path = source_requests.request_attempt_audit_path(project_root, config)
+    audit_label = project_relative(project_root, audit_path)
+    try:
+        events = source_requests.load_attempt_events(audit_path)
+    except SystemExit as exc:
+        issue(
+            results,
+            "MEDIUM",
+            "source_request_attempt_audit_invalid",
+            f"Source request attempt audit is unreadable: {exc}",
+            [audit_label],
+            "Restore the append-only attempt audit; delegated acquisition cannot be verified without it.",
+        )
+        return
+
+    known_request_ids = {
+        record["request_id"] for record in requests if isinstance(record.get("request_id"), str)
+    }
+    orphaned = sorted(
+        {
+            str(event.get("request_id"))
+            for event in events
+            if event.get("request_id") not in known_request_ids
+        }
+    )
+    stats["source_request_attempt_events"] = len(events)
+    stats["source_request_attempt_orphans"] = len(orphaned)
+    for request_id in orphaned:
+        issue(
+            results,
+            "LOW",
+            "source_request_attempt_orphaned",
+            f"Attempt audit records a request the source-request store does not have: {request_id}",
+            [audit_label, requests_label],
+            "Restore the source-request store; an attempt is evidence about a request that should still exist.",
+            field="request_id",
+            expected="request id present in the source-request store",
+            actual="absent",
+        )
+
+    if audit_path.is_file():
+        audit_bytes = audit_path.stat().st_size
+        stats["source_request_attempt_audit_bytes"] = audit_bytes
+        if audit_bytes > ATTEMPT_AUDIT_WARNING_BYTES:
+            issue(
+                results,
+                "LOW",
+                "source_request_attempt_audit_large",
+                (
+                    f"Source request attempt audit is {audit_bytes // (1024 * 1024)} MiB; the controller stops "
+                    "verifying delegated acquisition once it exceeds its bounded read guard."
+                ),
+                [audit_label],
+                (
+                    "Archive this workspace before the audit reaches the guard; the append-only stores have no "
+                    "compaction yet."
+                ),
+                field="size_bytes",
+                expected=f"at most {ATTEMPT_AUDIT_WARNING_BYTES} bytes",
+                actual=str(audit_bytes),
+            )
+
+
+def question_blocking_request_ids(frontmatter: dict[str, Any]) -> list[str]:
+    """Read a blocked question's linked request ids, order preserved and de-duplicated."""
+    value = frontmatter.get("blocking_request_ids")
+    if not isinstance(value, list):
+        return []
+    ordered: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        request_id = item.strip()
+        if request_id and request_id not in ordered:
+            ordered.append(request_id)
+    return ordered
+
+
+def coverage_facets_by_blocking_request(
+    project_root: Path,
+    config: dict[str, Any],
+    slug: str,
+    frontmatter: dict[str, Any],
+) -> tuple[str, dict[str, list[str]], list[str]] | None:
+    """Read one question's manifest as (label, facets-per-request, declared facet ids).
+
+    Returns ``None`` when the question has no manifest this lint run can read: a
+    workspace that does not keep coverage manifests has nothing to disagree with, and a
+    malformed or misplaced one is already reported by the coverage checks. Facets are
+    read straight from the document rather than through ``validate_manifest`` for the
+    same reason — this check answers "is the request listed?", and it must keep
+    answering it while some unrelated field is being repaired.
+    """
+    raw_manifest = frontmatter.get("coverage_manifest")
+    manifest_value = raw_manifest.strip() if isinstance(raw_manifest, str) and raw_manifest.strip() else None
+    try:
+        path = coverage_manifest.selected_manifest_path(project_root, config, slug, manifest_value)
+    except coverage_manifest.CoverageManifestError:
+        return None
+    if not path.is_file():
+        return None
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    if not isinstance(document, dict):
+        return None
+
+    facets_by_request: dict[str, list[str]] = {}
+    facet_ids: list[str] = []
+    for section in ("required_facets", "optional_facets"):
+        facets = document.get(section)
+        if not isinstance(facets, list):
+            continue
+        for facet in facets:
+            if not isinstance(facet, dict):
+                continue
+            raw_facet_id = facet.get("facet_id")
+            if not isinstance(raw_facet_id, str) or not raw_facet_id.strip():
+                continue
+            facet_id = raw_facet_id.strip()
+            if facet_id not in facet_ids:
+                facet_ids.append(facet_id)
+            request_ids = facet.get("blocking_request_ids")
+            if not isinstance(request_ids, list):
+                continue
+            for item in request_ids:
+                if not isinstance(item, str) or not item.strip():
+                    continue
+                linked = facets_by_request.setdefault(item.strip(), [])
+                if facet_id not in linked:
+                    linked.append(facet_id)
+    # ``selected_manifest_path`` resolves symlinks; the project root as configured may not,
+    # so label against the resolved root or the finding names an absolute temp path.
+    return project_relative(project_root.resolve(), path), facets_by_request, facet_ids
+
+
+def check_request_scope_facet_links(
+    project_root: Path,
+    config: dict[str, Any],
+    requests_by_id: dict[str, dict[str, Any]],
+    path: Path,
+    frontmatter: dict[str, Any],
+    label: str,
+    results: dict[str, Any],
+) -> None:
+    """Report a blocked question whose request and coverage manifest name different facets.
+
+    A request's ``scope.facet_id`` states which coverage facet delivering it would
+    unblock; the manifest states the same fact from the other side, under a facet's
+    ``blocking_request_ids``. ``coverage_manifest.py set-facet`` writes both together, so
+    only workspaces recorded before that can disagree — and an unnoticed disagreement
+    reads as coverage that is being worked when in fact the facet nobody linked stays
+    blocked forever.
+
+    MEDIUM, deliberately: no evidence is wrong, only its bookkeeping, and a HIGH would
+    freeze a workspace over history that predates the rule.
+    """
+    blocking_ids = question_blocking_request_ids(frontmatter)
+    if not blocking_ids:
+        return
+    links = coverage_facets_by_blocking_request(project_root, config, path.stem, frontmatter)
+    if links is None:
+        return
+    manifest_label, facets_by_request, facet_ids = links
+
+    for request_id in blocking_ids:
+        record = requests_by_id.get(request_id)
+        if not isinstance(record, dict):
+            continue
+        claimed_facet = normalize_scope(record.get("scope")).get(FACET_SCOPE_KEY)
+        if not claimed_facet:
+            continue
+        linked_facets = facets_by_request.get(request_id, [])
+        if claimed_facet in linked_facets:
+            continue
+        link_command = (
+            f"scripts/coverage_manifest.py set-facet --slug {path.stem} "
+            f"--facet-id {claimed_facet} --blocking-request-id {request_id}"
+        )
+        if linked_facets:
+            disagreement = "the manifest lists it under " + ", ".join(f"`{facet}`" for facet in linked_facets)
+            actual = ", ".join(linked_facets)
+        else:
+            disagreement = "no facet in the manifest lists it under `blocking_request_ids`"
+            actual = "no facet lists this request"
+        if claimed_facet in facet_ids:
+            recommendation = (
+                f"Link the facet with {link_command}, or correct the request's scope so "
+                "scope.facet_id names the facet that actually blocks on it."
+            )
+        else:
+            # set-facet refuses a facet the manifest does not declare, so pointing an
+            # operator straight at it here would hand them COVERAGE_FACET_UNKNOWN.
+            disagreement += f", and the manifest declares no facet `{claimed_facet}`"
+            recommendation = (
+                f"Correct the request's scope so scope.facet_id names a facet {manifest_label} "
+                f"declares, or add facet `{claimed_facet}` to that manifest and link it with {link_command}."
+            )
+        issue(
+            results,
+            "MEDIUM",
+            "request_scope_facet_unlinked",
+            (
+                f"Blocked question {label} links source request {request_id}, which claims coverage facet "
+                f"`{claimed_facet}`, but {disagreement}: {manifest_label}"
+            ),
+            [label, manifest_label],
+            recommendation,
+            field="scope.facet_id",
+            expected=f"facet `{claimed_facet}` listing {request_id} under blocking_request_ids",
+            actual=actual,
+        )
+
+
 def check_source_requests(
     project_root: Path,
     requests_path: Path,
     manifest_records: list[dict[str, Any]],
     wiki_files: list[Path],
     results: dict[str, Any],
+    config: dict[str, Any] | None = None,
 ) -> None:
     stats = results["stats"]
     requests = load_source_request_records(requests_path, project_root, results)
     requests_label = project_relative(project_root, requests_path)
+    requests_by_id = {
+        record["request_id"]: record
+        for record in requests
+        if isinstance(record.get("request_id"), str) and record["request_id"]
+    }
     manifest_ids = set(index_manifest_records(manifest_records))
     referenced_slugs: set[str] = set()
     status_counts = {"open": 0, "fulfilled": 0}
@@ -2176,9 +2685,13 @@ def check_source_requests(
         if frontmatter.get("type") != "question" or frontmatter.get("status") != "blocked":
             continue
         slug = path.stem
+        label = project_relative(project_root, path)
+        if config is not None:
+            check_request_scope_facet_links(
+                project_root, config, requests_by_id, path, frontmatter, label, results
+            )
         if slug in referenced_slugs:
             continue
-        label = project_relative(project_root, path)
         issue(
             results,
             "LOW",
@@ -2194,6 +2707,9 @@ def check_source_requests(
     stats["source_requests_total"] = len(requests)
     stats["source_requests_open"] = status_counts["open"]
     stats["source_requests_fulfilled"] = status_counts["fulfilled"]
+
+    if config is not None:
+        check_delegated_acquisition_records(project_root, config, requests, requests_label, results)
 
 
 def answered_question_is_grounded(question_frontmatter: dict[str, Any], answer_path: Path) -> bool:
@@ -2221,6 +2737,63 @@ def parse_claim_timestamp(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def validated_review_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Read the optional ``review`` section through lint's own config-invalid exit path."""
+    try:
+        return review_config(config)
+    except ReviewConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def check_human_review_age(
+    results: dict[str, Any],
+    label: str,
+    frontmatter: dict[str, Any],
+    max_pending_review_hours: int,
+) -> None:
+    """Re-escalate a review queue that has stopped moving.
+
+    Under ``review.escalation_scope: question`` a pending review no longer freezes the
+    workspace, so nothing would otherwise notice a review nobody works. A HIGH finding here
+    flips the readiness verdict back to ``attention_required`` through the existing
+    lint-to-verdict path, with no new verdict machinery.
+    """
+    requested_at = frontmatter.get("human_review_requested_at")
+    parsed_at = parse_claim_timestamp(requested_at)
+    if parsed_at is None:
+        issue(
+            results,
+            "MEDIUM",
+            "question_human_review_undated",
+            f"Question awaiting human review has no usable `human_review_requested_at`: {label}",
+            [label],
+            "Re-answer the question with scripts/question_resolve.py answer --require-coverage so the "
+            "review clock is recorded, or stamp human_review_requested_at as a quoted ISO 8601 UTC time. "
+            "Questions parked before this field existed will not have it.",
+            field="human_review_requested_at",
+            expected="ISO 8601 UTC timestamp while awaiting review",
+            actual="missing" if "human_review_requested_at" not in frontmatter else "unparseable",
+        )
+        return
+    age_hours = (datetime.now(timezone.utc) - parsed_at).total_seconds() / 3600
+    if age_hours <= max_pending_review_hours:
+        return
+    issue(
+        results,
+        "HIGH",
+        "question_human_review_stale",
+        f"Question has awaited human review for {age_hours:.1f}h, over the "
+        f"{max_pending_review_hours}h limit: {label}",
+        [label],
+        "Record the outstanding review with scripts/question_resolve.py review --slug SLUG --policy POLICY "
+        "--verdict accepted|rejected --reviewed-by PRINCIPAL (or approve), or raise "
+        "research.yml review.max_pending_review_hours if this queue is expected to move more slowly.",
+        field="human_review_requested_at",
+        expected=f"recorded review within {max_pending_review_hours}h",
+        actual=f"{age_hours:.1f}h",
+    )
 
 
 def claim_staleness_window_hours(config: dict[str, Any]) -> int:
@@ -2346,20 +2919,30 @@ def check_answered_question_coverage(
         )
 
 
-def valid_grounding_entries(value: Any) -> bool:
+def parse_grounding_entries(value: Any) -> list[dict[str, Any]] | None:
+    """The workspace's grounding entries, form-tagged, or ``None`` if the block is invalid.
+
+    The entry contract lives in ``verify_quotes`` and is borrowed rather than restated:
+    lint once carried its own stricter-in-one-way, laxer-in-another copy, which is exactly
+    how it came to reject every anchor-form entry the verifier accepts. One owner, one
+    answer to "is this entry well formed?".
+
+    ``grounding_entries`` raises on a bad shape because its callers are gates. Lint is not
+    a gate — it reports findings and must survive whatever a workspace happens to contain —
+    so the refusal is translated into ``None`` here and nowhere else.
+    """
+    # An empty list is a block that grounds nothing; verify_quotes reads it as "no
+    # grounding to check", which for an answered page is precisely the defect.
     if not isinstance(value, list) or not value:
-        return False
-    for item in value:
-        if not isinstance(item, dict):
-            return False
-        for field in ("claim", "source_id", "quote"):
-            field_value = item.get(field)
-            if not isinstance(field_value, str) or not field_value.strip():
-                return False
-        location_hint = item.get("location_hint")
-        if location_hint is not None and not isinstance(location_hint, str):
-            return False
-    return True
+        return None
+    try:
+        return _verify_quotes.grounding_entries({"grounding": value}, GROUNDING_ENTRY_SLUG)
+    except _verify_quotes.VerifyQuotesError:
+        return None
+
+
+def valid_grounding_entries(value: Any) -> bool:
+    return parse_grounding_entries(value) is not None
 
 
 def check_answered_question_grounding(
@@ -2369,18 +2952,32 @@ def check_answered_question_grounding(
     results: dict[str, Any],
 ) -> None:
     label = project_relative(project_root, path)
-    if frontmatter.get("coverage_required") is True and not valid_grounding_entries(frontmatter.get("grounding")):
+    entries = parse_grounding_entries(frontmatter.get("grounding"))
+    if frontmatter.get("coverage_required") is True and entries is None:
         issue(
             results,
             "HIGH",
             "question_grounding_missing",
-            f"Answered coverage-required question is missing valid grounding quotes: {label}",
+            f"Answered coverage-required question is missing valid grounding evidence: {label}",
             [label],
-            "Add `grounding` entries with claim, source_id, quote, and optional location_hint before marking the answer publishable.",
+            "Add `grounding` entries with claim, source_id, and exactly one form of evidence — "
+            "a `quote` (with optional location_hint) found in the normalized record, or an "
+            "`anchor` naming the record's structured-view `pointer` and `expected` value — "
+            "before marking the answer publishable.",
             field="grounding",
-            expected="non-empty grounding entries with claim/source_id/quote",
+            expected="non-empty grounding entries with claim/source_id and either quote or anchor",
             actual=actual_type(frontmatter.get("grounding")) if "grounding" in frontmatter else "missing",
         )
+    # Counted on every answered question, not only the coverage-required ones: the
+    # migration from quoted prose to structured anchors is a property of the whole
+    # workspace, and a question that never had to be grounded still moved when it moved.
+    if entries:
+        stats = results["stats"]
+        # count_by_form only ever reports the forms GROUNDING_FORM_STATS was built from,
+        # so an unmapped form here would mean the two had silently diverged.
+        for form, count in _verify_quotes.count_by_form(entries).items():
+            stat = GROUNDING_FORM_STATS[form]
+            stats[stat] = int(stats.get(stat, 0) or 0) + count
     answered_by = frontmatter.get("answered_by")
     if not isinstance(answered_by, str) or not answered_by.strip():
         answered_by = frontmatter.get("claimed_by")
@@ -2413,6 +3010,14 @@ def check_questions(
     config: dict[str, Any] | None = None,
 ) -> None:
     config = config or {}
+    review = validated_review_config(config)
+    # Under workspace scope a pending review already freezes the workspace, so the age finding
+    # would be redundant noise; null disables it outright.
+    review_age_limit = (
+        review["max_pending_review_hours"]
+        if review["escalation_scope"] == ESCALATION_SCOPE_QUESTION
+        else None
+    )
     stats = results["stats"]
     checked = 0
     status_counts: dict[str, int] = {}
@@ -2441,6 +3046,8 @@ def check_questions(
                     expected="answered with human_review_status: approved",
                     actual="human_review",
                 )
+                if review_age_limit is not None:
+                    check_human_review_age(results, label, frontmatter, review_age_limit)
             answer_page = frontmatter.get("answer_page")
             if not isinstance(answer_page, str) or not answer_page.strip():
                 issue(
@@ -2514,6 +3121,7 @@ def check_source_coverage(
     wiki_root: Path,
     wiki_files: list[Path],
     results: dict[str, Any],
+    min_coverage_ratio: float | None = None,
 ) -> None:
     stats = results["stats"]
     manifest_by_id = index_manifest_records(manifest_records)
@@ -2543,8 +3151,16 @@ def check_source_coverage(
             "Re-run normalization after verifying the source file, or supply manually extracted text.",
         )
 
+    # Walked once and reused: this listing and the orphaned-sidecar pass below both need
+    # every normalized record, and a workspace can hold thousands of them.
+    normalized_record_paths = (
+        sorted(normalized_root.rglob("*.md"), key=lambda p: p.as_posix())
+        if normalized_root.is_dir()
+        else []
+    )
+
     # Warn about normalized PDF records whose inferred title is uncertain.
-    for norm_path in sorted(normalized_root.rglob("*.md"), key=lambda p: p.as_posix()) if normalized_root.is_dir() else []:
+    for norm_path in normalized_record_paths:
         fm, _ = load_frontmatter(norm_path)
         if not isinstance(fm, dict):
             continue
@@ -2568,12 +3184,20 @@ def check_source_coverage(
             label = project_relative(project_root, norm_path)
             issue(
                 results,
-                "WARNING",
+                "LOW",
                 "pdf_title_uncertain",
                 f"PDF title inference produced low-confidence result (`title_confidence: {tc}`): {label}",
                 [label],
                 "Verify the `title:` field in the normalized record and correct it if needed.",
             )
+
+    foreign_normalized, contract_violations, low_coverage_normalized = check_normalized_record_contract(
+        project_root,
+        normalized_root,
+        manifest_by_id,
+        results,
+        min_coverage_ratio=min_coverage_ratio,
+    )
 
     source_notes_by_id, note_integrated_ids = index_source_notes(wiki_root)
     integration_by_id = index_integration_citations(wiki_root, wiki_files)
@@ -2718,6 +3342,21 @@ def check_source_coverage(
             actual="missing",
         )
 
+    for path in orphaned_structured_sidecars(normalized_root, normalized_record_paths):
+        label = project_relative(project_root, path)
+        issue(
+            results,
+            "LOW",
+            "normalized_orphan",
+            f"Structured-view sidecar has no normalized record beside it: {label}",
+            [label],
+            "Re-run normalization so the record that declares this sidecar is written "
+            "beside it, or remove the stale sidecar — nothing reads a sidecar no record binds.",
+            field="structured_view",
+            expected=f"a normalized record at {structured_sidecar_record_path(path).name}",
+            actual="missing",
+        )
+
     for source_id, paths in sorted(source_notes_by_id.items()):
         if source_id in valid_source_ids:
             continue
@@ -2752,6 +3391,9 @@ def check_source_coverage(
     stats["sources_integrated"] = sum(1 for source_id in manifest_by_id if source_id in integration_by_id)
     stats["source_lifecycle_counts"] = lifecycle_counts
     stats["sources_missing_normalized"] = missing_normalized
+    stats["sources_foreign_normalized"] = foreign_normalized
+    stats["normalized_contract_violations"] = contract_violations
+    stats["normalized_low_rendered_coverage"] = low_coverage_normalized
     stats["normalized_missing_source_note"] = missing_source_notes
     stats["integrated_missing_citation"] = missing_integrations
     stats["normalized_orphans"] = len(
@@ -3089,6 +3731,11 @@ def generate_recommendations(results: dict[str, Any]) -> None:
             "ground answers in cited source_ids, explain blocked questions, and keep "
             "in_progress claims recorded and fresh."
         )
+    if categories.intersection({"question_human_review_stale", "question_human_review_undated"}):
+        recommendations.append(
+            "Work the human-review queue: record outstanding reviews with question_resolve.py "
+            "review or approve, or adjust research.yml review.max_pending_review_hours."
+        )
     if categories.intersection({"question_coverage_missing", "question_coverage_blocked", "question_coverage_invalid"}):
         recommendations.append(
             "Repair coverage-required answered questions: create valid coverage manifests and resolve failed required facets."
@@ -3127,6 +3774,11 @@ def generate_recommendations(results: dict[str, Any]) -> None:
         recommendations.append(
             "Repair the source-request artifact: link blocked questions to requests and "
             "keep fulfilled requests pointing at existing manifest sources."
+        )
+    if "request_scope_facet_unlinked" in categories:
+        recommendations.append(
+            "Reconcile request scope with coverage manifests: link each scoped request to the "
+            "facet it names via coverage_manifest.py set-facet, or correct the request's scope."
         )
     if not recommendations:
         recommendations.append("Wiki health checks passed for the enabled lint rules.")
@@ -3168,6 +3820,10 @@ def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
             "academic_metadata_missing": 0,
             "openalex_identity_conflict": 0,
             **{stat: 0 for stat in CURATION_STATS},
+            # Declared here rather than only in check_questions: question validation is
+            # optional, and a migration counter that disappears when questions are
+            # disabled cannot be read as "no anchors yet" by anything downstream.
+            **{stat: 0 for stat in GROUNDING_FORM_STATS.values()},
         },
         "issues": [],
         "recommendations": [],
@@ -3303,6 +3959,7 @@ def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
             wiki_root,
             wiki_files,
             results,
+            min_coverage_ratio=min_rendered_coverage_ratio(lint_config),
         )
     if validate_provenance:
         check_provenance(project_root, manifest_path, manifest_records, results)
@@ -3314,7 +3971,9 @@ def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if validate_academic_publication_metadata:
         check_output_academic_publication_metadata(project_root, manifest_path, manifest_records, output_root, results)
     if validate_source_requests:
-        check_source_requests(project_root, source_requests_path, manifest_records, wiki_files, results)
+        check_source_requests(
+            project_root, source_requests_path, manifest_records, wiki_files, results, config
+        )
     if detect_prompt_injection_patterns:
         check_prompt_injection_patterns(project_root, normalized_root, wiki_root, manifest_path, manifest_records, results)
     if lint_config.get("validate_claims", True):
@@ -3425,6 +4084,15 @@ def format_source_coverage_summary(stats: dict[str, Any]) -> str:
     )
 
 
+def format_grounding_summary(stats: dict[str, Any]) -> str:
+    """How much of this workspace's grounding is anchor-based versus quote-based.
+
+    Unlike the source-coverage summary there is no ``disabled`` case: the counters carry
+    zero defaults, so the line reads the same shape whether or not questions were checked.
+    """
+    return " ".join(f"{form}={stats.get(stat, 0)}" for form, stat in GROUNDING_FORM_STATS.items())
+
+
 def format_log_recommendations(results: dict[str, Any]) -> list[str]:
     recommendations = results.get("recommendations")
     if not isinstance(recommendations, list):
@@ -3442,6 +4110,7 @@ def render_log_entry(results: dict[str, Any], timestamp: str, levels: list[str])
         f"- manifest_records: {stats.get('manifest_records', 0)}\n"
         f"- issues: {format_issue_summary(stats, levels)}\n"
         f"- source_coverage: {format_source_coverage_summary(stats)}\n"
+        f"- grounding: {format_grounding_summary(stats)}\n"
         f"- recommendations: {len(recommendations)}\n"
     ]
     lines.extend(f"- recommendation: {recommendation}\n" for recommendation in recommendations)

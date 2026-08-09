@@ -306,12 +306,15 @@ class PublicationSourceMatrixTests(unittest.TestCase):
             self.assertEqual(1, kinds.get("table", 0))
             self.assertEqual(1, kinds.get("web_link", 0))
             self.assertEqual(1, kinds.get("codebase_architecture", 0))
-            self.assertGreaterEqual(kinds.get("unknown", 0), 2)
+            # JSON is structured evidence with a name of its own; only the opaque
+            # binary is genuinely unclassifiable.
+            self.assertEqual(1, kinds.get("structured_data", 0))
+            self.assertGreaterEqual(kinds.get("unknown", 0), 1)
             expected_kinds = {
                 "raw/markdown/nested-frontmatter.md": "markdown",
                 "raw/web/one/report.html": "html",
                 "raw/papers/scanned.pdf": "pdf",
-                "raw/data/records.json": "unknown",
+                "raw/data/records.json": "structured_data",
                 "raw/data/matrix.csv": "table",
                 "raw/links/links.txt": "web_link",
                 "raw/binary/payload.bin": "unknown",
@@ -378,7 +381,11 @@ class PublicationSourceMatrixTests(unittest.TestCase):
             self.assertFalse(sentinel.exists())
 
             records = self.manifest(workspace)
-            unsupported = [record for record in records if record.get("kind") in {"markdown", "unknown"}]
+            # `structured_data` joins these: with no adapter configured it is
+            # classified-only, so it must also produce no normalized output.
+            unsupported = [
+                record for record in records if record.get("kind") in {"markdown", "unknown", "structured_data"}
+            ]
             self.assertGreaterEqual(len(unsupported), 3)
             unsupported_paths = {raw_path for record in unsupported for raw_path in record.get("raw_paths", [])}
             self.assertTrue(

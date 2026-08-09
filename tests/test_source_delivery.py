@@ -400,7 +400,10 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertEqual(3, report["summary"]["dry_run"])
         self.assertEqual(3, report["summary"]["would_create"])
         self.assertEqual(0, report["summary"]["failed"])
-        self.assertEqual({"latex": 1, "pdf": 0, "links": 2, "html": 0, "tables": 0, "codebase": 0}, report["summary"]["methods"])
+        self.assertEqual(
+            {"latex": 1, "pdf": 0, "links": 2, "html": 0, "tables": 0, "codebase": 0, "adapter": 0},
+            report["summary"]["methods"],
+        )
         self.assertEqual(3, len(report["actions"]))
         self.assertEqual({"would_create"}, {action["action"] for action in report["actions"]})
 

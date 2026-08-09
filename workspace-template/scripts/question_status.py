@@ -128,9 +128,53 @@ def collect_questions(questions_dir: Path) -> list[dict[str, Any]]:
                 "blocking_request_ids": _string_list(frontmatter.get("blocking_request_ids")),
                 "claimed_by": _text_field(frontmatter, "claimed_by") or None,
                 "claimed_at": _timestamp_field(frontmatter, "claimed_at"),
+                "human_review_requested_at": _timestamp_field(frontmatter, "human_review_requested_at"),
+                "human_review_pending_policies": _pending_review_policies(frontmatter),
             }
         )
     return records
+
+
+def _pending_review_policies(frontmatter: dict[str, Any]) -> list[str]:
+    """Declared review policies that have no accepted entry in `human_reviews` yet."""
+    accepted = set()
+    entries = frontmatter.get("human_reviews")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("verdict") != "accepted":
+                continue
+            policy = entry.get("policy")
+            if isinstance(policy, str) and policy.strip():
+                accepted.add(policy.strip())
+    return [policy for policy in _string_list(frontmatter.get("human_review_policies")) if policy not in accepted]
+
+
+def review_age_hours(requested_at: str | None, now: datetime | None = None) -> float | None:
+    """Hours a question has awaited review, or None when the clock is missing or unusable."""
+    if not isinstance(requested_at, str) or not requested_at.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(requested_at.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    moment = now or datetime.now(timezone.utc)
+    return (moment - parsed.astimezone(timezone.utc)).total_seconds() / 3600
+
+
+def review_queue_label(record: dict[str, Any]) -> str:
+    """Render the reviewer-facing suffix: how long it has waited and how much is left."""
+    parts: list[str] = []
+    age_hours = review_age_hours(record.get("human_review_requested_at"))
+    if age_hours is None:
+        parts.append("age unknown")
+    else:
+        parts.append(f"waiting {age_hours:.1f}h")
+    pending = record.get("human_review_pending_policies")
+    if isinstance(pending, list) and pending:
+        parts.append(f"{len(pending)} policy(ies) pending")
+    return ", ".join(parts)
 
 
 def _timestamp_field(frontmatter: dict[str, Any], key: str) -> str | None:
@@ -224,7 +268,9 @@ def render_text(report: dict[str, Any], questions_dir_label: str) -> str:
     if human_review:
         lines.append(f"Pending Human Review ({len(human_review)}):")
         for record in human_review:
-            lines.append(f"- {record['slug']}: {record['question'] or '(no text)'}")
+            lines.append(
+                f"- {record['slug']} [{review_queue_label(record)}]: {record['question'] or '(no text)'}"
+            )
         lines.append("")
 
     blocked = [record for record in report["questions"] if record["status"] == "blocked"]

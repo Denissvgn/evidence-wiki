@@ -34,6 +34,27 @@ domain_pack:
     official-current-figure: coverage-templates/official-current-figure.yml
 ```
 
+Pack overlays may also declare optional `domain_pack.request_kinds` as a list
+of source-request kind declarations, each requiring `id`, `label`, and
+`description`. A declared id must be namespaced `pack:<pack-name>/<kind-id>` —
+the same convention pack evidence policies use — and its namespace segment
+must equal the pack's own `domain_pack.name`, so one pack can never declare
+kinds in another pack's namespace. Built-in kinds (`paper`, `dataset`, `web`,
+`code`, `structured_data`, `other`) are reserved and cannot be redeclared.
+`evidence-wiki pack validate` checks id shape, namespace, and uniqueness
+before a pack ships; `source_requests.py add --kind` accepts a declared kind
+once the pack is installed in a workspace and refuses an undeclared or
+malformed one.
+
+```yaml
+domain_pack:
+  name: market-data
+  request_kinds:
+    - id: pack:market-data/supplier_quote
+      label: Supplier quote
+      description: Live SKU price + shipping + MOQ from a named supplier, ≤ 48h old.
+```
+
 ## Reference Packs
 
 - `llm-research`: guidance for LLM systems, autonomous research agents,

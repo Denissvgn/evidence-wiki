@@ -306,8 +306,13 @@ class CoverageManifestCliTests(unittest.TestCase):
         path.write_text(yaml.safe_dump(coverage, sort_keys=False), encoding="utf-8")
         return source_id
 
-    def seed_source_request(self, target: Path, request_id: str = "req-current-fee") -> None:
-        record = {
+    def source_request_record(
+        self,
+        request_id: str = "req-current-fee",
+        *,
+        scope: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        record: dict[str, Any] = {
             "schema_version": "1.0",
             "request_id": request_id,
             "kind": "web",
@@ -320,9 +325,28 @@ class CoverageManifestCliTests(unittest.TestCase):
             "updated_at": "2026-06-29T00:00:00Z",
             "source_id": None,
         }
-        requests = target / "sources" / "source-requests.jsonl"
+        if scope is not None:
+            record["scope"] = scope
+        return record
+
+    def requests_path(self, target: Path) -> Path:
+        return target / "sources" / "source-requests.jsonl"
+
+    def seed_source_requests(self, target: Path, records: list[dict[str, Any]]) -> None:
+        requests = self.requests_path(target)
         requests.parent.mkdir(parents=True, exist_ok=True)
-        requests.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        requests.write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8",
+        )
+
+    def seed_source_request(self, target: Path, request_id: str = "req-current-fee") -> None:
+        self.seed_source_requests(target, [self.source_request_record(request_id)])
+
+    def read_source_requests(self, target: Path) -> dict[str, dict[str, Any]]:
+        text = self.requests_path(target).read_text(encoding="utf-8")
+        records = [json.loads(line) for line in text.splitlines() if line.strip()]
+        return {record["request_id"]: record for record in records}
 
     def test_init_creates_manifest_for_existing_question(self):
         coverage = self.load_coverage()
@@ -805,6 +829,386 @@ class CoverageManifestCliTests(unittest.TestCase):
             )
             self.assertEqual(2, code)
             self.assertEqual("REQUEST_NOT_LINKED", payload["error_code"])
+
+    def set_facet_workspace(self, root: Path, records: list[dict[str, Any]]) -> tuple[Any, Path]:
+        coverage = self.load_coverage()
+        target = self.init_workspace(root)
+        self.seed_manifest_source(target)
+        self.seed_source_requests(target, records)
+        template = self.write_template(root)
+        code, _, stderr = self.run_coverage_json(
+            coverage,
+            target,
+            "init",
+            "--slug",
+            "which-benchmarks",
+            "--template",
+            str(template),
+        )
+        self.assertEqual(0, code, stderr)
+        return coverage, target
+
+    def test_set_facet_backfills_facet_scope_and_reruns_as_a_no_op(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(
+                root,
+                [
+                    self.source_request_record("req-current-fee"),
+                    self.source_request_record("req-candidate", scope={"candidate": "acme-widget"}),
+                ],
+            )
+
+            code, payload, stderr = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--blocking-request-id",
+                "req-current-fee",
+                "--blocking-request-id",
+                "req-candidate",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(
+                ["req-current-fee", "req-candidate"],
+                payload["scope_backfilled_request_ids"],
+            )
+            records = self.read_source_requests(target)
+            self.assertEqual({"facet_id": "paper-identity"}, records["req-current-fee"]["scope"])
+            # Other declared scope keys survive the back-fill verbatim.
+            self.assertEqual(
+                {"candidate": "acme-widget", "facet_id": "paper-identity"},
+                records["req-candidate"]["scope"],
+            )
+            for record in records.values():
+                self.assertNotEqual("2026-06-29T00:00:00Z", record["updated_at"])
+                self.assertEqual("2026-06-29T00:00:00Z", record["created_at"])
+                self.assertEqual("open", record["status"])
+
+            after_backfill = self.requests_path(target).read_bytes()
+            code, payload, stderr = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--blocking-request-id",
+                "req-current-fee",
+                "--blocking-request-id",
+                "req-candidate",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual([], payload["scope_backfilled_request_ids"])
+            self.assertEqual(after_backfill, self.requests_path(target).read_bytes())
+
+    def test_set_facet_clear_blocking_request_ids_leaves_request_scope_intact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(root, [self.source_request_record()])
+
+            self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+            after_backfill = self.requests_path(target).read_bytes()
+
+            code, payload, stderr = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--clear-blocking-request-ids",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual([], payload["manifest"]["required_facets"][0]["blocking_request_ids"])
+            self.assertEqual([], payload["scope_backfilled_request_ids"])
+            # Unlinking drops the manifest link only; the request still states what satisfies it.
+            self.assertEqual(after_backfill, self.requests_path(target).read_bytes())
+            self.assertEqual(
+                {"facet_id": "paper-identity"},
+                self.read_source_requests(target)["req-current-fee"]["scope"],
+            )
+
+    def test_set_facet_refuses_request_scoped_to_a_different_facet_before_writing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(
+                root,
+                [self.source_request_record(scope={"facet_id": "implementation-scope"})],
+            )
+            manifest_before = self.manifest_path(target).read_bytes()
+            requests_before = self.requests_path(target).read_bytes()
+
+            code, payload, _ = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--accepted-source-id",
+                "paper:bench-survey",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+
+            self.assertEqual(2, code)
+            self.assertEqual("FACET_SCOPE_CONFLICT", payload["error_code"])
+            self.assertIn("req-current-fee", payload["message"])
+            self.assertIn("implementation-scope", payload["message"])
+            self.assertIn("paper-identity", payload["message"])
+            self.assertEqual(
+                {
+                    "request_id": "req-current-fee",
+                    "declared_facet_id": "implementation-scope",
+                    "facet_id": "paper-identity",
+                },
+                payload["details"],
+            )
+            # The refusal precedes the facet write, so neither file moved.
+            self.assertEqual(manifest_before, self.manifest_path(target).read_bytes())
+            self.assertEqual(requests_before, self.requests_path(target).read_bytes())
+
+    def test_set_facet_refuses_when_a_duplicate_record_declares_another_facet(self):
+        """The pre-check must scan every record, not just the first per id.
+
+        The store is append-only and nothing rejects a duplicate id on read. If the
+        pre-check stopped at the first copy, a later copy declaring a different facet
+        would be caught only by the back-fill — after the manifest write, leaving the
+        half-applied state the §2.5 sequencing exists to prevent.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(
+                root,
+                [
+                    self.source_request_record(),
+                    self.source_request_record(scope={"facet_id": "implementation-scope"}),
+                ],
+            )
+            manifest_before = self.manifest_path(target).read_bytes()
+            requests_before = self.requests_path(target).read_bytes()
+
+            code, payload, _ = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--accepted-source-id",
+                "paper:bench-survey",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+
+            self.assertEqual(2, code)
+            self.assertEqual("FACET_SCOPE_CONFLICT", payload["error_code"])
+            self.assertIn("implementation-scope", payload["message"])
+            # Refused before the facet write, so neither file moved — the conflict is
+            # not reported as one discovered after a partial write.
+            self.assertNotIn("failed_step", payload.get("details", {}))
+            self.assertEqual(manifest_before, self.manifest_path(target).read_bytes())
+            self.assertEqual(requests_before, self.requests_path(target).read_bytes())
+
+    def test_set_facet_scopes_the_first_record_when_a_later_duplicate_is_scoped(self):
+        """A scoped duplicate must not excuse the record readers actually use.
+
+        `load_requests` preserves file order and the first match wins for readers like
+        `source_requests.run_fulfill`. If a later duplicate carrying the facet made the
+        id look already-scoped, the back-fill would be skipped and the *effective*
+        record left unscoped — with set-facet reporting success.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(
+                root,
+                [
+                    self.source_request_record(),
+                    self.source_request_record(scope={"facet_id": "paper-identity"}),
+                ],
+            )
+
+            code, payload, stderr = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--accepted-source-id",
+                "paper:bench-survey",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(["req-current-fee"], payload["scope_backfilled_request_ids"])
+            records = [
+                json.loads(line)
+                for line in self.requests_path(target).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            # Every copy carries the facet, so no reader can see an unscoped one.
+            self.assertEqual(2, len(records))
+            for record in records:
+                self.assertEqual("paper-identity", record["scope"]["facet_id"])
+
+    def test_set_facet_accepts_request_already_scoped_to_the_same_facet(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(
+                root,
+                [
+                    self.source_request_record(
+                        scope={"facet_id": "paper-identity", "candidate": "acme-widget"},
+                    )
+                ],
+            )
+            requests_before = self.requests_path(target).read_bytes()
+
+            code, payload, stderr = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(
+                ["req-current-fee"],
+                payload["manifest"]["required_facets"][0]["blocking_request_ids"],
+            )
+            self.assertEqual([], payload["scope_backfilled_request_ids"])
+            # Agreement needs no write: the request record is untouched, byte for byte.
+            self.assertEqual(requests_before, self.requests_path(target).read_bytes())
+
+    def test_set_facet_names_the_backfill_when_only_that_step_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(root, [self.source_request_record()])
+            requests_before = self.requests_path(target).read_bytes()
+
+            def refuse(*_args, **_kwargs):
+                raise OSError("simulated requests store write failure")
+
+            original = coverage.backfill_facet_scope
+            coverage.backfill_facet_scope = refuse
+            try:
+                code, payload, _ = self.run_coverage_json(
+                    coverage,
+                    target,
+                    "set-facet",
+                    "--slug",
+                    "which-benchmarks",
+                    "--facet-id",
+                    "paper-identity",
+                    "--blocking-request-id",
+                    "req-current-fee",
+                )
+            finally:
+                coverage.backfill_facet_scope = original
+
+            self.assertEqual(2, code)
+            self.assertEqual("request_scope_backfill", payload["details"]["failed_step"])
+            self.assertEqual(["req-current-fee"], payload["details"]["request_ids"])
+            self.assertIn("back-filling scope.facet_id", payload["message"])
+            self.assertIn("simulated requests store write failure", payload["message"])
+            self.assertIn("rerun the same set-facet command", payload["remediation"])
+            self.assertEqual(requests_before, self.requests_path(target).read_bytes())
+
+            # Step 2 already landed, which is exactly why the refusal says a rerun converges.
+            manifest = yaml.safe_load(self.manifest_path(target).read_text(encoding="utf-8"))
+            self.assertEqual(
+                ["req-current-fee"],
+                manifest["required_facets"][0]["blocking_request_ids"],
+            )
+
+            code, payload, stderr = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(["req-current-fee"], payload["scope_backfilled_request_ids"])
+            self.assertEqual(
+                {"facet_id": "paper-identity"},
+                self.read_source_requests(target)["req-current-fee"]["scope"],
+            )
+
+    def test_set_facet_leaves_requests_untouched_when_the_facet_write_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(root, [self.source_request_record()])
+            manifest_before = self.manifest_path(target).read_bytes()
+            requests_before = self.requests_path(target).read_bytes()
+
+            code, payload, _ = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "no-such-facet",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+            self.assertEqual(2, code)
+            self.assertEqual("COVERAGE_FACET_UNKNOWN", payload["error_code"])
+            self.assertEqual(manifest_before, self.manifest_path(target).read_bytes())
+            self.assertEqual(requests_before, self.requests_path(target).read_bytes())
+
+            code, payload, _ = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--accepted-source-id",
+                "paper:missing",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+            self.assertEqual(2, code)
+            self.assertEqual("SOURCE_UNKNOWN", payload["error_code"])
+            self.assertEqual(manifest_before, self.manifest_path(target).read_bytes())
+            self.assertEqual(requests_before, self.requests_path(target).read_bytes())
 
     def test_evaluate_blocks_failed_required_facet_even_when_optional_passes(self):
         coverage = self.load_coverage()

@@ -26,9 +26,20 @@ LATEX_EXTENSIONS = {".tex", ".sty", ".cls"}
 BIBTEX_EXTENSIONS = {".bib", ".bbl", ".bst"}
 HTML_EXTENSIONS = {".html", ".htm", ".xhtml"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".tif", ".tiff", ".bmp", ".eps"}
-TABLE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".feather", ".jsonl"}
+TABLE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".feather"}
+# Structured payloads: evidence whose shape is fields rather than prose or rows. This
+# package does not extract them, so they stay classified-only unless a workspace
+# configures a normalization adapter for the kind (see docs/research-yml.md).
+# `.jsonl` classified as `table` before this kind existed, but nothing ever normalized
+# it as one — only `.csv`/`.tsv` are tabular to the normalizer — so it belongs here.
+STRUCTURED_DATA_EXTENSIONS = {".json", ".jsonl"}
 TABLE_TEXT_EXTENSIONS = {".csv", ".tsv"}
 LINK_EXTENSIONS = {".url", ".webloc"}
+# Why a link-shaped file's URLs were not expanded into source records. `outside_link_root`
+# means the file was never a parse candidate (a URL list under, say, `raw/data/`);
+# `no_urls_parsed` means it was a candidate but yielded nothing usable.
+LINK_PARSE_OUTSIDE_ROOT = "outside_link_root"
+LINK_PARSE_NO_URLS = "no_urls_parsed"
 ARCHIVE_SUFFIXES = {
     (".zip",),
     (".tar",),
@@ -116,6 +127,7 @@ PROVENANCE_FIELDS = (
     "checksum",
     "request_id",
     "candidate_id",
+    "scope",
     "acquisition_run_id",
     "terms_url",
     "terms_note",
@@ -164,6 +176,7 @@ ACQUISITION_LOCK_RELATIVE = ("raw", ".locks", "acquisition.lock")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _request_scope import normalize_scope
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import (
@@ -319,6 +332,8 @@ def classify(path: Path, raw_root: Path) -> str:
         return "image"
     if suffix in TABLE_EXTENSIONS:
         return "table"
+    if suffix in STRUCTURED_DATA_EXTENSIONS:
+        return "structured_data"
     if looks_like_link_file(path, raw_root):
         return "link"
     if is_archive(path):
@@ -693,6 +708,17 @@ def extracted_urls(value: str) -> list[str]:
 def is_link_parse_candidate(path: Path, raw_root: Path) -> bool:
     suffix = path.suffix.lower()
     return suffix in LINK_EXTENSIONS or (suffix == ".txt" and raw_root.name == "links")
+
+
+def link_parse_status(record: dict[str, Any]) -> str:
+    """Why a link-shaped file's URLs were not inventoried.
+
+    Records written before this field existed default to the parse failure, which keeps
+    their remediation exactly as it was.
+    """
+    metadata = record.get("metadata")
+    value = metadata.get("link_parse_status") if isinstance(metadata, dict) else None
+    return value if value in {LINK_PARSE_OUTSIDE_ROOT, LINK_PARSE_NO_URLS} else LINK_PARSE_NO_URLS
 
 
 def parse_text_link_file(lines: list[str], relative_path: str) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1456,6 +1482,18 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
             data[field] = {"review_required": True}
             warnings.append(f"{relative_path}: provenance standards must be a mapping")
             continue
+        if field == "scope":
+            # What this delivery claims to answer, matched against the fulfilled request's
+            # own scope. Non-conforming entries are dropped rather than failing the
+            # sidecar: an unusable scope key must not cost the workspace the whole record.
+            parsed_scope = normalize_scope(value)
+            if not parsed_scope:
+                warnings.append(
+                    f"{relative_path}: provenance scope must be a mapping of non-empty scalar values"
+                )
+                continue
+            data[field] = parsed_scope
+            continue
         if field == "evidence_usability_override":
             parsed_override, warning = parse_evidence_usability_override(value)
             if warning is not None:
@@ -1730,8 +1768,12 @@ def raw_fingerprint_paths(project_root: Path, record: dict[str, Any]) -> list[Pa
                     sidecar = project_root / f"{raw_path}{PROVENANCE_SIDECAR_SUFFIX}"
                     if sidecar.is_file():
                         paths.append(sidecar)
-    elif kind in {"html", "table"}:
-        eligible_suffixes = HTML_EXTENSIONS if kind == "html" else TABLE_TEXT_EXTENSIONS
+    elif kind in {"html", "table", "structured_data"}:
+        eligible_suffixes = {
+            "html": HTML_EXTENSIONS,
+            "table": TABLE_TEXT_EXTENSIONS,
+            "structured_data": STRUCTURED_DATA_EXTENSIONS,
+        }[kind]
         raw_paths = record.get("raw_paths")
         if isinstance(raw_paths, list):
             for raw_path in raw_paths:
@@ -1932,6 +1974,15 @@ def _build_records_unlocked(
                 },
             }
         )
+        if kind == "link":
+            # A link-shaped file reaches this loop only when its URLs were *not* expanded
+            # into source records, and the two ways that happens need opposite fixes: a
+            # file inside a link root yielded no usable URLs, while one outside a link
+            # root was never a parse candidate and is simply in the wrong place. Record
+            # which it was, so the report can say so instead of guessing.
+            ensure_metadata(records[-1])["link_parse_status"] = (
+                LINK_PARSE_NO_URLS if is_link_parse_candidate(path, raw_root) else LINK_PARSE_OUTSIDE_ROOT
+            )
         path_warnings = link_file_warnings.get(relative_path)
         if path_warnings:
             metadata = ensure_metadata(records[-1])
@@ -2044,7 +2095,15 @@ def report_next_actions(
         actions.append("Review LaTeX-only records; add matching PDFs or continue with LaTeX source.")
     if unknown_records:
         actions.append("Classify, move, or ignore unknown raw files.")
-    if raw_link_records:
+    # These need opposite fixes, and naming the wrong one sends the operator away from
+    # the remedy: a misplaced URL list is not malformed, and moving it *out* of a link
+    # root is the reverse of what it needs.
+    if any(link_parse_status(record) == LINK_PARSE_OUTSIDE_ROOT for record in raw_link_records):
+        actions.append(
+            "Move link files under a link root (for example raw/links/) or rename them to "
+            ".url/.webloc; their URLs are not inventoried as sources where they are."
+        )
+    if any(link_parse_status(record) == LINK_PARSE_NO_URLS for record in raw_link_records):
         actions.append("Fix malformed raw link files or remove them from raw link roots.")
     if unusable_records:
         actions.append("Redeliver or replace unusable source captures before using them in required coverage facets.")

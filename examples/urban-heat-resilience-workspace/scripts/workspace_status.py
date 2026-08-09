@@ -23,12 +23,19 @@ status summary entry to ``log.md``.
 Verdict rules (fixed in schema version 1.0):
 
 - ``attention_required``: smoke validation failed, lint reported HIGH issues,
-  or either check could not run.
+  either check could not run, or a question awaits human review under the
+  default ``review.escalation_scope: workspace``.
 - ``complete``: no actionable (open or in_progress) questions, no blocked
-  questions, smoke passed, and no HIGH lint issues.
+  questions, no questions awaiting human review, smoke passed, and no HIGH lint
+  issues.
 - ``blocked_on_sources``: no actionable questions, but blocked questions
   remain.
-- ``in_progress``: anything else (actionable questions remain).
+- ``in_progress``: anything else (actionable questions remain, or under
+  ``review.escalation_scope: question`` only pending human reviews remain).
+
+Under ``review.escalation_scope: question`` a pending review parks its own
+question instead of flipping the verdict; ``readiness.questions_awaiting_review``
+reports the count under both scopes.
 
 Exit codes:
 
@@ -64,6 +71,7 @@ _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _review_config import DEFAULT_ESCALATION_SCOPE, ESCALATION_SCOPE_QUESTION, ReviewConfigError, review_config
 from _workspace_health import evaluate_workspace_health
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
@@ -593,6 +601,18 @@ def run_section(config: dict[str, Any]) -> dict[str, Any]:
         GITHUB_DEFAULT_MAX_ARCHIVE_BYTES_PER_RUN,
     )
     return section
+
+
+def validated_review_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Read the optional ``review`` section, failing through the config-invalid exit path.
+
+    Unlike ``run``, a malformed review setting is not replaced by its default: silently falling
+    back to workspace-wide escalation would freeze the workspace the operator was unfreezing.
+    """
+    try:
+        return review_config(config)
+    except ReviewConfigError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def parse_claim_timestamp(value: Any) -> datetime | None:
@@ -1144,6 +1164,7 @@ def structured_verdict_reasons(
     sources: dict[str, Any],
     lint: dict[str, Any],
     operational_debt: dict[str, Any] | None = None,
+    awaiting_review_only: bool = False,
 ) -> list[dict[str, Any]]:
     structured: list[dict[str, Any]] = []
     high_issues = int(lint.get("issue_counts", {}).get("HIGH", 0) or 0) if isinstance(lint.get("issue_counts"), dict) else 0
@@ -1209,8 +1230,34 @@ def structured_verdict_reasons(
                 "request_ids": list(questions.get("blocked_open_request_ids", [])),
             }
         )
+    awaiting_review = int(questions.get("human_review", 0) or 0)
+    if awaiting_review_only and awaiting_review:
+        structured.append(
+            {
+                "code": "questions_awaiting_review_only",
+                "severity": "in_progress",
+                "count": awaiting_review,
+                "question_slugs": list(questions.get("human_review_slugs", [])),
+                "remediation": (
+                    "Record the pending human review for each named question with "
+                    "scripts/question_resolve.py review (per policy, with an optional --review-ref) "
+                    "or approve; the workspace is not complete until every review is recorded."
+                ),
+            }
+        )
     if not structured:
         structured.append({"code": verdict, "severity": verdict, "message": reasons[0] if reasons else verdict})
+    # Informational codes are appended after the verdict fallback so a workspace whose verdict has no
+    # other explanation keeps reporting that verdict as its first structured reason.
+    if awaiting_review:
+        structured.append(
+            {
+                "code": "questions_awaiting_review",
+                "severity": "info",
+                "count": awaiting_review,
+                "question_slugs": list(questions.get("human_review_slugs", [])),
+            }
+        )
     return structured
 
 
@@ -1220,9 +1267,14 @@ def readiness_section(
     sources: dict[str, Any],
     lint: dict[str, Any],
     operational_debt: dict[str, Any] | None = None,
+    review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     attention = False
+    awaiting_review_only = False
+    review_settings = review if isinstance(review, dict) else {}
+    escalation_scope = review_settings.get("escalation_scope", DEFAULT_ESCALATION_SCOPE)
+    question_scoped_review = escalation_scope == ESCALATION_SCOPE_QUESTION
 
     if smoke.get("error"):
         attention = True
@@ -1270,10 +1322,16 @@ def readiness_section(
         if missing_ids:
             reasons.append(f"Missing blocking source request id(s): {summarize_slugs(missing_ids)}.")
 
-    if human_review:
+    if human_review and not question_scoped_review:
         attention = True
         reasons.append(
             f"{human_review} question(s) require human review approval: "
+            f"{summarize_slugs(questions.get('human_review_slugs', []))}."
+        )
+    elif human_review:
+        reasons.append(
+            f"{human_review} question(s) await human review under review.escalation_scope: question "
+            "and do not block the rest of the workspace: "
             f"{summarize_slugs(questions.get('human_review_slugs', []))}."
         )
 
@@ -1304,6 +1362,16 @@ def readiness_section(
                 f"{len(linked_open_ids)} linked open source request(s) await delivery: "
                 f"{summarize_slugs(linked_open_ids)}."
             )
+    elif human_review:
+        # Question-scoped reviews never reach this branch under workspace scope, where a pending
+        # review already forced attention. Reporting `complete` here would tell --check-complete
+        # automation that answers nobody has reviewed are finished work.
+        verdict = VERDICT_IN_PROGRESS
+        awaiting_review_only = True
+        reasons.append(
+            f"No actionable or blocked questions remain, but {human_review} question(s) still await "
+            "human review; the workspace is not complete until each review is recorded."
+        )
     else:
         verdict = VERDICT_COMPLETE
         if int(questions.get("total", 0) or 0) == 0:
@@ -1314,6 +1382,7 @@ def readiness_section(
     return {
         "verdict": verdict,
         "reasons": reasons,
+        "questions_awaiting_review": human_review,
         "verdict_reasons": structured_verdict_reasons(
             verdict,
             reasons,
@@ -1321,6 +1390,7 @@ def readiness_section(
             sources,
             lint,
             operational_debt,
+            awaiting_review_only=awaiting_review_only,
         ),
     }
 
@@ -2066,6 +2136,15 @@ def summarize_orchestration_session(
             if isinstance(recovery, dict)
             else None
         ),
+        # The acquisition posture the session froze at start. A session created before
+        # delegated acquisition existed carries neither field and reads as `providers`,
+        # which is the only mode it could have run under.
+        "acquisition_mode": (
+            document.get("acquisition_mode")
+            if document.get("acquisition_mode") in {"providers", "delegated"}
+            else "providers"
+        ),
+        "acquirer_agent_id": document.get("acquirer_agent_id"),
         "active_run_id": document.get("active_run_id"),
         "child_run_ids": list(document.get("child_run_ids") or []),
         "action_count": int(document.get("action_count", 0) or 0),
@@ -2173,6 +2252,7 @@ def build_status_document(
             "readiness": {
                 "verdict": VERDICT_ATTENTION_REQUIRED,
                 "reasons": reasons,
+                "questions_awaiting_review": 0,
                 "verdict_reasons": [dict(item) for item in workspace_health["findings"]],
             },
             "workspace_health": workspace_health,
@@ -2181,6 +2261,7 @@ def build_status_document(
     metadata = load_yaml_mapping(project_root / "workspace-system.yml", "workspace-system.yml")
 
     run = run_section(config)
+    review = validated_review_config(config)
     run_controller = run_controller_section(project_root, run_id, int(run["stale_run_threshold_hours"]))
     smoke = smoke_section(project_root)
     questions = questions_section(project_root, config)
@@ -2190,7 +2271,7 @@ def build_status_document(
     sources = sources_section(project_root, config)
     lint = lint_section(project_root, config)
     operational_debt = operational_debt_section(questions, candidates, sources, lint)
-    readiness = readiness_section(smoke, questions, sources, lint, operational_debt)
+    readiness = readiness_section(smoke, questions, sources, lint, operational_debt, review)
     readiness["operational_debt"] = operational_debt
     artifact_counters: dict[str, int] | None = None
     budget_accounting_error: BaseException | None = None
@@ -2343,6 +2424,12 @@ def render_text(document: dict[str, Any]) -> str:
         f"Questions: total {questions.get('total', 0)} ({status_summary}); "
         f"claimed {questions.get('claimed', 0)}, stale {len(questions.get('stale_claim_slugs', []))}"
     )
+    awaiting_review = int(readiness.get("questions_awaiting_review", 0) or 0)
+    if awaiting_review:
+        lines.append(
+            f"Awaiting human review: {awaiting_review} question(s): "
+            f"{summarize_slugs(questions.get('human_review_slugs', []))}"
+        )
     lines.append(
         f"Coverage: {coverage.get('manifests_total', 0)} manifest(s), "
         f"{coverage.get('required_questions', 0)} required answered question(s), "

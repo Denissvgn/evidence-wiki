@@ -186,6 +186,13 @@ COMMON_PROTECTED_WORKSPACE_PATH_SUFFIX = (
 WORKER_WRITABLE_CONTROL_PATHS = ("runs/run-reports",)
 MANAGED_HOST_LOCK_CONTROL_PATH = ".locks/managed-host.lock"
 
+# Declared literally rather than imported: this module is imported by
+# `orchestration_schemas`, so it cannot import back from it, and the host does not load
+# workspace code into its own process. Kept in step with
+# `_orchestration_config.ACQUISITION_MODE_DELEGATED` by `tests/test_orchestration_config.py`.
+DELEGATED_ACQUISITION_MODE = "delegated"
+MAX_RESEARCH_CONFIG_BYTES = 8 * 1024 * 1024
+
 EXIT_OK = 0
 EXIT_INVALID = 2
 EXIT_BLOCKED = 3
@@ -215,6 +222,10 @@ WORK_ORDER_KEYS = frozenset(
         "lease",
     }
 )
+# Present only on delegated acquisition orders, so they are accepted but never required:
+# an order without them is a provider-mode order, which is what every order issued before
+# delegated acquisition existed carries.
+OPTIONAL_WORK_ORDER_KEYS = frozenset({"acquisition_mode", "assigned_agent_id"})
 RESULT_KEYS = frozenset({"schema_version", "action_id", "outcome", "summary", "artifacts"})
 RUNNER_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -1211,7 +1222,7 @@ def _walk_strings(value: Any) -> list[str]:
 def _validate_work_order(document: Any) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise OrchestrationHostError("Controller work order must be a JSON object.")
-    unknown = set(document) - WORK_ORDER_KEYS
+    unknown = set(document) - WORK_ORDER_KEYS - OPTIONAL_WORK_ORDER_KEYS
     if unknown:
         raise OrchestrationHostError(f"Controller work order contains unsupported fields: {', '.join(sorted(unknown))}.")
     required = WORK_ORDER_KEYS
@@ -2340,6 +2351,56 @@ def _run_runner_capability_command(argv: list[str], *, cwd: Path) -> ProcessResu
 def _runner_capability_diagnostic(process: ProcessResult) -> str:
     diagnostic = (process.stderr or process.stdout).strip()
     return f" Diagnostic: {diagnostic}" if diagnostic else ""
+
+
+def _declared_acquisition_mode(root: Path) -> str | None:
+    """Return `research.yml`'s declared `orchestration.acquisition` value, if readable.
+
+    Deliberately does not validate. A malformed or contradictory declaration is the
+    deployed controller's to refuse, and it already does: `start` resolves the section and
+    fails with `CONFIG_INVALID`, its own message, and its own remediation. Re-deciding
+    that here would mean a second validator to keep in step, and the host would answer
+    where the workspace's own copy of the rules is authoritative.
+
+    This read answers only one question, before a session exists: is a managed runner the
+    wrong tool for this workspace? Anything it cannot read confidently returns ``None``
+    and leaves the verdict to the controller.
+    """
+    import yaml
+
+    path = root / "research.yml"
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_RESEARCH_CONFIG_BYTES:
+            return None
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    section = document.get("orchestration")
+    if not isinstance(section, dict):
+        return None
+    declared = section.get("acquisition")
+    return declared.strip() if isinstance(declared, str) else None
+
+
+def _refuse_delegated_acquisition(root: Path) -> None:
+    """Refuse a managed run over a workspace that delegates acquisition.
+
+    Under delegation the controller addresses acquisition work orders to an external
+    acquirer with its own connectors and credentials. A managed worker is not that
+    acquirer and cannot become one, so driving such a workspace would run until routing
+    reached acquisition and then spend a worker attempt on a guaranteed postcondition
+    failure. Refusing up front costs nothing and says which mode to use instead.
+    """
+    if _declared_acquisition_mode(root) != DELEGATED_ACQUISITION_MODE:
+        return
+    raise OrchestrationHostError(
+        "RUNNER_DELEGATED_ACQUISITION_UNSUPPORTED: This workspace declares "
+        "orchestration.acquisition: delegated, so acquisition work orders are addressed to an "
+        "external acquirer that a managed runner cannot execute. Drive this workspace with "
+        "evidence-wiki orchestrate start/next/submit instead."
+    )
 
 
 def _runner_isolation_error(message: str, process: ProcessResult | None = None) -> OrchestrationHostError:
@@ -4427,6 +4488,11 @@ def main(argv: list[str] | None = None) -> int:
         root = _workspace_root(args.target)
         if args.command in {"start", "next", "submit", "status"}:
             return _passthrough_controller(root, args.command, _protocol_arguments(args))
+
+        # Before the runner is resolved and before `run` creates a session: a delegated
+        # workspace is refused for what it declares, not for what this machine happens to
+        # have installed, and without leaving a session no managed run can finish.
+        _refuse_delegated_acquisition(root)
 
         runner = args.runner
         executable: str | None = None

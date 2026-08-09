@@ -1,12 +1,25 @@
 #!/usr/bin/env python3
-"""Verify answer grounding quotes against normalized source records.
+"""Verify answer grounding against normalized source records.
 
-The verifier is offline and deterministic. It reads question-page
-``grounding`` frontmatter entries, resolves each ``source_id`` to its normalized
-record, and checks whether the quoted text maps to one retained occurrence at a
-declared title, page, or section anchor. Normalization is limited to deterministic
-Unicode, whitespace, punctuation, and line-break hyphenation artifacts; semantic
-substitution is never accepted. It performs no network I/O.
+The verifier is offline and deterministic. It reads question-page ``grounding``
+frontmatter entries, resolves each ``source_id`` to its normalized record, and checks
+each entry against retained evidence. It performs no network I/O.
+
+A grounding entry carries exactly one of two forms, and each has its own check:
+
+- **quote** — the quoted text must map to one retained occurrence at a declared title,
+  page, or section anchor. Normalization is limited to deterministic Unicode,
+  whitespace, punctuation, and line-break hyphenation artifacts; semantic substitution
+  is never accepted.
+- **anchor** — an RFC 6901 pointer into the record's structured-view sidecar must
+  resolve to one scalar field whose canonical form equals the entry's ``expected``.
+
+The two are not variations on one check. Containment proves a record contains a
+sentence, which for structured evidence any line of the cited section satisfies whatever
+value the claim asserts; equality against a named field proves the claim's own value is
+what the evidence states. Anchors exist to close that gap, so the anchor path never falls
+back to containment, and a record with no structured view refuses per-entry rather than
+degrading to a weaker check that would report the same word, ``verified``.
 """
 
 from __future__ import annotations
@@ -16,6 +29,7 @@ import json
 import re
 import sys
 import unicodedata
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -48,6 +62,72 @@ from _workspace_module_loader import load_workspace_module
 _SIBLING_CACHE: dict[str, ModuleType] = {}
 
 
+def load_sibling_module(stem: str) -> ModuleType:
+    if stem not in _SIBLING_CACHE:
+        _SIBLING_CACHE[stem] = load_workspace_module(_SCRIPT_DIR, stem)
+    return _SIBLING_CACHE[stem]
+
+
+# `_structured_view` owns anchor resolution, and loads this module lazily from inside one
+# function precisely so the binding can be made here at import time. Its per-entry result
+# strings are aliased rather than restated: they are machine-readable API that hosts switch
+# on, and a second copy of an API string is a second place for it to drift.
+_structured_view = load_sibling_module("_structured_view")
+
+RESULT_STRUCTURED_VIEW_MISSING = _structured_view.RESULT_STRUCTURED_VIEW_MISSING
+RESULT_STRUCTURED_VIEW_CORRUPT = _structured_view.RESULT_STRUCTURED_VIEW_CORRUPT
+RESULT_ANCHOR_POINTER_NOT_FOUND = _structured_view.RESULT_ANCHOR_POINTER_NOT_FOUND
+RESULT_ANCHOR_TARGET_NOT_SCALAR = _structured_view.RESULT_ANCHOR_TARGET_NOT_SCALAR
+RESULT_ANCHOR_VALUE_MISMATCH = _structured_view.RESULT_ANCHOR_VALUE_MISMATCH
+
+# A grounding entry carries exactly one form of evidence, and says which.
+GROUNDING_FORM_QUOTE = "quote"
+GROUNDING_FORM_ANCHOR = "anchor"
+GROUNDING_FORMS = (GROUNDING_FORM_QUOTE, GROUNDING_FORM_ANCHOR)
+ANCHOR_ENTRY_FIELDS = ("pointer", "expected")
+ANCHOR_POLICY = "structured_anchor_evidence"
+
+# Fatal codes for a refused write. `GROUNDING_QUOTE_INVALID` predates anchors and is what
+# the filer's host switches on, so it stays the code for an all-quote failure set exactly
+# as before; anchors get their own rather than being folded into a name that lies.
+GROUNDING_QUOTE_INVALID = "GROUNDING_QUOTE_INVALID"
+GROUNDING_ANCHOR_INVALID = "GROUNDING_ANCHOR_INVALID"
+
+# One remediation per anchor failure, naming the edit that would fix that entry. Anchors
+# fail for reasons a quote cannot, so none of the quote-path advice transfers.
+ANCHOR_REMEDIATION = {
+    RESULT_STRUCTURED_VIEW_MISSING: (
+        "Re-normalize the cited source with a normalizer that emits a structured view, "
+        "or ground this claim with a quote against the record body instead."
+    ),
+    RESULT_STRUCTURED_VIEW_CORRUPT: (
+        "Re-normalize the cited source so its sidecar bytes and the record's "
+        "structured_view.content_hash agree, then rerun grounding verification."
+    ),
+    RESULT_ANCHOR_POINTER_NOT_FOUND: (
+        "Correct the pointer to name a field the record's structured view actually carries; "
+        "do not point at a field the evidence would have to grow."
+    ),
+    RESULT_ANCHOR_TARGET_NOT_SCALAR: (
+        "Extend the pointer to the single field being claimed; an anchor cites one scalar "
+        "value, never a subtree that merely contains it."
+    ),
+    RESULT_ANCHOR_VALUE_MISMATCH: (
+        "Correct the expected value to what the cited field states, or anchor the claim to "
+        "the field that carries it; never restate a value the evidence does not."
+    ),
+}
+# `_structured_view`'s result strings are documented as added to over time, so this table
+# is read with a default rather than indexed: a result it has not learned yet must degrade
+# to generic advice on that one entry, never raise a KeyError that escapes this module's
+# error handling and takes every caller — resolution, export, the controller's
+# recomputation — down with it.
+ANCHOR_REMEDIATION_FALLBACK = (
+    "Re-check this anchor against the cited record's structured view, then rerun grounding "
+    "verification; see the entry's message for what the verifier found."
+)
+
+
 class VerifyQuotesError(Exception):
     """Fatal grounding verifier error with a stable machine code."""
 
@@ -76,12 +156,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--write", action="store_true", help="Record verifier metadata on fully verified questions.")
     parser.add_argument("--verified-by", default=None, help="Verifier agent id required with --write.")
     return parser.parse_args(argv)
-
-
-def load_sibling_module(stem: str) -> ModuleType:
-    if stem not in _SIBLING_CACHE:
-        _SIBLING_CACHE[stem] = load_workspace_module(_SCRIPT_DIR, stem)
-    return _SIBLING_CACHE[stem]
 
 
 def timestamp_utc() -> str:
@@ -133,10 +207,28 @@ def workspace_relative(project_root: Path, path: Path) -> str:
         return path.as_posix()
 
 
-def normalized_record_path(project_root: Path, config: dict[str, Any], source_id: str) -> tuple[Path, str]:
+def normalized_root(project_root: Path, config: dict[str, Any]) -> tuple[Path, str]:
+    """The workspace's normalized-records directory, and the label artifacts under it carry."""
     normalize = load_sibling_module("normalize_sources")
     _, normalized_rel = normalize.source_paths(config)
-    path = project_root / normalized_rel / f"{normalize.safe_source_id(source_id)}.md"
+    return project_root / normalized_rel, normalized_rel
+
+
+def normalized_record_path(project_root: Path, config: dict[str, Any], source_id: str) -> tuple[Path, str]:
+    normalize = load_sibling_module("normalize_sources")
+    root, normalized_rel = normalized_root(project_root, config)
+    path = root / f"{normalize.safe_source_id(source_id)}.md"
+    return path, f"{normalized_rel}/{path.name}"
+
+
+def structured_view_path(project_root: Path, config: dict[str, Any], source_id: str) -> tuple[Path, str]:
+    """Where the structured-view sidecar for ``source_id`` must live, and its workspace label.
+
+    The naming rule belongs to `_structured_view`, which is also what reads the file, so a
+    sidecar can never be looked for in one place and validated in another.
+    """
+    root, normalized_rel = normalized_root(project_root, config)
+    path = _structured_view.sidecar_path(root, source_id)
     return path, f"{normalized_rel}/{path.name}"
 
 
@@ -259,46 +351,206 @@ def resolve_anchor(
     return section_anchor(body, location_hint)
 
 
-def grounding_entries(frontmatter: dict[str, Any], slug: str) -> list[dict[str, str]]:
+def _grounding_invalid(slug: str, index: int, message: str, **details: Any) -> VerifyQuotesError:
+    """A fatal entry-shape refusal naming the entry that caused it."""
+    return VerifyQuotesError(
+        "GROUNDING_INVALID",
+        f"Question {slug} grounding[{index}] {message}",
+        details={"slug": slug, "index": index, **details},
+    )
+
+
+def anchor_entry_fields(item: dict[str, Any], slug: str, index: int) -> dict[str, str]:
+    """Validate one entry's ``anchor`` block and canonicalize it.
+
+    ``expected`` is canonicalized to a string here, at load, because YAML types an
+    unquoted ``expected: 23.99`` as a float and an unquoted ``expected: true`` as a bool.
+    Downstream — comparison, reporting, and the frontmatter writer — then handles exactly
+    one type, and the entry means the same thing however its author happened to quote it.
+
+    ``pointer`` is stored as written. It is trimmed only for the emptiness check: RFC 6901
+    reference tokens may legitimately begin or end with a space, so stripping the stored
+    value could silently retarget the anchor at a neighbouring field.
+    """
+    anchor = item.get("anchor")
+    if not isinstance(anchor, dict):
+        raise _grounding_invalid(
+            slug,
+            index,
+            f"anchor must be a mapping of pointer and expected, not a {type(anchor).__name__}.",
+            field="anchor",
+            actual=type(anchor).__name__,
+        )
+    if item.get("location_hint") is not None:
+        # A location_hint anchors a quote inside the rendered body. Against a structured
+        # view it locates nothing, so accepting it would record a claim about nothing.
+        raise _grounding_invalid(
+            slug,
+            index,
+            "cannot carry location_hint beside anchor; a location_hint locates a quote in the record body.",
+            field="location_hint",
+        )
+    unknown = sorted(str(field) for field in anchor if field not in ANCHOR_ENTRY_FIELDS)
+    if unknown:
+        raise _grounding_invalid(
+            slug,
+            index,
+            f"anchor has unsupported key(s): {', '.join(unknown)}.",
+            field="anchor",
+            unsupported_keys=unknown,
+        )
+    pointer = anchor.get("pointer")
+    if not isinstance(pointer, str) or not pointer.strip():
+        raise _grounding_invalid(
+            slug,
+            index,
+            "anchor is missing a non-empty pointer.",
+            field="anchor.pointer",
+        )
+    expected = anchor.get("expected")
+    if expected is None or not isinstance(expected, (str, int, float, bool)):
+        raise _grounding_invalid(
+            slug,
+            index,
+            "anchor.expected must be a string, number, or boolean naming the value the cited field holds.",
+            field="anchor.expected",
+            actual=type(expected).__name__,
+        )
+    canonical = _structured_view.canonical_scalar(expected)
+    if canonical is None:  # pragma: no cover - the scalar gate above already excludes these
+        raise _grounding_invalid(
+            slug,
+            index,
+            "anchor.expected must be a scalar value.",
+            field="anchor.expected",
+            actual=type(expected).__name__,
+        )
+    return {"pointer": pointer, "expected": canonical}
+
+
+def quote_entry_fields(item: dict[str, Any], slug: str, index: int) -> dict[str, str]:
+    """Validate one entry's quote form: the quoted text and its optional body locator."""
+    fields: dict[str, str] = {}
+    quote = item.get("quote")
+    if not isinstance(quote, str) or not quote.strip():
+        raise _grounding_invalid(slug, index, "is missing non-empty quote.", field="quote")
+    fields["quote"] = quote.strip()
+    location_hint = item.get("location_hint")
+    if location_hint is not None:
+        if not isinstance(location_hint, str):
+            raise _grounding_invalid(
+                slug,
+                index,
+                "location_hint must be a string when present.",
+                field="location_hint",
+            )
+        if location_hint.strip():
+            fields["location_hint"] = location_hint.strip()
+    return fields
+
+
+def grounding_entries(frontmatter: dict[str, Any], slug: str) -> list[dict[str, Any]]:
+    """Parse a question's ``grounding`` block into validated, form-tagged entries.
+
+    Every entry names a claim, the source it cites, and exactly one form of evidence: a
+    ``quote``, checked by containment against the normalized record's body, or an
+    ``anchor``, checked by canonical equality against the record's structured view. The
+    exclusivity is the point. An entry carrying both would leave "what did this prove?"
+    to whichever check happened to run; an entry carrying neither would assert a claim
+    with nothing behind it. Both are refused here, before any evidence file is opened.
+
+    Shape violations raise the stable fatal ``GROUNDING_INVALID`` naming the entry index.
+    Anything that can only be learned by reading evidence is a per-entry result instead —
+    a bad anchor is a finding about one entry, not a malformed question page.
+    """
     raw = frontmatter.get("grounding")
     if raw is None:
         return []
     if not isinstance(raw, list):
         raise VerifyQuotesError(
             "GROUNDING_INVALID",
-            f"Question {slug} has invalid grounding: expected a list of claim/source/quote entries.",
+            f"Question {slug} has invalid grounding: expected a list of claim/source/quote or claim/source/anchor entries.",
             details={"slug": slug, "field": "grounding", "actual": type(raw).__name__},
         )
-    entries: list[dict[str, str]] = []
+    entries: list[dict[str, Any]] = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            raise VerifyQuotesError(
-                "GROUNDING_INVALID",
-                f"Question {slug} grounding[{index}] must be a mapping.",
-                details={"slug": slug, "index": index, "actual": type(item).__name__},
-            )
-        entry: dict[str, str] = {}
-        for field in ("claim", "source_id", "quote"):
+            raise _grounding_invalid(slug, index, "must be a mapping.", actual=type(item).__name__)
+        entry: dict[str, Any] = {}
+        for field in ("claim", "source_id"):
             value = item.get(field)
             if not isinstance(value, str) or not value.strip():
-                raise VerifyQuotesError(
-                    "GROUNDING_INVALID",
-                    f"Question {slug} grounding[{index}] is missing non-empty {field}.",
-                    details={"slug": slug, "index": index, "field": field},
-                )
+                raise _grounding_invalid(slug, index, f"is missing non-empty {field}.", field=field)
             entry[field] = value.strip()
-        location_hint = item.get("location_hint")
-        if location_hint is not None:
-            if not isinstance(location_hint, str):
-                raise VerifyQuotesError(
-                    "GROUNDING_INVALID",
-                    f"Question {slug} grounding[{index}] location_hint must be a string when present.",
-                    details={"slug": slug, "index": index, "field": "location_hint"},
-                )
-            if location_hint.strip():
-                entry["location_hint"] = location_hint.strip()
+        # A key present with a null value counts as absent, matching the canonical
+        # renderer: `quote:` with nothing after it is an unfinished edit, not a form.
+        has_quote = item.get("quote") is not None
+        has_anchor = item.get("anchor") is not None
+        if has_quote == has_anchor:
+            carried = "both quote and anchor" if has_quote else "neither quote nor anchor"
+            raise _grounding_invalid(
+                slug,
+                index,
+                f"carries {carried}; an entry must carry exactly one form.",
+                field="grounding",
+                forms=list(GROUNDING_FORMS),
+            )
+        if has_anchor:
+            entry["form"] = GROUNDING_FORM_ANCHOR
+            entry["anchor"] = anchor_entry_fields(item, slug, index)
+        else:
+            entry["form"] = GROUNDING_FORM_QUOTE
+            entry.update(quote_entry_fields(item, slug, index))
         entries.append(entry)
     return entries
+
+
+def count_by_form(results: Iterable[Any]) -> dict[str, int]:
+    """How many grounding entries of each form, so a workspace can measure its own migration."""
+    counts = dict.fromkeys(GROUNDING_FORMS, 0)
+    for result in results:
+        if isinstance(result, dict) and result.get("form") in counts:
+            counts[result["form"]] += 1
+    return counts
+
+
+def report_results(questions: Iterable[Any]) -> list[dict[str, Any]]:
+    """Every per-entry grounding result across a set of question reports."""
+    return [
+        result
+        for question in questions
+        if isinstance(question, dict)
+        for result in question.get("grounding", [])
+        if isinstance(result, dict)
+    ]
+
+
+def failed_results(results: Iterable[Any]) -> list[dict[str, Any]]:
+    """The per-entry results that did not verify."""
+    return [
+        result
+        for result in results
+        if isinstance(result, dict) and result.get("result") != RESULT_VERIFIED
+    ]
+
+
+def grounding_failure_error_code(results: Iterable[Any]) -> str:
+    """The fatal code that tops an envelope refusing a write over failed grounding.
+
+    ``GROUNDING_QUOTE_INVALID`` when every failure is quote-form — bit-for-bit the code
+    this refusal has always carried, which hosts switch on — and
+    ``GROUNDING_ANCHOR_INVALID`` as soon as one anchor entry failed, because a caller
+    told "a quote did not verify" about an anchor failure would look for a quote there is
+    none of. Either way the envelope carries the full failure list, so a mixed set is
+    fully enumerated whichever code names it.
+
+    Accepts either the already-failed entries or a whole grounding result list; verified
+    entries never choose the code.
+    """
+    for result in failed_results(results):
+        if result.get("form") == GROUNDING_FORM_ANCHOR:
+            return GROUNDING_ANCHOR_INVALID
+    return GROUNDING_QUOTE_INVALID
 
 
 def normalized_record_content(path: Path) -> tuple[dict[str, Any], str]:
@@ -307,12 +559,115 @@ def normalized_record_content(path: Path) -> tuple[dict[str, Any], str]:
     return frontmatter, body if frontmatter else text
 
 
-def verify_entry(project_root: Path, config: dict[str, Any], entry: dict[str, str]) -> dict[str, Any]:
+class EvidenceCache:
+    """Memo of the evidence files one verification run reads, keyed by path.
+
+    Reading a record and reading — and hashing — its structured view are facts about a
+    *source*, not about a claim. Without this, a question grounding ten claims in one
+    record re-read and re-SHA256'd that record's sidecar ten times, and the controller
+    repeated the whole thing for every answered question in the workspace on every run.
+    Sidecars are the deliberately uncapped artifact, so that cost is unbounded in exactly
+    the workspaces anchors exist for.
+
+    Nothing is weakened by memoizing: the hash binding is still enforced, once per source
+    per run instead of once per claim, and the run is short-lived — a later run re-reads
+    everything. Load failures are cached with successes on purpose, so every entry citing
+    one broken sidecar gets the same verdict rather than a verdict that depends on how
+    many entries preceded it.
+    """
+
+    def __init__(self) -> None:
+        self._records: dict[Path, tuple[dict[str, Any], str]] = {}
+        self._sidecars: dict[Path, Any] = {}
+
+    def record(self, path: Path) -> tuple[dict[str, Any], str]:
+        if path not in self._records:
+            self._records[path] = normalized_record_content(path)
+        return self._records[path]
+
+    def sidecar(self, frontmatter: dict[str, Any], path: Path) -> Any:
+        if path not in self._sidecars:
+            self._sidecars[path] = _structured_view.load_sidecar(frontmatter, path)
+        return self._sidecars[path]
+
+
+def verify_anchor_entry(
+    project_root: Path,
+    config: dict[str, Any],
+    entry: dict[str, Any],
+    cache: EvidenceCache | None = None,
+) -> dict[str, Any]:
+    """Verify one anchor entry: the cited field holds exactly the value the claim states.
+
+    The record must exist first — an anchor against an unnormalized source is the same
+    finding as a quote against one, and reuses the same result — and then the whole
+    anchor verdict is `_structured_view`'s: load the sidecar under the record's hash
+    binding, resolve the pointer, compare by canonical equality. Containment is never
+    consulted, which is exactly what distinguishes this path from the quote path.
+    """
+    source_id = entry["source_id"]
+    anchor = entry["anchor"]
+    record_path, record_label = normalized_record_path(project_root, config, source_id)
+    sidecar, sidecar_label = structured_view_path(project_root, config, source_id)
+    # Every anchor result carries the same keys, whichever way it ends: what was asked
+    # for, where it was asked, and what was found — `resolved` staying null when nothing
+    # was reached. A consumer never has to ask whether a key is there before reading it.
+    result: dict[str, Any] = {
+        "claim": entry["claim"],
+        "source_id": source_id,
+        "form": GROUNDING_FORM_ANCHOR,
+        "pointer": _structured_view.normalize_pointer(anchor["pointer"]),
+        "expected": anchor["expected"],
+        "resolved": None,
+        "normalized_record": record_label,
+        "structured_view": sidecar_label,
+        "artifacts": [record_label, sidecar_label],
+        "policy": ANCHOR_POLICY,
+    }
+    if not record_path.is_file():
+        result["result"] = RESULT_SOURCE_NOT_NORMALIZED
+        result["message"] = f"{source_id} has no normalized record at {record_label}."
+        result["remediation"] = "Normalize the cited source, then rerun grounding verification."
+        return result
+    cache = cache or EvidenceCache()
+    frontmatter, _ = cache.record(record_path)
+    # `_structured_view.resolve_anchor` is the sidecar/pointer/equality verdict, unrelated
+    # to this module's `resolve_anchor`, which locates a quote's page or section anchor.
+    # The sidecar is bound once per source and handed in; the verdict is unchanged by that.
+    resolution = _structured_view.resolve_anchor(
+        frontmatter,
+        sidecar,
+        anchor["pointer"],
+        anchor["expected"],
+        loaded=cache.sidecar(frontmatter, sidecar),
+    )
+    result["pointer"] = resolution.pointer  # the pointer the resolver actually walked
+    result["resolved"] = resolution.resolved
+    result["message"] = resolution.detail
+    if resolution.ok:
+        result["result"] = RESULT_VERIFIED
+        result["remediation"] = "No remediation required."
+        return result
+    result["result"] = resolution.result
+    result["remediation"] = ANCHOR_REMEDIATION.get(resolution.result, ANCHOR_REMEDIATION_FALLBACK)
+    return result
+
+
+def verify_entry(
+    project_root: Path,
+    config: dict[str, Any],
+    entry: dict[str, Any],
+    cache: EvidenceCache | None = None,
+) -> dict[str, Any]:
+    cache = cache or EvidenceCache()
+    if entry.get("form") == GROUNDING_FORM_ANCHOR:
+        return verify_anchor_entry(project_root, config, entry, cache)
     source_id = entry["source_id"]
     record_path, record_label = normalized_record_path(project_root, config, source_id)
     result: dict[str, Any] = {
         "claim": entry["claim"],
         "source_id": source_id,
+        "form": GROUNDING_FORM_QUOTE,
         "quote": entry["quote"],
         "location_hint": entry.get("location_hint"),
         "normalized_record": record_label,
@@ -324,7 +679,7 @@ def verify_entry(project_root: Path, config: dict[str, Any], entry: dict[str, st
         result["message"] = f"{source_id} has no normalized record at {record_label}."
         result["remediation"] = "Normalize the cited source, then rerun quote verification."
         return result
-    frontmatter, body = normalized_record_content(record_path)
+    frontmatter, body = cache.record(record_path)
     anchor_text, anchor = resolve_anchor(frontmatter, body, entry.get("location_hint"))
     result["anchor"] = anchor
     global_match = quote_match(body, entry["quote"])
@@ -364,6 +719,7 @@ def verify_question(
     *,
     frontmatter: dict[str, Any] | None = None,
     path: Path | None = None,
+    cache: EvidenceCache | None = None,
 ) -> dict[str, Any]:
     question = path or question_path(project_root, config, slug)
     if not question.is_file():
@@ -375,12 +731,15 @@ def verify_question(
     if frontmatter is None:
         frontmatter, _ = split_page(question.read_text(encoding="utf-8"))
     entries = grounding_entries(frontmatter, slug)
-    results = [verify_entry(project_root, config, entry) for entry in entries]
+    # One cache for the whole question, or the caller's when it spans several.
+    cache = cache or EvidenceCache()
+    results = [verify_entry(project_root, config, entry, cache) for entry in entries]
     all_verified = bool(results) and all(result.get("result") == RESULT_VERIFIED for result in results)
     return {
         "slug": slug,
         "question_page": workspace_relative(project_root, question),
         "grounding_count": len(results),
+        "by_form": count_by_form(results),
         "all_verified": all_verified,
         "grounding": results,
     }
@@ -397,14 +756,13 @@ def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]
             slugs.append(slug)
     if not slugs:
         raise VerifyQuotesError("SLUG_INVALID", "At least one --slug value is required.")
-    questions = [verify_question(project_root, config, slug) for slug in slugs]
+    # Shared across every question in the report: several questions commonly cite the
+    # same record, and the controller verifies the whole workspace in one call.
+    cache = EvidenceCache()
+    questions = [verify_question(project_root, config, slug, cache=cache) for slug in slugs]
     total_entries = sum(int(question.get("grounding_count", 0) or 0) for question in questions)
-    failed_entries = [
-        result
-        for question in questions
-        for result in question.get("grounding", [])
-        if isinstance(result, dict) and result.get("result") != RESULT_VERIFIED
-    ]
+    all_results = report_results(questions)
+    failed_entries = failed_results(all_results)
     missing_grounding = [question["slug"] for question in questions if not question.get("grounding")]
     return {
         "schema_version": SCHEMA_VERSION,
@@ -417,6 +775,9 @@ def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]
             "verified": total_entries - len(failed_entries),
             "failed": len(failed_entries),
             "missing_grounding": len(missing_grounding),
+            # Additive, and last: consumers that mirror this shape read the keys above by
+            # name, and a migration measurement is not worth moving one of them.
+            "by_form": count_by_form(all_results),
         },
         "overall_result": RESULT_VERIFIED if questions and not failed_entries and not missing_grounding else "not_verified",
     }
@@ -458,10 +819,11 @@ def stamp_question_verification(project_root: Path, config: dict[str, Any], slug
         frontmatter = question_claim.frontmatter_mapping(parts[0])
         report = verify_question(project_root, config, slug, frontmatter=frontmatter, path=question)
         if not report["all_verified"]:
+            failures = failed_results(report.get("grounding", []))
             raise VerifyQuotesError(
-                "GROUNDING_QUOTE_INVALID",
-                f"Question {slug} has grounding quotes that did not verify; refusing to stamp verifier metadata.",
-                details={"slug": slug},
+                grounding_failure_error_code(failures),
+                f"Question {slug} has grounding entries that did not verify; refusing to stamp verifier metadata.",
+                details={"slug": slug, "failures": failures},
             )
         frontmatter_lines, opening, rest = parts
         frontmatter_lines = set_frontmatter_scalar(frontmatter_lines, "verified_by", verified_by)
@@ -479,9 +841,13 @@ def write_verification_metadata(project_root: Path, args: argparse.Namespace, re
             details={"field": "verified_by"},
         )
     if report.get("overall_result") != RESULT_VERIFIED:
+        # A question with no grounding at all also lands here, with nothing failed to
+        # inspect; the all-quote code is what that has always reported and still is.
+        failures = failed_results(report_results(report.get("questions", [])))
         raise VerifyQuotesError(
-            "GROUNDING_QUOTE_INVALID",
-            "All grounding quotes must verify before verifier metadata is written.",
+            grounding_failure_error_code(failures),
+            "All grounding entries must verify before verifier metadata is written.",
+            details={"failures": failures},
         )
     config = load_config(project_root)
     for question in report.get("questions", []):
@@ -490,11 +856,12 @@ def write_verification_metadata(project_root: Path, args: argparse.Namespace, re
 
 
 def render_text(report: dict[str, Any]) -> str:
-    lines = ["Grounding Quote Verification", "============================", ""]
+    lines = ["Grounding Verification", "======================", ""]
     for question in report.get("questions", []):
         lines.append(f"- {question.get('slug')}: {'verified' if question.get('all_verified') else 'not_verified'}")
         for result in question.get("grounding", []):
-            lines.append(f"  - {result.get('source_id')}: {result.get('result')} - {result.get('claim')}")
+            form = result.get("form") or GROUNDING_FORM_QUOTE
+            lines.append(f"  - {result.get('source_id')} [{form}]: {result.get('result')} - {result.get('claim')}")
     return "\n".join(lines).rstrip() + "\n"
 
 

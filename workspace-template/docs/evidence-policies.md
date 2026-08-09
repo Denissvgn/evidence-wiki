@@ -66,7 +66,8 @@ Without a jurisdiction profile or a selected discovery candidate trail,
 `official_primary`, `primary_or_official`, `official_vendor`, and
 `official_domain_match` can require `manual_review`; that manual review can pass
 coverage but keeps publication readiness at `no_ship` until
-`question_resolve.py approve` records an explicit human-review approval.
+`question_resolve.py approve` or `question_resolve.py review` records an
+explicit human-review approval.
 `integrations.acquisition.web.allowed_domains` is only a transport allowlist for
 `web get`. It is not consulted as a trust signal and must not be used to make an
 official policy pass.
@@ -124,6 +125,40 @@ freshness, and identity policies are accepted by coverage-template validation
 but evaluate as `manual_review` until the domain pack adds stronger local
 automation. Undeclared namespaced IDs still fail closed with
 `COVERAGE_POLICY_UNKNOWN`.
+
+### What Happens To A `manual_review` Verdict
+
+Because every pack-namespaced policy currently evaluates to `manual_review`,
+declaring one decides how the question is resolved. Three settings control the
+consequences, and they compose:
+
+1. **Resolution.** `question_resolve.py answer --require-coverage` records
+   `status: human_review` rather than `answered`, and retains the policies that
+   demanded review in `human_review_policies` plus the clock
+   `human_review_requested_at`.
+2. **Blast radius.** `research.yml` `review.escalation_scope` decides how far
+   that reaches. Under the default `workspace`, the pending review sets the
+   workspace verdict to `attention_required` and orchestration refuses to
+   operate. Under `question`, it parks only its own question and is reported as
+   `readiness.questions_awaiting_review`, so work continues on every other
+   question. See [research-yml.md](research-yml.md) and
+   [workspace-status.md](workspace-status.md).
+3. **Recording the review.** `question_resolve.py approve` covers an
+   in-workspace reviewer; `question_resolve.py review --policy P --verdict
+   accepted --reviewed-by PRINCIPAL --review-ref REF` records a review a host
+   collected in its own approval queue, one policy at a time, with `--review-ref`
+   as the opaque pointer back to it. Publication readiness accepts both
+   identically and still refuses to ship an unreviewed answer. See
+   [question-api.md](question-api.md) and
+   [publication-readiness.md](publication-readiness.md).
+
+Scoping and external recording change *where the reviewer sits and how far one
+pending review reaches* — never whether a manual-review policy needs a human.
+Reducing how often a human is needed is a separate problem: it requires
+deterministic primitives a pack can compose instead of falling back to
+`manual_review`, which is the subject of CR-9 in
+`docs/CR/evidence-wiki-change-requests.md`. Until such an evaluator exists,
+`manual_review` remains the correct fate of a policy this package cannot decide.
 
 For `academic_method_existence`, a coverage facet may also carry
 `claim_probe` metadata when bounded arXiv and OpenAlex searches did not confirm

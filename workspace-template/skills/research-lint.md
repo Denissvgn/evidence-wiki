@@ -79,6 +79,8 @@ Category guidance:
 - `broken_link`, `broken_wikilink`, `index`, and `orphan`: restore navigation and discoverability. `broken_wikilink` flags `[[wikilinks]]` that do not resolve to a wiki note.
 - `source_manifest` and `source_status`: repair manifest shape or status values.
 - `source_missing_normalized`: run or rerun normalization.
+- `normalized_record_contract_violation`: a record produced by a tool other than this package does not match `docs/normalized-source-format.md`. Run `python3 scripts/normalize_verify.py --source-id <id> --format json` for the full list of breaches. Report it to whoever runs that normalizer and have the record re-delivered; see the fix policy below before editing it yourself.
+- `normalized_low_rendered_coverage`: the record's body renders less of its structured payload than `lint.min_rendered_coverage_ratio` asks for. Off unless a threshold is configured, and LOW when it fires: capping a long series is a legitimate rendering choice. The un-rendered part is still citable, just not quotable, so treat it as a signal about which facets a claim cannot quote — not as a defect to repair.
 - `normalized_missing_source_note`: create source notes before integration.
 - `integrated_missing_citation`: cite integrated sources from broader wiki pages or lower their status.
 - `normalized_orphan` and `source_note_unknown_source`: reconcile stale or unknown source IDs.
@@ -106,6 +108,7 @@ Review before fixing:
 
 Do not fix:
 
+- normalized records produced by an external normalizer — anything whose `normalizer.name` is not `normalize_sources.py` or `manual`. Hand-editing one makes it claim a conformance its producer did not give it, and for a kind this package does not normalize the edit sticks, hiding the producer's bug instead of surfacing it. Report the violation and have the record re-delivered.
 - raw source files,
 - evidence content without checking the normalized record or source note,
 - substantive research disagreements by choosing one side without review.

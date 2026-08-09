@@ -27,6 +27,8 @@ NORMALIZE = load_script_module("coverage_normalize", "normalize_sources.py")
 QUERY = load_script_module("coverage_query_index", "query_index.py")
 LINT = load_script_module("coverage_lint", "lint.py")
 STATUS = load_script_module("coverage_workspace_status", "workspace_status.py")
+CONTRACT = load_script_module("coverage_normalized_contract", "_normalized_contract.py")
+STRUCTURED_VIEW = load_script_module("coverage_structured_view", "_structured_view.py")
 
 
 WORKSPACE_CONFIG = """\
@@ -381,6 +383,412 @@ class TableNormalizationTests(NormalizationCoverageBase):
             payload = json.loads(stdout.getvalue())
             self.assertGreaterEqual(payload["result_count"], 1)
             self.assertIn("benchmark-scores", payload["results"][0]["path"])
+
+
+class TableStructuredViewTests(NormalizationCoverageBase):
+    """CR-7 T13: the structured-view sidecar the native tabular path emits.
+
+    `normalize_table_record` already streams every row through `csv.reader` and then
+    keeps 20 of them, cells ellipsized at 80 characters, for the quotable body. For a
+    CSV price history that leaves nearly every row citable but permanently unquotable.
+    These tests are about the uncapped complement: full cells, every row, addressed by
+    pointer — and about the tables that are refused rather than half-rendered, since a
+    sidecar that looks complete and is not would let an anchor cite evidence the file
+    never held.
+
+    Driven through `main` rather than `normalize_record`, because the sidecar is written
+    by `write_normalized_source`; the base helper stops short of it.
+    """
+
+    PRICE_ROWS = 60
+    ANCHOR_ROW = 41  # Past TABLE_SAMPLE_ROWS: unquotable in the body, anchorable here.
+
+    def price_history_csv(self, rows: int = PRICE_ROWS) -> str:
+        lines = ["date,price,seller"]
+        for index in range(rows):
+            lines.append(f"2026-08-{index % 28 + 1:02d},{20 + index / 100:.2f},Seller {index}")
+        return "\n".join(lines) + "\n"
+
+    def deliver(self, workspace: Path, name: str, text: str) -> None:
+        (workspace / "raw" / "data" / name).write_text(text, encoding="utf-8")
+
+    def normalize(self, workspace: Path, *extra: str) -> tuple[int, dict, str]:
+        self.run_inventory(workspace)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = NORMALIZE.main(
+                ["--project-root", str(workspace), "--all", "--format", "json", *extra]
+            )
+        return code, json.loads(stdout.getvalue()), stderr.getvalue()
+
+    def table_record(self, workspace: Path) -> dict:
+        records = [
+            json.loads(line)
+            for line in (workspace / "sources" / "manifest.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        return self.record_by_kind(records, "table")
+
+    def record_path(self, workspace: Path) -> Path:
+        return NORMALIZE.normalized_output_path_for_record(
+            self.table_record(workspace), workspace / "sources" / "normalized"
+        )
+
+    def sidecar_path(self, workspace: Path) -> Path:
+        return CONTRACT.expected_structured_path(
+            workspace / "sources" / "normalized", self.table_record(workspace)["id"]
+        )
+
+    def frontmatter(self, workspace: Path) -> dict:
+        return NORMALIZE.read_output_frontmatter(self.record_path(workspace))
+
+    def contract_violations(self, workspace: Path) -> list:
+        manifest = {record["id"]: record for record in [self.table_record(workspace)]}
+        return CONTRACT.validate_record(
+            self.record_path(workspace),
+            manifest_by_id=manifest,
+            normalized_root=workspace / "sources" / "normalized",
+        )
+
+    def skip_warnings(self, frontmatter: dict) -> list[str]:
+        return [
+            warning
+            for warning in frontmatter.get("parse_warnings") or []
+            if "no structured view emitted" in warning
+        ]
+
+    def assert_no_sidecar(self, workspace: Path, reason: str) -> None:
+        """A refused table: no bytes, no binding, a warning naming why, body intact."""
+        code, _, stderr = self.normalize(workspace)
+        sidecar_exists = self.sidecar_path(workspace).exists()
+        frontmatter = self.frontmatter(workspace)
+        body = self.record_path(workspace).read_text()
+        violations = self.contract_violations(workspace)
+        warnings = self.skip_warnings(frontmatter)
+
+        self.assertEqual(0, code, stderr)
+        self.assertFalse(sidecar_exists, f"a sidecar was written for a table refused as: {reason}")
+        self.assertIn("structured_view", frontmatter)
+        self.assertIsNone(frontmatter["structured_view"])
+        self.assertEqual(1, len(warnings), frontmatter.get("parse_warnings"))
+        self.assertIn(reason, warnings[0])
+        # Degrades to exactly today's behaviour: the quotable body is untouched.
+        self.assertIn("Sample rows (first", body)
+        self.assertEqual([], violations, [violation.message for violation in violations])
+
+    def test_a_clean_csv_emits_a_sidecar_bound_to_its_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "price-history.csv", self.price_history_csv())
+
+            code, _, stderr = self.normalize(workspace)
+            sidecar = self.sidecar_path(workspace)
+            data = sidecar.read_bytes() if sidecar.is_file() else None
+            frontmatter = self.frontmatter(workspace)
+            declared = CONTRACT.expected_structured_path(
+                workspace / "sources" / "normalized", self.table_record(workspace)["id"]
+            )
+            violations = self.contract_violations(workspace)
+
+        self.assertEqual(0, code, stderr)
+        self.assertIsNotNone(data, f"no sidecar was written for a clean CSV: {stderr}")
+        document = json.loads(data)
+        self.assertEqual(["date", "price", "seller"], document["columns"])
+        self.assertEqual(self.PRICE_ROWS, len(document["rows"]))
+        self.assertEqual({"date": "2026-08-01", "price": "20.00", "seller": "Seller 0"}, document["rows"][0])
+        # The record binds these exact bytes, so the writer's serialization is the one a
+        # reader must be able to reproduce.
+        self.assertEqual(NORMALIZE.render_structured_view(document), data)
+        self.assertEqual(declared.name, Path(frontmatter["structured_view"]["path"]).name)
+        self.assertFalse(Path(frontmatter["structured_view"]["path"]).is_absolute())
+        self.assertEqual(
+            STRUCTURED_VIEW.content_hash(data),
+            frontmatter["structured_view"]["content_hash"],
+        )
+        self.assertEqual([], violations, [violation.message for violation in violations])
+
+    def test_an_anchor_resolves_to_a_row_past_the_sample_cap(self):
+        """The payoff: a row the rendered body never shows is still citable.
+
+        Row 41 is past `TABLE_SAMPLE_ROWS`, so no quote could ever reach it — the body
+        contains 20 sample rows and a count. The anchor addresses it directly.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "price-history.csv", self.price_history_csv())
+            self.normalize(workspace)
+
+            frontmatter = self.frontmatter(workspace)
+            sidecar = self.sidecar_path(workspace)
+            body = self.record_path(workspace).read_text()
+            expected_price = f"{20 + self.ANCHOR_ROW / 100:.2f}"
+            hit = STRUCTURED_VIEW.resolve_anchor(
+                frontmatter, sidecar, f"rows/{self.ANCHOR_ROW}/price", expected_price
+            )
+            miss = STRUCTURED_VIEW.resolve_anchor(
+                frontmatter, sidecar, f"rows/{self.ANCHOR_ROW}/price", "999.99"
+            )
+
+        self.assertNotIn(f"Seller {self.ANCHOR_ROW} ", body)
+        self.assertNotIn(f"| Seller {self.ANCHOR_ROW} |", body)
+        self.assertTrue(hit.ok, hit.detail)
+        self.assertFalse(miss.ok)
+        self.assertEqual(STRUCTURED_VIEW.RESULT_ANCHOR_VALUE_MISMATCH, miss.result)
+
+    def test_cell_values_are_never_type_coerced(self):
+        """The property canonical equality depends on.
+
+        CSV is untyped, so the sidecar renders what the file literally holds. Inferring
+        would turn `007` into the number 7 and `true` into a boolean, and canonical
+        equality would then compare an anchor's `expected` against a value the file does
+        not contain — `"007"` would stop matching, and `expected: "1"` would start
+        matching a cell that reads `true`.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(
+                workspace,
+                "typed-looking.csv",
+                "sku,flag,count,empty,scientific\n"
+                "007,true,3,,1e3\n"
+                "080,false,0,,NaN\n",
+            )
+            self.normalize(workspace)
+            document = json.loads(self.sidecar_path(workspace).read_bytes())
+            frontmatter = self.frontmatter(workspace)
+            sidecar = self.sidecar_path(workspace)
+            sku = STRUCTURED_VIEW.resolve_anchor(frontmatter, sidecar, "rows/0/sku", "007")
+
+        self.assertEqual(
+            {"sku": "007", "flag": "true", "count": "3", "empty": "", "scientific": "1e3"},
+            document["rows"][0],
+        )
+        self.assertEqual(
+            {"sku": "080", "flag": "false", "count": "0", "empty": "", "scientific": "NaN"},
+            document["rows"][1],
+        )
+        for row in document["rows"]:
+            for value in row.values():
+                self.assertIsInstance(value, str)
+        self.assertTrue(sku.ok, sku.detail)
+
+    def test_sidecar_cells_are_not_capped_the_way_rendered_cells_are(self):
+        """The body is capped, the sidecar is not — that is the whole point.
+
+        `TABLE_MAX_CELL_CHARS` lives in `escape_table_cell`, a render-time concession to
+        a readable Markdown table. Applying it here would let an anchor's `expected`
+        match an ellipsis of the evidence rather than the evidence.
+        """
+        long_cell = "L" + "o" * (NORMALIZE.TABLE_MAX_CELL_CHARS * 2) + "ng"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "wide-cells.csv", f"note,price\n{long_cell},1.00\n")
+            self.normalize(workspace)
+            document = json.loads(self.sidecar_path(workspace).read_bytes())
+            body = self.record_path(workspace).read_text()
+
+        self.assertEqual(long_cell, document["rows"][0]["note"])
+        self.assertGreater(len(long_cell), NORMALIZE.TABLE_MAX_CELL_CHARS)
+        self.assertNotIn(long_cell, body)
+        self.assertIn("…", body)
+
+    def test_the_tsv_delimiter_path_emits_the_same_shape(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(
+                workspace,
+                "quarters.tsv",
+                "quarter\trevenue\tregion\n"
+                "2026Q1\t18400\tEMEA\n"
+                "2026Q2\t19750\tAPAC\n",
+            )
+            self.normalize(workspace)
+            document = json.loads(self.sidecar_path(workspace).read_bytes())
+            body = self.record_path(workspace).read_text()
+            frontmatter = self.frontmatter(workspace)
+            anchor = STRUCTURED_VIEW.resolve_anchor(
+                frontmatter, self.sidecar_path(workspace), "rows/1/revenue", "19750"
+            )
+
+        self.assertIn("Delimiter: tab", body)
+        self.assertEqual(["quarter", "revenue", "region"], document["columns"])
+        self.assertEqual({"quarter": "2026Q2", "revenue": "19750", "region": "APAC"}, document["rows"][1])
+        self.assertTrue(anchor.ok, anchor.detail)
+
+    def test_a_ragged_table_emits_no_sidecar_and_says_why(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(
+                workspace,
+                "ragged.csv",
+                "col_a,col_b,col_c\n1,2,3\n4,5\n6,7,8,9\n",
+            )
+            self.assert_no_sidecar(workspace, "2 row(s) do not match the 3-column header")
+
+    def test_a_duplicate_header_emits_no_sidecar_and_says_why(self):
+        # `rows/0/price` would be ambiguous: the second column would silently win, and
+        # the anchor would cite a value no reader can locate in the file.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "twice-priced.csv", "date,price,price\nx,1.00,2.00\n")
+            self.assert_no_sidecar(workspace, "the header repeats column name(s): price")
+
+    def test_an_empty_header_cell_emits_no_sidecar_and_says_why(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "unnamed-column.csv", "date, ,price\nx,y,1.00\n")
+            self.assert_no_sidecar(workspace, "the header has an empty column name")
+
+    def test_a_truncated_read_emits_no_sidecar_and_says_why(self):
+        """The honest-caps argument: the sidecar inherits the 5 MB read ceiling.
+
+        Every row past the ceiling is invisible to the parse, so a sidecar built from
+        what was read would look complete and number its rows as if nothing were
+        missing. Refusing is how the cap stays honest instead of silently partial.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            row = "value-a,value-b,value-c\n"
+            rows_needed = NORMALIZE.TABLE_MAX_BYTES // len(row) + 10
+            with (workspace / "raw" / "data" / "huge.csv").open("w") as handle:
+                handle.write("col_one,col_two,col_three\n")
+                for _ in range(rows_needed):
+                    handle.write(row)
+
+            self.assert_no_sidecar(workspace, "read ceiling")
+
+    def test_the_emission_decision_refuses_by_default(self):
+        """No header seen is a refusal, not an empty table.
+
+        The parse cannot normally end without a header, but the guarantee has to hold on
+        the paths nobody reached: a decision that defaults to "emit" would answer a
+        pointer with `columns: []` for a file whose columns were simply never read.
+        Checked directly because reaching this state through a CSV is the hard part.
+        """
+        no_header = NORMALIZE.table_structured_skip_reason([], NORMALIZE.table_header_problem([]), False, 0)
+        good_header = NORMALIZE.table_structured_skip_reason(
+            ["date", "price"], NORMALIZE.table_header_problem(["date", "price"]), False, 0
+        )
+
+        self.assertIsNotNone(no_header)
+        self.assertIn("no header row", no_header)
+        self.assertIsNone(good_header)
+        # Truncation outranks a good header: the ceiling is inherited, not escapable.
+        self.assertIn(
+            "read ceiling",
+            NORMALIZE.table_structured_skip_reason(["date"], None, True, 0),
+        )
+
+    def test_a_leading_blank_line_does_not_disqualify_the_real_header(self):
+        """The header branch runs twice; a verdict from the first must not carry over.
+
+        A stale refusal here would not skip the sidecar — `table_structured_skip_reason`
+        would still see the real header and emit — it would emit `rows: []` for a table
+        that has rows. That is the half-truthful sidecar the whole unit refuses.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "leading-blank.csv", "\ndate,price\n2026-08-01,23.99\n")
+            self.normalize(workspace)
+            document = json.loads(self.sidecar_path(workspace).read_bytes())
+
+        self.assertEqual(["date", "price"], document["columns"])
+        self.assertEqual([{"date": "2026-08-01", "price": "23.99"}], document["rows"])
+
+    def test_a_changed_raw_fingerprint_rewrites_the_sidecar_and_its_digest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "price-history.csv", "date,price\n2026-08-01,23.99\n")
+            self.normalize(workspace)
+            before = self.frontmatter(workspace)["structured_view"]["content_hash"]
+
+            self.deliver(workspace, "price-history.csv", "date,price\n2026-08-01,24.99\n")
+            code, _, stderr = self.normalize(workspace)
+
+            after = self.frontmatter(workspace)["structured_view"]["content_hash"]
+            data = self.sidecar_path(workspace).read_bytes()
+            document = json.loads(data)
+            violations = self.contract_violations(workspace)
+
+        self.assertEqual(0, code, stderr)
+        self.assertNotEqual(before, after)
+        self.assertEqual("24.99", document["rows"][0]["price"])
+        self.assertEqual(STRUCTURED_VIEW.content_hash(data), after)
+        self.assertEqual([], violations, [violation.message for violation in violations])
+
+    def test_an_unchanged_table_reproduces_the_same_sidecar_bytes(self):
+        # The binding is by digest, so a serialization that varied between runs would
+        # invalidate a record nothing had a reason to rewrite.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "price-history.csv", self.price_history_csv(rows=5))
+            self.normalize(workspace)
+            first = self.sidecar_path(workspace).read_bytes()
+            self.normalize(workspace, "--force")
+            second = self.sidecar_path(workspace).read_bytes()
+            digest = self.frontmatter(workspace)["structured_view"]["content_hash"]
+
+        self.assertEqual(first, second)
+        self.assertEqual(STRUCTURED_VIEW.content_hash(second), digest)
+
+    def test_a_table_that_stops_qualifying_loses_its_sidecar(self):
+        """The removal direction, which would otherwise leave an orphan nothing collects.
+
+        A sidecar no record declares is a contract violation and a file every consumer
+        here is blind to — they all glob `*.md`. When the source changes into something
+        unaddressable, the record losing its binding has to take the file with it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "price-history.csv", "date,price\n2026-08-01,23.99\n")
+            self.normalize(workspace)
+            self.assertTrue(self.sidecar_path(workspace).is_file())
+
+            self.deliver(workspace, "price-history.csv", "date,price\n2026-08-01,23.99,extra\n")
+            code, _, stderr = self.normalize(workspace)
+
+            sidecar_exists = self.sidecar_path(workspace).exists()
+            frontmatter = self.frontmatter(workspace)
+            warnings = self.skip_warnings(frontmatter)
+            violations = self.contract_violations(workspace)
+
+        self.assertEqual(0, code, stderr)
+        self.assertFalse(sidecar_exists, "a stale sidecar outlived the binding that declared it")
+        self.assertIsNone(frontmatter["structured_view"])
+        self.assertEqual(1, len(warnings), frontmatter.get("parse_warnings"))
+        self.assertEqual([], violations, [violation.message for violation in violations])
+
+    def test_a_record_written_before_sidecars_regenerates_to_gain_one(self):
+        """`missing_structured_view_key` already covers `table_text`.
+
+        A tabular record from before the field existed would otherwise stay
+        `skipped_existing` forever and never gain the view an anchor resolves against.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.deliver(workspace, "price-history.csv", "date,price\n2026-08-01,23.99\n")
+            self.normalize(workspace)
+
+            # Rewind the record to its pre-CR-7 shape: no key, no sidecar.
+            record_path = self.record_path(workspace)
+            record_path.write_text(
+                "\n".join(
+                    line
+                    for line in record_path.read_text().split("\n")
+                    if not line.startswith("structured_view:")
+                )
+            )
+            self.sidecar_path(workspace).unlink()
+            self.assertNotIn("structured_view", self.frontmatter(workspace))
+
+            code, _, stderr = self.normalize(workspace)
+            sidecar = self.sidecar_path(workspace)
+            data = sidecar.read_bytes() if sidecar.is_file() else None
+            frontmatter = self.frontmatter(workspace)
+
+        self.assertEqual(0, code, stderr)
+        self.assertIsNotNone(data, f"regeneration did not gain the structured view: {stderr}")
+        self.assertEqual(STRUCTURED_VIEW.content_hash(data), frontmatter["structured_view"]["content_hash"])
 
 
 class NeedsOcrDetectionTests(NormalizationCoverageBase):

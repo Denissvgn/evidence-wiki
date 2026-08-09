@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import sys
 import tarfile
@@ -40,6 +41,9 @@ ANSWER_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-answer.md
 SCOUT_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-scout.md"
 RUN_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-run.md"
 RESEARCH_ACQUIRE_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-acquire.md"
+DELEGATED_ACQUIRE_SKILL = (
+    REPO_ROOT / "workspace-template" / "skills" / "research-acquire-delegated.md"
+)
 RESEARCH_DISCOVER_SKILL = REPO_ROOT / "workspace-template" / "skills" / "research-discover.md"
 JURISDICTIONS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "discovery" / "jurisdictions.yml"
 LEGAL_RESULTS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "discovery" / "legal-search-results.jsonl"
@@ -207,6 +211,17 @@ class DocumentedWorkflowTests(unittest.TestCase):
         )
         return answer
 
+    def documented_yaml_block(self, document: str, needle: str) -> str:
+        """The documented ``grounding:`` block, taken from the fence that contains ``needle``.
+
+        Sliced from the fence rather than restated here: a copy in the test would let the
+        published bytes drift while the assertion kept passing.
+        """
+        for block in re.findall(r"```yaml\n(.*?)```", document, re.DOTALL):
+            if needle in block:
+                return block[block.index("grounding:") :].rstrip("\n")
+        raise AssertionError(f"no documented yaml block contains {needle!r}")
+
     def test_documented_validation_sequence_writes_manifest_before_normalization_dry_run(self):
         readme = README.read_text()
         readiness = READINESS.read_text()
@@ -305,7 +320,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
             self.assertIn(expected, handoff)
         for expected in (
             "--require-grounding",
-            "`claim`, `source_id`, `quote`",
+            "`claim`, `source_id`, and exactly **one** form",
             "retrieved bytes",
             "GROUNDING_QUOTE_INVALID",
         ):
@@ -318,6 +333,140 @@ class DocumentedWorkflowTests(unittest.TestCase):
             "source_not_normalized",
         ):
             self.assertIn(expected, verify_skill)
+
+    def test_structured_anchor_grounding_contract_is_documented(self):
+        """Anchor form is only usable if its rules are published where authors look."""
+        question_api = QUESTION_API_DOC.read_text()
+        answer_skill = ANSWER_SKILL.read_text()
+        verify_skill = VERIFY_SKILL.read_text()
+        record_format = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
+        research_yml = RESEARCH_YML_DOC.read_text()
+
+        # Prose assertions run against a whitespace-collapsed copy: where a sentence happens
+        # to wrap is an editing accident, and a test that fails on a reflow trains people to
+        # stop reading it.
+        question_api_prose = " ".join(question_api.split())
+        for expected in (
+            "hosts must stop editing `grounding` by hand",
+            "is checked by **equality**",
+        ):
+            self.assertIn(expected, question_api_prose)
+        self.assertIn('`"007"` stays `"007"`', " ".join(record_format.split()))
+
+        for expected in (
+            # The form itself, and the two write paths that replace hand-editing.
+            "`anchor`",
+            "`pointer`",
+            "`expected`",
+            "RFC 6901",
+            "equality, never containment",
+            "grounding set",
+            "--grounding-file",
+            "verification: not_performed",
+            "`grounding: []`",
+            # The stable machine surfaces a host switches on.
+            "GROUNDING_ANCHOR_INVALID",
+            "GROUNDING_FILE_INVALID",
+            "structured_view_missing",
+            "structured_view_corrupt",
+            "anchor_pointer_not_found",
+            "anchor_target_not_scalar",
+            "anchor_value_mismatch",
+            "structured_anchor_evidence",
+            "retained_quote_evidence_or_structured_anchor_evidence",
+            "by_form",
+            "grounding_entries_quote",
+            "grounding_entries_anchor",
+        ):
+            self.assertIn(expected, question_api)
+        for expected in ("`anchor`", "grounding set", "GROUNDING_ANCHOR_INVALID"):
+            self.assertIn(expected, answer_skill)
+        for expected in ("anchor_value_mismatch", "structured_view_missing"):
+            self.assertIn(expected, verify_skill)
+        for expected in (
+            "## Structured View Sidecar",
+            ".structured.json",
+            "content_hash",
+            "NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID",
+            "with_structured_view",
+            # The native tabular emission and its fail-closed rule.
+            '"columns"',
+            "rows/41/price",
+            "fail-closed",
+        ):
+            self.assertIn(expected, record_format)
+        # CR-7 adds no configuration; say so where an operator would go looking for a knob.
+        self.assertIn("Structured-view sidecars need no configuration.", research_yml)
+
+    def test_documented_grounding_write_path_produces_the_documented_bytes(self):
+        """The canonical serialization in question-api.md is what the shipped writer emits.
+
+        Documentation about byte-exact output is only true if it is executed: this runs the
+        documented `grounding set` command over the documented file shape and diffs the
+        resulting frontmatter block against the block the doc publishes as normative.
+        """
+        question_api = QUESTION_API_DOC.read_text()
+        canonical = self.documented_yaml_block(question_api, "grounding:\n  - claim: ")
+        documented_command = (
+            "python3 scripts/question_resolve.py --project-root ROOT grounding set \\\n"
+            "  --slug SLUG --from-file grounding.yml --agent-id agent-a --format json"
+        )
+        self.assertIn(documented_command, question_api)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(
+                root,
+                [{"id": "supplier-price", "question": "What is the supplier price?", "priority": "high"}],
+            )
+            anchor_source = "data--keepa--b0abc123"
+            quote_source = "web:vendor-official-product-spec"
+            self.seed_manifest_source(target, anchor_source)
+            manifest = target / "sources" / "manifest.jsonl"
+            with manifest.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "id": quote_source,
+                            "kind": "markdown",
+                            "raw_paths": ["raw/papers/bench-survey.md"],
+                            "status": "normalized",
+                            "detected_at": "2026-06-19T00:00:00Z",
+                        }
+                    )
+                    + "\n"
+                )
+
+            grounding_file = root / "grounding.yml"
+            grounding_file.write_text(canonical + "\n", encoding="utf-8")
+
+            code, payload, stderr = self.run_json_script(
+                QUESTION_RESOLVE,
+                [
+                    "--project-root",
+                    str(target),
+                    "grounding",
+                    "set",
+                    "--slug",
+                    "supplier-price",
+                    "--from-file",
+                    str(grounding_file),
+                    "--agent-id",
+                    "agent-a",
+                    "--allow-unclaimed",
+                    "--format",
+                    "json",
+                ],
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("grounding set", payload["action"])
+            self.assertEqual(2, payload["grounding_count"])
+            self.assertEqual({"quote": 1, "anchor": 1}, payload["by_form"])
+            # The doc states the envelope says it verified nothing; the envelope must.
+            self.assertEqual("not_performed", payload["verification"])
+
+            page = (target / "wiki" / "questions" / "supplier-price.md").read_text(encoding="utf-8")
+            self.assertIn(canonical, page)
 
     def test_coverage_status_lint_and_export_contracts_are_documented(self):
         coverage = COVERAGE_DOC.read_text()
@@ -515,6 +664,143 @@ class DocumentedWorkflowTests(unittest.TestCase):
         self.assertIn("workspace-template/docs/acquisition.md", readme)
         self.assertIn("docs/acquisition.md", template_readme)
 
+    def test_every_skill_a_work_order_can_name_ships_and_is_a_distribution_anchor(self):
+        # The controller writes a skill id into each work order; a distribution missing
+        # that file hands a worker — or an external acquirer — a dangling pointer to its
+        # own playbook. This keeps the required-asset manifest in step with the routes.
+        import re as _re
+
+        from evidence_wiki.resources import REQUIRED_STARTER_ASSETS
+
+        controller = (
+            REPO_ROOT / "workspace-template" / "scripts" / "orchestration_controller.py"
+        ).read_text(encoding="utf-8")
+        named = set(_re.findall(r'^\s*skill = "([a-z0-9-]+)"', controller, _re.MULTILINE))
+        self.assertIn("research-acquire-delegated", named, "the delegated route lost its skill id")
+
+        for skill_id in sorted(named):
+            with self.subTest(skill=skill_id):
+                path = REPO_ROOT / "workspace-template" / "skills" / f"{skill_id}.md"
+                self.assertTrue(path.is_file(), f"{skill_id} is named by a work order but has no skill file")
+                self.assertIn(f"skills/{skill_id}.md", REQUIRED_STARTER_ASSETS)
+
+    def test_delegated_acquire_skill_documents_the_external_acquirer_loop(self):
+        self.assertTrue(DELEGATED_ACQUIRE_SKILL.is_file(), "delegated acquire skill is missing")
+
+        skill = DELEGATED_ACQUIRE_SKILL.read_text(encoding="utf-8")
+        for expected in (
+            "## Use When",
+            "Inputs:",
+            "## Operating Rules",
+            "## Workflow",
+            "## Outcome Semantics",
+            "## Completion Checklist",
+            "acquisition_mode: delegated",
+            "python3 scripts/source_requests.py list --status open --format json",
+            "python3 scripts/source_inventory.py --report",
+            "python3 scripts/normalize_sources.py --all",
+            "python3 scripts/source_requests.py fulfill --request-id",
+            "python3 scripts/source_requests.py record-attempt-failure",
+            "python3 scripts/question_resolve.py reopen --slug",
+            "docs/source-delivery.md",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, skill)
+
+        collapsed = re.sub(r"\s+", " ", skill)
+        # The three things an acquirer most easily gets wrong, stated outright.
+        self.assertIn("exactly one of two durable outcomes", collapsed)
+        self.assertIn("partial** batch is still `completed`", collapsed)
+
+        # Asserted inside the Outcome Semantics section, not anywhere in the file: the
+        # completion checklist restates these in passing, so a whole-file search would
+        # stay green even if the definitions themselves were gutted.
+        semantics = re.sub(
+            r"\s+", " ", skill.split("## Outcome Semantics", 1)[1].split("## Completion Checklist", 1)[0]
+        )
+        self.assertIn("nothing durable changed", semantics)
+        self.assertIn("Reserve `failed` for", semantics)
+        self.assertIn("Never claim terminal `blocked_on_sources`", semantics)
+
+        # It must not instruct the acquirer to drive the workspace's provider layer.
+        # Naming those tools to contrast against them is the point of the orientation
+        # paragraph, so this checks for invocations rather than mentions.
+        for absent in (
+            "python3 scripts/fetch_sources.py",
+            "python3 scripts/discover_sources.py",
+            "plan-fetch --request-id",
+        ):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, skill)
+        self.assertIn("This is not `research-acquire`", skill)
+
+    def test_delivery_contract_points_at_the_delegated_acquirer_playbook(self):
+        delivery = SOURCE_DELIVERY_DOC.read_text(encoding="utf-8")
+        self.assertIn("../skills/research-acquire-delegated.md", delivery)
+        self.assertIn("orchestration.acquisition: delegated", delivery)
+
+    def test_delivery_contract_states_request_id_is_mandatory_under_delegation(self):
+        # The sidecar's request_id is the only link between a delivered artifact and the
+        # request it fulfils when there is no candidate id, so a delegated delivery that
+        # omits it is refused at submission. The contract has to say so where an
+        # implementer reads the field, not only in the orchestration doc.
+        delivery = re.sub(r"\s+", " ", SOURCE_DELIVERY_DOC.read_text(encoding="utf-8"))
+
+        self.assertIn("`request_id` stops being optional", delivery)
+        self.assertIn("required for delegated acquisition", delivery)
+        self.assertIn("ORCHESTRATION_POSTCONDITION_FAILED", delivery)
+
+    def test_delegated_acquisition_is_documented_where_hosts_look(self):
+        orchestration = re.sub(r"\s+", " ", ORCHESTRATION_DOC.read_text(encoding="utf-8"))
+
+        self.assertIn("## Delegated Acquisition", ORCHESTRATION_DOC.read_text(encoding="utf-8"))
+        # The declaration, and the property that keeps it from being a provider grant.
+        self.assertIn("acquirer_agent_id: autoseller-orchestrator", orchestration)
+        self.assertIn("Delegation is not a provider grant", orchestration)
+        # The three result rules an acquirer most easily gets wrong.
+        self.assertIn("fulfilment **or** a recorded attempt failure", orchestration)
+        self.assertIn("batch is therefore `completed`", orchestration)
+        self.assertIn("`blocked` means the attempt changed nothing durable", orchestration)
+        # Retry semantics and the gate.
+        self.assertIn("scoped to the current session", orchestration)
+        self.assertIn("SOURCE_REQUEST_FULFILL_DELEGATED", orchestration)
+        self.assertIn("QUESTION_REOPEN_DELEGATED", orchestration)
+        self.assertIn("research-acquire-delegated.md", orchestration)
+
+    def test_the_delegated_terminal_reason_prefix_is_published_verbatim(self):
+        # A host matches this string to tell "the acquirer kept failing" from the other
+        # reasons a session ends blocked_on_sources, so the doc and the controller
+        # constant must agree character for character.
+        controller = load_script_module(
+            "documented_workflows_controller",
+            REPO_ROOT / "workspace-template" / "scripts" / "orchestration_controller.py",
+        )
+        prefix = controller.DELEGATED_EXHAUSTED_TERMINAL_REASON
+
+        for doc in (ORCHESTRATION_DOC, HANDOFF_DOC):
+            with self.subTest(doc=doc.name):
+                self.assertIn(prefix, re.sub(r"\s+", " ", doc.read_text(encoding="utf-8")))
+
+    def test_the_handoff_publishes_the_delegated_wire_fields(self):
+        handoff = re.sub(r"\s+", " ", HANDOFF_DOC.read_text(encoding="utf-8"))
+
+        for field in ("`acquisition_mode`", "`assigned_agent_id`", "`max_attempts_per_request`"):
+            with self.subTest(field=field):
+                self.assertIn(field, handoff)
+        # The distinction a host must not collapse.
+        self.assertIn("being addressed does not grant the right to drive the protocol", handoff)
+        self.assertIn("exhausted_requests", handoff)
+
+    def test_the_changelog_frames_the_delegated_acquisition_change(self):
+        changelog = re.sub(r"\s+", " ", (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+
+        self.assertIn("external acquirer", changelog)
+        # Spelled as the YAML block a reader would copy, not the dotted form used in prose.
+        self.assertIn("orchestration: acquisition: delegated", changelog)
+        # The problem it removes, stated so a reader knows why the feature exists.
+        self.assertIn("no work order accounts for", changelog)
+        self.assertIn("`acquisition: providers` remains the default", changelog)
+
     def test_research_acquire_skill_documents_safe_fetch_loop(self):
         self.assertTrue(RESEARCH_ACQUIRE_SKILL.is_file(), "research-acquire skill is missing")
 
@@ -581,6 +867,71 @@ class DocumentedWorkflowTests(unittest.TestCase):
                 self.assertIn("PDF-only degradation", text)
                 self.assertIn("verify_quotes.py --slug <slug> --write", text)
         self.assertIn("methods.latex", acquisition_doc)
+
+    def test_normalized_source_format_is_a_versioned_public_contract(self):
+        normalized_format_doc = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
+
+        self.assertIn("versioned public contract", normalized_format_doc)
+        self.assertIn("normalized_format: 1", normalized_format_doc)
+        # An external writer must be able to learn the rule that applies to it: declare
+        # the version; the absent-is-legacy allowance is not a way out.
+        self.assertIn("An externally written record must declare `normalized_format`", normalized_format_doc)
+
+    def test_machine_output_contract_is_documented_for_hosts(self):
+        # The guarantee only helps an embedder who is told it exists — otherwise they
+        # keep the defensive "find the first `{`" parsing this contract removes.
+        handoff = re.sub(r"\s+", " ", HANDOFF_DOC.read_text())
+
+        self.assertIn("stdout carries exactly one JSON document", handoff)
+        self.assertIn("Parse the whole of stdout", handoff)
+        # Both documented exceptions, or a host will read a false violation.
+        self.assertIn("A non-zero exit does not mean", handoff)
+        self.assertIn("source_inventory.py --dry-run", handoff)
+        # Named so a reader can see the guarantee is enforced, not asserted.
+        self.assertIn("tests/test_json_stdout_purity.py", handoff)
+
+    def test_machine_output_contract_is_cross_linked(self):
+        for doc in (RESEARCH_YML_DOC, NORMALIZED_SOURCE_FORMAT_DOC):
+            with self.subTest(doc=doc.name):
+                text = re.sub(r"\s+", " ", doc.read_text())
+                self.assertIn("Machine Output On stdout", text)
+                self.assertIn("orchestrator-handoff.md", text)
+
+    def test_external_normalizer_workflow_is_documented(self):
+        normalized_format_doc = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
+
+        self.assertIn("Writing Records From an External Normalizer", normalized_format_doc)
+        # Acceptance is earned per record, not granted by origin — the promise the CR
+        # makes to a maintainer reviewing this change.
+        self.assertIn("only when the record conforms", normalized_format_doc)
+        self.assertIn("normalized_record_contract_violation", normalized_format_doc)
+        # An external writer must be told which records normalization will overwrite,
+        # because the loss is silent and needs no --force.
+        self.assertIn("will be overwritten", normalized_format_doc)
+
+    def test_source_delivery_states_a_delivery_is_not_yet_evidence(self):
+        delivery_doc = SOURCE_DELIVERY_DOC.read_text()
+
+        self.assertIn("Delivering a source is not enough", delivery_doc)
+        self.assertIn("SOURCE_NOT_NORMALIZED", delivery_doc)
+        self.assertIn("normalize_verify.py", delivery_doc)
+        self.assertIn("normalized-source-format.md", delivery_doc)
+
+    def test_record_verification_command_is_documented(self):
+        normalized_format_doc = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
+
+        self.assertIn("python3 scripts/normalize_verify.py --format json", normalized_format_doc)
+        self.assertIn("evidence-wiki normalize verify", normalized_format_doc)
+        # Every code the verifier can emit must be findable by the host that receives it.
+        for code in (
+            "NORMALIZED_CONTRACT_FRONTMATTER_MISSING",
+            "NORMALIZED_CONTRACT_FRONTMATTER_INVALID",
+            "NORMALIZED_CONTRACT_FORMAT_VERSION_UNSUPPORTED",
+            "NORMALIZED_CONTRACT_SECTIONS_INVALID",
+            "NORMALIZED_CONTRACT_MANIFEST_MISMATCH",
+            "NORMALIZED_CONTRACT_WARNINGS_INCONSISTENT",
+        ):
+            self.assertIn(code, normalized_format_doc)
 
     def test_pdf_extraction_migration_rule_is_documented(self):
         normalized_format_doc = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
@@ -1741,6 +2092,196 @@ class DocumentedWorkflowTests(unittest.TestCase):
             self.assertIn("resolve | Question blocked", log_text)
             self.assertIn("resolve | Question deferred", log_text)
             self.assertIn("resolve | Question rejected", log_text)
+
+    def test_scoped_review_commands_are_documented(self):
+        research_yml = RESEARCH_YML_DOC.read_text()
+        question_api = QUESTION_API_DOC.read_text()
+        workspace_status = WORKSPACE_STATUS_DOC.read_text()
+        publication = PUBLICATION_READINESS_DOC.read_text()
+        orchestration = ORCHESTRATION_DOC.read_text()
+        policies = (REPO_ROOT / "workspace-template" / "docs" / "evidence-policies.md").read_text()
+
+        for expected in ("`escalation_scope`", "`max_pending_review_hours`"):
+            self.assertIn(expected, research_yml)
+        self.assertIn("question_resolve.py review --slug", question_api)
+        for expected in ("`--review-ref`", "`human_reviews`", "`human_review_requested_at`"):
+            self.assertIn(expected, question_api)
+        for expected in ("`questions_awaiting_review`", "`questions_awaiting_review_only`"):
+            self.assertIn(expected, workspace_status)
+        self.assertIn("question_resolve.py review --verdict accepted", publication)
+        self.assertIn("All remaining questions await human review", orchestration)
+        self.assertIn("ORCHESTRATION_TRUSTED_INPUT_CHANGED", orchestration)
+        self.assertIn("review.escalation_scope", policies)
+        self.assertIn("CR-9", policies)
+
+    def test_documented_external_review_workflow_ships_a_scoped_workspace(self):
+        """Execute the question-api review command sequence end to end."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "workspace"
+            profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text())
+            profile["workspace_init"]["target_path"] = str(target)
+            profile["workspace_init"]["questions"] = [
+                {"id": "answerable", "question": "What benchmarks matter?", "priority": "high"},
+                {"id": "second", "question": "What else matters?", "priority": "medium"},
+            ]
+            profile_path = root / "profile.yml"
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False))
+            with contextlib.redirect_stdout(io.StringIO()):
+                INIT.main(["--profile", str(profile_path)])
+            self.seed_manifest_source(target)
+
+            # research.yml review: section, per docs/research-yml.md.
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text())
+            config["review"] = {"escalation_scope": "question", "max_pending_review_hours": 168}
+            config["domain_pack"] = {
+                "name": "market-data",
+                "policy_vocabularies": {
+                    "freshness_policy": {
+                        "pack:market-data/quote-48h": "Require a reviewer to confirm the quote is under 48 hours old.",
+                    }
+                },
+            }
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            coverage = target / "sources" / "coverage" / "answerable.yml"
+            coverage.parent.mkdir(parents=True, exist_ok=True)
+            coverage.write_text(
+                yaml.safe_dump(
+                    {
+                        "schema_version": "1.0",
+                        "question_slug": "answerable",
+                        "created_at": "2026-08-07T00:00:00Z",
+                        "updated_at": "2026-08-07T00:00:00Z",
+                        "coverage_profile": "documented-review-workflow",
+                        "coverage_verdict": "pending",
+                        "required_facets": [
+                            {
+                                "facet_id": "reviewed-evidence",
+                                "description": "Require reviewer sign-off for this source.",
+                                "required": True,
+                                "evidence_path": "academic_method_existence",
+                                "source_policy": "manual_review_required",
+                                "freshness_policy": "pack:market-data/quote-48h",
+                                "identity_policy": "none",
+                                "min_sources": 1,
+                                "accepted_source_ids": ["raw:bench-survey-2026"],
+                                "blocking_request_ids": [],
+                                "facet_verdict": "pending",
+                            }
+                        ],
+                        "optional_facets": [],
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            # docs/question-api.md: coverage-gated answers also carry grounding quote anchors.
+            normalized = target / "sources" / "normalized" / "raw--bench-survey-2026.md"
+            normalized.parent.mkdir(parents=True, exist_ok=True)
+            normalized.write_text(
+                "---\ntype: source\nsource_id: raw:bench-survey-2026\n"
+                "title: Benchmark Survey 2026\n---\n\n"
+                "# Benchmark Survey 2026\n\nGSM-Hard dominates 2026 reasoning evaluation.\n",
+                encoding="utf-8",
+            )
+            question_path = target / "wiki" / "questions" / "answerable.md"
+            question_text = question_path.read_text()
+            question_path.write_text(
+                question_text.replace(
+                    "source_ids: []",
+                    "source_ids: []\n"
+                    "grounding:\n"
+                    "  - claim: GSM-Hard dominates reasoning evaluation.\n"
+                    "    source_id: raw:bench-survey-2026\n"
+                    "    quote: GSM-Hard dominates 2026 reasoning evaluation.\n",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            # question_claim.py claim + question_resolve.py answer --require-coverage -> human_review
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    0,
+                    QUESTION_CLAIM.main(
+                        ["--project-root", str(target), "claim", "--slug", "answerable",
+                         "--agent-id", "agent-a", "--format", "json"]
+                    ),
+                )
+            self.write_answer_page(target)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = QUESTION_RESOLVE.main(
+                    ["--project-root", str(target), "answer", "--slug", "answerable",
+                     "--agent-id", "agent-a", "--answer-page", "wiki/synthesis/benchmarks.md",
+                     "--source-id", "raw:bench-survey-2026", "--require-coverage",
+                     "--require-grounding", "--format", "json"]
+                )
+            self.assertEqual(0, code, stdout.getvalue())
+            self.assertEqual("human_review", json.loads(stdout.getvalue())["status"])
+            parked = self.question_frontmatter(target, "answerable")
+            self.assertIn("human_review_requested_at", parked)
+
+            # workspace_status.py --check-complete: scoped review keeps other work moving.
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = WORKSPACE_STATUS.main(
+                    ["--project-root", str(target), "--check-complete", "--format", "json"]
+                )
+            document = json.loads(stdout.getvalue())
+            self.assertEqual(1, code)
+            self.assertEqual("in_progress", document["readiness"]["verdict"])
+            self.assertEqual(1, document["readiness"]["questions_awaiting_review"])
+
+            # question_resolve.py review --policy ... --review-ref ..., one policy at a time.
+            for policy, reviewer in (
+                ("pack:market-data/quote-48h", "ops-principal"),
+                ("manual_review_required", "reviewer-b"),
+            ):
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    code = QUESTION_RESOLVE.main(
+                        ["--project-root", str(target), "review", "--slug", "answerable",
+                         "--policy", policy, "--verdict", "accepted",
+                         "--reviewed-by", reviewer, "--review-ref", "approval-queue-42",
+                         "--format", "json"]
+                    )
+                self.assertEqual(0, code, stdout.getvalue())
+                review_payload = json.loads(stdout.getvalue())
+
+            self.assertEqual("answered", review_payload["status"])
+            self.assertEqual([], review_payload["pending_policies"])
+            answered = self.question_frontmatter(target, "answerable")
+            self.assertEqual("approved", answered["human_review_status"])
+            self.assertEqual(
+                ["pack:market-data/quote-48h", "manual_review_required"],
+                [entry["policy"] for entry in answered["human_reviews"]],
+            )
+
+            # export_answers.py carries the per-policy entries for auditors.
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(0, EXPORT.main(["--project-root", str(target), "--format", "json"]))
+            export = json.loads(stdout.getvalue())
+            record = next(item for item in export["questions"] if item["slug"] == "answerable")
+            self.assertEqual("approved", record["human_review"]["status"])
+            self.assertEqual(
+                ["approval-queue-42", "approval-queue-42"],
+                [entry["review_ref"] for entry in record["human_reviews"]],
+            )
+
+            # publication_readiness.py no longer reports the pending-review safety reason.
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                PUBLICATION_READINESS.main(["--project-root", str(target), "--format", "json"])
+            readiness = json.loads(stdout.getvalue())
+            self.assertEqual([], readiness["reasons"]["safety"])
+
+            log_text = (target / "log.md").read_text()
+            self.assertIn("- Question: `answerable` (review).", log_text)
+            self.assertIn("- Review reference: approval-queue-42.", log_text)
 
     def test_research_run_loop_drives_fixture_to_blocked_on_sources(self):
         """Execute the research-run skill command sequence on a seeded fixture."""

@@ -303,5 +303,44 @@ class WorkspaceGcTests(unittest.TestCase):
         self.assertEqual([eligible_run], [action["run_id"] for action in report["actions"]])
 
 
+class WorkspaceGcFatalErrorTests(unittest.TestCase):
+    """A fatal error must not arrive on stdout shaped like a report.
+
+    Under `--format json` stdout carries the report document or nothing. An error object
+    printed there is indistinguishable from a result to a caller that parses stdout, and
+    it also bypassed the shared envelope, so its shape drifted from every other script's.
+    """
+
+    def run_failing_gc(self, *extra: str) -> tuple[int, str, str]:
+        module = load_script_module("workspace_gc_fatal", GC_SCRIPT_PATH)
+        module.build_report = lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("archive directory is not writable")
+        )
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = module.main(["--project-root", tmpdir, *extra])
+        return int(code or 0), stdout.getvalue(), stderr.getvalue()
+
+    def test_json_mode_puts_the_envelope_on_stderr_and_leaves_stdout_empty(self):
+        code, stdout, stderr = self.run_failing_gc("--format", "json")
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout, "a fatal error must not be written to stdout")
+        envelope = json.loads(stderr)
+        self.assertEqual("WORKSPACE_UNREADABLE", envelope["error_code"])
+        self.assertEqual("archive directory is not writable", envelope["message"])
+        # The shared envelope shape, not a hand-rolled subset.
+        self.assertIn("recoverable", envelope)
+        self.assertIn("schema_version", envelope)
+
+    def test_text_mode_reports_on_stderr_and_leaves_stdout_empty(self):
+        code, stdout, stderr = self.run_failing_gc("--format", "text")
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout)
+        self.assertIn("archive directory is not writable", stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

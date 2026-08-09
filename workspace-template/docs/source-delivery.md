@@ -19,8 +19,9 @@ Deliver files only under the directories listed in `research.yml` `raw.source_ro
 |----------|------------------------------|-------|
 | Papers, PDFs, reports | `raw/papers/` or `raw/pdf/` | Single PDFs pair automatically with LaTeX bundles by arXiv ID or filename slug. |
 | arXiv source bundles | `raw/papers/arxiv-<id>/` | Directory names like `arxiv-2601.00001v1` trigger bundle detection; include `00README.json` when available. |
-| URLs and link lists | `raw/links/*.txt`, `.url`, `.webloc` | Newline-separated HTTP(S) URLs; `#` comments allowed. |
+| URLs and link lists | `raw/links/*.txt`, `.url`, `.webloc` | Newline-separated HTTP(S) URLs; `#` comments allowed. A `.txt` list is only expanded into one source per URL when it sits under a link root; `.url`/`.webloc` are expanded anywhere. A URL list delivered elsewhere is inventoried as a single `link` record whose URLs never become sources, and the inventory report says to move it. |
 | Datasets, tables | `raw/data/` | CSV/TSV files are normalized (columns, row counts, sample rows); Excel/Parquet/Feather stay classified-only. |
+| Structured payloads | `raw/data/` | `.json`/`.jsonl` are classified as `structured_data`. This package does not extract them, so they stay classified-only unless the workspace configures a normalization adapter for the kind, or an external normalizer writes the record directly. |
 | Repositories, archives | `raw/code/` | Only treated as codebase evidence when `integrations.codebase_analysis.enabled` is true. |
 | Web page snapshots, HTML papers | `raw/web/`, `raw/papers/` | `.html`/`.htm`/`.xhtml` files are normalized via stdlib extraction (no JS rendering, no asset fetching). |
 | Other media | `raw/media/`, `raw/other/` | Classified by extension; unsupported types surface as `unknown` for review. |
@@ -92,8 +93,11 @@ delivery_failure_code: javascript_required       # optional structured failure c
 delivery_failure_detail: Static fetch returned a JavaScript shell with no usable page body
 delivery_failure_remediation: Capture with an approved browser/manual path or request an accessible export
 checksum: "sha256:<64 hex chars>"                # checksum of the delivered file
-request_id: req-1a2b3c4d5e                       # optional: source request being fulfilled
+request_id: req-1a2b3c4d5e                       # optional; required for delegated acquisition (see below)
 candidate_id: cand-official-product              # optional: selected discovery candidate being delivered
+scope:                                           # optional: what this delivery answers, matched against the request's scope
+  facet_id: supplier_quote
+  candidate: acme-widget
 terms_url: https://example.org/terms             # optional license/terms page for web captures
 terms_note: "Reuse terms reviewed on source page" # optional short terms/reuse note
 standards:                                      # optional standards-registry metadata
@@ -111,8 +115,18 @@ notes: optional free text
 
 All fields are optional strings (validated when present), except `license` may
 be explicit YAML `null` to record known uncertainty, `publication_year` may
-be an integer or four-digit string, `date_metadata` is a scalar mapping, and
-`supported_evidence_areas` is a list of non-empty strings. `evidence_usability_override`
+be an integer or four-digit string, `date_metadata` is a scalar mapping,
+`supported_evidence_areas` is a list of non-empty strings, and `scope` is a
+mapping of string keys to scalar values. Each `scope` key must match
+`^[a-z0-9_][a-z0-9._-]*$`; values are opaque and are compared as text. A
+non-string scalar is accepted and coerced — an unquoted `2026` matches a
+request scope of `"2026"` — but booleans, sequences, mappings, and empty
+values are dropped from the parsed scope rather than failing the sidecar, so
+quote any value whose YAML type is not obviously a string. The workspace
+stores and matches these keys — it never interprets them. `facet_id` is the
+convention `coverage_manifest.py` tooling uses to link a request to the facet
+it unblocks, not a schema this package knows; a pack or host may use any keys
+that make sense for its own pairing. `evidence_usability_override`
 must be a mapping with `usable: true`, non-empty `reviewed_by`, non-empty
 `reviewed_at`, and non-empty `reason`. It is an audited escape hatch for
 deterministic source-usability false positives after reviewer inspection; it
@@ -131,6 +145,15 @@ selected discovery candidate, copy the candidate id into `candidate_id`.
 Standards registry captures should include a `standards` mapping. Inventory
 preserves valid mappings under `provenance.standards`; a malformed non-mapping
 warns and marks the source `review_required` instead of crashing.
+
+Under `orchestration.acquisition: delegated`, `request_id` stops being optional
+for anything delivered to satisfy a source request. It is the only link between a
+delivered artifact and the request it fulfils — there is no candidate id to fall
+back on — and inventory merges it into the manifest record only from a sidecar
+sitting beside the delivery. That is what makes "this source carries a provenance
+sidecar" a checkable claim: an acquisition action fulfilling a request whose
+manifest record has no matching `provenance.request_id` is refused with
+`ORCHESTRATION_POSTCONDITION_FAILED`. `candidate_id` stays absent in that mode.
 
 Provider-backed delivery is fail closed before this sidecar contract begins.
 Automated acquisition requires verified TLS, successful DNS resolution whose
@@ -199,6 +222,29 @@ specialize the remediation in `delivery_failure_remediation`. Source requests
 remain schema-compatible: put remediation guidance in the request `rationale`
 instead of adding request-only failure fields.
 
+### Acquisition-attempt failures
+
+The table above describes a delivery that happened but cannot be trusted. An acquisition
+attempt that produced **nothing at all** has no artifact and therefore no sidecar to carry
+a code, so those outcomes are recorded against the source request instead of against a
+file. The attempt vocabulary is the delivery vocabulary plus three connector-level codes:
+
+| Code | Meaning | Default remediation guidance |
+|------|---------|------------------------------|
+| `provider_throttled` | The connector was rate-limited before it could retrieve the source. | Retry after the connector's declared rate window. |
+| `not_authorized` | The acquirer's credentials or egress policy refuse this source. | Fix authorization host-side or record the decision and replace the request. |
+| `no_result` | The connector completed but returned nothing usable for this request. | Refine the request or try another source. |
+
+An attempt reports the most specific code that fits: a plain HTTP 500 is `http_error`, not
+`no_result`. These three are **not** valid `delivery_failure_code` values — inventory
+rejects them in a sidecar with a warning, because a sidecar sits beside an artifact and
+these codes mean no artifact exists.
+
+`not_authorized`, `robots_or_terms_blocked`, `license_or_terms_unknown`, and
+`manual_review_required` are **not retryable**: each reports a standing decision rather
+than a transient condition, so trying again within the same session cannot change the
+answer. Every other code is retryable, bounded by the per-request attempt budget.
+
 Failure-aware inventory and normalization are active for this vocabulary.
 Inventory keeps failed captures auditable in `sources/manifest.jsonl`, but marks
 them with `evidence_usable: false` and `unusable_evidence_reasons` so required
@@ -247,6 +293,24 @@ When the delivery fulfills a source request, link it and unblock the affected qu
 python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id paper:2601.00001v1
 ```
 
+Delivering a source is not enough to make it usable evidence. A source is only quotable
+and only reopens a blocked question once it has a **normalized record**: `reopen`
+refuses with `SOURCE_NOT_NORMALIZED`, and `verify_quotes.py` checks grounding against
+the normalized body, not the raw bytes.
+
+For source kinds `normalize_sources.py` reads, the command above produces that record.
+For kinds it does not read — structured API payloads, instrument output — an external
+normalizer may write the record instead, and it counts as evidence on the same terms
+once it conforms to the published record contract. Check it before relying on it:
+
+```bash
+python3 scripts/normalize_verify.py --source-id <source-id> --format json
+```
+
+See [normalized-source-format.md](normalized-source-format.md) for the contract, which
+sources an external tool may write records for, and the violation codes verification
+reports.
+
 ## Idempotency Guarantees
 
 - Re-running `source_inventory.py` after a partial delivery only adds or refreshes affected records. Existing record IDs are stable (path-derived), `detected_at` is preserved across runs, and no prior records are lost when new files arrive.
@@ -267,6 +331,7 @@ Evidence gaps flow out through `sources/source-requests.jsonl` (path configurabl
   "rationale": "Blocks the benchmark question.",
   "priority": "high",
   "question_slugs": ["which-benchmarks"],
+  "scope": {"facet_id": "supplier_quote", "candidate": "acme-widget"},
   "status": "open",
   "created_at": "2026-06-10T12:00:00Z",
   "updated_at": "2026-06-10T12:00:00Z",
@@ -276,9 +341,10 @@ Evidence gaps flow out through `sources/source-requests.jsonl` (path configurabl
 
 Field notes:
 
-- `kind`: one of `paper`, `dataset`, `web`, `code`, `other`.
+- `kind`: a built-in (`paper`, `dataset`, `web`, `code`, `structured_data`, `other`) or a domain-pack-declared kind namespaced `pack:<pack-name>/<kind-id>` (see `domain_pack.request_kinds` in [research-yml.md](research-yml.md)). `structured_data` is the built-in bucket for non-documentary payloads — API responses, sensor series, instrument output.
 - `query_or_identifier`: what to fetch — an arXiv ID, DOI, URL, or search query.
 - `question_slugs`: question pages this request unblocks; validated against the questions directory at `add` time, so a blocked question is discoverable from the request record.
+- `scope`: optional mapping (`add --scope key=value`, repeatable) stating what would satisfy this request — see "Scope Matching" below. Omitted entirely when no `--scope` was given, so scope-less requests stay byte-identical to records written before this field existed.
 - `status`: `open` or `fulfilled`. `fulfill` sets `source_id` to the manifest record that satisfied the request (validated against the manifest).
 
 Commands (workspace root):
@@ -293,7 +359,102 @@ python3 scripts/source_requests.py plan-fetch --request-id req-1a2b3c4d5e \
 python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id paper:2601.00001v1
 ```
 
-`plan-fetch` is read-only: it turns a request into candidate provider commands and records `network_io_executed: false`. Repeating `--candidate-id` limits `candidate_routes` to exactly those selected candidates; an unknown, non-selected, or differently linked ID is rejected. Managed acquisition must pass the work order's candidate IDs so another selected candidate on the same request is never emitted accidentally. Omitting the flag retains the request-wide operator workflow. A fetch agent's loop is: `list --status open --format json` → scoped `plan-fetch --request-id ... --candidate-id ... --format json` → deliver files with sidecars (set `request_id` and `candidate_id` in the sidecar) → run inventory and normalization → `fulfill` each delivered request. Use `skills/research-acquire.md` for the optional provider-backed version of this loop, including disabled-acquisition refusal, sidecar verification, blocked-question reopening, and final status reporting. `add` and `fulfill` append one `source-request` entry to `log.md`; `list` and `plan-fetch` do not mutate the request artifact or `log.md`.
+### Scope Matching
+
+When a request carries `scope`, fulfilment stops being positional convention
+and starts comparing declared scope against the delivered source's sidecar
+`scope` (read from the manifest record's merged `provenance.scope`; see
+"Provenance Sidecars" above). Matching is layered:
+
+1. **Contradiction check — always on, no flag.** For every key present on
+   *both* the request's scope and the source's provenance scope, the values
+   must agree; disagreement refuses the fulfil with `REQUEST_SCOPE_MISMATCH`,
+   naming each conflicting key and both values, and leaves the request
+   untouched. This check cannot fire unless both sides declared scope, so a
+   workspace with no scoped requests and no scoped deliveries never sees it —
+   existing deliveries are unaffected by construction.
+2. **`fulfill --match-scope key=value`** (repeatable): the caller asserts
+   scope keys at the command line. Each pair is checked against the
+   *request's* own scope (an assertion that contradicts what the request
+   already declared is refused) and against the source's metadata, the same
+   way declared scope is checked.
+3. **`fulfill --require-scope`** (opt-in strict mode): upgrades absence to
+   refusal. Every key the request's scope declares **and** every key
+   `--match-scope` asserts must be present *and* equal in the source's
+   provenance scope, or the fulfil is refused with `REQUEST_SCOPE_MISSING`,
+   naming each absent key. Asserted keys are covered because layer 2 can only
+   catch a delivery that *disagrees* with an assertion: without this, an
+   explicit `--match-scope` claim against an unstamped source would be
+   accepted with nothing verified, and no flag could ask otherwise.
+
+A key present on only one side is not a contradiction under layers 1–2 — the
+package's own language for this check is "contradicts," which is lenient by
+default. Absence is not treated as strictness because no existing delivery
+carries sidecar `scope`: were absence refused by default, every scoped
+request would become unfulfillable by any source delivered before this
+feature existed. `--require-scope` is how a host whose delivery pipeline reliably
+stamps `scope` opts into the fail-closed behavior instead.
+
+`reopen` (`question_resolve.py`) uses the same contradiction layer to pair
+each supplied request with the supplied source whose scope does not
+contradict it, instead of zipping the two `--request-id`/`--source-id` lists
+by argument order. Requests or sources without scope fall back to the
+previous positional behavior.
+
+### Recorded acquisition attempts
+
+A request that was attempted and produced nothing leaves no trace in the record above: its
+`status` stays `open`, which is correct but says nothing about whether anyone tried. Failed
+attempts are recorded in an append-only audit beside the request store,
+`sources/source-request-attempts.jsonl`, one JSON object per line:
+
+```json
+{
+  "schema_version": "1.0",
+  "event_type": "source_request_attempt_failed",
+  "event_id": "attempt-d3e6a14b38",
+  "request_id": "req-1a2b3c4d5e",
+  "orchestration_id": "orch-20260808T120000Z-abcd1234",
+  "action_id": "action-0001",
+  "failure_code": "provider_throttled",
+  "detail": "connector reported 429, retry-after 60s",
+  "recorded_at": "2026-08-08T12:00:00Z"
+}
+```
+
+```bash
+python3 scripts/source_requests.py record-attempt-failure --request-id req-1a2b3c4d5e \
+  --failure-code provider_throttled --orchestration-id ORCH_ID --action-id ACTION_ID \
+  --detail "connector reported 429, retry-after 60s" --format json
+```
+
+Field notes:
+
+- `failure_code`: any acquisition-attempt code from the taxonomy above. Delivery codes are
+  valid here too — an attempt that failed with a plain HTTP 500 records `http_error`.
+- `orchestration_id`, `action_id`: the session and work order the attempt ran under.
+  Attempts are counted **per session**, so a new session gets a fresh look at every
+  request; that is the supported way to retry after fixing a host-side cause, rather than
+  editing this file.
+- `detail`: optional operator context, truncated to 500 characters rather than refused.
+- `event_id`: stable identity. The audit is append-only and fingerprinted by event id, so
+  a recorded attempt cannot be rewritten or removed without detection.
+
+The command refuses an unknown request id (`REQUEST_UNKNOWN`), a request that is already
+fulfilled (`REQUEST_ALREADY_FULFILLED` — a fulfilled request has evidence and no failed
+attempt to record), and an unrecognized failure code (`ATTEMPT_FAILURE_CODE_INVALID`). It
+appends one `source-request` entry to `log.md`.
+
+Readers of this file must ignore fields they do not recognize: the event shape is expected
+to grow, and a reader pinned to today's exact key set would refuse events written by a
+later version of this package.
+
+Under `orchestration.acquisition: delegated` these commands run inside a pending
+acquisition work order rather than between actions; see
+[../skills/research-acquire-delegated.md](../skills/research-acquire-delegated.md) for the
+external acquirer's loop and [orchestration.md](orchestration.md) for the session shape.
+
+`plan-fetch` is read-only: it turns a request into candidate provider commands and records `network_io_executed: false`. Request-kind-based routing only special-cases `kind: paper`; every other kind — `dataset`, `web`, `code`, `other`, `structured_data`, and any pack-declared kind (`pack:<pack-name>/<kind-id>`) — has no provider-backed fetch plan and returns the same `unsupported` status and warning ("No provider-backed plan is available for this kind; use manual delivery."), with `network_io_executed: false` rather than an error. Repeating `--candidate-id` limits `candidate_routes` to exactly those selected candidates; an unknown, non-selected, or differently linked ID is rejected. Managed acquisition must pass the work order's candidate IDs so another selected candidate on the same request is never emitted accidentally. Omitting the flag retains the request-wide operator workflow. A fetch agent's loop is: `list --status open --format json` → scoped `plan-fetch --request-id ... --candidate-id ... --format json` → deliver files with sidecars (set `request_id` and `candidate_id` in the sidecar, and read the request's `scope` — if present, stamp the matching keys into the sidecar's `scope:` mapping so fulfilment can verify the delivery against the request instead of assuming it) → run inventory and normalization → `fulfill` each delivered request. Use `skills/research-acquire.md` for the optional provider-backed version of this loop, including disabled-acquisition refusal, sidecar verification, blocked-question reopening, and final status reporting. `add` and `fulfill` append one `source-request` entry to `log.md`; `list` and `plan-fetch` do not mutate the request artifact or `log.md`. When reopening a blocked question over multiple delivered sources, `reopen` pairs each request to a source by declared scope (see "Scope Matching" above) rather than by the order `--request-id`/`--source-id` were passed.
 
 ### Selected discovery candidates
 
@@ -356,6 +517,7 @@ Concurrency: the artifact is single-writer. `add` and `fulfill` serialize throug
 - `scripts/workspace_status.py` reports `sources.requests_open` and `sources.requests_open_ids`; a clean `blocked_on_sources` verdict also requires each blocked question to carry `blocking_request_ids` linked to open requests, and the verdict reasons name those linked request IDs. A blocked question without a linked open request is `attention_required`.
 - `scripts/workspace_status.py` reports `sources.curation` counts for automated web records, cited automated web records, and missing terms/license, notes, origin URL, checksum, or candidate id metadata.
 - `scripts/lint.py` (config-gated, default on) reports: automated non-web deliveries missing `license` provenance (MEDIUM, `validate_provenance`); automated web deliveries missing `license`, `terms_url`, or `terms_note` (LOW, `validate_curation_metadata`); cited automated web deliveries missing `notes` (MEDIUM) or `origin_url`/verified `checksum` (HIGH); selected-candidate web deliveries missing `candidate_id` (LOW); blocked questions with no linked source request (LOW), and fulfilled requests pointing at missing manifest sources (MEDIUM, both under `validate_source_requests`).
+- `scripts/lint.py` also reports a delivered source with no normalized record (LOW, `source_missing_normalized`) and a normalized record from an external normalizer that does not conform to the record contract (MEDIUM, `normalized_record_contract_violation`). Acceptance of an externally written record is gated on that conformance check, not on its origin.
 
 ## Retained Mixed-Source Publication Matrix
 
@@ -411,6 +573,9 @@ requires its own provenance and cannot be inferred from this replay.
   delivered into `raw/` through this contract.
 - [../skills/research-acquire.md](../skills/research-acquire.md) — fetch-agent
   workflow for request-backed provider acquisition.
+- [../skills/research-acquire-delegated.md](../skills/research-acquire-delegated.md) —
+  the same delivery contract driven by an external acquirer under
+  `orchestration.acquisition: delegated`, where the host owns the connectors.
 - [orchestrator-handoff.md](orchestrator-handoff.md) — the end-to-end machine contract this delivery step belongs to.
 - [source-manifest.md](source-manifest.md) — manifest record fields, including the `provenance` object.
 - [normalized-source-format.md](normalized-source-format.md) — normalized record frontmatter, including propagated provenance.

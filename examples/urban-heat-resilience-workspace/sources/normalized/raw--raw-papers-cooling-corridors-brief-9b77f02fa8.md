@@ -1,8 +1,10 @@
 ---
 type: normalized_source
+normalized_format: 1
 source_id: raw:raw-papers-cooling-corridors-brief-9b77f02fa8
 source_kind: markdown
 status: content_extracted
+evidence_usable: true
 created: 2026-05-31
 updated: 2026-05-31
 raw_paths:

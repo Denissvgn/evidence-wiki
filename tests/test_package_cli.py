@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -132,6 +133,13 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual("1.0", payload["artifact_schemas"]["coverage_manifest"])
         self.assertEqual("1.0", payload["artifact_schemas"]["publication_readiness"])
         self.assertEqual("1.0", payload["artifact_schemas"]["error_envelope"])
+        # An external normalizer targets the record contract, so the version it must
+        # write and the versions this package reads are both discoverable up front.
+        normalized_format = payload["normalized_source_format"]
+        self.assertEqual(1, normalized_format["version"])
+        self.assertIn(normalized_format["version"], normalized_format["accepted_versions"])
+        self.assertEqual("normalize_sources.py", normalized_format["normalizer"]["name"])
+        self.assertEqual("docs/normalized-source-format.md", normalized_format["contract_document"])
         self.assertEqual(
             {
                 "evidence_paths": [
@@ -841,6 +849,125 @@ class PackageCliTests(unittest.TestCase):
         self.assertIn("questions add", output)
         self.assertIn("questions export", output)
 
+    def test_normalize_verify_cli_matches_copied_workspace_script(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "verify-target"
+            self.run_cli(
+                "init",
+                "--target",
+                str(target),
+                "--project-name",
+                "verify-target",
+                "--project-description",
+                "Normalized record contract verification workspace.",
+            )
+            (target / "raw" / "links").mkdir(parents=True, exist_ok=True)
+            (target / "raw" / "links" / "a3.txt").write_text(
+                "https://example.org/research/a3\n", encoding="utf-8"
+            )
+            inventory = load_script_module(
+                "evidence_wiki_package_cli_inventory", target / "scripts" / "source_inventory.py"
+            )
+            normalize = load_script_module(
+                "evidence_wiki_package_cli_normalize", target / "scripts" / "normalize_sources.py"
+            )
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                inventory.main(["--project-root", str(target), "--report"])
+                normalize.main(["--project-root", str(target), "--all", "--format", "json"])
+
+            cli_code, cli_stdout, cli_stderr = self.run_cli_result(
+                "normalize", "verify", "--target", str(target), "--format", "json"
+            )
+            direct = subprocess.run(
+                [
+                    sys.executable,
+                    str(target / "scripts" / "normalize_verify.py"),
+                    "--project-root",
+                    str(target),
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            selected_source_id = json.loads(cli_stdout)["records"][0]["source_id"]
+            selected_code, selected_stdout, selected_stderr = self.run_cli_result(
+                "normalize",
+                "verify",
+                "--target",
+                str(target),
+                "--source-id",
+                selected_source_id,
+                "--format",
+                "json",
+            )
+
+        self.assertEqual(0, selected_code, selected_stderr)
+        selected_payload = json.loads(selected_stdout)
+        self.assertEqual(1, selected_payload["counts"]["records"])
+        self.assertEqual(selected_source_id, selected_payload["records"][0]["source_id"])
+        self.assertEqual(0, cli_code, cli_stderr)
+        self.assertEqual(direct.returncode, cli_code)
+        cli_payload = json.loads(cli_stdout)
+        direct_payload = json.loads(direct.stdout)
+        self.assertEqual("normalize_verify_report", cli_payload["document_type"])
+        self.assertEqual("verified", cli_payload["overall_result"])
+        self.assertEqual(
+            [record["path"] for record in direct_payload["records"]],
+            [record["path"] for record in cli_payload["records"]],
+        )
+        self.assertEqual(1, cli_payload["counts"]["native"])
+
+    def test_normalize_verify_cli_refuses_a_malformed_external_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "verify-bad"
+            self.run_cli(
+                "init",
+                "--target",
+                str(target),
+                "--project-name",
+                "verify-bad",
+                "--project-description",
+                "Malformed external record workspace.",
+            )
+            # A foreign record that never declares which contract it targets.
+            (target / "sources" / "normalized").mkdir(parents=True, exist_ok=True)
+            (target / "sources" / "normalized" / "manual--handwritten.md").write_text(
+                "---\n"
+                "type: normalized_source\n"
+                "source_id: manual:handwritten\n"
+                "source_kind: manual_note\n"
+                "status: content_extracted\n"
+                "evidence_usable: true\n"
+                "created: 2026-08-07\n"
+                "updated: 2026-08-07\n"
+                "raw_paths: []\n"
+                "manifest_path: sources/manifest.jsonl\n"
+                "normalizer:\n"
+                "  name: external-tool\n"
+                "  version: 1\n"
+                "parse_warnings: []\n"
+                "---\n\n# Handwritten\n",
+                encoding="utf-8",
+            )
+            cli_code, cli_stdout, _ = self.run_cli_result(
+                "normalize", "verify", "--target", str(target), "--format", "json"
+            )
+
+        self.assertEqual(1, cli_code)
+        payload = json.loads(cli_stdout)
+        self.assertEqual("not_verified", payload["overall_result"])
+        codes = [violation["code"] for record in payload["records"] for violation in record["violations"]]
+        self.assertIn("NORMALIZED_CONTRACT_FORMAT_VERSION_UNSUPPORTED", codes)
+        self.assertIn("NORMALIZED_CONTRACT_SECTIONS_INVALID", codes)
+
+    def test_normalize_help_lists_the_verify_subcommand(self):
+        output = self.run_cli("normalize")
+        self.assertIn("evidence-wiki normalize verify", output)
+        self.assertIn("docs/normalized-source-format.md", output)
+        self.assertIn("evidence-wiki normalize verify", self.run_cli("--help"))
+
     def test_pack_validate_command_reports_ok_json(self):
         output = self.run_cli("pack", "validate", "--path", "llm-research")
         payload = json.loads(output)
@@ -873,6 +1000,71 @@ class PackageCliTests(unittest.TestCase):
         )
         checks = {check["id"]: check for check in payload["checks"]}
         self.assertEqual("pass", checks["policy_vocabularies"]["status"])
+
+    def test_pack_validate_reports_request_kinds_check(self):
+        output = self.run_cli("pack", "validate", "--path", "llm-research", "--format", "json")
+        payload = json.loads(output)
+
+        self.assertTrue(payload["ok"], payload)
+        checks = {check["id"]: check for check in payload["checks"]}
+        self.assertIn("request_kinds", checks)
+        self.assertEqual("pass", checks["request_kinds"]["status"])
+        self.assertEqual(["research.overlay.yml"], checks["request_kinds"]["files"])
+        # Shipped packs declare no request kinds; the check still reports on every pack.
+        self.assertEqual({}, payload["domain_pack"]["request_kinds"])
+
+    def test_pack_validate_reports_declared_request_kinds_and_refuses_bad_ones(self):
+        source_pack = REPO_ROOT / "domain-packs" / "llm-research"
+        declaration = {
+            "id": "pack:market-data/supplier_quote",
+            "label": "Supplier quote",
+            "description": "Live SKU price + shipping + MOQ from a named supplier.",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_path = Path(tmpdir) / "market-data"
+            shutil.copytree(source_pack, pack_path)
+            overlay_path = pack_path / "research.overlay.yml"
+            overlay = yaml.safe_load(overlay_path.read_text())
+            overlay["domain_pack"]["name"] = "market-data"
+            overlay["domain_pack"]["request_kinds"] = [declaration]
+            overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False))
+
+            code, stdout, stderr = self.run_cli_result(
+                "pack", "validate", "--path", str(pack_path), "--format", "json"
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(0, code, stderr)
+            checks = {check["id"]: check for check in payload["checks"]}
+            self.assertEqual("pass", checks["request_kinds"]["status"])
+            self.assertEqual(
+                "Domain pack declares 1 namespaced request kind(s).",
+                checks["request_kinds"]["message"],
+            )
+            self.assertEqual(
+                {
+                    "pack:market-data/supplier_quote": {
+                        "label": "Supplier quote",
+                        "description": declaration["description"],
+                    }
+                },
+                payload["domain_pack"]["request_kinds"],
+            )
+
+            # Dropping the reserved prefix must fail the pack, not silently narrow it.
+            overlay["domain_pack"]["request_kinds"] = [{**declaration, "id": "market-data/supplier_quote"}]
+            overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False))
+
+            bad_code, bad_stdout, bad_stderr = self.run_cli_result(
+                "pack", "validate", "--path", str(pack_path), "--format", "json"
+            )
+            bad_payload = json.loads(bad_stdout)
+
+        self.assertEqual(1, bad_code, bad_stderr)
+        self.assertFalse(bad_payload["ok"], bad_payload)
+        bad_checks = {check["id"]: check for check in bad_payload["checks"]}
+        self.assertEqual("fail", bad_checks["request_kinds"]["status"])
+        self.assertIn("market-data/supplier_quote", bad_checks["request_kinds"]["message"])
 
     def test_help_mentions_doctor(self):
         output = self.run_cli("--help")

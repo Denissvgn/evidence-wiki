@@ -55,6 +55,43 @@ _REMEDIATIONS = {
     "QUERY_MISSING": "Provide one or more query terms.",
     "QUESTION_UNKNOWN": "Use a question slug that exists under wiki/questions/.",
     "REQUEST_UNKNOWN": "List requests with scripts/source_requests.py list --format json and choose an existing id.",
+    "REQUEST_ALREADY_FULFILLED": (
+        "A fulfilled request has evidence and no failed attempt to record; open a new request "
+        "if the delivered source turned out to be unusable."
+    ),
+    "ATTEMPT_FAILURE_CODE_INVALID": (
+        "Use an acquisition-attempt failure code documented in docs/source-delivery.md."
+    ),
+    "REQUEST_KIND_INVALID": (
+        "Use a built-in request kind, or a pack kind namespaced like pack:<pack-name>/<kind-id>."
+    ),
+    "REQUEST_KIND_UNDECLARED": (
+        "Declare the kind under domain_pack.request_kinds in the active domain pack, or use a built-in kind."
+    ),
+    "REQUEST_SCOPE_INVALID": (
+        "Pass scope pairs as key=value with a lowercase key, as documented in docs/source-delivery.md."
+    ),
+    "REQUEST_SCOPE_MISMATCH": (
+        "Fulfil the request with a source whose provenance scope agrees with it, or open a request "
+        "whose scope matches the delivered evidence."
+    ),
+    "REQUEST_SCOPE_MISSING": (
+        "Stamp the delivered source's provenance sidecar with the request's scope keys, or rerun "
+        "without --require-scope."
+    ),
+    "FACET_SCOPE_CONFLICT": (
+        "Link a request whose scope facet_id matches this facet, or open a new request for it."
+    ),
+    "SOURCE_REQUEST_FULFILL_DELEGATED": (
+        "Fulfil or record an attempt against this request while executing the delegated acquisition work "
+        "order that scopes it, or finish the active session first."
+    ),
+    "QUESTION_REOPEN_DELEGATED": (
+        "Reopen this question while executing the work order that scopes it, or finish the active session first."
+    ),
+    "ORCHESTRATION_STATE_UNREADABLE": (
+        "Restore the orchestration control tree; unreadable session state cannot authorize a mutation."
+    ),
     "SOURCE_UNKNOWN": "Run scripts/source_inventory.py --report and choose a source id present in the manifest.",
     "TOOLING_MISSING": "Restore or upgrade the workspace scripts from the starter.",
     "INTAKE_TOTAL_CAP_EXCEEDED": (
@@ -133,9 +170,23 @@ _REMEDIATIONS = {
     "ANSWER_SOURCE_REQUIRED": "Pass at least one --source-id or use --allow-uncited for an explicit uncited answer.",
     "ANSWER_PAGE_INVALID": "Pass a workspace-relative answer page under the configured wiki root.",
     "ANSWER_PAGE_MISSING": "Create the answer page under the wiki root before resolving the question as answered.",
-    "GROUNDING_REQUIRED": "Add a grounding frontmatter list with claim, source_id, quote, and optional location_hint.",
-    "GROUNDING_INVALID": "Fix the grounding frontmatter so each entry has non-empty claim, source_id, and quote fields.",
+    "GROUNDING_REQUIRED": (
+        "Add a grounding frontmatter list whose entries each carry claim, source_id, and exactly one "
+        "form of evidence: quote (with optional location_hint) or anchor with pointer and expected."
+    ),
+    "GROUNDING_INVALID": (
+        "Fix the grounding frontmatter so each entry has a non-empty claim and source_id plus exactly "
+        "one form: a non-empty quote, or an anchor whose pointer and expected are both present."
+    ),
     "GROUNDING_QUOTE_INVALID": "Revise the grounding quote to match normalized source content, or normalize the cited source first.",
+    "GROUNDING_ANCHOR_INVALID": (
+        "Point each failed anchor at a field the cited record's structured view holds, and state that "
+        "field's value in expected; re-normalize the source if it carries no structured view yet."
+    ),
+    "GROUNDING_FILE_INVALID": (
+        "Write the grounding file as YAML or JSON carrying a top-level 'grounding:' list, or a bare "
+        "list of entry mappings; use 'grounding: []' to clear a question's grounding."
+    ),
     "GROUNDING_VERIFIER_REQUIRED": "Pass --verified-by AGENT_ID when writing quote-verification metadata.",
     "REQUEST_NOT_LINKED": "Link the source request to this question slug before using it to block the question.",
     "RESOLUTION_REASON_INVALID": "Pass a non-empty reason for blocked, deferred, or rejected outcomes.",
@@ -193,6 +244,10 @@ def classify_error_code(message: str) -> str:
         return "QUESTION_UNKNOWN"
     if text.startswith("Unknown request id:") or "already fulfilled by a different source id" in lower:
         return "REQUEST_UNKNOWN"
+    if text.startswith("Request already fulfilled:"):
+        return "REQUEST_ALREADY_FULFILLED"
+    if text.startswith("Unknown attempt failure code:"):
+        return "ATTEMPT_FAILURE_CODE_INVALID"
     if text.startswith("Unknown source id:"):
         return "SOURCE_UNKNOWN"
     if text.startswith("Missing sibling workspace script:") or text.startswith("Cannot load sibling workspace script:"):

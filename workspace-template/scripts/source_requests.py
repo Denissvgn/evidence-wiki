@@ -13,7 +13,7 @@ Each JSONL line is one request record (schema version 1.0)::
     {
       "schema_version": "1.0",
       "request_id": "req-1a2b3c4d5e",
-      "kind": "paper",                    # paper|dataset|web|code|other
+      "kind": "paper",                    # built-in, or pack:<pack-name>/<kind-id>
       "query_or_identifier": "arXiv:2601.00001",
       "rationale": "Blocks the benchmark question.",
       "priority": "high",                 # high|medium|low
@@ -21,18 +21,31 @@ Each JSONL line is one request record (schema version 1.0)::
       "status": "open",                   # open|fulfilled
       "created_at": "2026-06-10T12:00:00Z",
       "updated_at": "2026-06-10T12:00:00Z",
-      "source_id": null                    # manifest id set on fulfill
+      "source_id": null,                   # manifest id set on fulfill
+      "scope": {"facet_id": "benchmarks"}  # optional; omitted when unscoped
     }
+
+``scope`` is an open string→string mapping stating machine-readably what would
+satisfy the request. It is stored and matched, never interpreted: ``facet_id``
+is the convention coverage-manifest tooling uses, not a schema this script
+knows. The field is absent — not empty — on requests recorded without
+``--scope``, so unscoped records stay byte-identical to what earlier versions
+wrote.
 
 Subcommands:
 
-- ``add``: append one validated request. Referenced ``--question-slug`` values
-  must exist as question pages. Re-adding the same kind plus query while an
-  open request exists is an idempotent no-op reported as a duplicate.
-- ``list``: read-only listing with optional repeatable ``--status`` filters.
+- ``add``: append one validated request. ``--kind`` accepts a built-in kind or
+  one declared by the active domain pack. Referenced ``--question-slug`` values
+  must exist as question pages. Re-adding the same kind, query, and scope while
+  an open request exists is an idempotent no-op reported as a duplicate.
+- ``list``: read-only listing with optional repeatable ``--status``, ``--kind``,
+  and ``--scope`` filters.
 - ``fulfill``: link a delivered manifest ``--source-id`` to a request and set
   ``status: fulfilled``. Fulfilling an already-fulfilled request with the same
-  source id is a no-op; with a different source id it is an error.
+  source id is a no-op; with a different source id it is an error. A request
+  and a delivery that both declare scope must agree about every key they share;
+  ``--match-scope`` adds caller-asserted keys and ``--require-scope`` upgrades a
+  key the delivery never states from tolerated to refused.
 
 The file is single-writer by design: ``add`` and ``fulfill`` serialize through
 the shared workspace lock helper while preserving atomic append/replace writes.
@@ -67,7 +80,20 @@ except ImportError as exc:  # pragma: no cover - environment guard
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_REQUESTS_PATH = "sources/source-requests.jsonl"
-REQUEST_KINDS = ("paper", "dataset", "web", "code", "other")
+ATTEMPT_AUDIT_FILENAME = "source-request-attempts.jsonl"
+ATTEMPT_EVENT_TYPE = "source_request_attempt_failed"
+# A detail is operator context, not a payload. Long connector diagnostics are truncated
+# rather than refused: losing the tail of a message is a smaller harm than refusing to
+# record that the attempt failed at all.
+MAX_ATTEMPT_DETAIL_LENGTH = 500
+ATTEMPT_EVENT_REQUIRED_FIELDS = (
+    "event_id",
+    "request_id",
+    "orchestration_id",
+    "action_id",
+    "failure_code",
+    "recorded_at",
+)
 REQUEST_PRIORITIES = ("high", "medium", "low")
 REQUEST_STATUSES = ("open", "fulfilled")
 EXIT_OK = 0
@@ -81,8 +107,26 @@ SAFE_OUTPUT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _delegation_gate import DelegationGateError, require_sanctioned_mutation
+from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
+from _request_kinds import BUILTIN_REQUEST_KINDS, RequestKindError, validate_kind
+from _request_scope import (
+    RequestScopeError,
+    conflict_details,
+    format_scope,
+    normalize_scope,
+    parse_scope_pairs,
+    scope_equal,
+    scope_match,
+)
+from _script_errors import emit_error, handle_system_exit, json_mode_requested, remediation_for
 from _workspace_locks import LockUnavailableError, workspace_lock
+from source_failure_taxonomy import ATTEMPT_FAILURE_CODES, is_attempt_failure_code
+
+# The kind vocabulary moved to _request_kinds so `pack validate` and this command
+# validate against one definition. Kept as a module attribute because other scripts
+# and tests read source_requests.REQUEST_KINDS.
+REQUEST_KINDS = BUILTIN_REQUEST_KINDS
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -97,7 +141,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     add_parser = subparsers.add_parser("add", help="Record one open source request.")
-    add_parser.add_argument("--kind", required=True, choices=REQUEST_KINDS, help="Requested evidence kind.")
+    add_parser.add_argument(
+        "--kind",
+        required=True,
+        # Deliberately not an argparse `choices` list: the valid set depends on the
+        # workspace's domain pack, and argparse answers an unknown choice with a usage
+        # dump on stderr rather than the shared error envelope. Validating in the command
+        # keeps the refusal machine-readable under `--format json` with a stable
+        # REQUEST_KIND_INVALID / REQUEST_KIND_UNDECLARED code, matching the precedent set
+        # by `record-attempt-failure --failure-code` below.
+        help=(
+            f"Requested evidence kind: {', '.join(BUILTIN_REQUEST_KINDS)}, or a kind the active "
+            "domain pack declares as pack:<pack-name>/<kind-id>."
+        ),
+    )
     add_parser.add_argument(
         "--query-or-identifier",
         "--query",
@@ -124,6 +181,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Slug of a question page this request unblocks. Repeatable.",
     )
     add_parser.add_argument(
+        "--scope",
+        action="append",
+        dest="scope",
+        default=None,
+        help=(
+            "Machine-readable key=value statement of what would satisfy this request, "
+            "e.g. --scope facet_id=supplier_quote. Repeatable."
+        ),
+    )
+    add_parser.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
@@ -137,6 +204,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=REQUEST_STATUSES,
         default=None,
         help="Only include requests with the given status. Repeatable.",
+    )
+    list_parser.add_argument(
+        "--kind",
+        action="append",
+        dest="kind",
+        default=None,
+        # Config-dependent, so validated in the command rather than by argparse choices.
+        help="Only include requests of the given kind, built-in or pack-declared. Repeatable.",
+    )
+    list_parser.add_argument(
+        "--scope",
+        action="append",
+        dest="scope",
+        default=None,
+        help=(
+            "Only include requests whose scope declares this exact key=value pair. "
+            "Repeatable; every given pair must match."
+        ),
     )
     list_parser.add_argument(
         "--format",
@@ -153,6 +238,62 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Manifest source id of the delivered evidence.",
     )
     fulfill_parser.add_argument(
+        "--match-scope",
+        action="append",
+        dest="match_scope",
+        default=None,
+        help=(
+            "Assert a key=value scope pair for this fulfilment, checked against both the request's "
+            "own scope and the delivered source's provenance scope. Repeatable."
+        ),
+    )
+    fulfill_parser.add_argument(
+        "--require-scope",
+        action="store_true",
+        help=(
+            "Refuse the fulfilment unless the delivered source's provenance scope states every key "
+            "the request declares and every key --match-scope asserts. Without it, a key the "
+            "delivery never states is tolerated; keys both sides state must always agree."
+        ),
+    )
+    fulfill_parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Report format. Defaults to text.",
+    )
+
+    attempt_parser = subparsers.add_parser(
+        "record-attempt-failure",
+        help="Record that one acquisition attempt for a request produced no evidence.",
+    )
+    attempt_parser.add_argument("--request-id", required=True, help="Open request the attempt was for.")
+    attempt_parser.add_argument(
+        "--failure-code",
+        required=True,
+        # Deliberately not an argparse `choices` list, unlike `add --kind`. The caller
+        # here is an external acquirer driving this command programmatically, and argparse
+        # answers an invalid choice with a usage dump on stderr rather than the shared
+        # error envelope. Validating in the command keeps the failure machine-readable
+        # under `--format json` with a stable ATTEMPT_FAILURE_CODE_INVALID code.
+        help=f"Why the attempt produced nothing: {', '.join(ATTEMPT_FAILURE_CODES)}. See docs/source-delivery.md.",
+    )
+    attempt_parser.add_argument(
+        "--orchestration-id",
+        required=True,
+        help="Session the attempt belongs to; attempts are counted per session.",
+    )
+    attempt_parser.add_argument(
+        "--action-id",
+        required=True,
+        help="Work order the attempt was executed under.",
+    )
+    attempt_parser.add_argument(
+        "--detail",
+        default=None,
+        help=f"Optional operator context, truncated to {MAX_ATTEMPT_DETAIL_LENGTH} characters.",
+    )
+    attempt_parser.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
@@ -299,13 +440,17 @@ def validate_question_slugs(project_root: Path, config: dict[str, Any], slugs: l
     return cleaned
 
 
-def manifest_source_ids(project_root: Path, config: dict[str, Any]) -> set[str]:
+def manifest_path(project_root: Path, config: dict[str, Any]) -> Path:
     sources_config = config.get("sources") if isinstance(config.get("sources"), dict) else {}
     manifest_value = sources_config.get("manifest_path", "sources/manifest.jsonl")
-    manifest = project_root / validate_generated_sources_path(manifest_value, "sources.manifest_path")
-    ids: set[str] = set()
+    return project_root / validate_generated_sources_path(manifest_value, "sources.manifest_path")
+
+
+def iter_manifest_records(project_root: Path, config: dict[str, Any]):
+    """Yield every well-formed manifest record. Malformed lines are skipped, not fatal."""
+    manifest = manifest_path(project_root, config)
     if not manifest.is_file():
-        return ids
+        return
     for line in manifest.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -314,8 +459,35 @@ def manifest_source_ids(project_root: Path, config: dict[str, Any]) -> set[str]:
         except json.JSONDecodeError:
             continue
         if isinstance(record, dict) and isinstance(record.get("id"), str):
-            ids.add(record["id"])
-    return ids
+            yield record
+
+
+def manifest_source_ids(project_root: Path, config: dict[str, Any]) -> set[str]:
+    return {record["id"] for record in iter_manifest_records(project_root, config)}
+
+
+def manifest_record_by_id(project_root: Path, config: dict[str, Any], source_id: str) -> dict[str, Any] | None:
+    """Return one full manifest record, including its merged ``provenance`` object.
+
+    Sidecar fields reach consumers through the manifest record that
+    ``source_inventory.py`` builds, so scope matching never re-reads a
+    ``.provenance.yml`` from disk and never disagrees with the inventoried view.
+    """
+    for record in iter_manifest_records(project_root, config):
+        if record["id"] == source_id:
+            return record
+    return None
+
+
+def source_provenance_scope(project_root: Path, config: dict[str, Any], source_id: str) -> dict[str, str]:
+    """Return the scope a delivered source declares, or an empty mapping when unstamped."""
+    record = manifest_record_by_id(project_root, config, source_id)
+    if record is None:
+        return {}
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        return {}
+    return normalize_scope(provenance.get("scope"))
 
 
 def render_request_line(record: dict[str, Any]) -> str:
@@ -353,6 +525,124 @@ def write_requests(path: Path, records: list[dict[str, Any]]) -> None:
         _write_requests_unlocked(path, records)
 
 
+def workspace_delegates_acquisition(config: dict[str, Any]) -> bool:
+    """Return whether research.yml declares an external acquirer.
+
+    A malformed section is reported through this script's own error envelope rather than
+    silently reading as "not delegated": treating a broken declaration as absent would
+    quietly reopen the out-of-band path the gate exists to close.
+    """
+    try:
+        return is_delegated(orchestration_config(config))
+    except OrchestrationConfigError as exc:
+        raise SystemExit(f"Invalid research.yml: {exc.message}") from exc
+
+
+def require_in_order_request_mutation(project_root: Path, config: dict[str, Any], request_id: str) -> None:
+    require_sanctioned_mutation(
+        project_root,
+        workspace_delegates_acquisition(config),
+        request_id=request_id,
+        error_code="SOURCE_REQUEST_FULFILL_DELEGATED",
+        subject=f"source request {request_id}",
+        remediation=(
+            "Fulfil or record an attempt against this request while executing the delegated acquisition "
+            "work order that scopes it, or finish the active session first."
+        ),
+    )
+
+
+def request_attempt_audit_path(project_root: Path, config: dict[str, Any]) -> Path:
+    """Return the append-only attempt audit beside the request store."""
+    return requests_path(project_root, config).with_name(ATTEMPT_AUDIT_FILENAME)
+
+
+def generate_attempt_event_id() -> str:
+    """Return a fresh attempt-event identity.
+
+    Random rather than content-derived, unlike ``generate_request_id``. A request id
+    hashes its content so that re-adding the same request is an idempotent no-op; an
+    attempt has no such dedup semantics — two throttled attempts on one request in the
+    same second are two events. Deriving the id from (request, timestamp, count) made it
+    collide exactly then, and `event_id` is the identity the controller fingerprints, so a
+    collision would hide one attempt behind another. This matches the candidate lifecycle
+    audit, which is the precedent for an append-only event store here.
+    """
+    return f"attempt-{uuid.uuid4().hex}"
+
+
+def bounded_attempt_detail(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) <= MAX_ATTEMPT_DETAIL_LENGTH:
+        return text
+    return text[: MAX_ATTEMPT_DETAIL_LENGTH - 1] + "…"
+
+
+def load_attempt_events(path: Path) -> list[dict[str, Any]]:
+    """Load every recorded attempt-failure event.
+
+    Readers are deliberately tolerant of **unknown keys** while strict about the fields
+    they rely on. The event shape is expected to grow — a structured request scope is the
+    next likely addition — and a reader written today must not refuse events written by a
+    later version of this package. Writers stay strict: nothing here emits an unknown key.
+
+    A malformed line is fatal rather than skipped. This is an audit whose absence is
+    evidence: silently dropping an unreadable event would let a request look
+    never-attempted, which is exactly the claim the audit exists to disprove.
+    """
+    events: list[dict[str, Any]] = []
+    if not path.exists():
+        return events
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Invalid JSONL in {path.name} line {line_number}: {exc}") from exc
+        if not isinstance(event, dict):
+            raise SystemExit(f"Invalid attempt event in {path.name} line {line_number}: expected a JSON object")
+        missing = [field for field in ATTEMPT_EVENT_REQUIRED_FIELDS if not isinstance(event.get(field), str)]
+        if missing:
+            raise SystemExit(
+                f"Invalid attempt event in {path.name} line {line_number}: "
+                f"missing or non-string {', '.join(missing)}"
+            )
+        events.append(event)
+    return events
+
+
+def attempt_failures_by_request(
+    events: list[dict[str, Any]],
+    orchestration_id: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Group attempt failures by request id, oldest first, optionally for one session.
+
+    The session filter is how a router counts attempts per session rather than for all
+    time: a new session gets a fresh look at every request, so a host-side fix is applied
+    by starting one rather than by editing this append-only audit. Callers that want the
+    whole history — lint, an operator report — pass no filter.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        if orchestration_id is not None and event.get("orchestration_id") != orchestration_id:
+            continue
+        grouped.setdefault(str(event["request_id"]), []).append(event)
+    return grouped
+
+
+def append_attempt_event(path: Path, event: dict[str, Any]) -> None:
+    """Append one attempt event. Called while holding the source-request lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=False) + "\n")
+
+
 def append_log_entry(log_path: Path, entry: str) -> None:
     """Append a rendered log entry under the shared workspace lock."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -378,13 +668,26 @@ def append_log_entry(log_path: Path, entry: str) -> None:
 def request_summary(record: dict[str, Any]) -> str:
     question_slugs = record.get("question_slugs")
     slugs = ", ".join(question_slugs) if isinstance(question_slugs, list) and question_slugs else "none"
-    return (
+    summary = (
         f"[{record.get('priority', '?')}] {record.get('request_id', '?')} ({record.get('kind', '?')}, "
         f"{record.get('status', '?')}): {record.get('query_or_identifier', '?')} | questions: {slugs}"
     )
+    scope = format_scope(record.get("scope"))
+    return f"{summary} | scope: {scope}" if scope else summary
 
 
-def find_open_duplicate(records: list[dict[str, Any]], kind: str, query: str) -> dict[str, Any] | None:
+def find_open_duplicate(
+    records: list[dict[str, Any]],
+    kind: str,
+    query: str,
+    scope: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Return the open request this one would duplicate, or None.
+
+    Scope is part of the identity, not decoration: the same query template asked for
+    two candidates is two requests, and collapsing them would silently drop the second
+    ask. Both sides unscoped counts as equal, so unscoped callers keep today's behavior.
+    """
     normalized = normalize_query(query)
     for record in records:
         if (
@@ -392,6 +695,7 @@ def find_open_duplicate(records: list[dict[str, Any]], kind: str, query: str) ->
             and record.get("kind") == kind
             and isinstance(record.get("query_or_identifier"), str)
             and normalize_query(record["query_or_identifier"]) == normalized
+            and scope_equal(record.get("scope"), scope)
         ):
             return record
     return None
@@ -1485,6 +1789,10 @@ def run_add(args: argparse.Namespace) -> dict[str, Any]:
     config = load_config(project_root)
     path = requests_path(project_root, config)
 
+    # Both raise before the lock is taken, so an unusable kind or scope costs nothing.
+    kind = validate_kind(args.kind, config)
+    scope = parse_scope_pairs(getattr(args, "scope", None))
+
     query = args.query_or_identifier.strip()
     if not query:
         raise SystemExit("--query-or-identifier must be a non-empty string")
@@ -1495,7 +1803,7 @@ def run_add(args: argparse.Namespace) -> dict[str, Any]:
 
     with workspace_lock(source_requests_lock_path(path), purpose="source request mutation"):
         records = load_requests(path)
-        duplicate = find_open_duplicate(records, args.kind, query)
+        duplicate = find_open_duplicate(records, kind, query, scope)
         if duplicate is not None:
             return {
                 "schema_version": SCHEMA_VERSION,
@@ -1509,8 +1817,8 @@ def run_add(args: argparse.Namespace) -> dict[str, Any]:
         now = timestamp_utc()
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
-            "request_id": generate_request_id(args.kind, query, now, len(records)),
-            "kind": args.kind,
+            "request_id": generate_request_id(kind, query, now, len(records)),
+            "kind": kind,
             "query_or_identifier": query,
             "rationale": rationale,
             "priority": args.priority,
@@ -1520,6 +1828,10 @@ def run_add(args: argparse.Namespace) -> dict[str, Any]:
             "updated_at": now,
             "source_id": None,
         }
+        if scope:
+            # Present only when declared: an empty mapping would read as "nothing satisfies
+            # this", and its absence keeps unscoped records identical to pre-CR-4 ones.
+            record["scope"] = scope
         _append_request_unlocked(path, record)
     append_log_entry(
         project_root / "log.md",
@@ -1539,13 +1851,39 @@ def run_add(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def matches_scope_filter(record: dict[str, Any], scope_filter: dict[str, str]) -> bool:
+    """Return whether a record declares every filter pair exactly.
+
+    AND over the given pairs with exact string equality and no operators — the same
+    matching-never-interpreting rule scope obeys everywhere else. A record without the
+    key never matches; there is no "unset" wildcard to reason about.
+    """
+    if not scope_filter:
+        return True
+    record_scope = normalize_scope(record.get("scope"))
+    return all(record_scope.get(key) == value for key, value in scope_filter.items())
+
+
 def run_list(args: argparse.Namespace) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
     config = load_config(project_root)
     path = requests_path(project_root, config)
+
+    # Validated against the same registry `add` writes through, so a filter can never
+    # silently return nothing because of a kind this workspace would have refused.
+    raw_kinds = getattr(args, "kind", None)
+    kinds = list(dict.fromkeys(validate_kind(value, config) for value in raw_kinds)) if raw_kinds else None
+    scope_filter = parse_scope_pairs(getattr(args, "scope", None))
+
     records = load_requests(path)
     statuses = list(dict.fromkeys(args.status)) if args.status else None
-    selected = [record for record in records if statuses is None or record.get("status") in statuses]
+    selected = [
+        record
+        for record in records
+        if (statuses is None or record.get("status") in statuses)
+        and (kinds is None or record.get("kind") in kinds)
+        and matches_scope_filter(record, scope_filter)
+    ]
     selected.sort(key=request_time_sort_key)
     counts = {status: 0 for status in REQUEST_STATUSES}
     for record in records:
@@ -1557,9 +1895,113 @@ def run_list(args: argparse.Namespace) -> dict[str, Any]:
         "generated_at": timestamp_utc(),
         "requests_path": relative_label(project_root, path),
         "filter_statuses": statuses,
+        "filter_kinds": kinds,
+        "filter_scope": scope_filter or None,
         "counts": {"total": len(records), **counts},
         "requests": selected,
     }
+
+
+def check_fulfill_scope(
+    request: dict[str, Any],
+    source_id: str,
+    source_scope: dict[str, str],
+    asserted_scope: dict[str, str],
+    *,
+    require_scope: bool,
+) -> None:
+    """Refuse a fulfilment whose scope evidence contradicts the request. Never writes.
+
+    Three layers, each answering a different failure (CR-4 §2.3):
+
+    1. **Contradiction** — keys the request and the delivery both declare must agree.
+       Unconditional, because it cannot fire unless both sides opted into scope: a
+       workspace that never passed ``--scope`` sees exactly today's behavior.
+    2. **Assertion** (``--match-scope``) — what the caller claims this fulfilment is,
+       checked against the request *and* the delivery, so a caller cannot talk a
+       facet-X request into accepting facet-Y evidence.
+    3. **Absence** (``--require-scope``) — a key the delivery never states, whether the
+       request declared it or the caller asserted it. Tolerated by default, since no
+       pre-CR-4 delivery stamps scope; refused on request by hosts whose pipeline does,
+       which closes the hole where omitting scope evades layers 1 and 2. Asserted keys
+       belong in this set: layer 2 can only catch an assertion the delivery *disagrees*
+       with, so without this an explicit ``--match-scope`` claim against an unstamped
+       source would be accepted with nothing verified, and no flag could ask otherwise.
+
+    ``REQUEST_SCOPE_MISMATCH`` and ``REQUEST_SCOPE_MISSING`` stay distinct codes: the
+    first is a mis-pairing to investigate, the second a delivery pipeline to fix. Each
+    refusal carries that code's registered remediation rather than the scope module's
+    parse-oriented default, which would tell someone holding a mis-paired delivery to
+    check their ``key=value`` syntax.
+    """
+    request_id = str(request.get("request_id", ""))
+    request_scope = normalize_scope(request.get("scope"))
+
+    conflicts, _ = scope_match(request_scope, source_scope)
+    if conflicts:
+        raise RequestScopeError(
+            "REQUEST_SCOPE_MISMATCH",
+            (
+                f"Request {request_id} cannot be fulfilled by source {source_id}: they disagree about "
+                f"scope {', '.join(conflicts)} "
+                f"(request {format_scope({key: request_scope[key] for key in conflicts})}; "
+                f"source {format_scope({key: source_scope[key] for key in conflicts})})."
+            ),
+            remediation=remediation_for("REQUEST_SCOPE_MISMATCH"),
+            details={
+                "request_id": request_id,
+                "source_id": source_id,
+                "conflicts": conflict_details(request_scope, source_scope, conflicts),
+            },
+        )
+
+    for label, other in (("request " + request_id, request_scope), ("source " + source_id, source_scope)):
+        asserted_conflicts, _ = scope_match(asserted_scope, other)
+        if asserted_conflicts:
+            raise RequestScopeError(
+                "REQUEST_SCOPE_MISMATCH",
+                (
+                    f"--match-scope contradicts the scope of {label}: "
+                    f"asserted {format_scope({key: asserted_scope[key] for key in asserted_conflicts})}, "
+                    f"recorded {format_scope({key: other[key] for key in asserted_conflicts})}."
+                ),
+                remediation=remediation_for("REQUEST_SCOPE_MISMATCH"),
+                details={
+                    "request_id": request_id,
+                    "source_id": source_id,
+                    "option": "--match-scope",
+                    "conflicts": [
+                        {"key": key, "asserted_value": asserted_scope[key], "recorded_value": other[key]}
+                        for key in asserted_conflicts
+                    ],
+                },
+            )
+
+    if require_scope:
+        # An asserted key is a claim the caller made on the command line; a request key
+        # is one the workspace recorded. Under --require-scope the delivery must state
+        # both, so neither can be verified by silence. Values that disagree were already
+        # refused above, so the union never hides a conflict behind a merge.
+        required = {**request_scope, **asserted_scope}
+        _, missing = scope_match(required, source_scope)
+        if missing:
+            raise RequestScopeError(
+                "REQUEST_SCOPE_MISSING",
+                (
+                    f"Source {source_id} declares no provenance scope for {', '.join(missing)}; "
+                    "--require-scope needs the delivery to state every scope key "
+                    f"request {request_id} declares or --match-scope asserts."
+                ),
+                remediation=remediation_for("REQUEST_SCOPE_MISSING"),
+                details={
+                    "request_id": request_id,
+                    "source_id": source_id,
+                    "missing_keys": missing,
+                    "request_scope": request_scope,
+                    "asserted_scope": asserted_scope,
+                    "source_scope": source_scope,
+                },
+            )
 
 
 def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
@@ -1571,6 +2013,7 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
     source_id = args.source_id.strip()
     if not request_id or not source_id:
         raise SystemExit("--request-id and --source-id must be non-empty strings")
+    asserted_scope = parse_scope_pairs(getattr(args, "match_scope", None), option="--match-scope")
 
     with workspace_lock(source_requests_lock_path(path), purpose="source request mutation"):
         records = load_requests(path)
@@ -1590,11 +2033,24 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
                 f"Request {request_id} is already fulfilled by source {target.get('source_id')}; "
                 "record a new request instead of relinking it."
             )
+        # Gated here rather than at the top of the command: the idempotent re-fulfil above
+        # returns without touching anything, and refusing a no-op would break a delegate
+        # replaying its own action.
+        require_in_order_request_mutation(project_root, config, request_id)
         if source_id not in manifest_source_ids(project_root, config):
             raise SystemExit(
                 f"Unknown source id: {source_id} (not in the manifest). "
                 "Run source_inventory.py after delivering the files, then fulfill."
             )
+        # After manifest membership so an unknown source is reported as such rather than as
+        # an unscoped delivery, and before any mutation so a refusal leaves the request open.
+        check_fulfill_scope(
+            target,
+            source_id,
+            source_provenance_scope(project_root, config, source_id),
+            asserted_scope,
+            require_scope=bool(getattr(args, "require_scope", False)),
+        )
 
         now = timestamp_utc()
         target["status"] = "fulfilled"
@@ -1615,6 +2071,69 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
         "updated": True,
         "request": target,
         "requests_path": relative_label(project_root, path),
+    }
+
+
+def run_record_attempt_failure(args: argparse.Namespace) -> dict[str, Any]:
+    project_root = Path(args.project_root).expanduser().resolve()
+    config = load_config(project_root)
+    path = requests_path(project_root, config)
+    audit_path = request_attempt_audit_path(project_root, config)
+
+    request_id = args.request_id.strip()
+    orchestration_id = args.orchestration_id.strip()
+    action_id = args.action_id.strip()
+    failure_code = args.failure_code.strip()
+    if not request_id or not orchestration_id or not action_id:
+        raise SystemExit("--request-id, --orchestration-id, and --action-id must be non-empty strings")
+    if not is_attempt_failure_code(failure_code):
+        raise SystemExit(
+            f"Unknown attempt failure code: {failure_code}. "
+            f"Use one of: {', '.join(ATTEMPT_FAILURE_CODES)}"
+        )
+
+    with workspace_lock(source_requests_lock_path(path), purpose="source request mutation"):
+        records = load_requests(path)
+        target = next((record for record in records if record.get("request_id") == request_id), None)
+        if target is None:
+            raise SystemExit(f"Unknown request id: {request_id} (no record in {relative_label(project_root, path)})")
+        if target.get("status") == "fulfilled":
+            # A fulfilled request has evidence; recording an attempt failure against it
+            # would put the audit and the store in disagreement about what happened.
+            raise SystemExit(
+                f"Request already fulfilled: {request_id} was fulfilled by source "
+                f"{target.get('source_id')}; a fulfilled request has no failed attempt to record."
+            )
+        require_in_order_request_mutation(project_root, config, request_id)
+        now = timestamp_utc()
+        event: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "event_type": ATTEMPT_EVENT_TYPE,
+            "event_id": generate_attempt_event_id(),
+            "request_id": request_id,
+            "orchestration_id": orchestration_id,
+            "action_id": action_id,
+            "failure_code": failure_code,
+            "detail": bounded_attempt_detail(getattr(args, "detail", None)),
+            "recorded_at": now,
+        }
+        append_attempt_event(audit_path, event)
+
+    append_log_entry(
+        project_root / "log.md",
+        (
+            f"## [{now.split('T', 1)[0]}] source-request | Recorded a failed acquisition attempt\n\n"
+            f"- Request: `{request_id}` failed with `{failure_code}`.\n"
+            f"- Action: `{action_id}` of orchestration `{orchestration_id}`.\n"
+        ),
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "action": "record-attempt-failure",
+        "recorded": True,
+        "event": event,
+        "request": target,
+        "attempts_path": relative_label(project_root, audit_path),
     }
 
 
@@ -1710,6 +2229,17 @@ def render_text_report(report: dict[str, Any]) -> str:
     if report.get("action") == "fulfill":
         verb = "Fulfilled" if report["updated"] else "Already fulfilled (no-op)"
         return f"{verb}:\n  {request_summary(report['request'])}\n"
+    if report.get("action") == "record-attempt-failure":
+        event = report["event"]
+        lines = [
+            f"Recorded attempt failure {event['failure_code']}:",
+            f"  {request_summary(report['request'])}",
+            f"  Action: {event['action_id']} of orchestration {event['orchestration_id']}",
+        ]
+        if event.get("detail"):
+            lines.append(f"  Detail: {event['detail']}")
+        lines.append(f"  Audit: {report['attempts_path']}")
+        return "\n".join(lines) + "\n"
     if report.get("action") == "plan-fetch":
         lines = [
             f"Fetch plan for {report['request'].get('request_id', '?')}: {report['plan_status']}",
@@ -1756,8 +2286,19 @@ def main(argv: list[str] | None = None) -> int:
             report = run_list(args)
         elif args.command == "fulfill":
             report = run_fulfill(args)
+        elif args.command == "record-attempt-failure":
+            report = run_record_attempt_failure(args)
         else:
             report = run_plan_fetch(args)
+    except (DelegationGateError, RequestKindError, RequestScopeError) as exc:
+        emit_error(
+            exc.message,
+            json_mode=json_mode,
+            error_code=exc.error_code,
+            remediation=exc.remediation,
+            details=exc.details,
+        )
+        return EXIT_INVALID
     except LockUnavailableError as exc:
         emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
         return EXIT_INVALID

@@ -202,6 +202,8 @@ _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _request_scope import FACET_SCOPE_KEY, normalize_scope
+from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
 
 _script_errors = load_workspace_module(_SCRIPT_DIR, "_script_errors")
@@ -255,7 +257,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     validate_parser.add_argument("--slug", required=True, help="Question slug (file name without .md).")
     add_format_arg(validate_parser)
 
-    set_facet_parser = subparsers.add_parser("set-facet", help="Update accepted source or blocking request IDs.")
+    set_facet_parser = subparsers.add_parser(
+        "set-facet",
+        help="Update accepted source or blocking request IDs.",
+        description=(
+            "Update one facet's accepted source ids and blocking request ids. "
+            f"Linking a blocking request also back-fills scope.{FACET_SCOPE_KEY} into that request "
+            "record so the manifest and the request cannot disagree about which facet the request "
+            "unblocks. A request already scoped to a different facet is refused with "
+            "FACET_SCOPE_CONFLICT before the manifest is written. The back-fill runs after the "
+            "manifest write; if only the back-fill fails the command exits non-zero naming that "
+            "step, and rerunning the same set-facet converges."
+        ),
+    )
     set_facet_parser.add_argument("--slug", required=True, help="Question slug (file name without .md).")
     set_facet_parser.add_argument("--facet-id", required=True, help="Facet identifier to update.")
     set_facet_parser.add_argument(
@@ -268,7 +282,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--blocking-request-id",
         action="append",
         default=None,
-        help="Source request id blocking this facet. Repeatable.",
+        help=(
+            "Source request id blocking this facet. Repeatable. Also back-fills "
+            f"scope.{FACET_SCOPE_KEY}=<facet-id> into the request record when it carries no facet "
+            "scope yet; a request already scoped to another facet is refused with "
+            "FACET_SCOPE_CONFLICT before anything is written."
+        ),
     )
     set_facet_parser.add_argument(
         "--clear-accepted-source-ids",
@@ -278,7 +297,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     set_facet_parser.add_argument(
         "--clear-blocking-request-ids",
         action="store_true",
-        help="Clear blocking request ids before adding any provided --blocking-request-id values.",
+        help=(
+            "Clear blocking request ids before adding any provided --blocking-request-id values. "
+            f"This removes only the manifest link; it never clears scope.{FACET_SCOPE_KEY} from the "
+            "unlinked request records, which still state what would satisfy them."
+        ),
     )
     add_format_arg(set_facet_parser)
 
@@ -928,6 +951,125 @@ def validate_request_ids(project_root: Path, config: dict[str, Any], slug: str, 
             )
 
 
+def facet_scope_conflict(request_id: str, declared_facet_id: str, facet_id: str, *, written: bool) -> CoverageManifestError:
+    """Build the refusal for a request that already answers a different facet."""
+    tail = (
+        " The manifest facet link was already written; reconcile the request scope, "
+        "then rerun set-facet."
+        if written
+        else " Nothing was written."
+    )
+    return CoverageManifestError(
+        "FACET_SCOPE_CONFLICT",
+        (
+            f"source request {request_id} already declares scope.{FACET_SCOPE_KEY}={declared_facet_id}, "
+            f"which is not the facet being linked ({facet_id})." + tail
+        ),
+        details={
+            "request_id": request_id,
+            "declared_facet_id": declared_facet_id,
+            "facet_id": facet_id,
+        },
+    )
+
+
+def facet_scope_backfill_targets(
+    project_root: Path,
+    config: dict[str, Any],
+    facet_id: str,
+    request_ids: list[str],
+) -> list[str]:
+    """Return the linked request ids whose scope still needs ``facet_id`` back-filled.
+
+    Read-only and deliberately lock-free: this is the pre-check of the sequencing in
+    docs/CR/cr4-backlog.md §2.5, so a conflicting request is refused *before* the facet
+    write and a refusal leaves the manifest untouched. Unknown request ids are left to
+    ``validate_request_ids``, which runs first and refuses them with ``REQUEST_UNKNOWN``.
+
+    Every record is scanned rather than the first match per id, because the back-fill
+    scans every record too. A store holding duplicate ids whose *later* copy declared a
+    different facet would otherwise pass this check and be refused only after the facet
+    write — the half-applied state this sequencing exists to prevent. The store is
+    append-only and nothing rejects a duplicate id on read, so it stays reachable.
+    """
+    if not request_ids:
+        return []
+    wanted = set(request_ids)
+    unscoped: set[str] = set()
+    for record in all_source_request_records(project_root, config):
+        request_id = record.get("request_id") if isinstance(record, dict) else None
+        if not isinstance(request_id, str) or request_id not in wanted:
+            continue
+        declared = normalize_scope(record.get("scope")).get(FACET_SCOPE_KEY)
+        if declared is None:
+            # One record lacking the facet is enough to need the back-fill, even if a
+            # duplicate of the same id already declares it: ``backfill_facet_scope``
+            # writes into every record that lacks it, and readers take the *first*
+            # match. Treating the id as already scoped because some later duplicate
+            # carries the facet would leave the record readers actually use unscoped,
+            # with set-facet reporting success.
+            unscoped.add(request_id)
+            continue
+        if declared != facet_id:
+            raise facet_scope_conflict(request_id, declared, facet_id, written=False)
+    return [request_id for request_id in request_ids if request_id in unscoped]
+
+
+def backfill_facet_scope(
+    project_root: Path,
+    config: dict[str, Any],
+    facet_id: str,
+    request_ids: list[str],
+) -> list[str]:
+    """Write ``scope.facet_id`` into each named request that does not carry it yet.
+
+    Takes the source-requests lock alone — never nested inside another workspace lock
+    (docs/CR/cr4-backlog.md §2.5) — and writes through ``_write_requests_unlocked`` rather
+    than the public ``write_requests`` wrapper, which would re-acquire the same lock.
+
+    Deliberately *not* gated by ``source_requests.require_in_order_request_mutation``:
+    recording which facet a request already blocks is manifest bookkeeping, not
+    fulfilment, so it must stay available outside a delegated acquisition work order
+    (docs/CR/cr4-backlog.md T7). That gate wraps only ``fulfill`` and
+    ``record-attempt-failure``.
+
+    Idempotent: a request already scoped to ``facet_id`` is skipped, and when nothing
+    needs writing the requests file is not rewritten at all.
+    """
+    if not request_ids:
+        return []
+    source_requests = load_sibling_module("source_requests")
+    path = source_requests.requests_path(project_root, config)
+    wanted = set(request_ids)
+    updated: list[str] = []
+    with workspace_lock(source_requests.source_requests_lock_path(path), purpose="source request mutation"):
+        records = source_requests.load_requests(path)
+        now = source_requests.timestamp_utc()
+        for record in records:
+            request_id = record.get("request_id")
+            if not isinstance(request_id, str) or request_id not in wanted:
+                continue
+            raw_scope = record.get("scope")
+            declared = normalize_scope(raw_scope).get(FACET_SCOPE_KEY)
+            if declared == facet_id:
+                continue
+            if declared is not None:
+                # Re-read under the lock: another writer may have scoped this request
+                # since the pre-check. Refuse rather than overwrite a stated scope.
+                raise facet_scope_conflict(request_id, declared, facet_id, written=True)
+            # Keep any other declared keys verbatim; normalize_scope is a defensive
+            # reader for the decision above, not the shape this command persists.
+            scope = dict(raw_scope) if isinstance(raw_scope, dict) else {}
+            scope[FACET_SCOPE_KEY] = facet_id
+            record["scope"] = scope
+            record["updated_at"] = now
+            if request_id not in updated:
+                updated.append(request_id)
+        if updated:
+            source_requests._write_requests_unlocked(path, records)
+    return updated
+
+
 def all_facets(document: dict[str, Any]) -> list[dict[str, Any]]:
     return [*document["required_facets"], *document["optional_facets"]]
 
@@ -1109,14 +1251,23 @@ def unique_blocking_request_ids(document: dict[str, Any]) -> list[str]:
     return request_ids
 
 
-def source_request_records_by_id(project_root: Path, config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def all_source_request_records(project_root: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every request record in store order, duplicates included.
+
+    Callers that must not miss a later duplicate of an id read this rather than the
+    first-wins mapping below.
+    """
     source_requests = load_sibling_module("source_requests")
     try:
-        records = source_requests.load_requests(source_requests.requests_path(project_root, config))
+        return source_requests.load_requests(source_requests.requests_path(project_root, config))
     except SystemExit:
-        return {}
+        return []
+
+
+def source_request_records_by_id(project_root: Path, config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map request id to its first record. First-wins is fine for display and linkage."""
     by_id: dict[str, dict[str, Any]] = {}
-    for record in records:
+    for record in all_source_request_records(project_root, config):
         request_id = record.get("request_id") if isinstance(record, dict) else None
         if isinstance(request_id, str) and request_id and request_id not in by_id:
             by_id[request_id] = record
@@ -1280,6 +1431,11 @@ def run_set_facet(project_root: Path, config: dict[str, Any], args: argparse.Nam
     validate_source_ids(project_root, config, accepted_source_ids)
     validate_request_ids(project_root, config, slug, blocking_request_ids)
     facet = find_facet(document, facet_id)
+    # Step 1 of docs/CR/cr4-backlog.md §2.5: refuse a request that already answers a
+    # different facet before anything is written, so a conflict leaves the manifest as
+    # it was. --clear-blocking-request-ids drops only the manifest link, so an unlinked
+    # request keeps its scope and is never a back-fill target.
+    backfill_targets = facet_scope_backfill_targets(project_root, config, facet_id, blocking_request_ids)
     facet["accepted_source_ids"] = merge_unique(
         facet["accepted_source_ids"],
         accepted_source_ids,
@@ -1292,8 +1448,53 @@ def run_set_facet(project_root: Path, config: dict[str, Any], args: argparse.Nam
     )
     document["updated_at"] = timestamp_utc()
     validate_manifest(document, expected_slug=slug, policy_vocabularies=merged_policy_vocabularies(config))
+    # Step 2: the facet write, exactly as before this back-fill existed.
     write_manifest(path, document)
-    return report("set-facet", project_root, path, document, facet_id=facet_id)
+    # Step 3: the back-fill, under the source-requests lock alone. Step 4: a failure here
+    # leaves the facet written, so the refusal names this step and says the rerun converges.
+    # A CoverageManifestError from the back-fill is already precise about what happened
+    # (a scope conflict a concurrent writer introduced), so it is deliberately not caught
+    # and re-labelled here.
+    try:
+        backfilled = backfill_facet_scope(project_root, config, facet_id, backfill_targets)
+    except LockUnavailableError as exc:
+        raise backfill_failed(facet_id, backfill_targets, str(exc), exc.error_code) from exc
+    except SystemExit as exc:
+        if not isinstance(exc.code, str):
+            # A real process-exit code is not this command's failure to describe;
+            # let it through the way handle_system_exit does.
+            raise
+        raise backfill_failed(facet_id, backfill_targets, exc.code, "WORKSPACE_UNREADABLE") from exc
+    except OSError as exc:
+        raise backfill_failed(facet_id, backfill_targets, str(exc), "WORKSPACE_UNREADABLE") from exc
+    return report(
+        "set-facet",
+        project_root,
+        path,
+        document,
+        facet_id=facet_id,
+        scope_backfilled_request_ids=backfilled,
+    )
+
+
+def backfill_failed(facet_id: str, request_ids: list[str], reason: str, error_code: str) -> CoverageManifestError:
+    """Refusal for a back-fill that failed after the facet write already landed."""
+    return CoverageManifestError(
+        error_code,
+        (
+            f"coverage facet {facet_id} was updated, but back-filling scope.{FACET_SCOPE_KEY}={facet_id} "
+            f"into source request(s) {', '.join(request_ids)} failed: {reason}"
+        ),
+        remediation=(
+            "Only the request scope back-fill failed; the manifest facet is already written. "
+            "Resolve the reported cause and rerun the same set-facet command, which converges."
+        ),
+        details={
+            "failed_step": "request_scope_backfill",
+            "facet_id": facet_id,
+            "request_ids": list(request_ids),
+        },
+    )
 
 
 def run_evaluate(project_root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -1321,7 +1522,11 @@ def render_text(result: dict[str, Any]) -> str:
     if action == "validate":
         return f"valid: {slug}\n"
     if action == "set-facet":
-        return f"updated: {slug} facet {result['facet_id']}\n"
+        text = f"updated: {slug} facet {result['facet_id']}\n"
+        backfilled = result.get("scope_backfilled_request_ids") or []
+        if backfilled:
+            text += f"scope {FACET_SCOPE_KEY} back-filled into: {', '.join(backfilled)}\n"
+        return text
     if action == "evaluate":
         return f"{result['coverage_verdict']}: {slug}\n"
     return f"created: {result['manifest_path']}\n"
@@ -1355,6 +1560,9 @@ def main(argv: list[str] | None = None) -> int:
             details=error.details,
         )
         return error.exit_code
+    except LockUnavailableError as exc:
+        emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
+        return EXIT_INVALID
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
 

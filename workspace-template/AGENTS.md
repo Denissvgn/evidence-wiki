@@ -190,6 +190,14 @@ Goal: convert raw source material into stable, agent-readable records.
 4. Do not overwrite normalized records unless the workflow explicitly allows it.
 5. Append a `normalize` entry to `log.md`.
 
+When a source kind has no tooling and a record is written by hand or by an external
+normalizer, it must satisfy the record contract in `docs/normalized-source-format.md`
+to count as evidence: declare `normalized_format`, name the producing tool in
+`normalizer`, and keep the required frontmatter and sections. Check it with
+`scripts/normalize_verify.py --source-id <id>` before relying on it; lint accepts an
+externally written record only when it conforms. Write such records only for kinds
+`normalize_sources.py` does not handle — it regenerates records for the kinds it does.
+
 ### Ingest
 
 Goal: move source understanding into maintained wiki knowledge.

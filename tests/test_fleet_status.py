@@ -139,6 +139,90 @@ class FleetStatusTests(unittest.TestCase):
         self.assertEqual(1, document["counts"]["deferred_items"])
         self.assertGreaterEqual(document["counts"]["operational_warnings"], 1)
 
+    def park_question_for_review(self, target: Path, slug: str) -> None:
+        (target / "wiki" / "synthesis").mkdir(parents=True, exist_ok=True)
+        (target / "wiki" / "synthesis" / f"{slug}-answer.md").write_text(
+            "---\ntype: synthesis\ncreated: 2026-08-07\nupdated: 2026-08-07\nsource_ids: []\n---\n# A\n",
+            encoding="utf-8",
+        )
+        (target / "wiki" / "questions" / f"{slug}.md").write_text(
+            "---\n"
+            "type: question\n"
+            "created: 2026-08-07\n"
+            "updated: 2026-08-07\n"
+            "status: human_review\n"
+            "priority: high\n"
+            f"question: Which review clears {slug}?\n"
+            f"answer_page: ../synthesis/{slug}-answer.md\n"
+            "human_review_required: true\n"
+            "human_review_status: pending\n"
+            'human_review_requested_at: "2026-08-07T09:00:00Z"\n'
+            "human_review_policies:\n"
+            "  - manual_review_required\n"
+            "source_ids: []\n"
+            "---\n\n"
+            "# Parked\n",
+            encoding="utf-8",
+        )
+
+    def set_question_review_scope(self, target: Path) -> None:
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text())
+        config["review"] = {"escalation_scope": "question"}
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def test_fleet_status_reports_questions_awaiting_review_per_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scoped = self.init_workspace(root, "scoped-workspace")
+            self.set_question_review_scope(scoped)
+            self.park_question_for_review(scoped, "parked")
+            clean = self.init_workspace(root, "clean-workspace")
+
+            code, document = self.run_fleet_status(
+                "--target", str(scoped), "--target", str(clean), "--no-cache"
+            )
+
+        self.assertEqual(0, code)
+        scoped_summary, clean_summary = document["targets"]
+        self.assertEqual(1, scoped_summary["questions_awaiting_review"])
+        self.assertEqual("in_progress", scoped_summary["readiness_verdict"])
+        self.assertEqual(0, clean_summary["questions_awaiting_review"])
+        self.assertEqual(1, document["counts"]["questions_awaiting_review"])
+
+    def test_fleet_text_output_surfaces_the_review_queue(self):
+        fleet_status = load_script_module("fleet_status_render_under_test", FLEET_STATUS_SCRIPT_PATH)
+        report = {
+            "schema_version": "1.0",
+            "targets": [
+                {
+                    "path": "/workspaces/scoped",
+                    "ok": True,
+                    "readiness_verdict": "in_progress",
+                    "active_run_count": 0,
+                    "stale_run_count": 0,
+                    "questions_awaiting_review": 2,
+                    "operational_debt": {"warning_count": 0, "deferred_count": 0},
+                }
+            ],
+            "counts": {
+                "targets": 1,
+                "ok": 1,
+                "errors": 0,
+                "active_runs": 0,
+                "stale_runs": 0,
+                "targets_with_operational_debt": 0,
+                "operational_warnings": 0,
+                "deferred_items": 0,
+                "questions_awaiting_review": 2,
+            },
+        }
+
+        text = fleet_status.render_text(report)
+
+        self.assertIn("Questions awaiting review: 2", text)
+        self.assertIn("awaiting_review=2", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -294,5 +294,110 @@ class DoctorScriptTests(unittest.TestCase):
         self.assertTrue(checks["python"]["required"])
 
 
+class NormalizerAdapterDoctorTests(unittest.TestCase):
+    """Doctor is where an auditor asks what a workspace may execute before it does.
+
+    A configured adapter is the one place normalization runs something the package did
+    not ship, so the declaration has to be visible without opening research.yml — and
+    doctor must only report it, never run it.
+    """
+
+    def setUp(self):
+        self.doctor = load_script_module("evidence_wiki_doctor_adapters", DOCTOR_PATH)
+
+    def report(self, workspace: Path) -> dict:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.doctor.main(["--project-root", str(workspace), "--format", "json"], env=FakeEnvironment())
+        return json.loads(stdout.getvalue())
+
+    def check(self, workspace: Path) -> dict:
+        return {check["id"]: check for check in self.report(workspace)["checks"]}["normalization_adapters"]
+
+    def with_normalization(self, workspace: Path, section: str) -> Path:
+        config = workspace / "research.yml"
+        config.write_text(config.read_text(encoding="utf-8") + section, encoding="utf-8")
+        return workspace
+
+    ADAPTER_SECTION = (
+        "normalization:\n"
+        "  adapters:\n"
+        "    - kinds: [structured_data]\n"
+        "      provider: command\n"
+        '      command: ["autoseller-normalize", "--format", "json"]\n'
+        "      name: autoseller-normalize\n"
+        '      version: "1.4.0"\n'
+        "      timeout_seconds: 90\n"
+    )
+
+    def test_a_workspace_with_no_adapters_says_it_runs_nothing_external(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            check = self.check(make_workspace(Path(tmpdir)))
+
+        self.assertEqual("ok", check["status"])
+        self.assertFalse(check["required"])
+        self.assertEqual(0, check["details"]["configured"])
+        self.assertEqual([], check["details"]["adapters"])
+        self.assertIn("no external commands", check["implication"])
+
+    def test_a_configured_adapter_is_listed_in_full(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.with_normalization(make_workspace(Path(tmpdir)), self.ADAPTER_SECTION)
+            check = self.check(workspace)
+
+        self.assertEqual("ok", check["status"], check["message"])
+        self.assertEqual(1, check["details"]["configured"])
+        self.assertEqual(
+            {
+                "kinds": ["structured_data"],
+                "provider": "command",
+                "command": ["autoseller-normalize", "--format", "json"],
+                "name": "autoseller-normalize",
+                "version": "1.4.0",
+                "timeout_seconds": 90,
+            },
+            check["details"]["adapters"][0],
+        )
+        self.assertIn("structured_data", check["message"])
+        self.assertIn("executes these commands", check["implication"])
+
+    def test_a_configured_adapter_does_not_degrade_the_verdict(self):
+        # Authorizing an adapter is a legitimate configuration, not a defect; the audit
+        # value is in the listing, not in a warning.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.with_normalization(make_workspace(Path(tmpdir)), self.ADAPTER_SECTION)
+            report = self.report(workspace)
+
+        self.assertEqual("ok", report["verdict"], report["checks"])
+
+    def test_an_invalid_section_is_reported_as_degraded_with_its_code(self):
+        broken = self.ADAPTER_SECTION.replace(
+            '      command: ["autoseller-normalize", "--format", "json"]\n',
+            '      command: "autoseller-normalize --format json"\n',
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.with_normalization(make_workspace(Path(tmpdir)), broken)
+            check = self.check(workspace)
+
+        self.assertEqual("degraded", check["status"])
+        self.assertEqual("CONFIG_INVALID", check["details"]["error_code"])
+        self.assertIn("must be a list of arguments", check["message"])
+        self.assertIn("docs/research-yml.md", check["remediation"])
+
+    def test_doctor_never_executes_the_configured_command(self):
+        # The command names a program that would fail loudly if run.
+        section = self.ADAPTER_SECTION.replace(
+            '      command: ["autoseller-normalize", "--format", "json"]\n',
+            '      command: ["/definitely/not/a/real/binary-ew"]\n',
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.with_normalization(make_workspace(Path(tmpdir)), section)
+            with mock.patch("subprocess.run", side_effect=AssertionError("doctor ran the adapter")):
+                check = self.check(workspace)
+
+        self.assertEqual("ok", check["status"])
+        self.assertEqual(["/definitely/not/a/real/binary-ew"], check["details"]["adapters"][0]["command"])
+
+
 if __name__ == "__main__":
     unittest.main()
