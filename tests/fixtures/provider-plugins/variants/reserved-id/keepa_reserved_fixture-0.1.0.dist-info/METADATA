@@ -1,0 +1,10 @@
+Metadata-Version: 2.1
+Name: keepa-reserved-fixture
+Version: 0.1.0
+Summary: Synthetic provider distribution that claims the reserved built-in id "web".
+Author: EvidenceWiki contributors
+License: MIT
+Requires-Python: >=3.10
+
+Exists to prove that built-in provider ids can never be shadowed by a registration, even
+when the rest of the declaration is well formed.

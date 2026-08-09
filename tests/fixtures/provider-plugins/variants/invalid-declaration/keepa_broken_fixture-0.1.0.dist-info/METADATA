@@ -1,0 +1,10 @@
+Metadata-Version: 2.1
+Name: keepa-broken-fixture
+Version: 0.1.0
+Summary: Synthetic provider distribution whose capability declaration breaks every v1 rule.
+Author: EvidenceWiki contributors
+License: MIT
+Requires-Python: >=3.10
+
+Exists to prove that an invalid registration is reported with every violation named, and
+that it never crashes entry-point enumeration.
