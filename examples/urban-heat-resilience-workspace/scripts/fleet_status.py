@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Aggregate workspace status across multiple research workspaces."""
+"""Aggregate workspace status across multiple research workspaces.
+
+One unreadable target must never fail the whole command: an operator asking about
+a fleet is asking which members are healthy, and a command that dies on the first
+broken one answers nothing. So ``target_summary`` catches everything a single
+target can throw and folds it into an ``ok: False`` entry beside the healthy ones.
+
+That guarantee is why ``run_fleet_status`` is the one seam in this package that
+never raises ``ScriptRefusal``: this command has no refusal to raise. A sibling
+seam's refusal is one target's error entry here, not this command's verdict.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -97,7 +108,7 @@ def target_summary(target: Path, status_module: ModuleType, *, no_cache: bool) -
     }
 
 
-def build_report(targets: list[str], *, no_cache: bool) -> dict[str, Any]:
+def build_report(targets: Sequence[str | Path], *, no_cache: bool) -> dict[str, Any]:
     status_module = load_workspace_status()
     summaries = [target_summary(Path(target), status_module, no_cache=no_cache) for target in targets]
     return {
@@ -160,9 +171,27 @@ def render_text(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def run_fleet_status(targets: Sequence[str | Path], *, no_cache: bool = False) -> dict[str, Any]:
+    """Return exactly the fleet report ``main`` prints under ``--format json``.
+
+    This is the library seam: a long-lived host calls it in-process instead of
+    shelling out, and gets the document the CLI would have printed. ``targets``
+    mirrors repeated ``--target`` and ``no_cache`` mirrors ``--no-cache``;
+    ``--format`` has no counterpart because it chooses a rendering, not a document.
+
+    Unlike every other seam in this package it declares no ``ScriptRefusal``, and
+    that is the contract rather than an omission. A target this command cannot read
+    is reported as an ``ok: False`` entry carrying that target's ``error_code`` and
+    message, so a host that passes ten workspaces and one bad path gets eleven
+    answers instead of one exception. ``main`` needs no catch arm for the same
+    reason, and has never had one.
+    """
+    return build_report(list(targets), no_cache=no_cache)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    report = build_report(args.target, no_cache=args.no_cache)
+    report = run_fleet_status(args.target, no_cache=args.no_cache)
     if args.format == "json":
         print(json.dumps(report, indent=2, sort_keys=False))
     else:

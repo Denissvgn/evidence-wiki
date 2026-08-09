@@ -42,7 +42,9 @@ Each enrolled script declares its cases in its own file at
     function may prepare workspace state (claim a question, corrupt a config,
     copy the workspace aside) before returning its cases; ``workspace.parent`` is
     a scratch directory this module owns and may write to. Both a success case
-    and a refusal case are required -- half the contract is the refusal.
+    and a refusal case are required -- half the contract is the refusal. The one
+    exception is a command that cannot refuse at all, which declares itself in
+    ``SEAM_WITHOUT_REFUSAL`` below and supplies success cases only.
 
 A ``SeamCase`` (see ``tests/seam_cases/__init__.py``) pairs the argv the CLI is
 invoked with against a callable that drives the seam with equivalent inputs::
@@ -119,6 +121,49 @@ NOT_A_SEAM = {"_script_errors.py"}
 #: long before CR-6, and naming alone would enroll all of them.
 SEAM_DEFINITION = re.compile(r"^def run_\w+\(", re.MULTILINE)
 REFUSAL_TYPE = "ScriptRefusal"
+
+#: Enrolled scripts whose command has no refusal any input reaches, mapped to why.
+#:
+#: The default is that a case module declares both outcomes, because a seam that can
+#: refuse must refuse exactly as its CLI does and only a declared refusal case holds the
+#: two together. A command that cannot refuse has no such pair. Demanding one anyway
+#: would leave an author two bad choices -- fabricate a refusal the command does not
+#: have, or add a real one so the suite goes green -- and the second is a contract that
+#: damages the code it is meant to protect. These scripts stay enrolled: every document
+#: they can produce, including the ones another command would have refused over, is held
+#: to CLI parity by the success cases in their case modules.
+#:
+#: This is an exemption from declaring a refusal, not from being watched. It is checked
+#: rather than trusted by ``test_no_refusal_scripts_have_not_grown_one`` below, which
+#: fails the moment one of these files introduces a refusal -- so a later author cannot
+#: add one here without the suite telling them to move the script out of this set and
+#: declare the refusal case the contract asks for.
+SEAM_WITHOUT_REFUSAL = {
+    "fleet_status.py": (
+        "One unreadable target must never fail the whole command, so target_summary() "
+        "catches SystemExit and every Exception per target and folds the failure into an "
+        "ok: False entry beside the healthy ones. No input reaches a refusal; the bad-target "
+        "case is therefore a success case."
+    ),
+    "doctor.py": (
+        "Contract breaches are report content, not fatal errors: each domain error is caught "
+        "inside the *_check helper that provoked it and becomes a check_item, and a workspace "
+        "the doctor cannot read is a 'missing' verdict with a full report on stdout -- "
+        "diagnosing a broken workspace is the reason to run this command. Its seam converts "
+        "the defensive SystemExit funnel main has always carried, which no input reaches. "
+        "The purity suite records the same fact from the other side, in "
+        "REPORTS_ON_A_BROKEN_WORKSPACE."
+    ),
+}
+
+#: What introducing a refusal looks like in a script's source.
+#:
+#: ``raise ScriptRefusal(`` is a refusal the command *chooses*. ``raise SystemExit(`` is
+#: the older spelling of the same decision, since every wrapped ``main`` funnels one into
+#: a refusal. Deliberately not matched: ``ScriptRefusal.from_system_exit(...)``, which
+#: re-raises a ``SystemExit`` the script did not create and is the defensive funnel
+#: itself, and the ``raise SystemExit(main())`` module trailer, which is process exit.
+REFUSAL_INTRODUCED = re.compile(r"^\s*raise (?:ScriptRefusal\(|SystemExit\((?!main\(\)\)))", re.MULTILINE)
 
 #: Substituted for a declared-volatile value on both sides before comparison.
 VOLATILE = "<volatile>"
@@ -332,7 +377,34 @@ class SeamConformanceTests(unittest.TestCase):
             with self.subTest(script=script):
                 outcomes = {case.expect for case in enrollment.cases}
                 self.assertIn(SUCCESS, outcomes, f"{script}: declare at least one success case")
+                if script in SEAM_WITHOUT_REFUSAL:
+                    # This command cannot refuse; see SEAM_WITHOUT_REFUSAL for why, and
+                    # test_no_refusal_scripts_have_not_grown_one for what still holds it there.
+                    continue
                 self.assertIn(REFUSAL, outcomes, f"{script}: declare at least one refusal case")
+
+    def test_no_refusal_scripts_have_not_grown_one(self):
+        """The no-refusal exemption is checked against the source, not taken on trust."""
+        enrolled = enrolled_seam_scripts()
+        for script, reason in sorted(SEAM_WITHOUT_REFUSAL.items()):
+            with self.subTest(script=script):
+                # Enrollment is what subjects the script to this contract at all, so a
+                # file that drops its ScriptRefusal mention would fall out of the suite
+                # silently rather than loudly. Require it here instead.
+                self.assertIn(
+                    script,
+                    enrolled,
+                    f"{script} is declared refusal-free but is no longer detected as a seam; "
+                    "either restore its seam or drop it from SEAM_WITHOUT_REFUSAL",
+                )
+                found = REFUSAL_INTRODUCED.search((SCRIPTS / script).read_text(encoding="utf-8"))
+                self.assertIsNone(
+                    found,
+                    f"{script} now raises a refusal ({found.group().strip() if found else ''}), "
+                    f"but is declared refusal-free because: {reason} "
+                    "Remove it from SEAM_WITHOUT_REFUSAL and declare the refusal case in "
+                    f"tests/seam_cases/{Path(script).stem}.py.",
+                )
 
     def test_the_seam_and_the_cli_agree(self):
         for script, enrollment in sorted(self.enrollments.items()):
