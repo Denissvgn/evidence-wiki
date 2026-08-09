@@ -207,13 +207,23 @@ from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
 
 _script_errors = load_workspace_module(_SCRIPT_DIR, "_script_errors")
+ScriptRefusal = _script_errors.ScriptRefusal
 emit_error = _script_errors.emit_error
+emit_refusal = _script_errors.emit_refusal
 handle_system_exit = _script_errors.handle_system_exit
 json_mode_requested = _script_errors.json_mode_requested
 
 
-class CoverageManifestError(Exception):
-    """A refused coverage-manifest operation with a stable machine code."""
+class CoverageManifestError(ScriptRefusal):
+    """A refused coverage-manifest operation with a stable machine code.
+
+    This is the shared ``ScriptRefusal`` under the name this script's refusals have
+    always carried. Making it the shared type is what lets a ``run_<op>`` seam raise
+    the refusal an embedding host catches while ``main`` keeps rendering the very
+    same object as the error envelope on stderr. Sibling scripts that already catch
+    ``coverage.CoverageManifestError`` are unaffected: the name still denotes this
+    script's refusals and nothing else.
+    """
 
     def __init__(
         self,
@@ -225,12 +235,18 @@ class CoverageManifestError(Exception):
         remediation: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.exit_code = exit_code
-        self.recoverable = recoverable
-        self.remediation = remediation
-        self.details = details
+        super().__init__(
+            error_code,
+            message,
+            exit_code=exit_code,
+            recoverable=recoverable,
+            remediation=remediation,
+            details=details,
+            # Text mode has always printed this command's refusals as the bare
+            # message, never the shared ``refused (CODE): message`` form, so the
+            # text rendering is pinned here rather than left to the default.
+            text_line=message,
+        )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1497,16 +1513,46 @@ def backfill_failed(facet_id: str, request_ids: list[str], reason: str, error_co
     )
 
 
-def run_evaluate(project_root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    slug = validate_slug(args.slug)
-    path, document = load_manifest(project_root, config, slug)
-    policy_results, policy_results_by_facet = evaluate_policy_results_for_manifest(project_root, config, document)
-    evaluate_manifest(document, policy_results_by_facet)
-    validate_manifest(document, expected_slug=slug, policy_vocabularies=merged_policy_vocabularies(config))
-    write_manifest(path, document)
+def resolved_project_root(value: str | Path) -> Path:
+    """Resolve a caller-supplied project root the way this command always has."""
+    return Path(value).expanduser().resolve()
+
+
+def run_evaluate(project_root: str | Path, *, slug: str) -> dict[str, Any]:
+    """Return exactly the document ``main`` prints for ``evaluate --format json``.
+
+    This is the library seam: a long-lived host calls it in-process instead of
+    shelling out to this script, and gets the document the CLI would have printed.
+    The keyword argument mirrors the subcommand's one flag, ``--slug``.
+
+    Evaluating is not a read: the recomputed facet verdicts, coverage verdict, and
+    ``updated_at`` are written back to the manifest, so that write belongs to the
+    operation and stays inside the seam. Config loading is here too rather than in
+    ``main``, so an unreadable ``research.yml`` refuses by one code path no matter
+    which caller asked.
+
+    Refusals are raised as ``ScriptRefusal`` instead of printed, leaving the
+    rendering to the caller: ``main`` renders them as the same stderr envelope it
+    always did, and ``tests/test_seam_conformance.py`` holds the two renderings to
+    each other permanently.
+    """
+    root = resolved_project_root(project_root)
+    try:
+        config = load_config(root)
+        question_slug = validate_slug(slug)
+        path, document = load_manifest(root, config, question_slug)
+        policy_results, policy_results_by_facet = evaluate_policy_results_for_manifest(root, config, document)
+        evaluate_manifest(document, policy_results_by_facet)
+        validate_manifest(document, expected_slug=question_slug, policy_vocabularies=merged_policy_vocabularies(config))
+        write_manifest(path, document)
+    except SystemExit as exc:
+        # A workspace this command cannot read arrives as SystemExit(str) -- a missing
+        # research.yml, or a sibling script the loader cannot reach. from_system_exit
+        # classifies the message and re-raises anything that is not a refusal.
+        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
     return report(
         "evaluate",
-        project_root,
+        root,
         path,
         document,
         coverage_verdict=document["coverage_verdict"],
@@ -1535,31 +1581,29 @@ def render_text(result: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=args.format == "json")
-    project_root = Path(args.project_root).expanduser().resolve()
+    project_root = resolved_project_root(args.project_root)
     try:
-        config = load_config(project_root)
-        if args.command == "init":
-            result = run_init(project_root, config, args)
-        elif args.command == "show":
-            result = run_show(project_root, config, args)
-        elif args.command == "validate":
-            result = run_validate(project_root, config, args)
-        elif args.command == "set-facet":
-            result = run_set_facet(project_root, config, args)
-        elif args.command == "evaluate":
-            result = run_evaluate(project_root, config, args)
-        else:  # pragma: no cover - argparse enforces subcommands
-            raise CoverageManifestError("VALUE_INVALID", f"unknown command: {args.command}")
-    except CoverageManifestError as error:
-        emit_error(
-            str(error),
-            json_mode=json_mode,
-            error_code=error.error_code,
-            recoverable=error.recoverable,
-            remediation=error.remediation,
-            details=error.details,
-        )
-        return error.exit_code
+        if args.command == "evaluate":
+            # The seam owns the whole operation, config load included; everything the
+            # other subcommands still need from `main` is below.
+            result = run_evaluate(project_root, slug=args.slug)
+        else:
+            config = load_config(project_root)
+            if args.command == "init":
+                result = run_init(project_root, config, args)
+            elif args.command == "show":
+                result = run_show(project_root, config, args)
+            elif args.command == "validate":
+                result = run_validate(project_root, config, args)
+            elif args.command == "set-facet":
+                result = run_set_facet(project_root, config, args)
+            else:  # pragma: no cover - argparse enforces subcommands
+                raise CoverageManifestError("VALUE_INVALID", f"unknown command: {args.command}")
+    except ScriptRefusal as refusal:
+        # CoverageManifestError is a ScriptRefusal, so this one arm still renders every
+        # coded refusal exactly as it did before -- bare message in text mode, the same
+        # envelope in JSON mode, the refusal's own exit code either way.
+        return emit_refusal(refusal, json_mode=json_mode)
     except LockUnavailableError as exc:
         emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
         return EXIT_INVALID
