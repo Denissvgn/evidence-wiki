@@ -323,7 +323,18 @@ def request_kind_filter(value: Any, load_config: Any) -> list[str] | None:
     ``load_config`` is a thunk so an unfiltered call never pays for a second read of
     ``research.yml`` — the underlying ``list`` contract loads it either way.
     """
-    kinds = validate_string_list(value, "kind")
+    try:
+        kinds = validate_string_list(value, "kind")
+    except ToolExecutionError as exc:
+        # The shared shape validator carries no error code, so a malformed `kind`
+        # would classify as WORKSPACE_UNREADABLE — unactionable for a client that
+        # merely passed a bare string instead of an array. Restate it as the
+        # kind-specific refusal without touching the validator other args share.
+        raise ToolExecutionError(
+            exc.message,
+            error_code="REQUEST_KIND_INVALID",
+            details=exc.details,
+        ) from exc
     if not kinds:
         return None
     config = load_config()

@@ -463,6 +463,8 @@ class McpServerTests(unittest.TestCase):
             malformed_kind = self.call_tool(
                 server, "source_requests_list", {"kind": ["market-data/supplier_quote"]}
             )
+            non_array_kind = self.call_tool(server, "source_requests_list", {"kind": "paper"})
+            empty_kind_entry = self.call_tool(server, "source_requests_list", {"kind": ["  "]})
             malformed_scope_key = self.call_tool(
                 server, "source_requests_list", {"scope": {"Facet ID": "pricing"}}
             )
@@ -478,6 +480,12 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual("REQUEST_KIND_INVALID", malformed_kind["structuredContent"]["error_code"])
         # The bare-id near miss names the id the caller actually wants.
         self.assertIn(self.PACK_KIND, malformed_kind["structuredContent"]["message"])
+        # A malformed argument *shape* is refused by the shared list validator, which
+        # carries no code of its own; it must still reach the client as the kind-specific
+        # refusal rather than a generic unreadable-workspace classification.
+        for result in (non_array_kind, empty_kind_entry):
+            self.assertTrue(result["isError"])
+            self.assertEqual("REQUEST_KIND_INVALID", result["structuredContent"]["error_code"])
         for result in (malformed_scope_key, non_string_value, non_object_scope):
             self.assertTrue(result["isError"])
             self.assertEqual("REQUEST_SCOPE_INVALID", result["structuredContent"]["error_code"])
