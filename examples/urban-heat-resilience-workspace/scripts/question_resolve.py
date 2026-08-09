@@ -110,9 +110,13 @@ if str(_SCRIPT_DIR) not in sys.path:
 from _delegation_gate import DelegationGateError, require_sanctioned_mutation
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
 from _request_scope import conflict_details, format_scope, normalize_scope, scope_match
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
 from _workspace_locks import LockUnavailableError
 from _workspace_module_loader import load_workspace_module
+
+#: The verb whose principal is not ``--agent-id``, and the namespace attribute it lands on.
+#: Read by both the seams and ``main`` so the recorded principal cannot depend on the door.
+PRINCIPAL_FLAGS = {"approve": ("--reviewer", "reviewer"), "review": ("--reviewed-by", "reviewed_by")}
 
 
 class ResolveError(Exception):
@@ -1872,36 +1876,72 @@ def render_text_report(report: dict[str, Any]) -> str:
     return f"{report['status']}: {report['slug']}\n"
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    json_mode = json_mode_requested(argv, default_json=args.format == "json")
-    project_root = Path(args.project_root).expanduser().resolve()
+def resolved_project_root(value: str | Path) -> Path:
+    """Resolve a caller-supplied project root the way this command always has."""
+    return Path(value).expanduser().resolve()
+
+
+def resolved_principal(args: argparse.Namespace) -> str:
+    """Return the principal this verb records, which is not always ``--agent-id``."""
+    if args.command in PRINCIPAL_FLAGS:
+        return getattr(args, PRINCIPAL_FLAGS[args.command][1]).strip()
+    return args.agent_id.strip()
+
+
+def resolved_action(args: argparse.Namespace) -> str:
+    """Return the action string a report and a log entry carry.
+
+    ``grounding`` is the one nested command, so the action is the full spelling a
+    host typed; dispatch still switches on ``args.command`` alone.
+    """
+    if args.command == GROUNDING_COMMAND:
+        return f"{args.command} {args.grounding_command}"
+    return args.command
+
+
+def _run_command(project_root: str | Path, args: argparse.Namespace) -> dict[str, Any]:
+    """Apply one resolution verb and return the report ``main`` prints under ``--format json``.
+
+    This is the body every ``run_*`` seam below shares. The seams differ only in
+    which flags they accept, so they each assemble the namespace this function
+    dispatches on and hand it over — which is also the namespace ``argparse``
+    produces, so the CLI and a host drive one implementation, not two.
+
+    Refusals are raised as ``ScriptRefusal`` rather than printed. The four refusal
+    families this command has each keep the exit code they always returned:
+    ``DelegationGateError`` and ``LockUnavailableError`` are invalid-usage refusals
+    (the gate error carries no exit code of its own and never did), while
+    ``ClaimError`` and ``ResolveError`` carry theirs, which is how a claim conflict
+    stays exit 3 and everything else stays exit 2.
+
+    **The ``log.md`` append is inside this seam**, in the position it has always
+    occupied: after the page is written, before the report is built. Resolving a
+    question is a workspace mutation, and the audit entry is part of that mutation
+    rather than part of printing it. Leaving the append in ``main`` would mean a
+    host that answers or blocks a question in-process rewrites the page and writes
+    no audit entry, while the CLI doing the same thing writes one — the trail this
+    package exists to guarantee would then record only the callers who came
+    through the command line. CR-6 AC-1 requires the two doors to produce
+    byte-identical workspace state and audit entries, and this is where that is
+    either true or not.
+    """
+    root = resolved_project_root(project_root)
     slug = args.slug.strip()
-    principal_flags = {"approve": ("--reviewer", "reviewer"), "review": ("--reviewed-by", "reviewed_by")}
-    if args.command in principal_flags:
-        agent_id = getattr(args, principal_flags[args.command][1]).strip()
-    else:
-        agent_id = args.agent_id.strip()
-    # `grounding` is the one nested command, so the action a report and a log entry carry is
-    # the full spelling a host typed. Dispatch below still switches on `args.command`.
-    action = (
-        f"{args.command} {args.grounding_command}"
-        if args.command == GROUNDING_COMMAND
-        else args.command
-    )
+    agent_id = resolved_principal(args)
+    action = resolved_action(args)
     # Bound before the `try` so the ClaimError handler below can name the class. The module
     # loader is cached, so this is the same object the body uses.
     question_claim = load_sibling_module("question_claim")
     try:
         if not agent_id:
-            label = principal_flags.get(args.command, ("--agent-id",))[0]
-            error_code = "REVIEWER_INVALID" if args.command in principal_flags else "AGENT_ID_INVALID"
+            label = PRINCIPAL_FLAGS.get(args.command, ("--agent-id",))[0]
+            error_code = "REVIEWER_INVALID" if args.command in PRINCIPAL_FLAGS else "AGENT_ID_INVALID"
             raise ResolveError(EXIT_INVALID, error_code, f"{label} must be a non-empty string")
         question_status = load_sibling_module("question_status")
-        config = question_status.load_config(project_root)
-        page_path = question_claim.question_page_path(project_root, slug)
+        config = question_status.load_config(root)
+        page_path = question_claim.question_page_path(root, slug)
         if args.command == "reopen":
-            result = transition_reopen(page_path, project_root, config, args)
+            result = transition_reopen(page_path, root, config, args)
         elif args.command == "approve":
             result = transition_approve(page_path, args)
         elif args.command == "review":
@@ -1910,80 +1950,342 @@ def main(argv: list[str] | None = None) -> int:
             # Explicit, not left to the trailing `else`: that branch funnels anything
             # unrecognized into transition_resolution, which would then fail on an attribute
             # a grounding namespace does not have.
-            result = transition_grounding_set(page_path, project_root, config, args)
+            result = transition_grounding_set(page_path, root, config, args)
         else:
-            result = transition_resolution(page_path, project_root, config, args)
+            result = transition_resolution(page_path, root, config, args)
     except DelegationGateError as error:
         details = {"action": action, "slug": slug, "agent_id": agent_id}
         details.update(error.details)
-        if json_mode:
-            emit_error(
-                error.message,
-                json_mode=True,
-                error_code=error.error_code,
-                remediation=error.remediation,
-                details=details,
-            )
-        else:
-            print(f"refused ({error.error_code}): {error.message}", file=sys.stderr)
-        return EXIT_INVALID
+        raise ScriptRefusal(
+            error.error_code,
+            error.message,
+            exit_code=EXIT_INVALID,
+            remediation=error.remediation,
+            details=details,
+        ) from error
     except question_claim.ClaimError as error:
         # `question_page_path` refuses an unknown or malformed slug with a ClaimError, and
         # every claim helper this script calls can raise one. Without this clause they reach
         # a host as a traceback rather than the refusal envelope every other refusal uses —
-        # which for a host parsing stdout as JSON is indistinguishable from a crash.
-        if json_mode:
-            emit_error(
-                str(error),
-                json_mode=True,
-                error_code=error.error_code,
-                details={"action": action, "slug": slug, "agent_id": agent_id},
-            )
-        else:
-            print(f"refused ({error.error_code}): {error}", file=sys.stderr)
-        return error.exit_code
+        # which for a host parsing stdout as JSON is indistinguishable from a crash. It is
+        # itself a ScriptRefusal now, but of the sibling module's own class and without this
+        # command's details, so it is re-raised in this command's shape rather than passed on.
+        raise ScriptRefusal(
+            error.error_code,
+            str(error),
+            exit_code=error.exit_code,
+            details={"action": action, "slug": slug, "agent_id": agent_id},
+        ) from error
     except ResolveError as error:
-        if json_mode:
-            details = {"action": action, "slug": slug, "agent_id": agent_id}
-            details.update(error.details)
-            emit_error(
-                str(error),
-                json_mode=True,
-                error_code=error.error_code,
-                details=details,
-            )
-        else:
-            print(f"refused ({error.error_code}): {error}", file=sys.stderr)
-        return error.exit_code
+        details = {"action": action, "slug": slug, "agent_id": agent_id}
+        details.update(error.details)
+        raise ScriptRefusal(
+            error.error_code,
+            str(error),
+            exit_code=error.exit_code,
+            details=details,
+        ) from error
     except LockUnavailableError as error:
-        if json_mode:
-            emit_error(
-                str(error),
-                json_mode=True,
-                error_code=error.error_code,
-                details={"action": action, "slug": slug, "agent_id": agent_id, **error.details},
-            )
-        else:
-            print(f"refused ({error.error_code}): {error}", file=sys.stderr)
-        return EXIT_INVALID
+        raise ScriptRefusal(
+            error.error_code,
+            str(error),
+            exit_code=EXIT_INVALID,
+            details={"action": action, "slug": slug, "agent_id": agent_id, **error.details},
+        ) from error
     except SystemExit as exc:
-        return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
+        # An unreadable workspace reaches here as SystemExit(str); from_system_exit
+        # re-raises anything else untouched.
+        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
 
-    question_claim = load_sibling_module("question_claim")
     try:
-        question_claim.append_log_entry(project_root / "log.md", render_log(action, slug, agent_id, result))
+        question_claim.append_log_entry(root / "log.md", render_log(action, slug, agent_id, result))
     except LockUnavailableError as error:
-        if json_mode:
-            emit_error(
-                str(error),
-                json_mode=True,
-                error_code=error.error_code,
-                details={"action": action, "slug": slug, "agent_id": agent_id, **error.details},
-            )
-        else:
-            print(f"refused ({error.error_code}): {error}", file=sys.stderr)
-        return EXIT_INVALID
-    report = build_report(action, slug, agent_id, page_path, project_root, result)
+        raise ScriptRefusal(
+            error.error_code,
+            str(error),
+            exit_code=EXIT_INVALID,
+            details={"action": action, "slug": slug, "agent_id": agent_id, **error.details},
+        ) from error
+    return build_report(action, slug, agent_id, page_path, root, result)
+
+
+def run_answer(
+    project_root: str | Path,
+    *,
+    slug: str,
+    agent_id: str,
+    answer_page: str,
+    source_id: list[str] | None = None,
+    allow_uncited: bool = False,
+    allow_unclaimed: bool = False,
+    confidence: str | None = None,
+    evidence_strength: str | None = None,
+    require_coverage: bool = False,
+    require_grounding: bool = False,
+    coverage_manifest: str | None = None,
+    grounding_file: str | None = None,
+) -> dict[str, Any]:
+    """Resolve a question as answered. Keyword arguments mirror the ``answer`` flags one for one."""
+    return _run_command(
+        project_root,
+        argparse.Namespace(
+            command="answer",
+            slug=slug,
+            agent_id=agent_id,
+            allow_unclaimed=allow_unclaimed,
+            answer_page=answer_page,
+            source_id=source_id,
+            allow_uncited=allow_uncited,
+            confidence=confidence,
+            evidence_strength=evidence_strength,
+            require_coverage=require_coverage,
+            require_grounding=require_grounding,
+            coverage_manifest=coverage_manifest,
+            grounding_file=grounding_file,
+        ),
+    )
+
+
+def run_block(
+    project_root: str | Path,
+    *,
+    slug: str,
+    agent_id: str,
+    blocked_reason: str,
+    request_id: list[str] | None = None,
+    allow_unclaimed: bool = False,
+) -> dict[str, Any]:
+    """Resolve a question as blocked on missing evidence."""
+    return _run_command(
+        project_root,
+        argparse.Namespace(
+            command="block",
+            slug=slug,
+            agent_id=agent_id,
+            allow_unclaimed=allow_unclaimed,
+            blocked_reason=blocked_reason,
+            request_id=request_id,
+        ),
+    )
+
+
+def run_defer(
+    project_root: str | Path,
+    *,
+    slug: str,
+    agent_id: str,
+    reason: str,
+    allow_unclaimed: bool = False,
+) -> dict[str, Any]:
+    """Resolve a question as deferred."""
+    return _run_command(
+        project_root,
+        argparse.Namespace(
+            command="defer",
+            slug=slug,
+            agent_id=agent_id,
+            allow_unclaimed=allow_unclaimed,
+            reason=reason,
+        ),
+    )
+
+
+def run_reject(
+    project_root: str | Path,
+    *,
+    slug: str,
+    agent_id: str,
+    reason: str,
+    allow_unclaimed: bool = False,
+) -> dict[str, Any]:
+    """Resolve a question as rejected."""
+    return _run_command(
+        project_root,
+        argparse.Namespace(
+            command="reject",
+            slug=slug,
+            agent_id=agent_id,
+            allow_unclaimed=allow_unclaimed,
+            reason=reason,
+        ),
+    )
+
+
+def run_reopen(
+    project_root: str | Path,
+    *,
+    slug: str,
+    agent_id: str,
+    source_id: list[str],
+    request_id: list[str] | None = None,
+) -> dict[str, Any]:
+    """Move a blocked question back to open once its evidence is delivered and normalized.
+
+    ``reopen`` has no ``--allow-unclaimed``: a blocked question is never claimed.
+    """
+    return _run_command(
+        project_root,
+        argparse.Namespace(
+            command="reopen",
+            slug=slug,
+            agent_id=agent_id,
+            source_id=source_id,
+            request_id=request_id,
+        ),
+    )
+
+
+def run_approve(project_root: str | Path, *, slug: str, reviewer: str) -> dict[str, Any]:
+    """Approve every policy still pending human review, in one call.
+
+    The recorded principal is ``reviewer``, not an agent id — the same trust model
+    the CLI has: this authenticates nobody, and the audit trail is the frontmatter
+    entry plus ``log.md``.
+    """
+    return _run_command(
+        project_root,
+        argparse.Namespace(command="approve", slug=slug, reviewer=reviewer),
+    )
+
+
+def run_review(
+    project_root: str | Path,
+    *,
+    slug: str,
+    policy: str,
+    verdict: str,
+    reviewed_by: str,
+    review_ref: str | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Record one per-policy human review collected inside or outside the workspace."""
+    return _run_command(
+        project_root,
+        argparse.Namespace(
+            command="review",
+            slug=slug,
+            policy=policy,
+            verdict=verdict,
+            reviewed_by=reviewed_by,
+            review_ref=review_ref,
+            note=note,
+        ),
+    )
+
+
+def run_grounding_set(
+    project_root: str | Path,
+    *,
+    slug: str,
+    agent_id: str,
+    from_file: str,
+    allow_unclaimed: bool = False,
+) -> dict[str, Any]:
+    """Replace a question's whole grounding block from a file, without resolving it."""
+    return _run_command(
+        project_root,
+        argparse.Namespace(
+            command=GROUNDING_COMMAND,
+            grounding_command="set",
+            slug=slug,
+            agent_id=agent_id,
+            from_file=from_file,
+            allow_unclaimed=allow_unclaimed,
+        ),
+    )
+
+
+def dispatch_seam(args: argparse.Namespace) -> dict[str, Any]:
+    """Call the seam that matches the parsed command, flag for flag.
+
+    ``main`` goes through the public seams rather than straight to ``_run_command``
+    on purpose: it makes the CLI one more caller of the library API instead of a
+    parallel path, so the existing CLI suites exercise the seams' argument mapping
+    too, and a seam whose keyword does not reach the transition fails loudly here
+    rather than only in the conformance harness.
+    """
+    if args.command == "answer":
+        return run_answer(
+            args.project_root,
+            slug=args.slug,
+            agent_id=args.agent_id,
+            answer_page=args.answer_page,
+            source_id=args.source_id,
+            allow_uncited=args.allow_uncited,
+            allow_unclaimed=args.allow_unclaimed,
+            confidence=args.confidence,
+            evidence_strength=args.evidence_strength,
+            require_coverage=args.require_coverage,
+            require_grounding=args.require_grounding,
+            coverage_manifest=args.coverage_manifest,
+            grounding_file=args.grounding_file,
+        )
+    if args.command == "block":
+        return run_block(
+            args.project_root,
+            slug=args.slug,
+            agent_id=args.agent_id,
+            blocked_reason=args.blocked_reason,
+            request_id=args.request_id,
+            allow_unclaimed=args.allow_unclaimed,
+        )
+    if args.command == "defer":
+        return run_defer(
+            args.project_root,
+            slug=args.slug,
+            agent_id=args.agent_id,
+            reason=args.reason,
+            allow_unclaimed=args.allow_unclaimed,
+        )
+    if args.command == "reject":
+        return run_reject(
+            args.project_root,
+            slug=args.slug,
+            agent_id=args.agent_id,
+            reason=args.reason,
+            allow_unclaimed=args.allow_unclaimed,
+        )
+    if args.command == "reopen":
+        return run_reopen(
+            args.project_root,
+            slug=args.slug,
+            agent_id=args.agent_id,
+            source_id=args.source_id,
+            request_id=args.request_id,
+        )
+    if args.command == "approve":
+        return run_approve(args.project_root, slug=args.slug, reviewer=args.reviewer)
+    if args.command == "review":
+        return run_review(
+            args.project_root,
+            slug=args.slug,
+            policy=args.policy,
+            verdict=args.verdict,
+            reviewed_by=args.reviewed_by,
+            review_ref=args.review_ref,
+            note=args.note,
+        )
+    if args.command == GROUNDING_COMMAND:
+        return run_grounding_set(
+            args.project_root,
+            slug=args.slug,
+            agent_id=args.agent_id,
+            from_file=args.from_file,
+            allow_unclaimed=args.allow_unclaimed,
+        )
+    # argparse rejects anything else before this point; `_run_command` refuses the same
+    # way `main` always did if a future subcommand ever forgets to add itself here.
+    return _run_command(args.project_root, args)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    json_mode = json_mode_requested(argv, default_json=args.format == "json")
+    try:
+        report = dispatch_seam(args)
+    except ScriptRefusal as refusal:
+        return emit_refusal(refusal, json_mode=json_mode)
+
     if args.format == "json":
         print(json.dumps(report, indent=2, sort_keys=False))
     else:
