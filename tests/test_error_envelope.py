@@ -16,7 +16,7 @@ SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 HANDOFF_DOC = REPO_ROOT / "workspace-template" / "docs" / "orchestrator-handoff.md"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
 HELPER_PATH = SCRIPTS / "_script_errors.py"
-ERROR_HELPER_CALLS = {"handle_system_exit", "emit_error", "error_envelope"}
+ERROR_HELPER_CALLS = {"handle_system_exit", "emit_error", "emit_refusal", "error_envelope"}
 
 JSON_MODE_SCRIPTS = [
     "discover_sources.py",
@@ -181,6 +181,97 @@ class ErrorEnvelopeTests(unittest.TestCase):
             },
             envelope,
         )
+
+    def test_refusal_envelope_is_the_shared_envelope(self):
+        """A raised refusal and a printed envelope are the same bytes because they share one builder."""
+        helper = load_helper()
+
+        refusal = helper.ScriptRefusal(
+            "CLAIM_HELD",
+            "Question which-benchmarks is claimed by agent-a.",
+            exit_code=3,
+            recoverable=False,
+            remediation="Use claim --steal --if-older-than HOURS.",
+            details={"slug": "which-benchmarks"},
+        )
+
+        self.assertEqual(3, refusal.exit_code)
+        self.assertEqual("Question which-benchmarks is claimed by agent-a.", refusal.message)
+        self.assertEqual("Question which-benchmarks is claimed by agent-a.", str(refusal))
+        self.assertEqual(
+            helper.error_envelope(
+                "CLAIM_HELD",
+                "Question which-benchmarks is claimed by agent-a.",
+                recoverable=False,
+                remediation="Use claim --steal --if-older-than HOURS.",
+                details={"slug": "which-benchmarks"},
+            ),
+            refusal.to_envelope(),
+        )
+
+    def test_refusal_defaults_match_an_uncoded_envelope(self):
+        helper = load_helper()
+
+        refusal = helper.ScriptRefusal("RUN_UNKNOWN", "unknown run id: run-9", exit_code=2)
+
+        self.assertEqual(
+            {
+                "schema_version": "1.0",
+                "error_code": "RUN_UNKNOWN",
+                "message": "unknown run id: run-9",
+                "recoverable": True,
+                "remediation": "List workspace runs under runs/ and choose an existing run id.",
+            },
+            refusal.to_envelope(),
+        )
+        self.assertEqual("refused (RUN_UNKNOWN): unknown run id: run-9", refusal.text_line)
+
+    def test_refusal_from_system_exit_classifies_and_keeps_the_bare_message(self):
+        helper = load_helper()
+
+        refusal = helper.ScriptRefusal.from_system_exit(
+            SystemExit("Missing config: /tmp/workspace/research.yml"),
+            exit_code=2,
+        )
+
+        self.assertEqual("CONFIG_MISSING", refusal.error_code)
+        self.assertEqual(2, refusal.exit_code)
+        # handle_system_exit has always printed the bare message in text mode.
+        self.assertEqual("Missing config: /tmp/workspace/research.yml", refusal.text_line)
+        self.assertEqual(
+            helper.error_envelope("CONFIG_MISSING", "Missing config: /tmp/workspace/research.yml"),
+            refusal.to_envelope(),
+        )
+
+    def test_refusal_from_system_exit_reraises_a_process_control_exit(self):
+        """A SystemExit without a message is not a refusal; handle_system_exit re-raises it too."""
+        helper = load_helper()
+
+        with self.assertRaises(SystemExit) as caught:
+            helper.ScriptRefusal.from_system_exit(SystemExit(4), exit_code=2)
+
+        self.assertEqual(4, caught.exception.code)
+
+    def test_emit_refusal_renders_both_modes_and_returns_the_exit_code(self):
+        helper = load_helper()
+        refusal = helper.ScriptRefusal(
+            "LOCK_UNAVAILABLE",
+            "workspace lock is held",
+            exit_code=2,
+            details={"lock": "log.md"},
+        )
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            json_code = helper.emit_refusal(refusal, json_mode=True)
+        self.assertEqual(2, json_code)
+        self.assertEqual(refusal.to_envelope(), json.loads(stderr.getvalue()))
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            text_code = helper.emit_refusal(refusal, json_mode=False)
+        self.assertEqual(2, text_code)
+        self.assertEqual("refused (LOCK_UNAVAILABLE): workspace lock is held\n", stderr.getvalue())
 
     def test_helper_classifies_known_system_exit_messages(self):
         helper = load_helper()
