@@ -995,20 +995,24 @@ def facet_scope_backfill_targets(
     if not request_ids:
         return []
     wanted = set(request_ids)
-    seen: set[str] = set()
-    scoped: set[str] = set()
+    unscoped: set[str] = set()
     for record in all_source_request_records(project_root, config):
         request_id = record.get("request_id") if isinstance(record, dict) else None
         if not isinstance(request_id, str) or request_id not in wanted:
             continue
-        seen.add(request_id)
         declared = normalize_scope(record.get("scope")).get(FACET_SCOPE_KEY)
         if declared is None:
+            # One record lacking the facet is enough to need the back-fill, even if a
+            # duplicate of the same id already declares it: ``backfill_facet_scope``
+            # writes into every record that lacks it, and readers take the *first*
+            # match. Treating the id as already scoped because some later duplicate
+            # carries the facet would leave the record readers actually use unscoped,
+            # with set-facet reporting success.
+            unscoped.add(request_id)
             continue
         if declared != facet_id:
             raise facet_scope_conflict(request_id, declared, facet_id, written=False)
-        scoped.add(request_id)
-    return [request_id for request_id in request_ids if request_id in seen and request_id not in scoped]
+    return [request_id for request_id in request_ids if request_id in unscoped]
 
 
 def backfill_facet_scope(

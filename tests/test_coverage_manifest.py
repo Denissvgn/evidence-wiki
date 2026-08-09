@@ -1032,6 +1032,50 @@ class CoverageManifestCliTests(unittest.TestCase):
             self.assertEqual(manifest_before, self.manifest_path(target).read_bytes())
             self.assertEqual(requests_before, self.requests_path(target).read_bytes())
 
+    def test_set_facet_scopes_the_first_record_when_a_later_duplicate_is_scoped(self):
+        """A scoped duplicate must not excuse the record readers actually use.
+
+        `load_requests` preserves file order and the first match wins for readers like
+        `source_requests.run_fulfill`. If a later duplicate carrying the facet made the
+        id look already-scoped, the back-fill would be skipped and the *effective*
+        record left unscoped — with set-facet reporting success.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(
+                root,
+                [
+                    self.source_request_record(),
+                    self.source_request_record(scope={"facet_id": "paper-identity"}),
+                ],
+            )
+
+            code, payload, stderr = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--accepted-source-id",
+                "paper:bench-survey",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(["req-current-fee"], payload["scope_backfilled_request_ids"])
+            records = [
+                json.loads(line)
+                for line in self.requests_path(target).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            # Every copy carries the facet, so no reader can see an unscoped one.
+            self.assertEqual(2, len(records))
+            for record in records:
+                self.assertEqual("paper-identity", record["scope"]["facet_id"])
+
     def test_set_facet_accepts_request_already_scoped_to_the_same_facet(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
