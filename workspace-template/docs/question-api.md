@@ -352,6 +352,15 @@ statuses (`STATUS_NOT_RESOLVABLE`) and another agent's claim (`CLAIM_HELD`)
 exactly as the resolution verbs do; `--allow-unclaimed` is the same explicit
 opt-out.
 
+That terminal refusal has a consequence worth stating, because this command
+exists so hosts stop editing frontmatter: **there is no in-place correction of an
+answered question's grounding.** Once a question is `answered`, its grounding is
+part of a recorded answer that may already have been verified, reviewed, or
+exported, and swapping the evidence under it is what terminal statuses exist to
+prevent. Correcting it is a reopen cycle — `reopen` for a blocked question,
+otherwise a new question — never a hand-edit of the page, which would drop the
+lock discipline and the `log.md` entry this path keeps.
+
 `grounding set` deliberately does **not** verify. The two-step flow exists to
 record grounding while cited evidence may still be normalizing, and
 `scripts/verify_quotes.py --slug SLUG` already *is* that check — a second

@@ -101,8 +101,15 @@ STRUCTURED_VIEW_SUFFIX = ".structured.json"
 # deeper than a hand-authored addressing scheme stays usable at.
 STRUCTURED_VIEW_MAX_DEPTH = 64
 # Same `sha256:<hex>` spelling `raw_fingerprint` and provenance checksums already use, so
-# a reader learns one hash format for the whole workspace.
-_CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# a reader learns one hash format for the whole workspace. Public, and the only definition:
+# `_structured_view` binds these rather than restating them, so the module that writes a
+# binding and the module that reads one can never disagree about what a valid digest is.
+CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def content_hash(data: bytes) -> str:
+    """The digest a `structured_view` block binds its sidecar bytes with."""
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 CONTRACT_DOCUMENT = "docs/normalized-source-format.md"
 DEFAULT_REMEDIATION = f"Correct the normalized record so it matches {CONTRACT_DOCUMENT}."
@@ -900,14 +907,14 @@ def validate_structured_view_block(block: Any, *, field: str = "structured_view"
             )
         )
 
-    content_hash = block.get("content_hash")
-    if not isinstance(content_hash, str) or not _CONTENT_HASH_RE.match(content_hash.strip()):
+    declared_hash = block.get("content_hash")
+    if not isinstance(declared_hash, str) or not CONTENT_HASH_RE.fullmatch(declared_hash.strip()):
         violations.append(
             _structured_violation(
                 "`structured_view.content_hash` must be a `sha256:<64 hex chars>` digest of the sidecar bytes.",
                 field=f"{field}.content_hash",
                 expected="sha256:<64 lowercase hex chars>",
-                actual=None if content_hash is None else repr(content_hash),
+                actual=None if declared_hash is None else repr(declared_hash),
             )
         )
     return violations
@@ -1035,7 +1042,7 @@ def _check_sidecar_file(
             )
         ]
 
-    digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+    digest = content_hash(data)
     declared_hash = str(block["content_hash"]).strip()
     if digest != declared_hash:
         # Reported alone: once the bytes are not the bytes the record attested, nothing

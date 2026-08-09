@@ -117,6 +117,15 @@ ANCHOR_REMEDIATION = {
         "the field that carries it; never restate a value the evidence does not."
     ),
 }
+# `_structured_view`'s result strings are documented as added to over time, so this table
+# is read with a default rather than indexed: a result it has not learned yet must degrade
+# to generic advice on that one entry, never raise a KeyError that escapes this module's
+# error handling and takes every caller — resolution, export, the controller's
+# recomputation — down with it.
+ANCHOR_REMEDIATION_FALLBACK = (
+    "Re-check this anchor against the cited record's structured view, then rerun grounding "
+    "verification; see the entry's message for what the verifier found."
+)
 
 
 class VerifyQuotesError(Exception):
@@ -550,7 +559,44 @@ def normalized_record_content(path: Path) -> tuple[dict[str, Any], str]:
     return frontmatter, body if frontmatter else text
 
 
-def verify_anchor_entry(project_root: Path, config: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+class EvidenceCache:
+    """Memo of the evidence files one verification run reads, keyed by path.
+
+    Reading a record and reading — and hashing — its structured view are facts about a
+    *source*, not about a claim. Without this, a question grounding ten claims in one
+    record re-read and re-SHA256'd that record's sidecar ten times, and the controller
+    repeated the whole thing for every answered question in the workspace on every run.
+    Sidecars are the deliberately uncapped artifact, so that cost is unbounded in exactly
+    the workspaces anchors exist for.
+
+    Nothing is weakened by memoizing: the hash binding is still enforced, once per source
+    per run instead of once per claim, and the run is short-lived — a later run re-reads
+    everything. Load failures are cached with successes on purpose, so every entry citing
+    one broken sidecar gets the same verdict rather than a verdict that depends on how
+    many entries preceded it.
+    """
+
+    def __init__(self) -> None:
+        self._records: dict[Path, tuple[dict[str, Any], str]] = {}
+        self._sidecars: dict[Path, Any] = {}
+
+    def record(self, path: Path) -> tuple[dict[str, Any], str]:
+        if path not in self._records:
+            self._records[path] = normalized_record_content(path)
+        return self._records[path]
+
+    def sidecar(self, frontmatter: dict[str, Any], path: Path) -> Any:
+        if path not in self._sidecars:
+            self._sidecars[path] = _structured_view.load_sidecar(frontmatter, path)
+        return self._sidecars[path]
+
+
+def verify_anchor_entry(
+    project_root: Path,
+    config: dict[str, Any],
+    entry: dict[str, Any],
+    cache: EvidenceCache | None = None,
+) -> dict[str, Any]:
     """Verify one anchor entry: the cited field holds exactly the value the claim states.
 
     The record must exist first — an anchor against an unnormalized source is the same
@@ -583,10 +629,18 @@ def verify_anchor_entry(project_root: Path, config: dict[str, Any], entry: dict[
         result["message"] = f"{source_id} has no normalized record at {record_label}."
         result["remediation"] = "Normalize the cited source, then rerun grounding verification."
         return result
-    frontmatter, _ = normalized_record_content(record_path)
+    cache = cache or EvidenceCache()
+    frontmatter, _ = cache.record(record_path)
     # `_structured_view.resolve_anchor` is the sidecar/pointer/equality verdict, unrelated
     # to this module's `resolve_anchor`, which locates a quote's page or section anchor.
-    resolution = _structured_view.resolve_anchor(frontmatter, sidecar, anchor["pointer"], anchor["expected"])
+    # The sidecar is bound once per source and handed in; the verdict is unchanged by that.
+    resolution = _structured_view.resolve_anchor(
+        frontmatter,
+        sidecar,
+        anchor["pointer"],
+        anchor["expected"],
+        loaded=cache.sidecar(frontmatter, sidecar),
+    )
     result["pointer"] = resolution.pointer  # the pointer the resolver actually walked
     result["resolved"] = resolution.resolved
     result["message"] = resolution.detail
@@ -595,13 +649,19 @@ def verify_anchor_entry(project_root: Path, config: dict[str, Any], entry: dict[
         result["remediation"] = "No remediation required."
         return result
     result["result"] = resolution.result
-    result["remediation"] = ANCHOR_REMEDIATION[resolution.result]
+    result["remediation"] = ANCHOR_REMEDIATION.get(resolution.result, ANCHOR_REMEDIATION_FALLBACK)
     return result
 
 
-def verify_entry(project_root: Path, config: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+def verify_entry(
+    project_root: Path,
+    config: dict[str, Any],
+    entry: dict[str, Any],
+    cache: EvidenceCache | None = None,
+) -> dict[str, Any]:
+    cache = cache or EvidenceCache()
     if entry.get("form") == GROUNDING_FORM_ANCHOR:
-        return verify_anchor_entry(project_root, config, entry)
+        return verify_anchor_entry(project_root, config, entry, cache)
     source_id = entry["source_id"]
     record_path, record_label = normalized_record_path(project_root, config, source_id)
     result: dict[str, Any] = {
@@ -619,7 +679,7 @@ def verify_entry(project_root: Path, config: dict[str, Any], entry: dict[str, An
         result["message"] = f"{source_id} has no normalized record at {record_label}."
         result["remediation"] = "Normalize the cited source, then rerun quote verification."
         return result
-    frontmatter, body = normalized_record_content(record_path)
+    frontmatter, body = cache.record(record_path)
     anchor_text, anchor = resolve_anchor(frontmatter, body, entry.get("location_hint"))
     result["anchor"] = anchor
     global_match = quote_match(body, entry["quote"])
@@ -659,6 +719,7 @@ def verify_question(
     *,
     frontmatter: dict[str, Any] | None = None,
     path: Path | None = None,
+    cache: EvidenceCache | None = None,
 ) -> dict[str, Any]:
     question = path or question_path(project_root, config, slug)
     if not question.is_file():
@@ -670,7 +731,9 @@ def verify_question(
     if frontmatter is None:
         frontmatter, _ = split_page(question.read_text(encoding="utf-8"))
     entries = grounding_entries(frontmatter, slug)
-    results = [verify_entry(project_root, config, entry) for entry in entries]
+    # One cache for the whole question, or the caller's when it spans several.
+    cache = cache or EvidenceCache()
+    results = [verify_entry(project_root, config, entry, cache) for entry in entries]
     all_verified = bool(results) and all(result.get("result") == RESULT_VERIFIED for result in results)
     return {
         "slug": slug,
@@ -693,7 +756,10 @@ def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]
             slugs.append(slug)
     if not slugs:
         raise VerifyQuotesError("SLUG_INVALID", "At least one --slug value is required.")
-    questions = [verify_question(project_root, config, slug) for slug in slugs]
+    # Shared across every question in the report: several questions commonly cite the
+    # same record, and the controller verifies the whole workspace in one call.
+    cache = EvidenceCache()
+    questions = [verify_question(project_root, config, slug, cache=cache) for slug in slugs]
     total_entries = sum(int(question.get("grounding_count", 0) or 0) for question in questions)
     all_results = report_results(questions)
     failed_entries = failed_results(all_results)

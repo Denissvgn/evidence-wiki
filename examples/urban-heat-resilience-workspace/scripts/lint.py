@@ -1123,7 +1123,7 @@ def structured_sidecar_record_path(sidecar_path: Path) -> Path:
     return sidecar_path.with_name(f"{stem}.md")
 
 
-def orphaned_structured_sidecars(normalized_root: Path) -> list[Path]:
+def orphaned_structured_sidecars(normalized_root: Path, record_paths: list[Path]) -> list[Path]:
     """Structured-view sidecars with no normalized record beside them at all.
 
     A peer pass to ``index_normalized_sources``, which globs ``*.md`` — as does every
@@ -1133,6 +1133,11 @@ def orphaned_structured_sidecars(normalized_root: Path) -> list[Path]:
     tool will ever open. The record contract already reports the neighbouring case (a
     sidecar beside a record that fails to *declare* it); this is the case where there is
     no record to declare anything.
+
+    ``record_paths`` is the caller's existing listing of normalized records rather than a
+    walk of our own: the directory has already been enumerated once by the time this runs,
+    and doing it again would traverse a tree of thousands to serve the lowest-severity
+    finding in the file.
     """
     if not normalized_root.is_dir():
         return []
@@ -1142,7 +1147,7 @@ def orphaned_structured_sidecars(normalized_root: Path) -> list[Path]:
     )
     if not sidecars:
         return []
-    records = {path.as_posix() for path in normalized_root.rglob("*.md")}
+    records = {path.as_posix() for path in record_paths}
     return [path for path in sidecars if structured_sidecar_record_path(path).as_posix() not in records]
 
 
@@ -3146,8 +3151,16 @@ def check_source_coverage(
             "Re-run normalization after verifying the source file, or supply manually extracted text.",
         )
 
+    # Walked once and reused: this listing and the orphaned-sidecar pass below both need
+    # every normalized record, and a workspace can hold thousands of them.
+    normalized_record_paths = (
+        sorted(normalized_root.rglob("*.md"), key=lambda p: p.as_posix())
+        if normalized_root.is_dir()
+        else []
+    )
+
     # Warn about normalized PDF records whose inferred title is uncertain.
-    for norm_path in sorted(normalized_root.rglob("*.md"), key=lambda p: p.as_posix()) if normalized_root.is_dir() else []:
+    for norm_path in normalized_record_paths:
         fm, _ = load_frontmatter(norm_path)
         if not isinstance(fm, dict):
             continue
@@ -3329,7 +3342,7 @@ def check_source_coverage(
             actual="missing",
         )
 
-    for path in orphaned_structured_sidecars(normalized_root):
+    for path in orphaned_structured_sidecars(normalized_root, normalized_record_paths):
         label = project_relative(project_root, path)
         issue(
             results,

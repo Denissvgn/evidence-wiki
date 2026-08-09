@@ -32,7 +32,6 @@ one grounding entry, not a failure of the run that found it.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sys
@@ -78,8 +77,10 @@ ANCHOR_RESULTS = (
 
 STRUCTURED_VIEW_FIELD = "structured_view"
 SIDECAR_SUFFIX = ".structured.json"
-# Same digest convention as `raw_fingerprint`, so one reader recognizes both.
-CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# Bound from the contract, not restated: it owns the digest format a binding is written
+# in, and a second copy here is a second place for the writer's idea of a valid digest to
+# drift from the reader's.
+CONTENT_HASH_RE = _normalized_contract.CONTENT_HASH_RE
 
 # A plain decimal literal, deliberately narrower than what `Decimal` itself parses.
 _DECIMAL_LITERAL_RE = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
@@ -163,9 +164,9 @@ def _json_type_name(value: Any) -> str:
     return _JSON_TYPE_NAMES.get(type(value), type(value).__name__)
 
 
-def content_hash(data: bytes) -> str:
-    """The digest a ``structured_view`` block binds its sidecar bytes with."""
-    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+# Same reason as `CONTENT_HASH_RE`: the contract computes the digest a record binds, and
+# this module verifies it, so both have to be the same line of code.
+content_hash = _normalized_contract.content_hash
 
 
 def sidecar_path(normalized_root: Path, source_id: str) -> Path:
@@ -456,18 +457,28 @@ def expected_matches(target: Any, expected: Any) -> bool:
 
 def resolve_anchor(
     frontmatter: dict[str, Any],
-    sidecar_path: Path,
+    sidecar: Path,
     pointer: str,
     expected: Any,
+    *,
+    loaded: SidecarLoad | None = None,
 ) -> AnchorResolution:
     """Decide one anchor end to end: load the structured view, resolve, compare.
 
     Returns the first failure, so a report names the earliest thing that was wrong
     rather than a symptom of it, or ``ok=True`` when the pointer reached a scalar equal
     to ``expected``.
+
+    ``loaded`` lets a caller supply a sidecar this function would otherwise read itself.
+    Reading and hashing are per *source*, not per claim, so a verifier checking several
+    anchors against one record can bind the file once and pass the same result in — the
+    binding is enforced exactly as strictly either way, just not re-enforced per entry.
+    The parameter is named ``sidecar`` rather than ``sidecar_path`` because this module
+    also exports a ``sidecar_path()`` function, which the old name shadowed.
     """
     normalized_pointer = normalize_pointer(pointer)
-    loaded = load_sidecar(frontmatter, sidecar_path)
+    if loaded is None:
+        loaded = load_sidecar(frontmatter, sidecar)
     if not loaded.ok:
         return AnchorResolution(False, loaded.result, loaded.detail, normalized_pointer, None)
     resolution = resolve_pointer(loaded.document, pointer)

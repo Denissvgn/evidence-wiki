@@ -190,7 +190,7 @@ def verify_record(
         "normalizer": normalizer if isinstance(normalizer, dict) else None,
         "normalized_format": contract.effective_format_version(frontmatter) if frontmatter is not None else None,
         "rendered_coverage": coverage_summary(frontmatter),
-        "structured_view": structured_view_summary(frontmatter, path, normalized_root),
+        "structured_view": structured_view_summary(frontmatter, normalized_root, violations),
         "result": RESULT_VERIFIED if not violations else RESULT_INVALID,
         "violations": [violation.to_dict() for violation in violations],
     }
@@ -231,8 +231,8 @@ def coverage_summary(frontmatter: dict[str, Any] | None) -> dict[str, Any] | Non
 
 def structured_view_summary(
     frontmatter: dict[str, Any] | None,
-    path: Path,
     normalized_root: Path,
+    violations: list[Any],
 ) -> dict[str, Any] | None:
     """Whether this record binds a structured-view sidecar, and whether it resolves.
 
@@ -243,11 +243,15 @@ def structured_view_summary(
     Unlike `coverage_summary`, which reports only what the frontmatter claims, this
     reads the workspace. That departure is the point: a binding's whole value is whether
     the file it names is really there and really hashes to what the record says, which
-    no amount of frontmatter can answer on its own. `verified` is decided by the same
-    contract check that produced this record's violations, so the summary and the
-    violation list can never tell a host two different stories — and it additionally
-    requires the sidecar to have been found, so a record too broken to resolve one
-    (a missing `source_id`, say) reports an unverified binding rather than a silent pass.
+    no amount of frontmatter can answer on its own.
+
+    `verified` is read out of the violations the caller already computed rather than by
+    re-running the contract check. Same answer from the same authority — the check ran
+    once and its verdict is right here — without reading and SHA256-ing every sidecar in
+    the workspace a second time on every run, and with no way for a later edit to move
+    the summary and the violation list apart. It additionally requires the sidecar to
+    have been found, so a record too broken to resolve one (a missing `source_id`, say)
+    reports an unverified binding rather than a silent pass.
     """
     if not isinstance(frontmatter, dict):
         return None
@@ -266,10 +270,13 @@ def structured_view_summary(
             size = sidecar.stat().st_size
     except OSError:
         size = None
+    bound = not any(
+        getattr(violation, "code", None) == contract.STRUCTURED_VIEW_INVALID for violation in violations
+    )
     return {
         "declared": True,
         "path": declared if isinstance(declared, str) and declared.strip() else None,
-        "verified": size is not None and not contract.check_structured_view(path, frontmatter, normalized_root),
+        "verified": size is not None and bound,
         "bytes": size,
     }
 

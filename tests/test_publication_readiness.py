@@ -823,7 +823,9 @@ evidence_strength: corroborated""",
 
         self.assertIn("retained_quote_evidence", contract["policy"])
         self.assertIn("structured_anchor_evidence", contract["policy"])
-        self.assertIn("sources/normalized/*.structured.json", contract["artifacts"])
+        # The sidecars live beside the records, so the tree is named once — the same way
+        # every other reason names a directory it points an operator at.
+        self.assertIn("sources/normalized/", contract["artifacts"])
         self.assertIn("pointer", contract["remediation"])
         self.assertIn("quote", contract["remediation"])
 
@@ -864,7 +866,7 @@ evidence_strength: corroborated""",
         blockers = [item for item in document["verdict_reasons"] if item.get("category") == "grounding"]
         self.assertEqual(1, len(blockers), blockers)
         self.assertIn("structured_anchor_evidence", blockers[0]["policy"])
-        self.assertIn("sources/normalized/*.structured.json", blockers[0]["artifacts"])
+        self.assertIn("sources/normalized/", blockers[0]["artifacts"])
 
     def test_publication_readiness_no_ships_failed_grounding_anchor(self):
         """A real anchor verification that mismatched, rendered by the published gate."""

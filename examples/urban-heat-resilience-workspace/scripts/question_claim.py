@@ -205,7 +205,9 @@ def render_scalar(value: str, quote: bool) -> str:
                 return value
         except yaml.YAMLError:
             pass
-    return json.dumps(value)
+    # `ensure_ascii=False`: a double-quoted YAML scalar carries literal UTF-8, so escaping
+    # it would only make the page harder for the human who opens it.
+    return json.dumps(value, ensure_ascii=False)
 
 
 def set_frontmatter_field(lines: list[str], key: str, rendered_value: str) -> list[str]:

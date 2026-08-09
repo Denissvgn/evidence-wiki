@@ -85,10 +85,9 @@ REASON_ARTIFACTS = {
     "source_quality": ["wiki/questions/", "sources/manifest.jsonl"],
     "discovery_quality": ["sources/discovery/candidates.jsonl"],
     "citation_identity": ["citation-verification.json"],
-    # The sidecar is named beside the record directory because an anchor failure is often
-    # a fact about the sidecar alone — absent, unbound, or holding a different value than
-    # the `.md` body a reader would otherwise go and check.
-    "grounding": ["wiki/questions/", "sources/normalized/", "sources/normalized/*.structured.json"],
+    # `sources/normalized/` covers the sidecars too — they live beside the records — so it
+    # is named once, the way every other reason names a tree it points an operator at.
+    "grounding": ["wiki/questions/", "sources/normalized/"],
     "contradiction": ["wiki/claims/", "sources/normalized/"],
     "currentness": ["sources/coverage/", "sources/manifest.jsonl"],
     "curation": ["sources/manifest.jsonl", "raw/**/*.provenance.yml"],

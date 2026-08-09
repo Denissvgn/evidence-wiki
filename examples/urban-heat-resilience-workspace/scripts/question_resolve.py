@@ -40,7 +40,9 @@ research runs:
   before anything is written; verification is **not** performed here, because the
   two-step flow records grounding while cited evidence may still be normalizing.
   Run ``verify_quotes.py --slug SLUG`` for that, and see ``--grounding-file`` below
-  for the single-write alternative.
+  for the single-write alternative. Like the resolution verbs it does not rewrite a
+  terminal question: correcting an answered question's grounding is a reopen cycle,
+  not an edit.
 - ``reopen --slug SLUG --agent-id ID --source-id MANIFEST_ID`` moves a
   ``blocked`` question back to ``open`` once the delivered evidence is in the
   manifest and has a normalized record, drops ``blocked_reason``, and adds the
@@ -811,13 +813,25 @@ def _reloads_bare(probe: str, expected: Any) -> bool:
         return False
 
 
+def quote_yaml_string(value: str) -> str:
+    """A YAML double-quoted scalar carrying ``value`` exactly, and readably.
+
+    ``ensure_ascii=False``: JSON's default would write a claim quoting a source as
+    ``"23,99 \\u20ac \\u2014 confirm\\u00e9"``. That reloads correctly, so nothing fails —
+    it just makes the block unreadable in the Obsidian page a human is meant to be able
+    to open and edit, which is most of the point of storing evidence as frontmatter.
+    A YAML double-quoted scalar carries literal UTF-8, so the escaping bought nothing.
+    """
+    return json.dumps(value, ensure_ascii=False)
+
+
 def quote_scalar(value: str) -> str:
     """Render a mapping value, quoting whenever a bare rendering would not survive reload."""
     if not value:
         return '""'
     if _BARE_SCALAR_RE.fullmatch(value) and _reloads_bare(f"probe: {value}", {"probe": value}):
         return value
-    return json.dumps(value)
+    return quote_yaml_string(value)
 
 
 def quote_sequence_item(value: str) -> str:
@@ -837,7 +851,7 @@ def quote_sequence_item(value: str) -> str:
         return '""'
     if _reloads_bare(f"probe:\n  - {value}", {"probe": [value]}):
         return value
-    return json.dumps(value)
+    return quote_yaml_string(value)
 
 
 def render_mapping_sequence(key: str, entries: list[dict[str, str]]) -> list[str]:
@@ -881,7 +895,7 @@ def quote_grounding_scalar(value: str, *, always_quote: bool = False) -> str:
     leading or trailing whitespace, which YAML strips from a plain scalar.
     """
     if always_quote or value != value.strip():
-        return json.dumps(value)
+        return quote_yaml_string(value)
     return quote_scalar(value)
 
 
@@ -1069,23 +1083,25 @@ def grounding_source_ids(entries: list[dict[str, Any]]) -> list[str]:
 
 
 def grounding_form_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
-    """Forms breakdown for the result envelope, counted by ``verify_quotes.count_by_form``.
+    """Forms breakdown for the result envelope.
 
     The form vocabulary and the zero-initialized shape both come from the verifier, so a
     ``grounding set`` envelope and a verification report never disagree about what forms
-    exist or how an empty set is spelled.
+    exist or how an empty set is spelled. Counted here rather than through
+    ``count_by_form``, which reads a ``form`` tag off a *result*: these are entries on
+    their way to the page and carry no tag, and synthesizing one per entry just to have
+    it read straight back out said less than the count it was hiding.
     """
     verify_quotes = load_sibling_module("verify_quotes")
-    return verify_quotes.count_by_form(
-        {
-            "form": (
-                verify_quotes.GROUNDING_FORM_ANCHOR
-                if entry.get("anchor") is not None
-                else verify_quotes.GROUNDING_FORM_QUOTE
-            )
-        }
-        for entry in entries
-    )
+    counts = dict.fromkeys(verify_quotes.GROUNDING_FORMS, 0)
+    for entry in entries:
+        form = (
+            verify_quotes.GROUNDING_FORM_ANCHOR
+            if entry.get("anchor") is not None
+            else verify_quotes.GROUNDING_FORM_QUOTE
+        )
+        counts[form] += 1
+    return counts
 
 
 def render_frontmatter_value(
@@ -1511,6 +1527,15 @@ def transition_grounding_set(
     grounding while cited evidence may still be normalizing, and ``verify_quotes.py --slug S``
     already *is* the check step — a second spelling of it would be a second door every
     future change to verification semantics had to remember.
+
+    **Terminal questions are not rewritten**, by the same ``enforce_claim`` gate the
+    resolution verbs use: once a question is ``answered`` its grounding is part of a
+    recorded answer, and silently swapping the evidence under an answer that has already
+    been verified, reviewed, or exported is the thing terminal statuses exist to prevent.
+    The consequence is worth stating plainly, because this command exists to stop hosts
+    editing frontmatter: correcting the grounding of an answered question is a *reopen*
+    cycle (``reopen`` for a blocked question, otherwise a new question), not an edit —
+    and never a hand-edit of the page, which drops the audit trail this path keeps.
     """
     question_claim = load_sibling_module("question_claim")
     slug = args.slug.strip()
