@@ -2,6 +2,83 @@
 
 ## Unreleased
 
+- Let a domain pack declare its own source-request kinds instead of being
+  limited to the package's built-in set. A pack overlay lists kind
+  declarations under `domain_pack.request_kinds` — a list of mappings with
+  required `id`, `label`, and `description` — namespaced exactly like pack
+  evidence policies: `pack:<pack-name>/<kind-id>`, with the namespace segment
+  required to equal the pack's own `domain_pack.name`, so one pack can never
+  declare kinds in another's namespace. Built-in ids stay reserved and
+  unprefixed and cannot be redeclared. `evidence-wiki pack validate` checks id
+  shape, namespace, and uniqueness before a pack ships; `source_requests.py
+  add --kind` resolves the same declaration from the workspace's merged
+  `research.yml` and refuses a malformed id with `REQUEST_KIND_INVALID`
+  (naming the correctly prefixed id when a bare `<pack>/<kind>` id is
+  submitted) or a well-formed but undeclared id with `REQUEST_KIND_UNDECLARED`.
+  Everything here is additive: a workspace with no installed pack, or a pack
+  that declares no `request_kinds`, accepts exactly the built-in kinds it
+  always did.
+- Add `structured_data` as a built-in source-request kind — the generic
+  non-documentary bucket for evidence like price series, sensor output, and
+  other data that isn't a paper, dataset file, web page, or code artifact. It
+  dovetails with the existing manifest-side `structured_data` classification
+  and CR-2's `normalization.adapters` config: a request opened with `--kind
+  structured_data` and fulfilled by a delivery an adapter normalizes closes
+  the same loop `paper` or `dataset` requests do. Like every kind other than
+  `paper` in the heuristic route planner, `plan-fetch` reports the existing
+  manual-delivery warning for it when no candidate is selected; a selected
+  discovery candidate routes exactly as it would for any other kind.
+- Let a source request carry a structured `scope` — an open key-value mapping
+  stating what would satisfy it — instead of relying on a free-text
+  `query_or_identifier` and positional convention to pair a delivered source
+  back to the request it answers. `add --scope key=value` (repeatable) records
+  the mapping on the request; a deliverer states the same keys in the
+  `.provenance.yml` sidecar's new `scope:` field. `fulfill` always checks for
+  contradiction — a key both sides declare with different values refuses with
+  `REQUEST_SCOPE_MISMATCH`, naming the conflicting keys and both values, and
+  writes nothing — which is what stops a source that answers facet Y from
+  being recorded as fulfilling a request for facet X. `fulfill --match-scope
+  key=value` lets the caller assert scope keys when fulfilling, checked the
+  same way. `fulfill --require-scope` upgrades absence to a refusal: every key
+  the request declares must be present and equal in the delivered scope, or
+  the fulfilment is refused with `REQUEST_SCOPE_MISSING` — the fail-closed
+  mode for a delivery pipeline that can guarantee it stamps scope. Malformed
+  `--scope`/`--match-scope` input (missing `=`, a malformed key, a repeated
+  key) is refused with `REQUEST_SCOPE_INVALID`. None of this is required: a
+  request that declares no scope, or a delivery whose sidecar declares none,
+  behaves exactly as before — the contradiction check can only fire when both
+  sides opted in.
+- Pair a `reopen`'s supplied requests and sources by declared scope instead of
+  by argument order. `question_resolve.py reopen` now computes, for each
+  scoped request among the supplied `--request-id`/`--source-id` pairs, which
+  supplied source's provenance scope does not contradict it, and reports the
+  pairing as `pairs` in its result. A scoped request that matches no supplied
+  source, or an assignment that would pair one source with two scoped
+  requests, refuses with `REQUEST_SCOPE_MISMATCH` before any write. Requests
+  and sources without scope fall back to the previous unpaired behavior, so an
+  unscoped `reopen` call is unchanged.
+- Back-fill a request's scope from the coverage manifest that blocks on it.
+  `coverage_manifest.py set-facet --blocking-request-id` now writes the linked
+  facet's id into the request's `scope.facet_id` when the request doesn't
+  already declare one, so the manifest and the request can never disagree
+  about which facet a request unblocks. A request that already carries a
+  different `scope.facet_id` refuses the facet write with
+  `FACET_SCOPE_CONFLICT`, naming both facet ids and the request. The
+  back-fill is idempotent — rerunning `set-facet` is a no-op — and
+  `--clear-blocking-request-ids` does not clear the request's own scope, since
+  the request still states what would satisfy it even after the manifest link
+  is removed.
+- Add `kind` and `scope` read filters to the request-listing surfaces.
+  `source_requests.py list --kind <id>` (repeatable) and `--scope key=value`
+  (repeatable, AND semantics, exact string equality) narrow the listing the
+  same way `--status` already does; a malformed `--scope` pair is refused with
+  `REQUEST_SCOPE_INVALID` and an unknown `--kind` with
+  `REQUEST_KIND_UNDECLARED`. The MCP `source_requests_list` tool gains
+  matching `kind` and `scope` arguments so a host reading through MCP —
+  `serve-mcp` is the read surface for every other service — can filter the
+  same way. Both filters are optional additions to an existing read path;
+  omitting them returns exactly what `list`/`source_requests_list` returned
+  before.
 - Let a registered external acquirer fulfil source requests, so a host that
   already owns fetching infrastructure — rate limits, credential custody, egress
   policy, compliance logging — can supply evidence without the workspace fetching

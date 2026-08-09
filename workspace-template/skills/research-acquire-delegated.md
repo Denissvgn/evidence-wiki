@@ -43,6 +43,10 @@ Inputs:
 - Stamp `request_id` in the provenance sidecar of everything you deliver. The controller
   correlates a fulfilment to its request through that field; a delivered file without it
   cannot satisfy the request it was fetched for.
+- Stamp a request's `scope` mapping into the same sidecar's `scope:` field, key for key,
+  whenever the request declares one. `fulfill --require-scope` (step 5) makes that stamp
+  load-bearing: it refuses a delivery that omits a scope key the request declares, closing
+  the gap where an unstamped delivery would otherwise slip past every check.
 - Do all of this **while the order is pending**. Fulfilling or reopening between actions is
   refused, because no work order accounts for it.
 - Never write below `runs/orchestrations/`, and never invoke `evidence-wiki orchestrate`
@@ -62,7 +66,16 @@ python3 scripts/source_requests.py list --status open --format json
 ```
 
    Keep only the ids in `scope.request_ids`. Each record's `kind`,
-   `query_or_identifier`, and `rationale` describe what would satisfy it.
+   `query_or_identifier`, and `rationale` describe what would satisfy it; an
+   optional `scope` mapping (for example `facet_id`, `candidate`) states the
+   same thing machine-readably — read it when present, since step 3 stamps it
+   into the delivery and step 5 verifies the pairing against it. A request's
+   `kind` may be built-in, the built-in `structured_data` kind for
+   non-documentary evidence, or a pack-declared `pack:<pack-name>/<kind-id>`
+   kind — none of that changes this workflow. This skill never calls
+   `plan-fetch` and has no provider layer at all, so every delivery here is
+   already the manual-delivery path `research-acquire.md` falls back to for a
+   kind without a provider route.
 
 2. Acquire the evidence with your own connectors, outside the workspace. Nothing in this
    workspace performs or authorizes that fetch.
@@ -79,9 +92,15 @@ retrieved_by: autoseller-orchestrator
 request_id: req-1a2b3c4d5e          # required: how the controller correlates the fulfilment
 license: CC-BY-4.0                  # or null as explicit uncertainty
 checksum: sha256:<64 hex chars>
+scope:                              # stamp this when the request declares a scope mapping
+  facet_id: supplier_quote
+  candidate: acme-widget
 ```
 
    `candidate_id` stays absent: delegated acquisition has no candidate store.
+   Copy the request's `scope` keys and values verbatim into the sidecar's
+   `scope:` field; step 5's `fulfill --require-scope` checks them against
+   exactly what lands here.
 
 4. Inventory and normalize the delivery:
 
@@ -95,11 +114,22 @@ python3 scripts/normalize_sources.py --all
    `docs/research-yml.md`. A source with no normalized record cannot fulfil a request, and
    the postconditions will say so by source id.
 
-5. Fulfil each request you delivered evidence for:
+5. Fulfil each request you delivered evidence for. Pass `--require-scope` — this
+   pipeline stamps scope on every delivery (step 3), so the flag is safe to use
+   by default and closes the gap an unstamped delivery would otherwise leave
+   open:
 
 ```bash
-python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id data--keepa--b0abc123 --format json
+python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id data--keepa--b0abc123 --require-scope --format json
 ```
+
+   `fulfill` refuses with `REQUEST_SCOPE_MISMATCH` when the delivered
+   sidecar's scope contradicts the request's, and with `REQUEST_SCOPE_MISSING`
+   under `--require-scope` when the sidecar omits a key the request declares.
+   Fix either by delivering the evidence the request actually describes or by
+   re-checking the scope you stamped in step 3 — never by editing the sidecar
+   after the fact to force a match. A request or delivery that carries no
+   `scope` at all is unaffected by either check.
 
 6. Record a structured failure for each scoped request you could **not** fulfil:
 
@@ -163,7 +193,11 @@ evidence-wiki orchestrate submit --target . --orchestration-id ORCH_ID \
 - Every scoped request ends with a fulfilment **or** an attempt-failure event carrying this
   action's `action_id` — never neither, never both.
 - Every delivered artifact has a `.provenance.yml` sidecar carrying `request_id`, and a
-  checksum for file deliveries.
+  checksum for file deliveries; a request that declares a `scope` mapping has the same
+  keys and values stamped into the sidecar's `scope:` field.
+- Scope-carrying deliveries were fulfilled with `--require-scope`, and no
+  `REQUEST_SCOPE_MISMATCH`/`REQUEST_SCOPE_MISSING` refusal was worked around by editing a
+  sidecar after delivery.
 - `source_inventory.py --report` and `normalize_sources.py --all` completed, and every
   fulfilled `source_id` has a normalized record.
 - Questions were reopened only where **all** blocking requests are fulfilled; questions
