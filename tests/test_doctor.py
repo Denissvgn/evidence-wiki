@@ -601,6 +601,35 @@ class RegisteredProviderDoctorTests(unittest.TestCase):
             section["details"]["counts"],
         )
 
+    def test_an_authorized_registration_in_a_disabled_phase_is_not_called_enabled(self):
+        """Authorization alone does not make a provider reachable; the phase switch also gates it.
+
+        With `enabled: false` the acquisition path refuses every call with
+        ACQUISITION_DISABLED, so reporting the provider as "enabled" would tell an auditor
+        asking what this workspace can reach exactly the wrong thing. This matches
+        orchestration_controller.provider_policy, which reads enabled as the switch AND a
+        non-empty allow-list.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(
+                tmpdir,
+                acquisition=(ACQUISITION_PROVIDER_ID,),
+                acquisition_enabled=False,
+            )
+            with installed_provider_plugins():
+                report = self.report(workspace)
+
+        section = {check["id"]: check for check in report["checks"]}["registered_providers"]
+        entries = {entry["id"]: entry for entry in section["details"]["registered"]}
+        acquisition = entries[ACQUISITION_PROVIDER_ID]
+        self.assertEqual("available", acquisition["state"])
+        # Still authorized -- the allow-list does name it, so an operator is not sent to
+        # fix the wrong line; it is the phase switch that makes it unreachable.
+        self.assertTrue(acquisition["authorized"])
+        self.assertFalse(acquisition["phase_enabled"])
+        text = self.doctor.render_text(report)
+        self.assertIn("authorized, but the phase is not enabled", text)
+
     def test_an_authorized_registration_is_listed_as_enabled_with_its_declaration(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.workspace(tmpdir, acquisition=(ACQUISITION_PROVIDER_ID,))
@@ -764,6 +793,7 @@ class RegisteredProviderDoctorTests(unittest.TestCase):
                 "entry_point_group",
                 "id",
                 "phase",
+                "phase_enabled",
                 "provider_api_version",
                 "state",
                 "version",
@@ -832,8 +862,8 @@ class RegisteredProviderDoctorTests(unittest.TestCase):
         expected = (
             "  Authorized in research.yml:",
             f"    acquisition (enabled): {ACQUISITION_PROVIDER_ID}",
-            "  Enabled (registered here and authorized in research.yml):",
-            "  Available (registered here, not authorized in research.yml):",
+            "  Enabled (registered here, authorized in research.yml, phase enabled):",
+            "  Available (registered here, not reachable as research.yml stands):",
             "      Declared domains: api.keepa-fixture.invalid, assets.keepa-fixture.invalid",
             "      Rate limit: 60 request(s) per minute",
             f"      Credential names (values never read): {self.CREDENTIAL_NAME}",

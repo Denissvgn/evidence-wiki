@@ -608,8 +608,15 @@ def registered_acquisition_ids() -> tuple[str, ...]:
     The loader never raises for a plugin's sake, so a broken distribution cannot stop a
     workspace that only uses built-ins: with nothing installed this is ``()``, and every
     accepted set and refusal message below is what it was before registration existed.
+    That promise is defence in depth rather than a type guarantee, so it is backed here:
+    a built-in acquisition must not fail because some unrelated distribution's metadata
+    is unreadable. Falling back to ``()`` narrows the accepted set, so this can only
+    refuse a registered id, never admit one.
     """
-    return registered_ids(ACQUISITION_PHASE)
+    try:
+        return registered_ids(ACQUISITION_PHASE)
+    except Exception:  # noqa: BLE001 - a broken environment must not break validation
+        return ()
 
 
 def require_acquisition_registration(provider_id: str) -> Any:
@@ -3738,9 +3745,12 @@ def reserve_registered_requests(
     rate_limit = capabilities.rate_limit
     run_budget = context.get("run_budget")
     if not isinstance(run_budget, dict):
-        # No active run means no durable ledger to spend against. The declaration still
-        # binds what a single command may do, so a plan that exceeds the ceiling on its
-        # own is refused with the same code the ledger would have used.
+        # No active run means no durable ledger to spend against, so the declared window
+        # cannot be accounted across commands: each invocation starts from an empty one.
+        # What still binds is the plan itself, refused with the same code the ledger would
+        # have used. Enforcement across commands is therefore run-scoped, exactly like
+        # max_downloads_per_run, and provider-registration.md says so rather than
+        # promising a ceiling this path does not keep.
         enforce_declared_rate_limit(provider_id, rate_limit, count)
         return None
     run_dir = Path(run_budget["path"]).parent

@@ -1326,6 +1326,20 @@ def load_config(project_root: Path) -> dict[str, Any]:
     return document
 
 
+def safe_registered_ids(phase: str) -> tuple[str, ...]:
+    """Return the ids installed registrations supply, ``()`` if enumeration fails.
+
+    This policy is recomputed on every replay, so an environment that cannot be
+    enumerated must degrade to "supplies nothing" rather than crash the controller and
+    block every session. The fallback only narrows the accepted set, so it can refuse a
+    registered id but never admit one.
+    """
+    try:
+        return registered_ids(phase)
+    except Exception:  # noqa: BLE001 - a broken environment must not break the controller
+        return ()
+
+
 def provider_policy(config: dict[str, Any]) -> dict[str, Any]:
     integrations = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
     policy: dict[str, Any] = {}
@@ -1335,7 +1349,7 @@ def provider_policy(config: dict[str, Any]) -> dict[str, Any]:
             validated = validate_provider_ids(
                 block.get("providers"),
                 phase=phase,
-                registered=registered_ids(phase),
+                registered=safe_registered_ids(phase),
             )
         except ProviderNotRegisteredError as exc:
             # The code stays CONFIG_INVALID because an unresolvable id is indistinguishable

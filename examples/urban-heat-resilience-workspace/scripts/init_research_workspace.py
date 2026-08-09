@@ -29,6 +29,19 @@ if str(_SCRIPT_DIR) not in sys.path:
 # init/upgrade *writer* paths so the readers and writers cannot drift (SEC-E1-T04).
 from _handoff_signature import handoff_secret, sign_handoff
 from _provider_plugins import ProviderPluginError, registered_ids, require_registration
+
+
+def safe_registered_ids(phase: str) -> tuple[str, ...]:
+    """Return the ids installed registrations supply, ``()`` if enumeration fails.
+
+    Deploying a workspace must not fail because some unrelated installed distribution's
+    metadata is unreadable. The fallback only narrows the accepted set, so it can refuse
+    a registered id but never admit one.
+    """
+    try:
+        return registered_ids(phase)
+    except Exception:  # noqa: BLE001 - a broken environment must not break deployment
+        return ()
 from _provider_registry import (
     ACQUISITION_PROVIDER_IDS,
     DISCOVERY_ACCEPTED_IDS,
@@ -691,7 +704,7 @@ def validate_provider_list(
             # Deployment must not authorize what this environment cannot supply, so the
             # accepted set is the built-ins plus whatever is actually installed here.
             # With nothing installed this is ``()`` and the old universe is unchanged.
-            registered=registered_ids(phase),
+            registered=safe_registered_ids(phase),
         )
     except ProviderNotRegisteredError as exc:
         raise provider_registration_exit(
@@ -1091,7 +1104,7 @@ def normalize_cli_provider_flags(values: Any, *, phase: str, label: str) -> tupl
             values,
             phase=phase,
             require_non_empty=True,
-            registered=registered_ids(phase),
+            registered=safe_registered_ids(phase),
         )
     except ProviderNotRegisteredError as exc:
         raise provider_registration_exit(

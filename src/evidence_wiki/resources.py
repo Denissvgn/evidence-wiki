@@ -30,6 +30,7 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/doctor.py",
     "scripts/init_research_workspace.py",
     "scripts/lint.py",
+    "scripts/_provider_accounting.py",
     "scripts/_provider_plugins.py",
     "scripts/_provider_registry.py",
     "scripts/discover_sources.py",

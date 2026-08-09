@@ -83,6 +83,10 @@ _HTTPS_PREFIX = "https://"
 _CREDENTIAL_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _CREDENTIAL_PLACEHOLDER_PREFIX = "{{credential:"
 _DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
+# Must stay identical to DOMAIN_RE in workspace-template/scripts/_provider_plugins.py,
+# which is the authority: a hostname this class accepts and registration rejects would
+# make the published contract disagree with the one actually enforced.
+_DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
 
 
 def _fail(field_name: str, reason: str, value: Any) -> ValueError:
@@ -125,6 +129,11 @@ def _validate_allowed_domains(value: Any) -> tuple[str, ...]:
     Surrounding whitespace is stripped and case is folded down (an uppercase declaration
     is accepted and normalised, never silently mismatched at the transport's host check);
     anything that looks like a URL, a path, or an embedded space is refused.
+
+    The shape check is the registry's own ``DOMAIN_RE``, applied to the normalised value.
+    Accepting a hostname here that registration will reject would make this class a
+    misleading guide to the contract it exists to describe: the author would learn the
+    real rule only by installing the distribution and reading the refusal.
     """
 
     field_name = "ProviderCapabilities.allowed_domains"
@@ -136,7 +145,10 @@ def _validate_allowed_domains(value: Any) -> tuple[str, ...]:
             raise _fail(field_name, "entries must be bare hostnames, not URLs or paths", domain)
         if any(character.isspace() for character in candidate):
             raise _fail(field_name, "entries must not contain whitespace", domain)
-        normalized.append(candidate.lower())
+        folded = candidate.lower()
+        if _DOMAIN_RE.fullmatch(folded) is None:
+            raise _fail(field_name, "entries must be hostnames of dot-separated alphanumeric labels", domain)
+        normalized.append(folded)
     return tuple(normalized)
 
 
@@ -363,8 +375,12 @@ class PlannedRequest:
                 "in a URL would survive URL redaction in logs, provenance, and error envelopes, so "
                 f"placeholders are accepted in header values only: {self.url!r}"
             )
-        if self.method not in _HTTP_METHODS:
+        # Normalised rather than matched exactly, because the transport upper-cases before
+        # comparing: rejecting "get" here would make this class stricter than the contract
+        # it describes, so the same plan would be valid duck-typed and invalid via the ABC.
+        if not isinstance(self.method, str) or self.method.strip().upper() not in _HTTP_METHODS:
             raise _fail("PlannedRequest.method", f"must be one of {_HTTP_METHODS}", self.method)
+        object.__setattr__(self, "method", self.method.strip().upper())
         object.__setattr__(self, "headers", _validate_headers(self.headers))
         if self.body is not None:
             # A request body can carry an authentication payload, so it is described by

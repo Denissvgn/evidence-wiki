@@ -380,6 +380,13 @@ def _capability_summary(capabilities: Any) -> tuple[CapabilitySummary | None, li
         request_kinds = ()
     elif any(not kind.strip() or kind.strip() != kind for kind in request_kinds):
         errors.append("capabilities.request_kinds entries must be non-empty ids without surrounding whitespace")
+    else:
+        # Checked like allowed_domains and credentials above. The field is recorded rather
+        # than routed in v1, but it is the declared seam for CR-4 kind routing, where a
+        # repeated id stops being cosmetic and becomes an ambiguity to resolve.
+        duplicate_kinds = _duplicates(request_kinds)
+        if duplicate_kinds:
+            errors.append(f"capabilities.request_kinds has duplicate id(s): {', '.join(duplicate_kinds)}")
 
     if errors:
         return None, errors

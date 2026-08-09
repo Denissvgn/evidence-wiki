@@ -601,6 +601,12 @@ def _registration_entries(report: dict[str, Any], authorization: dict[str, Any])
         phase_report = report.get(phase) or {}
         group = phase_report.get("entry_point_group") or ENTRY_POINT_GROUPS[phase]
         authorized_ids = set(authorization[phase]["providers"])
+        # The phase switch is half of the answer: an id listed under a phase whose
+        # `enabled` is not true is authorized but unreachable, because acquisition and
+        # discovery both refuse before consulting the allow-list. Matching
+        # orchestration_controller.provider_policy, which reads enabled as the switch
+        # AND a non-empty list, keeps one definition of "enabled" across the package.
+        phase_enabled = authorization[phase].get("enabled") is True
         for record in phase_report.get("registered") or []:
             provider_id = record.get("id")
             authorized = provider_id in authorized_ids
@@ -614,9 +620,10 @@ def _registration_entries(report: dict[str, Any], authorization: dict[str, Any])
                     "entry_point_group": group,
                     "provider_api_version": record.get("provider_api_version"),
                     "authorized": authorized,
+                    "phase_enabled": phase_enabled,
                     # The CR's distinction, in one word an auditor can scan a column of:
                     # installing a distribution can only ever produce "available".
-                    "state": "enabled" if authorized else "available",
+                    "state": "enabled" if authorized and phase_enabled else "available",
                     "capabilities": record.get("capabilities") or {},
                 }
             )
@@ -1133,18 +1140,25 @@ def registered_providers_lines(check: dict[str, Any]) -> list[str]:
 
     registered = details.get("registered") or []
     for state, heading in (
-        ("enabled", "Enabled (registered here and authorized in research.yml)"),
-        ("available", "Available (registered here, not authorized in research.yml)"),
+        ("enabled", "Enabled (registered here, authorized in research.yml, phase enabled)"),
+        ("available", "Available (registered here, not reachable as research.yml stands)"),
     ):
         entries = [entry for entry in registered if entry.get("state") == state]
         if not entries:
             continue
         lines.append(f"  {heading}:")
         for entry in entries:
+            # Authorized but unreachable is the case worth naming: the id IS in the
+            # allow-list, so "not authorized" would send an operator to fix the wrong line.
+            reason = (
+                " - authorized, but the phase is not enabled"
+                if entry.get("authorized") and not entry.get("phase_enabled")
+                else ""
+            )
             lines.append(
                 f"    {entry.get('id')} [{entry.get('phase')}] from {entry.get('distribution')} "
                 f"{entry.get('version')} (entry point {entry.get('entry_point') or 'unnamed'}, "
-                f"provider API v{entry.get('provider_api_version')})"
+                f"provider API v{entry.get('provider_api_version')}){reason}"
             )
             lines.extend(_capability_lines(entry.get("capabilities") or {}))
 

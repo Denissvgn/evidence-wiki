@@ -510,6 +510,14 @@ class CapabilityRuleTests(FixtureDistributionCase):
             ("terms_urls empty", {"terms_urls": "()"}, (), "at least one terms URL"),
             ("terms_urls http", {"terms_urls": '("http://keepa.com/terms",)'}, (), "https:// URLs"),
             ("terms_urls bare scheme", {"terms_urls": '("https://",)'}, (), "https:// URLs"),
+            # Checked like allowed_domains and credentials: request_kinds is the declared
+            # seam for CR-4 kind routing, where a repeated id becomes a real ambiguity.
+            (
+                "request_kinds duplicated",
+                {"request_kinds": '("market-data/price_history", "market-data/price_history")'},
+                (),
+                "duplicate id",
+            ),
             ("license_inference missing", {}, ("license_inference",), "license_inference must be one of"),
             ("license_inference unknown", {"license_inference": '"maybe"'}, (), "license_inference must be one of"),
             ("captures_raw false", {"captures_raw": "False"}, (), "captures_raw must be True"),

@@ -106,7 +106,13 @@ The enforceable claim is narrower and worth stating exactly:
 Concretely, that means: an artifact under `raw/` acquired via `registered get`
 was fetched from a host the provider declared, within the declared rate limit
 and the workspace's own download budget, and carries a sidecar recording the
-declaration that authorized it. Bytes a plugin obtained some other way are not
+declaration that authorized it. Read the rate limit precisely: it is accounted in
+the **active run's** ledger, so it bounds provider calls across commands only
+while a run is open. Outside a run there is no durable budget to spend against,
+and only the single command's plan is checked against the ceiling — the same
+run-scoped shape `integrations.acquisition.max_downloads_per_run` already has.
+Start a run with `run_controller.py` when the declared window is the guarantee
+you are relying on. Bytes a plugin obtained some other way are not
 acquisition output — they cannot reach `raw/`, cannot be inventoried, and cannot
 be cited, because the only writer is the package's own.
 
@@ -232,7 +238,7 @@ promise.
 | `license_inference` | Exactly one of `yes`, `partial`, or `none`, with the meanings the built-in provider registry table in [acquisition.md](acquisition.md) already uses. | **Recorded** in provenance and printed by doctor. A `none` declaration does not stop acquisition; it tells the operator the sidecar's license status will need review before publication. |
 | `captures_raw` | Whether raw bytes are retained as evidence. Defaults to `True` and **must** be `True` in v1. | **Validated at registration** and recorded. The package's writer always retains raw bytes, so a `False` declaration is a contract the package would not honor; it is refused rather than ignored. |
 | `quarantine_on_incomplete` | Whether an interrupted acquisition quarantines rather than publishing a partial artifact. Defaults to `True` and **must** be `True` in v1. | **Validated at registration** and recorded, for the same reason: the writer quarantines unconditionally. |
-| `rate_limit` | `RateLimit(requests, per)` with `requests >= 1` and `per` either `"minute"` or `"hour"`, or `None` for no declared ceiling. | **Enforced** against a durable per-run ledger. The declared window is checked before transport; exceeding it raises `ACQUISITION_PROVIDER_RATE_LIMITED`. A declared limit tightens, never loosens, `integrations.acquisition.max_downloads_per_run`. |
+| `rate_limit` | `RateLimit(requests, per)` with `requests >= 1` and `per` either `"minute"` or `"hour"`, or `None` for no declared ceiling. | **Enforced** against a durable per-run ledger. The declared window is checked before transport; exceeding it raises `ACQUISITION_PROVIDER_RATE_LIMITED`. A declared limit tightens, never loosens, `integrations.acquisition.max_downloads_per_run`. Accounting across commands is run-scoped: with no active run there is no ledger, and only the single command's plan is checked against the ceiling. |
 | `credentials` | Tuple of **environment variable names only**, each matching `^[A-Z][A-Z0-9_]*$`. Defaults to `()`. Never values. | **Enforced**: a plan may reference only declared names, and the package resolves the values. The *names* are recorded in provenance; the values never appear in any output. |
 | `request_kinds` | Tuple of source-request kind IDs this provider can serve — a built-in kind such as `structured_data`, or a pack-namespaced kind such as `pack:market-data/price_history`. Defaults to `()`. | **Recorded** and printed by doctor. v1 validates the shape but does not route work orders on it (see [v1 Limits](#v1-limits)). |
 

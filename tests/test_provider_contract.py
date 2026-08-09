@@ -191,6 +191,14 @@ class ProviderCapabilitiesTests(unittest.TestCase):
             ("api.example.com\\v1", "bare hostnames"),
             ("api example com", "whitespace"),
             ("api.example.com\tx", "whitespace"),
+            # Shape is checked against the registry's own DOMAIN_RE. Accepting a hostname
+            # here that registration rejects would make this class a misleading guide to
+            # the contract it documents: the author would learn the real rule only by
+            # installing the distribution and reading the refusal.
+            ("not_a_domain!!", "dot-separated alphanumeric labels"),
+            ("api.example.com:443", "dot-separated alphanumeric labels"),
+            ("api.example.com.", "dot-separated alphanumeric labels"),
+            ("-leading-hyphen.example.com", "dot-separated alphanumeric labels"),
         )
         for domain, expected in cases:
             with self.subTest(domain=domain):
@@ -324,10 +332,19 @@ class PlannedRequestTests(unittest.TestCase):
                 self.assertIn("PlannedRequest.url", str(caught.exception))
 
     def test_only_get_and_post_are_planned(self):
-        for method in ("GET", "POST"):
+        # Case and surrounding whitespace are normalised, matching the transport's own
+        # `.strip().upper()`: a class stricter than the contract it documents would make
+        # the same plan valid duck-typed and invalid through this class.
+        for method, expected in (
+            ("GET", "GET"),
+            ("POST", "POST"),
+            ("get", "GET"),
+            ("post", "POST"),
+            (" get ", "GET"),
+        ):
             with self.subTest(method=method):
-                self.assertEqual(PlannedRequest(url="https://api.example.com/v1", method=method).method, method)
-        for method in ("get", "post", "PUT", "DELETE", "HEAD", "", None):
+                self.assertEqual(PlannedRequest(url="https://api.example.com/v1", method=method).method, expected)
+        for method in ("PUT", "DELETE", "HEAD", "", None):
             with self.subTest(method=method):
                 with self.assertRaises(ValueError) as caught:
                     PlannedRequest(url="https://api.example.com/v1", method=method)

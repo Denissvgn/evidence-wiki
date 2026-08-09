@@ -637,6 +637,42 @@ class OutOfDeclarationFetchTests(RegisteredProviderWorkspace, unittest.TestCase)
         self.assertEqual("ACQUISITION_DOMAIN_NOT_DECLARED", caught.exception.error_code)
         self.assertEqual([], resolver.calls, "an undeclared host must not even be resolved")
 
+    def test_a_redirect_out_of_the_declaration_is_refused(self):
+        """The declaration must bound where a request *lands*, not only where it is aimed.
+
+        A plan can be entirely inside the declaration and still leave it, because the
+        server chooses the redirect. That check lives on a different code path from the
+        planned-URL one -- the final-URL branch of ``bounded_download``, reached through
+        the opener rather than through ``enforce_declared_domain`` -- and carries its own
+        error code, so it needs its own test. Without this, dropping the final-URL branch
+        or passing ``allowed_domains=None`` into the download would let a registered
+        provider be redirected anywhere and break nothing.
+        """
+
+        class RedirectingOpener(RecordingOpener):
+            def __call__(self, request, timeout=None):
+                self.requests.append(request)
+                return FakeResponse(self.body, f"https://{UNDECLARED_HOST}/product")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.make_workspace(Path(tmpdir), acquisition_providers=[ACQUISITION_PROVIDER_ID])
+            self.write_request(workspace, {"asin": REQUEST_ASIN})
+            opener = RedirectingOpener(PRODUCT_RESPONSE)
+            before = tree_snapshot(workspace)
+
+            with self.installed_plugins(), self.credential_in_the_environment():
+                with mock.patch.object(FETCH, "REGISTERED_OPENER", opener):
+                    code, stdout, stderr = self.registered_get(workspace)
+
+            self.assertEqual(2, code, stdout or stderr)
+            self.assertEqual("", stdout, "a refusal must leave stdout empty")
+            envelope = json.loads(stderr)
+            self.assertEqual("ACQUISITION_REDIRECT_UNSAFE", envelope["error_code"])
+            # The request was aimed inside the declaration, so it was correctly attempted.
+            self.assertTrue(opener.urls, "the in-declaration request should have been sent")
+            self.assertNotIn(UNDECLARED_HOST, opener.urls[0])
+            self.assertEqual(before, tree_snapshot(workspace), "a blocked redirect wrote to the workspace")
+
     def test_the_same_plan_inside_the_declaration_is_executed(self):
         """The control: without it, an implementation that refused everything would pass."""
         with tempfile.TemporaryDirectory() as tmpdir:

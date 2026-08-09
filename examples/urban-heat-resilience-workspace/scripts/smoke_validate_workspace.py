@@ -335,6 +335,22 @@ PROVIDER_REGISTRATION_RECOMMENDATION_PREFIX = (
 )
 
 
+def safe_registered_ids(phase: str) -> tuple[str, ...]:
+    """Return the ids installed registrations supply, ``()`` if enumeration fails.
+
+    Smoke is the gate that decides whether a workspace is safe to operate, so it must
+    never be the thing that breaks because some installed distribution's metadata is
+    unreadable: a crash here blocks every orchestrated session, while ``()`` reports the
+    authorization as unsatisfiable, which is the honest reading of an environment that
+    cannot be enumerated. The fallback only narrows the accepted set, so it can refuse a
+    registered id but never admit one.
+    """
+    try:
+        return registered_ids(phase)
+    except Exception:  # noqa: BLE001 - a broken environment must not break the safety gate
+        return ()
+
+
 def validate_provider_list(
     value: Any,
     *,
@@ -352,7 +368,7 @@ def validate_provider_list(
         # Registration widens the accepted set to what is installed *here*, so a
         # workspace authorizing a pip-installed provider passes only where it exists.
         # With nothing installed this is ``()`` and the accepted set is the old one.
-        validated = validate_provider_ids(value, phase=phase, registered=registered_ids(phase))
+        validated = validate_provider_ids(value, phase=phase, registered=safe_registered_ids(phase))
     except ProviderNotRegisteredError as exc:
         return [], str(exc), [], exc.provider_ids
     except ProviderListError as exc:
