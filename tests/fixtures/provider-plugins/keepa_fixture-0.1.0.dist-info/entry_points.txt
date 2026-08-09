@@ -1,0 +1,5 @@
+[evidence_wiki.acquisition_providers]
+keepa-fixture = keepa_fixture:KeepaFixtureAcquisitionProvider
+
+[evidence_wiki.discovery_providers]
+keepa-search-fixture = keepa_fixture:KeepaFixtureDiscoveryProvider
