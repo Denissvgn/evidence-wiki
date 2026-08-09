@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: keepa-fixture
+Version: 0.1.0
+Summary: Synthetic evidence-wiki provider plugin used only by this repository's test suite.
+Author: EvidenceWiki contributors
+License: MIT
+Requires-Python: >=3.10
+
+Registers one acquisition provider (``keepa-fixture``) and one discovery provider
+(``keepa-search-fixture``) under the evidence-wiki entry-point groups. It plans HTTPS
+requests against reserved ``.invalid`` hosts and never performs I/O of its own.

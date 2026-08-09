@@ -114,6 +114,43 @@ _REMEDIATIONS = {
     "ACQUISITION_PROVIDER_DISABLED": (
         "Add the provider to integrations.acquisition.providers or choose an enabled provider."
     ),
+    "PROVIDER_NOT_REGISTERED": (
+        "Install a distribution that registers the provider under the evidence_wiki.acquisition_providers "
+        "or evidence_wiki.discovery_providers entry-point group, or remove the id from the research.yml "
+        "provider list."
+    ),
+    "PROVIDER_REGISTRATION_INVALID": (
+        "Upgrade or fix the named distribution so its provider declares allowed_domains, terms_urls, "
+        "license_inference, and a supported provider_api_version, or remove the provider from research.yml "
+        "until it does."
+    ),
+    "PROVIDER_REQUEST_INVALID": (
+        "Rewrite the request document as a single JSON object the provider accepts, using the reason the "
+        "provider reported, then rerun the command."
+    ),
+    "PROVIDER_PLAN_INVALID": (
+        "Upgrade the provider so its planned requests are HTTPS, carry only declared credential "
+        "placeholders in headers, and stay within the per-command request cap."
+    ),
+    "ACQUISITION_DOMAIN_NOT_DECLARED": (
+        "Request a URL whose host the provider declares in allowed_domains, or install a provider "
+        "version that declares that host."
+    ),
+    "ACQUISITION_PROVIDER_RATE_LIMITED": (
+        "Wait for the provider's declared rate-limit window to clear, then rerun with fewer requests "
+        "or raise integrations.acquisition.max_downloads_per_run after reviewing provider limits."
+    ),
+    "PROVIDER_ACCOUNTING_ARGUMENT_INVALID": (
+        "Fix the reservation arguments: pass an existing run directory, a positive request count, "
+        "and a rate-limit declaration of the documented shape."
+    ),
+    "PROVIDER_ACCOUNTING_LEDGER_INVALID": (
+        "Preserve the run's provider-request ledger for audit and start a fresh run. A damaged ledger "
+        "is never treated as an empty budget."
+    ),
+    "PROVIDER_ACCOUNTING_WRITE_FAILED": (
+        "Restore write access and free space for the run directory, then rerun the command."
+    ),
     "DISCOVERY_DISABLED": (
         "Set integrations.discovery.enabled: true in research.yml to opt in. "
         "Discovery still performs no network I/O until a provider transport is implemented."
