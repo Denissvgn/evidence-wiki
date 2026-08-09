@@ -1546,8 +1546,43 @@ optional_facets: []
 """
         )
 
-    def add_blocked_question(self, project: Path, slug: str = "which-benchmarks") -> None:
-        (project / "wiki" / "questions" / f"{slug}.md").write_text(BLOCKED_QUESTION_PAGE)
+    def add_blocked_question(
+        self,
+        project: Path,
+        slug: str = "which-benchmarks",
+        blocking_request_ids: list[str] | None = None,
+    ) -> None:
+        page = BLOCKED_QUESTION_PAGE
+        if blocking_request_ids:
+            listed = "".join(f"  - {request_id}\n" for request_id in blocking_request_ids)
+            page = page.replace(
+                "question: Which benchmarks matter?\n",
+                f"blocking_request_ids:\n{listed}question: Which benchmarks matter?\n",
+            )
+        (project / "wiki" / "questions" / f"{slug}.md").write_text(page)
+
+    def scoped_request(
+        self,
+        *,
+        request_id: str = "req-1a2b3c4d5e",
+        facet_id: str | None = "required-identity",
+        kind: str = "paper",
+        slug: str = "which-benchmarks",
+    ) -> dict:
+        record = {
+            "schema_version": "1.0",
+            "request_id": request_id,
+            "kind": kind,
+            "query_or_identifier": "arXiv:2601.00001",
+            "rationale": "Needed.",
+            "priority": "high",
+            "question_slugs": [slug],
+            "status": "open",
+            "source_id": None,
+        }
+        if facet_id is not None:
+            record["scope"] = {"facet_id": facet_id}
+        return record
 
     def add_output_page(self, project: Path, source_id: str = "paper:fixture-static") -> None:
         output = project / "wiki" / "outputs" / "fixture-output.md"
@@ -1857,6 +1892,130 @@ Reusable output grounded in `{source_id}`.
 
         self.assertNotIn("question_blocked_no_request", self.issue_categories(results))
         self.assertEqual(1, results["stats"]["source_requests_open"])
+
+    def test_request_scope_facet_absent_from_manifest_fires_medium(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            self.add_blocked_question(project, blocking_request_ids=["req-1a2b3c4d5e"])
+            self.write_coverage_manifest(project, blocking_request_ids=[])
+            self.write_requests(project, [self.scoped_request()])
+
+            results = self.run_lint(project)
+            severity_levels = LINT.severity_order(LINT.load_config(project))
+
+        issues = self.issue_for_category(results, "request_scope_facet_unlinked")
+        self.assertEqual(1, len(issues))
+        self.assertEqual("MEDIUM", issues[0]["severity"])
+        self.assertIn("req-1a2b3c4d5e", issues[0]["message"])
+        self.assertIn("required-identity", issues[0]["message"])
+        self.assertIn("wiki/questions/which-benchmarks.md", issues[0]["message"])
+        self.assertIn("sources/coverage/which-benchmarks.yml", issues[0]["files"])
+        self.assertEqual("scope.facet_id", issues[0]["field"])
+        self.assertEqual("no facet lists this request", issues[0]["actual"])
+        self.assertIn("set-facet --slug which-benchmarks", issues[0]["recommendation"])
+        self.assertIn("--blocking-request-id req-1a2b3c4d5e", issues[0]["recommendation"])
+        # A filtered-out severity would drop the finding from every report that reads it.
+        self.assertIn("MEDIUM", severity_levels)
+        self.assertEqual(1, results["stats"]["issue_counts"]["MEDIUM"])
+        # Advisory only: a HIGH here would flip the workspace verdict to attention_required.
+        self.assertEqual(0, results["stats"]["issue_counts"]["HIGH"])
+
+    def test_request_scope_facet_linked_in_manifest_reports_nothing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            self.add_blocked_question(project, blocking_request_ids=["req-1a2b3c4d5e"])
+            self.write_coverage_manifest(project, blocking_request_ids=["req-1a2b3c4d5e"])
+            self.write_requests(project, [self.scoped_request()])
+
+            results = self.run_lint(project)
+
+        self.assertEqual([], self.issue_for_category(results, "request_scope_facet_unlinked"))
+
+    def test_request_scoped_to_another_facet_names_both_facets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            self.add_blocked_question(project, blocking_request_ids=["req-1a2b3c4d5e"])
+            self.write_coverage_manifest(project, blocking_request_ids=["req-1a2b3c4d5e"])
+            self.write_requests(project, [self.scoped_request(facet_id="supplier-quote")])
+
+            results = self.run_lint(project)
+
+        issues = self.issue_for_category(results, "request_scope_facet_unlinked")
+        self.assertEqual(1, len(issues))
+        self.assertEqual("MEDIUM", issues[0]["severity"])
+        self.assertIn("supplier-quote", issues[0]["message"])
+        self.assertIn("required-identity", issues[0]["message"])
+        self.assertEqual("required-identity", issues[0]["actual"])
+
+    def test_request_scoped_to_an_undeclared_facet_recommends_fixing_the_scope(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            self.add_blocked_question(project, blocking_request_ids=["req-1a2b3c4d5e"])
+            self.write_coverage_manifest(project, blocking_request_ids=[])
+            self.write_requests(project, [self.scoped_request(facet_id="no-such-facet")])
+
+            results = self.run_lint(project)
+
+        issues = self.issue_for_category(results, "request_scope_facet_unlinked")
+        self.assertEqual(1, len(issues))
+        self.assertEqual("MEDIUM", issues[0]["severity"])
+        self.assertIn("declares no facet `no-such-facet`", issues[0]["message"])
+        # set-facet refuses an undeclared facet, so it must not be the leading advice.
+        self.assertTrue(issues[0]["recommendation"].startswith("Correct the request's scope"))
+
+    def test_request_without_scope_reports_no_facet_finding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            self.add_blocked_question(project, blocking_request_ids=["req-1a2b3c4d5e"])
+            self.write_coverage_manifest(project, blocking_request_ids=[])
+            self.write_requests(project, [self.scoped_request(facet_id=None)])
+
+            results = self.run_lint(project)
+
+        self.assertEqual([], self.issue_for_category(results, "request_scope_facet_unlinked"))
+
+    def test_question_without_coverage_manifest_reports_no_facet_finding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            self.add_blocked_question(project, blocking_request_ids=["req-1a2b3c4d5e"])
+            self.write_requests(project, [self.scoped_request()])
+
+            results = self.run_lint(project)
+
+        self.assertFalse((project / "sources" / "coverage" / "which-benchmarks.yml").exists())
+        self.assertEqual([], self.issue_for_category(results, "request_scope_facet_unlinked"))
+
+    def test_pack_and_structured_data_request_kinds_pass_through_lint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            self.add_blocked_question(
+                project, blocking_request_ids=["req-pack000001", "req-struct0001"]
+            )
+            self.write_coverage_manifest(project, blocking_request_ids=[])
+            self.write_requests(
+                project,
+                [
+                    self.scoped_request(
+                        request_id="req-pack000001",
+                        kind="pack:market-data/supplier_quote",
+                        facet_id="required-identity",
+                    ),
+                    self.scoped_request(
+                        request_id="req-struct0001",
+                        kind="structured_data",
+                        facet_id=None,
+                    ),
+                ],
+            )
+
+            results = self.run_lint(project)
+
+        self.assertEqual([], self.issue_for_category(results, "source_request_invalid"))
+        self.assertNotIn("question_blocked_no_request", self.issue_categories(results))
+        self.assertEqual(2, results["stats"]["source_requests_open"])
+        issues = self.issue_for_category(results, "request_scope_facet_unlinked")
+        self.assertEqual(1, len(issues))
+        self.assertIn("req-pack000001", issues[0]["message"])
 
     def test_answered_coverage_required_question_without_manifest_fires_high(self):
         with tempfile.TemporaryDirectory() as tmpdir:
