@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -348,6 +349,153 @@ Vendor-controlled product specification.
             ["questions", "grounding_entries", "verified", "failed", "missing_grounding", "by_form"],
             list(payload["counts"]),
         )
+
+
+class SeamTests(unittest.TestCase):
+    """``run_verify`` is the same operation ``main`` runs, minus the printing (CR-6 T8).
+
+    ``tests/test_seam_conformance.py`` holds the two renderings to each other
+    permanently. What is pinned here is what a document comparison cannot see: that a
+    failed verification is a returned report rather than an exception, that a refusal
+    keeps this command's bare-message text rendering, and that ``--write`` stamps the
+    question pages once on the way through the seam -- not twice, and not zero times.
+
+    The fixture is the quote workspace next door, reused rather than rebuilt so the
+    seam is exercised against exactly the evidence the CLI tests use.
+    """
+
+    source_id = VerifyQuotesTests.source_id
+    make_workspace = VerifyQuotesTests.make_workspace
+    question_frontmatter = VerifyQuotesTests.question_frontmatter
+
+    def run_main(self, target: Path, *extra: str) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = VERIFY.main(["--project-root", str(target), "--slug", "vendor-product-spec", *extra])
+        return int(code or 0), stdout.getvalue(), stderr.getvalue()
+
+    @staticmethod
+    def without_generated_at(document: dict) -> dict:
+        return {key: value for key, value in document.items() if key != "generated_at"}
+
+    def test_the_seam_returns_the_document_main_prints(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir))
+
+            code, stdout, stderr = self.run_main(target, "--format", "json")
+            returned = VERIFY.run_verify(target, ["vendor-product-spec"])
+
+        self.assertEqual(0, code, stderr)
+        self.assertIn("generated_at", returned)
+        self.assertEqual(self.without_generated_at(json.loads(stdout)), self.without_generated_at(returned))
+
+    def test_a_failed_verification_is_a_returned_report_not_a_refusal(self):
+        # The whole value of the report is naming which claim failed and why. A seam that
+        # raised here would hand a host an exception where the answer should have been.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir), quote="A sentence no retained record carries.")
+
+            code, stdout, stderr = self.run_main(target, "--format", "json")
+            returned = VERIFY.run_verify(target, ["vendor-product-spec"])
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        self.assertEqual("not_verified", json.loads(stdout)["overall_result"])
+        self.assertEqual("not_verified", returned["overall_result"])
+        self.assertEqual("quote_not_found", returned["questions"][0]["grounding"][0]["result"])
+
+    def test_a_refusal_carries_the_envelope_and_exit_code_the_cli_emits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir))
+            frontmatter = self.question_frontmatter(target)
+            frontmatter["grounding"][0].pop("quote")
+            (target / "wiki" / "questions" / "vendor-product-spec.md").write_text(
+                "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n\n# Vendor Product Spec\n",
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = self.run_main(target, "--format", "json")
+            with self.assertRaises(VERIFY.VerifyQuotesError) as raised:
+                VERIFY.run_verify(target, ["vendor-product-spec"])
+
+        self.assertEqual("", stdout)
+        self.assertEqual(VERIFY.EXIT_INVALID, code)
+        self.assertEqual(VERIFY.EXIT_INVALID, raised.exception.exit_code)
+        self.assertEqual("GROUNDING_INVALID", raised.exception.error_code)
+        self.assertEqual(json.loads(stderr), raised.exception.to_envelope())
+
+    def test_an_unreadable_workspace_refuses_through_the_system_exit_funnel(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "not-a-workspace"
+            missing.mkdir()
+
+            code, stdout, stderr = self.run_main(missing, "--format", "json")
+            with self.assertRaises(VERIFY.ScriptRefusal) as raised:
+                VERIFY.run_verify(missing, ["vendor-product-spec"])
+
+        self.assertEqual("", stdout)
+        self.assertEqual(VERIFY.EXIT_INVALID, code)
+        self.assertEqual(VERIFY.EXIT_INVALID, raised.exception.exit_code)
+        self.assertEqual("CONFIG_MISSING", raised.exception.error_code)
+        self.assertEqual(json.loads(stderr), raised.exception.to_envelope())
+
+    def test_text_mode_still_prints_the_bare_refusal_message(self):
+        # This command's coded refusals reached emit_error, which prints the message
+        # alone. The shared refusal type would otherwise prefix `refused (CODE): `.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir))
+
+            code, stdout, stderr = self.run_main(target, "--format", "text", "--write")
+
+        self.assertEqual(VERIFY.EXIT_INVALID, code)
+        self.assertEqual("", stdout)
+        self.assertEqual("--verified-by is required when --write is set.\n", stderr)
+
+    def test_write_stamps_through_the_seam_exactly_once(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir))
+            with mock.patch.object(
+                VERIFY,
+                "write_verification_metadata",
+                wraps=VERIFY.write_verification_metadata,
+            ) as stamp:
+                code, _, stderr = self.run_main(target, "--format", "json", "--write", "--verified-by", "verify-agent")
+                calls = stamp.call_count
+
+            frontmatter = self.question_frontmatter(target)
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual(1, calls, "the --write mutation must happen once on the way through the seam")
+        self.assertEqual("verify-agent", frontmatter["verified_by"])
+        self.assertIn("grounding_verified_at", frontmatter)
+
+    def test_the_seam_does_not_stamp_unless_write_is_requested(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir))
+            before = (target / "wiki" / "questions" / "vendor-product-spec.md").read_bytes()
+
+            VERIFY.run_verify(target, ["vendor-product-spec"])
+
+            after = (target / "wiki" / "questions" / "vendor-product-spec.md").read_bytes()
+
+        self.assertEqual(before, after)
+
+    def test_the_seam_de_duplicates_slugs_as_the_cli_does(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir))
+
+            returned = VERIFY.run_verify(target, ["vendor-product-spec", " vendor-product-spec "])
+
+        self.assertEqual(1, returned["counts"]["questions"])
+
+    def test_no_slugs_refuses_before_any_question_is_read(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir))
+
+            with self.assertRaises(VERIFY.VerifyQuotesError) as raised:
+                VERIFY.run_verify(target, [])
+
+        self.assertEqual("SLUG_INVALID", raised.exception.error_code)
 
 
 _DEFAULT_SIDECAR = object()
