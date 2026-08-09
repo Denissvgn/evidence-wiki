@@ -6,6 +6,7 @@ refused with a stable code naming what is wrong.
 """
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -119,9 +120,59 @@ CAPPED_RECORD = FOREIGN_RECORD.replace(
     "- price: 23.99 EUR\n\n### metadata\n\n- asin: B0ABC\n",
 )
 
+STRUCTURED_VIEW_INVALID = "NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID"
+SIDECAR_NAME = "raw--raw-data-keepa-40efe41f3b.structured.json"
+SIDECAR_REL = f"sources/normalized/{SIDECAR_NAME}"
+STRUCTURED_PAYLOAD = {
+    "asin": "B0ABC",
+    "supplier_quote": {"currency": "EUR", "price": "23.99 EUR"},
+}
+
+
+def sidecar_bytes(payload=None) -> bytes:
+    document = STRUCTURED_PAYLOAD if payload is None else payload
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def content_hash(data: bytes) -> str:
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def with_structured_view(
+    *,
+    record: str = FOREIGN_RECORD,
+    path: str = SIDECAR_REL,
+    digest: str | None = None,
+    data: bytes | None = None,
+) -> str:
+    """The record, plus a `structured_view` block binding a sidecar to it."""
+    payload = sidecar_bytes() if data is None else data
+    block = "\n".join(
+        [
+            "structured_view:",
+            f"  path: {path}",
+            f"  content_hash: {digest or content_hash(payload)}",
+            f"raw_fingerprint: {FINGERPRINT}",
+        ]
+    )
+    return record.replace(f"raw_fingerprint: {FINGERPRINT}", block)
+
+
+NATIVE_RECORD = FOREIGN_RECORD.replace(
+    "  name: autoseller-normalize\n  version: 1.4.0\n",
+    "  name: normalize_sources.py\n  version: 3\n",
+)
+
 
 class NormalizeVerifyTests(unittest.TestCase):
-    def make_workspace(self, root: Path, *, record: str | None = FOREIGN_RECORD) -> Path:
+    def make_workspace(
+        self,
+        root: Path,
+        *,
+        record: str | None = FOREIGN_RECORD,
+        sidecar: bytes | None = None,
+        sidecar_name: str = SIDECAR_NAME,
+    ) -> Path:
         target = root / "verify-workspace"
         (target / "sources" / "normalized").mkdir(parents=True)
         (target / "research.yml").write_text(
@@ -141,6 +192,8 @@ class NormalizeVerifyTests(unittest.TestCase):
         )
         if record is not None:
             (target / "sources" / "normalized" / RECORD_NAME).write_text(record, encoding="utf-8")
+        if sidecar is not None:
+            (target / "sources" / "normalized" / sidecar_name).write_bytes(sidecar)
         return target
 
     def run_verify(self, target: Path, *extra: str) -> tuple[int, dict, str, str]:
@@ -383,6 +436,290 @@ class NormalizeVerifyTests(unittest.TestCase):
         # operator triaging a bad record still needs to know how much of it is quotable.
         self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code)
         self.assertEqual(0.25, payload["records"][0]["rendered_coverage"]["ratio"])
+
+    # -- structured-view sidecar -------------------------------------------------
+
+    def test_native_record_with_a_conforming_sidecar_verifies(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(
+                Path(tmpdir),
+                record=with_structured_view(record=NATIVE_RECORD),
+                sidecar=sidecar_bytes(),
+            )
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_OK, code, stderr)
+        record = payload["records"][0]
+        self.assertEqual([], record["violations"])
+        self.assertEqual(
+            {
+                "declared": True,
+                "path": SIDECAR_REL,
+                "verified": True,
+                "bytes": len(sidecar_bytes()),
+            },
+            record["structured_view"],
+        )
+        self.assertEqual(1, payload["counts"]["with_structured_view"])
+
+    def test_foreign_record_with_a_hand_written_sidecar_verifies_on_the_same_terms(self):
+        # The CR-2 promise applied to the sidecar: an external normalizer that writes a
+        # conforming sidecar and binds it correctly is first-class evidence, with no
+        # adapter involved and no native provenance claimed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(
+                Path(tmpdir),
+                record=with_structured_view(),
+                sidecar=sidecar_bytes(),
+            )
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_OK, code, stderr)
+        record = payload["records"][0]
+        self.assertEqual("external", record["origin"])
+        self.assertEqual([], record["violations"])
+        self.assertTrue(record["structured_view"]["verified"])
+
+    def test_record_without_a_structured_view_is_left_alone(self):
+        # Every paper, PDF, web link and codebase record in every existing workspace.
+        # The check must be silent for them, and must not invent a summary either.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir))
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_OK, code, stderr)
+        record = payload["records"][0]
+        self.assertEqual([], record["violations"])
+        self.assertIsNone(record["structured_view"])
+        self.assertEqual(0, payload["counts"]["with_structured_view"])
+
+    def test_explicit_null_structured_view_is_treated_as_undeclared(self):
+        record = FOREIGN_RECORD.replace(
+            f"raw_fingerprint: {FINGERPRINT}",
+            f"structured_view: null\nraw_fingerprint: {FINGERPRINT}",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir), record=record)
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_OK, code, stderr)
+        self.assertIsNone(payload["records"][0]["structured_view"])
+
+    def test_declared_but_missing_sidecar_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir), record=with_structured_view())
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        record = payload["records"][0]
+        self.assertEqual([STRUCTURED_VIEW_INVALID], [v["code"] for v in record["violations"]])
+        self.assertEqual("structured_view.path", record["violations"][0]["field"])
+        self.assertFalse(record["structured_view"]["verified"])
+        self.assertIsNone(record["structured_view"]["bytes"])
+
+    def test_tampered_sidecar_bytes_are_refused_by_the_hash_binding(self):
+        clean = sidecar_bytes()
+        tampered = sidecar_bytes({**STRUCTURED_PAYLOAD, "asin": "B0XYZ"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(
+                Path(tmpdir),
+                record=with_structured_view(data=clean),
+                sidecar=tampered,
+            )
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        violations = payload["records"][0]["violations"]
+        self.assertEqual([STRUCTURED_VIEW_INVALID], [v["code"] for v in violations])
+        self.assertEqual("structured_view.content_hash", violations[0]["field"])
+        self.assertEqual(content_hash(clean), violations[0]["expected"])
+        self.assertEqual(content_hash(tampered), violations[0]["actual"])
+
+    def test_undeclared_sidecar_on_disk_is_refused(self):
+        # `*.md` is the only thing any consumer globs, so a sidecar nothing declares is
+        # a file no tool will ever open. Reporting it is the only way it is ever seen.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir), sidecar=sidecar_bytes())
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        record = payload["records"][0]
+        self.assertEqual([STRUCTURED_VIEW_INVALID], [v["code"] for v in record["violations"]])
+        self.assertEqual("structured_view", record["violations"][0]["field"])
+        self.assertIn("does not declare it", record["violations"][0]["message"])
+        self.assertIsNone(record["structured_view"])
+
+    def test_binding_another_records_sidecar_is_refused(self):
+        # The binding exists so an anchor cites the record it names. A record that
+        # points at a neighbour's sidecar borrows evidence it never produced.
+        other = "raw--raw-data-other-0000000000.structured.json"
+        record = with_structured_view(path=f"sources/normalized/{other}")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(
+                Path(tmpdir),
+                record=record,
+                sidecar=sidecar_bytes(),
+                sidecar_name=other,
+            )
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        violations = payload["records"][0]["violations"]
+        self.assertEqual([STRUCTURED_VIEW_INVALID], [v["code"] for v in violations])
+        self.assertEqual("structured_view.path", violations[0]["field"])
+        self.assertIn("different record's sidecar", violations[0]["message"])
+
+    def test_sidecar_path_outside_the_normalized_directory_is_refused(self):
+        record = with_structured_view(path=f"sources/raw/{SIDECAR_NAME}")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir), record=record, sidecar=sidecar_bytes())
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        violations = payload["records"][0]["violations"]
+        self.assertEqual([STRUCTURED_VIEW_INVALID], [v["code"] for v in violations])
+        self.assertIn("normalized directory", violations[0]["message"])
+
+    def test_malformed_binding_block_is_refused_by_shape(self):
+        record = with_structured_view(digest="deadbeef").replace(
+            "  content_hash:", "  format: json\n  content_hash:"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir), record=record, sidecar=sidecar_bytes())
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        violations = payload["records"][0]["violations"]
+        self.assertEqual([STRUCTURED_VIEW_INVALID] * 2, [v["code"] for v in violations])
+        self.assertEqual(
+            ["structured_view", "structured_view.content_hash"],
+            [v["field"] for v in violations],
+        )
+
+    def test_sidecar_that_is_not_one_json_object_is_refused(self):
+        payload_bytes = sidecar_bytes([{"price": "23.99 EUR"}])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(
+                Path(tmpdir),
+                record=with_structured_view(data=payload_bytes),
+                sidecar=payload_bytes,
+            )
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        violations = payload["records"][0]["violations"]
+        self.assertEqual([STRUCTURED_VIEW_INVALID], [v["code"] for v in violations])
+        self.assertIn("single JSON object", violations[0]["message"])
+
+    def test_sidecar_carrying_nan_is_refused(self):
+        # `json.loads` accepts the `NaN` literal even though JSON does not, so a payload
+        # that round-trips through this package would carry a value no other reader can.
+        payload_bytes = b'{"price": NaN}\n'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(
+                Path(tmpdir),
+                record=with_structured_view(data=payload_bytes),
+                sidecar=payload_bytes,
+            )
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        violations = payload["records"][0]["violations"]
+        self.assertEqual([STRUCTURED_VIEW_INVALID], [v["code"] for v in violations])
+        self.assertIn("not JSON-serializable", violations[0]["message"])
+
+    def test_binding_on_a_record_too_broken_to_locate_its_sidecar_is_not_reported_verified(self):
+        # No `source_id` means no canonical sidecar location, so nothing was checked.
+        # "Not checked" must not read as "checked and fine".
+        record = with_structured_view().replace(f"source_id: {SOURCE_ID}\n", "")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(Path(tmpdir), record=record, sidecar=sidecar_bytes())
+            code, payload, _, stderr = self.run_verify(target)
+
+        self.assertEqual(VERIFY.EXIT_NOT_VERIFIED, code, stderr)
+        self.assertFalse(payload["records"][0]["structured_view"]["verified"])
+
+    # -- the shared validators units 4 and 5 call ---------------------------------
+
+    def test_payload_validator_accepts_an_object_and_refuses_the_rest(self):
+        validate = VERIFY.contract.validate_structured_payload
+        self.assertEqual([], validate({"supplier_quote": {"price": "23.99 EUR"}}))
+        self.assertEqual([], validate({}))
+        for bad in ([{"price": 1}], "23.99", 23.99, None, True):
+            self.assertEqual(
+                [STRUCTURED_VIEW_INVALID],
+                [v.code for v in validate(bad)],
+                f"{bad!r} is not a JSON object",
+            )
+
+    def test_payload_validator_bounds_nesting_before_a_reader_recurses_into_it(self):
+        depth = VERIFY.contract.STRUCTURED_VIEW_MAX_DEPTH
+        deep = inner = {}
+        for _ in range(depth + 4):
+            inner["next"] = {}
+            inner = inner["next"]
+        violations = VERIFY.contract.validate_structured_payload(deep)
+        self.assertEqual([STRUCTURED_VIEW_INVALID], [v.code for v in violations])
+        self.assertIn(f"deeper than {depth} levels", violations[0].message)
+
+        shallow = inner = {}
+        for _ in range(depth - 2):
+            inner["next"] = {}
+            inner = inner["next"]
+        self.assertEqual([], VERIFY.contract.validate_structured_payload(shallow))
+
+    def test_payload_validator_terminates_on_a_cycle_instead_of_recursing(self):
+        cyclic: dict = {}
+        cyclic["self"] = cyclic
+        self.assertEqual(
+            [STRUCTURED_VIEW_INVALID],
+            [v.code for v in VERIFY.contract.validate_structured_payload(cyclic)],
+        )
+
+    def test_block_validator_checks_shape_without_touching_disk(self):
+        validate = VERIFY.contract.validate_structured_view_block
+        good = {"path": SIDECAR_REL, "content_hash": content_hash(sidecar_bytes())}
+        self.assertEqual([], validate(good))
+        self.assertEqual([], validate({**good, "x-note": "experiments are exempt"}))
+        self.assertEqual(
+            ["structured_view.content_hash"],
+            [v.field for v in validate({**good, "content_hash": "abc123"})],
+        )
+        self.assertEqual(
+            ["structured_view.path"],
+            [v.field for v in validate({**good, "path": "  "})],
+        )
+        self.assertEqual(["structured_view"], [v.field for v in validate([good])])
+        self.assertEqual(
+            ["adapter_structured"],
+            [v.field for v in validate("nope", field="adapter_structured")],
+        )
+
+    def test_sidecar_naming_is_single_sourced_beside_the_record(self):
+        root = Path("/workspace/sources/normalized")
+        self.assertEqual(
+            root / "raw--raw-data-keepa-40efe41f3b.structured.json",
+            VERIFY.contract.expected_structured_path(root, SOURCE_ID),
+        )
+        # Same stem as the record, so the pair is obvious in a directory listing.
+        self.assertEqual(
+            VERIFY.contract.expected_record_path(root, SOURCE_ID).name.removesuffix(".md"),
+            VERIFY.contract.expected_structured_path(root, SOURCE_ID).name.removesuffix(
+                VERIFY.contract.STRUCTURED_VIEW_SUFFIX
+            ),
+        )
+
+    def test_text_format_states_the_sidecar_and_whether_it_resolved(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.make_workspace(
+                Path(tmpdir),
+                record=with_structured_view(),
+                sidecar=sidecar_bytes(),
+            )
+            code, _, raw_stdout, stderr = self.run_verify(target, "--format", "text")
+
+        self.assertEqual(VERIFY.EXIT_OK, code, stderr)
+        self.assertIn(f"structured view: verified ({SIDECAR_REL}", raw_stdout)
 
     # -- fatal workspace errors --------------------------------------------------
 
