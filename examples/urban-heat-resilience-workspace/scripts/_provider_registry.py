@@ -6,6 +6,14 @@ discovery strategy (for example ``legal``) may compose one or more providers,
 but it is never itself permission to contact a network service.  The legacy
 strategy identifiers are accepted for one compatibility release so upgraded
 workspaces remain readable; callers must not use them as provider authority.
+
+Third-party providers registered through entry points widen the accepted set,
+never this module.  A caller that knows how to enumerate registrations passes
+them as ``registered=``; this module stays a pure function of its arguments and
+never imports the entry-point machinery, so the validator every surface depends
+on cannot start failing because an installed distribution is broken.  With the
+default ``registered=()`` the accepted set — and every message built from it —
+is exactly what it was before registration existed.
 """
 
 from __future__ import annotations
@@ -40,6 +48,21 @@ class ProviderListError(ValueError):
     """Raised when a configured provider allow-list has an invalid shape."""
 
 
+class ProviderNotRegisteredError(ProviderListError):
+    """Raised when an allow-list names an id no built-in or registration supplies.
+
+    A subclass rather than a sibling: every existing ``except ProviderListError``
+    call site keeps catching this unchanged, while a registration-aware caller can
+    single it out and refuse with ``PROVIDER_NOT_REGISTERED`` instead of a generic
+    configuration error.  ``provider_ids`` carries the offending ids so that caller
+    does not have to parse them back out of the message.
+    """
+
+    def __init__(self, message: str, *, provider_ids: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.provider_ids = provider_ids
+
+
 @dataclass(frozen=True)
 class ProviderList:
     configured: tuple[str, ...]
@@ -52,8 +75,15 @@ def validate_provider_ids(
     *,
     phase: str,
     require_non_empty: bool = False,
+    registered: tuple[str, ...] = (),
 ) -> ProviderList:
-    """Validate one phase allow-list without granting strategy aliases access."""
+    """Validate one phase allow-list without granting strategy aliases access.
+
+    ``registered`` widens the accepted set with ids supplied by installed provider
+    registrations.  The ids are appended in the caller's order after the built-ins,
+    so with the default ``()`` the accepted set and every message quoting it are
+    byte-for-byte what they were before registration existed.
+    """
 
     if phase == "discovery":
         allowed = DISCOVERY_ACCEPTED_IDS
@@ -63,6 +93,9 @@ def validate_provider_ids(
         legacy = set()
     else:  # pragma: no cover - internal programming guard
         raise ValueError(f"unknown provider phase: {phase}")
+
+    extra = tuple(dict.fromkeys(item for item in registered if item not in allowed))
+    accepted = (*allowed, *extra)
 
     if value is None:
         configured: list[str] = []
@@ -78,11 +111,15 @@ def validate_provider_ids(
     duplicates = sorted({provider for provider in configured if configured.count(provider) > 1})
     if duplicates:
         raise ProviderListError(f"has duplicate provider(s): {', '.join(duplicates)}")
-    unknown = sorted(set(configured) - set(allowed))
+    unknown = sorted(set(configured) - set(accepted))
     if unknown:
-        raise ProviderListError(
-            f"has unknown provider(s): {', '.join(unknown)}. Allowed providers: {', '.join(allowed)}"
-        )
+        message = f"has unknown provider(s): {', '.join(unknown)}. Allowed providers: {', '.join(accepted)}"
+        if extra:
+            # Only a registration-aware caller can produce this clause, so the sentence
+            # existing callers parse is untouched while a host that installed providers
+            # is told which ones this environment actually supplies.
+            message += f". Registered providers: {', '.join(extra)}"
+        raise ProviderNotRegisteredError(message, provider_ids=tuple(unknown))
     concrete = tuple(provider for provider in configured if provider not in legacy)
     if require_non_empty and not concrete:
         raise ProviderListError(
