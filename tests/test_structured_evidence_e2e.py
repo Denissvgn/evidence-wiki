@@ -18,6 +18,16 @@ Two ways to get that record, and CR-2 promises both work on identical terms:
 - `ForeignRecordChainTests` — an external tool wrote the record by hand and no adapter
   exists anywhere (AC2), plus one mutation per contract violation family showing verify
   and lint each name it (AC3).
+
+CR-4 then names the request that starts the chain. Before it, a workspace whose evidence
+is JSON had to file every request as `kind: other` — the request said nothing about what
+was wanted and nothing about what would satisfy it:
+
+- `StructuredDataRequestKindTests` — the same chain opened with the built-in
+  `structured_data` kind and a `--scope facet_id=…` mapping, delivered with a sidecar
+  stating the same scope, and closed through `fulfill` and `reopen`. Plus the refusal
+  that gives the scope its meaning: a delivery scoped to a different facet cannot fulfil
+  the request.
 """
 
 import contextlib
@@ -46,6 +56,12 @@ QUESTION_SLUG = "needs-price-evidence"
 ADAPTER_NAME = "stub-normalize"
 ADAPTER_VERSION = "1.0.0"
 
+STRUCTURED_KIND = "structured_data"
+# Both are top-level keys of the fixture payload, so either is a facet the adapter
+# really renders — the mis-pairing below is between two answers that both exist.
+REQUESTED_FACET = "supplier_quote"
+DELIVERED_OTHER_FACET = "price_history_median_90d"
+
 
 def load_script_module(name: str, filename: str):
     path = SCRIPTS / filename
@@ -68,6 +84,25 @@ REQUESTS = load_script_module("e2e_structured_source_requests", "source_requests
 VERIFY_QUOTES = load_script_module("e2e_structured_verify_quotes", "verify_quotes.py")
 LINT = load_script_module("e2e_structured_lint", "lint.py")
 STATUS = load_script_module("e2e_structured_workspace_status", "workspace_status.py")
+REQUEST_SCOPE = load_script_module("e2e_structured_request_scope", "_request_scope.py")
+
+FACET_KEY = REQUEST_SCOPE.FACET_SCOPE_KEY
+
+
+def cli_accepts(subcommand: str, option: str) -> bool:
+    """True when `source_requests.py <subcommand>` already declares `option`.
+
+    CR-4's scope flags arrive in sibling tasks (`add --scope`, `fulfill --match-scope`)
+    while the record schema and the match semantics they drive are already shipped. This
+    suite proves the scenario either way: it asks the parser what exists rather than
+    pinning a revision, builds the same record state directly while a flag is missing,
+    and starts exercising the real CLI path the moment the flag lands — with no edit here.
+    """
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(io.StringIO()):
+        with contextlib.suppress(SystemExit):
+            REQUESTS.main([subcommand, "--help"])
+    return option in captured.getvalue()
 
 
 @contextlib.contextmanager
@@ -129,17 +164,26 @@ class StructuredEvidenceWorkspace:
         }
         config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
-    def deliver_payload(self, workspace: Path) -> None:
-        """A delivery per docs/source-delivery.md: the artifact plus its sidecar."""
+    def deliver_payload(self, workspace: Path, *, scope: dict[str, str] | None = None) -> None:
+        """A delivery per docs/source-delivery.md: the artifact plus its sidecar.
+
+        `scope` is CR-4's addition to that contract: the deliverer states what the
+        artifact answers, so fulfilment compares it instead of pairing by position. It
+        is appended to the fixture's own sidecar text rather than re-serialized, which
+        keeps `origin_url`/`retrieved_at`/`license` byte-identical to the unscoped
+        delivery every other test in this module makes.
+        """
         destination = workspace / "raw" / "data"
         destination.mkdir(parents=True, exist_ok=True)
         shutil.copy2(PAYLOAD, destination / PAYLOAD.name)
-        shutil.copy2(
-            PAYLOAD.with_name(PAYLOAD.name + ".provenance.yml"),
-            destination / (PAYLOAD.name + ".provenance.yml"),
-        )
+        sidecar = PAYLOAD.with_name(PAYLOAD.name + ".provenance.yml").read_text(encoding="utf-8")
+        if scope:
+            sidecar += "scope:\n" + "".join(f"  {key}: {scope[key]}\n" for key in sorted(scope))
+        (destination / (PAYLOAD.name + ".provenance.yml")).write_text(sidecar, encoding="utf-8")
 
-    def make_workspace(self, root: Path, *, adapter: bool = True) -> Path:
+    def make_workspace(
+        self, root: Path, *, adapter: bool = True, scope: dict[str, str] | None = None
+    ) -> Path:
         workspace = self.init_workspace(root)
         if adapter:
             self.enable_adapter(workspace)
@@ -148,14 +192,14 @@ class StructuredEvidenceWorkspace:
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             config["raw"]["source_roots"] = sorted({*config["raw"]["source_roots"], "raw/data"})
             config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-        self.deliver_payload(workspace)
+        self.deliver_payload(workspace, scope=scope)
         return workspace
 
     # -- pipeline stages ---------------------------------------------------------
 
-    def run_inventory(self, workspace: Path) -> None:
+    def run_inventory(self, workspace: Path, *extra: str) -> None:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            code = INVENTORY.main(["--project-root", str(workspace), "--format", "json"])
+            code = INVENTORY.main(["--project-root", str(workspace), "--format", "json", *extra])
         self.assertEqual(0, code)
 
     def run_normalize(self, workspace: Path, *extra: str) -> tuple[int, dict, str]:
@@ -188,7 +232,13 @@ class StructuredEvidenceWorkspace:
 
     # -- question lifecycle ------------------------------------------------------
 
-    def block_the_question(self, workspace: Path) -> str:
+    def block_the_question(
+        self,
+        workspace: Path,
+        *,
+        kind: str = "dataset",
+        scope: dict[str, str] | None = None,
+    ) -> str:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(
                 0,
@@ -200,19 +250,26 @@ class StructuredEvidenceWorkspace:
                     ]
                 ),
             )
+        scope_argv: list[str] = []
+        if scope and cli_accepts("add", "--scope"):
+            scope_argv = [
+                argument for key in sorted(scope) for argument in ("--scope", f"{key}={scope[key]}")
+            ]
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
             code = REQUESTS.main(
                 [
                     "--project-root", str(workspace),
-                    "add", "--kind", "dataset",
+                    "add", "--kind", kind,
                     "--query-or-identifier", "keepa product B0ABC12345",
                     "--rationale", "No price evidence in the workspace.",
-                    "--question-slug", QUESTION_SLUG, "--format", "json",
+                    "--question-slug", QUESTION_SLUG, *scope_argv, "--format", "json",
                 ]
             )
         self.assertEqual(0, code, stdout.getvalue())
         request_id = json.loads(stdout.getvalue())["request"]["request_id"]
+        if scope and not scope_argv:
+            self.stamp_request_scope(workspace, request_id, scope)
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = RESOLVE.main(
@@ -226,6 +283,56 @@ class StructuredEvidenceWorkspace:
             )
         self.assertEqual(0, code)
         return request_id
+
+    def stamp_request_scope(self, workspace: Path, request_id: str, scope: dict[str, str]) -> None:
+        """Write CR-4's optional `scope` object onto an existing request record.
+
+        The stand-in for `add --scope` until that flag exists. It writes through the
+        shipped path resolver and loader, so it lands where the command will land and
+        exercises the promise that makes the field additive: `load_requests` carries
+        fields it was never taught about.
+        """
+        config = REQUESTS.load_config(workspace)
+        path = REQUESTS.requests_path(workspace, config)
+        records = REQUESTS.load_requests(path)
+        matched = [record for record in records if record.get("request_id") == request_id]
+        self.assertEqual(1, len(matched), f"no request {request_id} in {path}")
+        matched[0]["scope"] = dict(scope)
+        path.write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+        )
+
+    def request_record(self, workspace: Path, request_id: str) -> dict:
+        """Read one request back from the store, as a consumer of the CLI would."""
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            code = REQUESTS.main(["--project-root", str(workspace), "list", "--format", "json"])
+        self.assertEqual(0, int(code or 0), stdout.getvalue())
+        matched = [
+            record
+            for record in json.loads(stdout.getvalue())["requests"]
+            if record.get("request_id") == request_id
+        ]
+        self.assertEqual(1, len(matched), stdout.getvalue())
+        return matched[0]
+
+    def run_fulfill(
+        self, workspace: Path, request_id: str, source_id: str, *extra: str
+    ) -> tuple[int, dict]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = REQUESTS.main(
+                [
+                    "--project-root", str(workspace),
+                    "fulfill", "--request-id", request_id,
+                    "--source-id", source_id, *extra, "--format", "json",
+                ]
+            )
+        return int(code or 0), json.loads(stdout.getvalue() or stderr.getvalue())
+
+    def question_status(self, workspace: Path) -> str:
+        page = (workspace / "wiki" / "questions" / f"{QUESTION_SLUG}.md").read_text(encoding="utf-8")
+        return yaml.safe_load(page.split("---\n", 2)[1])["status"]
 
     def run_reopen(self, workspace: Path, source_id: str, request_id: str) -> tuple[int, dict]:
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -723,6 +830,141 @@ class ForeignRecordChainTests(StructuredEvidenceWorkspace, unittest.TestCase):
 
         self.assertEqual(1, code)
         self.assertEqual("anchor_not_found", quotes["questions"][0]["grounding"][0]["result"])
+
+
+class StructuredDataRequestKindTests(StructuredEvidenceWorkspace, unittest.TestCase):
+    """CR-4: the request that starts the chain finally names what it wants.
+
+    CR-2 made a JSON payload citable. What it could not fix is the request that asks for
+    one: with `paper`/`dataset`/`web`/`code`/`other` as the whole vocabulary, a workspace
+    whose evidence is JSON filed `kind: other` — a bucket that says nothing — and paired
+    the delivery back to the request by position afterwards. CR-4 supplies both halves,
+    and this walks the loop with both stated: a `structured_data` request carrying
+    `scope: {facet_id: …}`, and a delivery whose sidecar declares a facet of its own.
+
+    The scope is only worth carrying if it can refuse something, so the refusal is here
+    too — with both facets drawn from the payload's own keys, making the delivery a
+    source that genuinely answers *something*, recorded against the wrong request. That
+    is the mis-pairing the change request reports; a malformed sidecar would not be.
+    """
+
+    def scoped_workspace(self, root: Path, *, delivered_facet: str) -> tuple[Path, str, str]:
+        """A blocked `structured_data` request, plus a delivery scoped to `delivered_facet`."""
+        workspace = self.make_workspace(root, scope={FACET_KEY: delivered_facet})
+        request_id = self.block_the_question(
+            workspace, kind=STRUCTURED_KIND, scope={FACET_KEY: REQUESTED_FACET}
+        )
+        self.run_inventory(workspace, "--report")
+        return workspace, request_id, self.structured_record(workspace)["id"]
+
+    def test_a_structured_data_request_survives_the_whole_delivery_loop(self):
+        """blocked question -> scoped request -> delivery -> normalize -> fulfil -> reopen."""
+        scope = {FACET_KEY: REQUESTED_FACET}
+        # 1. No pack is installed anywhere in this module, so the kind can only be
+        #    accepted by `add` because it is reserved — which is the whole point of
+        #    making it a built-in rather than something each pack redeclares.
+        self.assertIn(STRUCTURED_KIND, REQUESTS.REQUEST_KINDS)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, source_id = self.scoped_workspace(
+                Path(tmpdir), delivered_facet=REQUESTED_FACET
+            )
+            opened = self.request_record(workspace, request_id)
+            self.assertEqual(STRUCTURED_KIND, opened["kind"])
+            self.assertEqual(scope, opened["scope"])
+            self.assertEqual("blocked", self.question_status(workspace))
+
+            # 2. Inventory files the payload under the same string the request used, and
+            #    round-trips the sidecar scope onto the manifest record. Both matter: the
+            #    shared kind string is what lets a CR-2 adapter declaring
+            #    `kinds: [structured_data]` cover a `structured_data` request at all, and
+            #    the manifest is where fulfilment reads the delivery's side of the scope.
+            manifest_record = self.structured_record(workspace)
+            self.assertEqual(STRUCTURED_KIND, manifest_record["kind"])
+            self.assertEqual(scope, manifest_record["provenance"]["scope"])
+
+            # 3. The configured adapter turns the payload into a normalized record.
+            code, report, stderr = self.run_normalize(workspace)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(1, report["summary"]["methods"]["adapter"])
+            self.assertTrue(self.normalized_path(workspace, source_id).is_file())
+
+            # 4. Fulfilment: the two scopes agree, so the request closes against this
+            #    source — matched, not merely unchecked. The contradicting case below is
+            #    what tells those two apart.
+            code, fulfilled = self.run_fulfill(workspace, request_id, source_id)
+            self.assertEqual(0, code, fulfilled)
+            self.assertEqual("fulfilled", fulfilled["request"]["status"])
+            self.assertEqual(source_id, fulfilled["request"]["source_id"])
+            self.assertEqual(STRUCTURED_KIND, fulfilled["request"]["kind"])
+
+            # 5. ...and the question it blocked reopens. This is the step that used to
+            #    end the chain at SOURCE_NOT_NORMALIZED for structured evidence, and the
+            #    reason the loop is worth walking rather than unit-testing in pieces.
+            code, reopened = self.run_reopen(workspace, source_id, request_id)
+            self.assertEqual(0, code, reopened)
+            self.assertEqual("open", reopened["status"])
+            self.assertIn(source_id, reopened["source_ids"])
+            self.assertEqual("open", self.question_status(workspace))
+
+            final = self.request_record(workspace, request_id)
+
+        # 6. Carried verbatim, never mapped: the kind and the scope that paired it read
+        #    back off the store unchanged after every mutation the loop performed.
+        self.assertEqual(STRUCTURED_KIND, final["kind"])
+        self.assertEqual(scope, final["scope"])
+        self.assertEqual("fulfilled", final["status"])
+        self.assertEqual(source_id, final["source_id"])
+
+    def test_a_delivery_for_another_facet_contradicts_the_request_it_would_close(self):
+        """The refusal's precondition, asserted against durable state rather than assumed.
+
+        Whether `fulfill` can act on this yet is the next assertion's problem; that the
+        two sides genuinely disagree — as the shipped matcher reads them, out of the
+        request store and the inventoried manifest record that `fulfill` itself reads —
+        is this one's, and it holds independently of any flag.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, source_id = self.scoped_workspace(
+                Path(tmpdir), delivered_facet=DELIVERED_OTHER_FACET
+            )
+            conflicts, absences = REQUEST_SCOPE.scope_match(
+                self.request_record(workspace, request_id)["scope"],
+                REQUESTS.source_provenance_scope(
+                    workspace, REQUESTS.load_config(workspace), source_id
+                ),
+            )
+
+        # A conflict, not an absence: the delivery stated a facet, it is simply not the
+        # one asked for. The distinction is the whole layering — a conflict always
+        # refuses, an absence only under `--require-scope`.
+        self.assertEqual([FACET_KEY], conflicts)
+        self.assertEqual([], absences)
+
+    def test_a_delivery_scoped_to_another_facet_is_refused_at_fulfill(self):
+        """CR-4 acceptance: a `facet_id=X` request cannot be closed by a `facet_id=Y` source.
+
+        Normalization is deliberately absent — fulfilment gates on manifest membership,
+        so leaving it out proves the refusal is the scope check and not a missing record.
+        """
+        if not cli_accepts("fulfill", "--match-scope"):
+            self.skipTest(
+                "fulfill does not check request scope on this revision (CR-4 T5); the "
+                "contradiction it must refuse is asserted independently by "
+                "test_a_delivery_for_another_facet_contradicts_the_request_it_would_close"
+            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, source_id = self.scoped_workspace(
+                Path(tmpdir), delivered_facet=DELIVERED_OTHER_FACET
+            )
+            code, payload = self.run_fulfill(workspace, request_id, source_id)
+            refused = self.request_record(workspace, request_id)
+
+        self.assertEqual(REQUESTS.EXIT_INVALID, code, payload)
+        self.assertEqual("REQUEST_SCOPE_MISMATCH", payload["error_code"])
+        # Refused before the write, not rolled back after it: the request is still open
+        # and unlinked, so the source that does answer it can still close it.
+        self.assertEqual("open", refused["status"])
+        self.assertIsNone(refused["source_id"])
 
 
 if __name__ == "__main__":
