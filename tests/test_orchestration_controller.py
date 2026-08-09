@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import yaml
@@ -90,6 +91,81 @@ def openalex_payload() -> bytes:
 
 
 class OrchestrationControllerTests(unittest.TestCase):
+    def test_answered_slug_filter_accepts_anchor_only_grounding(self):
+        """A question grounded only by anchors reaches the verifier like any other.
+
+        The entries are parsed by the verifier rather than hand-written, so the filter is
+        tested against the entry shape grounding actually has, not a guess at it.
+        """
+        anchor_only = VERIFY_QUOTES.grounding_entries(
+            {
+                "grounding": [
+                    {
+                        "claim": "The current supplier price is 23.99 EUR.",
+                        "source_id": "data:keepa-b0abc123",
+                        "anchor": {"pointer": "supplier_quote/price", "expected": "23.99 EUR"},
+                    }
+                ]
+            },
+            "anchor-only",
+        )
+        quote_only = VERIFY_QUOTES.grounding_entries(
+            {
+                "grounding": [
+                    {
+                        "claim": "The survey is retained evidence.",
+                        "source_id": "raw:bench-survey-2026",
+                        "quote": "Benchmark Survey 2026",
+                    }
+                ]
+            },
+            "quote-only",
+        )
+        self.assertEqual(["anchor"], [entry["form"] for entry in anchor_only])
+
+        selected = CONTROLLER.answered_grounded_slugs(
+            {
+                "questions": [
+                    {"slug": "anchor-only", "status": "answered", "grounding": anchor_only},
+                    {"slug": "quote-only", "status": "answered", "grounding": quote_only},
+                    {"slug": "mixed", "status": "answered", "grounding": anchor_only + quote_only},
+                    {"slug": "ungrounded", "status": "answered", "grounding": []},
+                    {"slug": "not-answered", "status": "open", "grounding": anchor_only},
+                    {"slug": "grounding-not-a-list", "status": "answered", "grounding": {}},
+                ]
+            }
+        )
+
+        self.assertEqual(["anchor-only", "quote-only", "mixed"], selected)
+
+    def test_empty_quote_verification_report_matches_the_real_report_shape(self):
+        """The persisted artifact has one schema whether or not a run had grounding.
+
+        Compared against `verify_quotes.build_report`'s own output rather than a second
+        hardcoded literal: a literal here would only prove this file agrees with itself.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "quote-shape-workspace"
+            (target / "wiki" / "questions").mkdir(parents=True)
+            (target / "research.yml").write_text("project:\n  name: Quote Shape\n", encoding="utf-8")
+            (target / "wiki" / "questions" / "shape.md").write_text(
+                "---\nstatus: answered\n---\n\n# Shape\n",
+                encoding="utf-8",
+            )
+
+            real = VERIFY_QUOTES.build_report(target, SimpleNamespace(slug=["shape"]))
+
+        empty = CONTROLLER.empty_quote_verification_report()
+
+        self.assertEqual(list(real), list(empty))
+        self.assertEqual(list(real["counts"]), list(empty["counts"]))
+        self.assertEqual(list(real["counts"]["by_form"]), list(empty["counts"]["by_form"]))
+        self.assertEqual({"quote": 0, "anchor": 0}, empty["counts"]["by_form"])
+        self.assertEqual(0, sum(empty["counts"][key] for key in empty["counts"] if key != "by_form"))
+        self.assertEqual([], empty["questions"])
+        self.assertEqual("verified", empty["overall_result"])
+        self.assertFalse(empty["network_io_executed"])
+
     def run_module(self, module, argv: list[str]) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):

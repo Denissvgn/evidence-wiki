@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -15,6 +16,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 EXPORT_SCRIPT_PATH = SCRIPTS / "export_answers.py"
 INIT_SCRIPT_PATH = SCRIPTS / "init_research_workspace.py"
+# The MCP server surfaces question detail by returning `build_export` verbatim; it is
+# loaded here so one fixture can prove that passthrough over the same anchor entries.
+MCP_SCRIPT_PATH = SCRIPTS / "serve_mcp.py"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
 
 
@@ -30,6 +34,7 @@ def load_script_module(name: str, path: Path):
 
 EXPORT = load_script_module("research_export_answers", EXPORT_SCRIPT_PATH)
 INIT = load_script_module("research_export_answers_init", INIT_SCRIPT_PATH)
+MCP = load_script_module("research_export_answers_mcp", MCP_SCRIPT_PATH)
 
 
 ANSWER_PAGE = """---
@@ -81,6 +86,27 @@ title: Benchmark Survey 2026
 
 # Benchmark Survey 2026
 """
+
+STRUCTURED_VIEW = {"summary": {"benchmark_count": 41, "edition": "2026"}}
+
+# One question, both evidence forms: the quote proves the record says something, the
+# anchor proves the cited field holds the value the claim states.
+MIXED_GROUNDING = """grounding:
+  - claim: GSM-Hard and ARC-X are reasoning benchmarks.
+    source_id: raw:bench-survey-2026
+    quote: Benchmark Survey 2026
+    location_hint: normalized title
+  - claim: The survey counts 41 benchmarks.
+    source_id: raw:bench-survey-2026
+    anchor:
+      pointer: summary/benchmark_count
+      expected: 41"""
+
+MALFORMED_ANCHOR_GROUNDING = """grounding:
+  - claim: The survey counts 41 benchmarks.
+    source_id: raw:bench-survey-2026
+    anchor:
+      expected: 41"""
 
 
 class ExportAnswersTests(unittest.TestCase):
@@ -216,6 +242,36 @@ optional_facets:
             "blocked_reason: Needs the 2026 contamination audit; not yet delivered.",
         )
         return target
+
+    SAFE_SOURCE_ID = "raw--bench-survey-2026"
+
+    def write_structured_view(self, target: Path, document: dict) -> None:
+        """Emit a structured-view sidecar and bind the seeded record to it by content hash."""
+        data = json.dumps(document, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        normalized_dir = target / "sources" / "normalized"
+        (normalized_dir / f"{self.SAFE_SOURCE_ID}.structured.json").write_bytes(data)
+        (normalized_dir / f"{self.SAFE_SOURCE_ID}.md").write_text(
+            NORMALIZED_RECORD.replace(
+                "title: Benchmark Survey 2026\n",
+                "title: Benchmark Survey 2026\n"
+                "structured_view:\n"
+                f"  path: sources/normalized/{self.SAFE_SOURCE_ID}.structured.json\n"
+                f"  content_hash: sha256:{hashlib.sha256(data).hexdigest()}\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+    def set_question_grounding(self, target: Path, grounding_yaml: str) -> None:
+        question = target / "wiki" / "questions" / "benchmarks.md"
+        question.write_text(
+            question.read_text(encoding="utf-8").replace(
+                "answer_page: ../synthesis/reasoning-benchmarks.md",
+                "answer_page: ../synthesis/reasoning-benchmarks.md\n" + grounding_yaml,
+                1,
+            ),
+            encoding="utf-8",
+        )
 
     def run_export(self, *args: str) -> tuple[int, str, str]:
         stdout = io.StringIO()
@@ -477,6 +533,144 @@ optional_facets:
         )
         self.assertTrue(answered["grounding_verification"]["all_verified"])
         self.assertEqual("verified", answered["grounding_verification"]["grounding"][0]["result"])
+
+    def test_export_carries_both_grounding_forms_and_their_verification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            self.write_structured_view(target, STRUCTURED_VIEW)
+            self.set_question_grounding(target, MIXED_GROUNDING)
+
+            code, document = self.export_json(target)
+
+        self.assertEqual(0, code)
+        answered = self.question_by_slug(document, "benchmarks")
+        self.assertEqual(
+            [
+                {
+                    "claim": "GSM-Hard and ARC-X are reasoning benchmarks.",
+                    "source_id": "raw:bench-survey-2026",
+                    "form": "quote",
+                    "quote": "Benchmark Survey 2026",
+                    "location_hint": "normalized title",
+                },
+                {
+                    "claim": "The survey counts 41 benchmarks.",
+                    "source_id": "raw:bench-survey-2026",
+                    "form": "anchor",
+                    # `expected` is canonicalized to a string at load, so an unquoted
+                    # YAML 41 and a quoted "41" reach the export as the same entry.
+                    "anchor": {"pointer": "summary/benchmark_count", "expected": "41"},
+                },
+            ],
+            answered["grounding"],
+        )
+        verification = answered["grounding_verification"]
+        self.assertTrue(verification["all_verified"])
+        self.assertEqual(2, verification["grounding_count"])
+        self.assertEqual({"quote": 1, "anchor": 1}, verification["by_form"])
+        anchor_result = verification["grounding"][1]
+        self.assertEqual("verified", anchor_result["result"])
+        self.assertEqual("anchor", anchor_result["form"])
+        self.assertEqual("structured_anchor_evidence", anchor_result["policy"])
+        self.assertEqual("/summary/benchmark_count", anchor_result["pointer"])
+        self.assertEqual("41", anchor_result["expected"])
+        self.assertEqual("41", anchor_result["resolved"])
+        self.assertEqual(
+            f"sources/normalized/{self.SAFE_SOURCE_ID}.structured.json",
+            anchor_result["structured_view"],
+        )
+        self.assertEqual(
+            [
+                f"sources/normalized/{self.SAFE_SOURCE_ID}.md",
+                f"sources/normalized/{self.SAFE_SOURCE_ID}.structured.json",
+            ],
+            anchor_result["artifacts"],
+        )
+        self.assertEqual("retained_quote_evidence", verification["grounding"][0]["policy"])
+
+    def test_export_reports_an_anchor_that_did_not_verify_without_dropping_the_question(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            self.write_structured_view(target, STRUCTURED_VIEW)
+            self.set_question_grounding(
+                target,
+                MIXED_GROUNDING.replace("expected: 41", "expected: 99", 1),
+            )
+
+            code, document = self.export_json(target)
+
+        self.assertEqual(0, code)
+        verification = self.question_by_slug(document, "benchmarks")["grounding_verification"]
+        self.assertFalse(verification["all_verified"])
+        self.assertEqual({"quote": 1, "anchor": 1}, verification["by_form"])
+        self.assertEqual("anchor_value_mismatch", verification["grounding"][1]["result"])
+        self.assertEqual("41", verification["grounding"][1]["resolved"])
+        self.assertEqual("99", verification["grounding"][1]["expected"])
+        self.assertTrue(verification["grounding"][1]["remediation"])
+
+    def test_export_warns_on_an_anchor_shape_violation_and_still_exports_the_question(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            self.write_structured_view(target, STRUCTURED_VIEW)
+            self.set_question_grounding(target, MALFORMED_ANCHOR_GROUNDING)
+
+            code, document = self.export_json(target)
+
+        self.assertEqual(0, code)
+        answered = self.question_by_slug(document, "benchmarks")
+        self.assertEqual([], answered["grounding"])
+        verification = answered["grounding_verification"]
+        self.assertEqual("GROUNDING_INVALID", verification["error_code"])
+        self.assertFalse(verification["all_verified"])
+        self.assertEqual(0, verification["grounding_count"])
+        # The refusal carries the same keys a real verification does, so a consumer
+        # reading `by_form` never has to branch on which path produced the envelope.
+        self.assertEqual({"quote": 0, "anchor": 0}, verification["by_form"])
+        self.assertIn("anchor is missing a non-empty pointer", verification["message"])
+        self.assertTrue(
+            any(
+                "has invalid grounding" in warning and "anchor is missing a non-empty pointer" in warning
+                for warning in document["warnings"]
+            ),
+            document["warnings"],
+        )
+
+    def test_mcp_export_tool_surfaces_anchor_grounding_unchanged(self):
+        """serve_mcp returns `build_export` verbatim, so anchors need no MCP-side work."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            self.write_structured_view(target, STRUCTURED_VIEW)
+            self.set_question_grounding(target, MIXED_GROUNDING)
+            server = MCP.ResearchWikiMcpServer(target)
+            response = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "export_answers", "arguments": {}},
+                }
+            )
+            direct = EXPORT.build_export(target, None)
+
+        result = response["result"]
+        self.assertFalse(result["isError"])
+        payload = result["structuredContent"]
+        mcp_question = self.question_by_slug(payload, "benchmarks")
+        direct_question = self.question_by_slug(direct, "benchmarks")
+        self.assertEqual(direct_question["grounding"], mcp_question["grounding"])
+        self.assertEqual(
+            direct_question["grounding_verification"],
+            mcp_question["grounding_verification"],
+        )
+        self.assertEqual("anchor", mcp_question["grounding"][1]["form"])
+        self.assertEqual(
+            "structured_anchor_evidence",
+            mcp_question["grounding_verification"]["grounding"][1]["policy"],
+        )
+        self.assertEqual(
+            "/summary/benchmark_count",
+            mcp_question["grounding_verification"]["grounding"][1]["pointer"],
+        )
 
     def test_export_includes_blocked_question_request_details(self):
         with tempfile.TemporaryDirectory() as tmpdir:
