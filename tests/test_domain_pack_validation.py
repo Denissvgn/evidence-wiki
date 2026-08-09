@@ -137,6 +137,227 @@ class DomainPackValidationTests(unittest.TestCase):
         self.assertTrue(payload["ok"], payload)
         self.assertEqual(pack_path.resolve().as_posix(), payload["domain_pack"]["path"])
 
+    def validate_pack_declaring_request_kinds(self, pack_name: str, request_kinds) -> tuple[int, dict]:
+        """Validate a throwaway copy of a shipped pack whose overlay declares ``request_kinds``.
+
+        Shipped packs deliberately declare no request kinds, so every declaration case
+        is exercised against a temporary copy instead of inventing placeholder kinds.
+        """
+        source_pack = REPO_ROOT / "domain-packs" / "llm-research"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_path = Path(tmpdir) / pack_name
+            shutil.copytree(source_pack, pack_path)
+            overlay_path = pack_path / "research.overlay.yml"
+            overlay = yaml.safe_load(overlay_path.read_text())
+            overlay["domain_pack"]["name"] = pack_name
+            overlay["domain_pack"]["request_kinds"] = request_kinds
+            overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False))
+
+            code, stdout, stderr = self.run_validator("--path", str(pack_path))
+
+        self.assertEqual("", stderr)
+        return code, json.loads(stdout)
+
+    def assert_request_kinds_failure(self, payload: dict, *offending: str) -> None:
+        checks = {check["id"]: check for check in payload["checks"]}
+        request_kinds = checks["request_kinds"]
+        self.assertEqual("fail", request_kinds["status"], request_kinds)
+        self.assertEqual(["research.overlay.yml"], request_kinds["files"])
+        self.assertEqual({}, payload["domain_pack"]["request_kinds"])
+        for fragment in offending:
+            self.assertIn(fragment, request_kinds["message"])
+
+    def test_request_kinds_pass_when_pack_declares_none(self):
+        code, stdout, stderr = self.run_validator("--path", "llm-research")
+        payload = json.loads(stdout)
+
+        self.assertEqual(0, code, stderr)
+        checks = {check["id"]: check for check in payload["checks"]}
+        self.assertEqual("pass", checks["request_kinds"]["status"])
+        self.assertEqual("No domain-pack request kinds declared.", checks["request_kinds"]["message"])
+        self.assertEqual({}, payload["domain_pack"]["request_kinds"])
+
+    def test_request_kinds_accept_valid_namespaced_declarations(self):
+        code, payload = self.validate_pack_declaring_request_kinds(
+            "market-data",
+            [
+                {
+                    "id": "pack:market-data/supplier_quote",
+                    "label": "Supplier quote",
+                    "description": "Live SKU price + shipping + MOQ from a named supplier.",
+                },
+                {
+                    "id": "pack:market-data/price_history",
+                    "label": "Price history",
+                    "description": "Historical price series for a single SKU.",
+                },
+            ],
+        )
+
+        self.assertEqual(0, code, payload)
+        self.assertTrue(payload["ok"], payload)
+        checks = {check["id"]: check for check in payload["checks"]}
+        self.assertEqual("pass", checks["request_kinds"]["status"])
+        self.assertEqual(
+            "Domain pack declares 2 namespaced request kind(s).",
+            checks["request_kinds"]["message"],
+        )
+        self.assertEqual(
+            {
+                "pack:market-data/supplier_quote": {
+                    "label": "Supplier quote",
+                    "description": "Live SKU price + shipping + MOQ from a named supplier.",
+                },
+                "pack:market-data/price_history": {
+                    "label": "Price history",
+                    "description": "Historical price series for a single SKU.",
+                },
+            },
+            payload["domain_pack"]["request_kinds"],
+        )
+
+    def test_request_kinds_reject_malformed_id(self):
+        code, payload = self.validate_pack_declaring_request_kinds(
+            "market-data",
+            [
+                {
+                    "id": "pack:market-data/Supplier Quote",
+                    "label": "Supplier quote",
+                    "description": "Uppercase and whitespace are not valid id characters.",
+                }
+            ],
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_request_kinds_failure(
+            payload,
+            "domain_pack.request_kinds[0].id",
+            "pack:market-data/Supplier Quote",
+            "pack:<pack-name>/<kind-id>",
+        )
+
+    def test_request_kinds_reject_unprefixed_id_and_name_the_prefixed_form(self):
+        code, payload = self.validate_pack_declaring_request_kinds(
+            "market-data",
+            [
+                {
+                    "id": "market-data/supplier_quote",
+                    "label": "Supplier quote",
+                    "description": "The reserved pack: prefix is missing.",
+                }
+            ],
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_request_kinds_failure(
+            payload,
+            "domain_pack.request_kinds[0].id",
+            "market-data/supplier_quote",
+            "did you mean pack:market-data/supplier_quote?",
+        )
+
+    def test_request_kinds_reject_namespace_that_is_not_the_pack_name(self):
+        code, payload = self.validate_pack_declaring_request_kinds(
+            "market-data",
+            [
+                {
+                    "id": "pack:other-pack/supplier_quote",
+                    "label": "Supplier quote",
+                    "description": "A pack may not declare kinds in another pack's namespace.",
+                }
+            ],
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_request_kinds_failure(
+            payload,
+            "domain_pack.request_kinds[0].id",
+            "pack:other-pack/supplier_quote",
+            "'other-pack'",
+            "'market-data'",
+        )
+
+    def test_request_kinds_reject_duplicate_ids(self):
+        code, payload = self.validate_pack_declaring_request_kinds(
+            "market-data",
+            [
+                {
+                    "id": "pack:market-data/supplier_quote",
+                    "label": "Supplier quote",
+                    "description": "First declaration.",
+                },
+                {
+                    "id": "pack:market-data/supplier_quote",
+                    "label": "Supplier quote (again)",
+                    "description": "Second declaration of the same id.",
+                },
+            ],
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_request_kinds_failure(
+            payload,
+            "domain_pack.request_kinds[1].id",
+            "pack:market-data/supplier_quote",
+            "declared more than once",
+        )
+
+    def test_request_kinds_reject_missing_label_and_description(self):
+        code, payload = self.validate_pack_declaring_request_kinds(
+            "market-data",
+            [{"id": "pack:market-data/supplier_quote"}],
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_request_kinds_failure(
+            payload,
+            "domain_pack.request_kinds[0].label must be a non-empty string",
+            "domain_pack.request_kinds[0].description must be a non-empty string",
+        )
+
+    def test_request_kinds_reject_builtin_shadowing(self):
+        code, payload = self.validate_pack_declaring_request_kinds(
+            "market-data",
+            [
+                {
+                    "id": "dataset",
+                    "label": "Dataset",
+                    "description": "Built-in kinds stay reserved and cannot be redeclared.",
+                }
+            ],
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_request_kinds_failure(
+            payload,
+            "domain_pack.request_kinds[0].id dataset",
+            "reserved built-in kind",
+        )
+
+    def test_request_kinds_reject_non_list_declaration(self):
+        code, payload = self.validate_pack_declaring_request_kinds(
+            "market-data",
+            {
+                "pack:market-data/supplier_quote": {
+                    "label": "Supplier quote",
+                    "description": "A mapping is not the declared list form.",
+                }
+            },
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_request_kinds_failure(
+            payload,
+            "domain_pack.request_kinds must be a list of kind declarations",
+        )
+
     def test_recommended_acquisition_rejects_unknown_provider(self):
         source_pack = REPO_ROOT / "domain-packs" / "llm-research"
         with tempfile.TemporaryDirectory() as tmpdir:
