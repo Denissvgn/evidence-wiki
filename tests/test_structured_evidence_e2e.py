@@ -28,9 +28,33 @@ was wanted and nothing about what would satisfy it:
   stating the same scope, and closed through `fulfill` and `reopen`. Plus the refusal
   that gives the scope its meaning: a delivery scoped to a different facet cannot fulfil
   the request.
+
+CR-7 then fixes what all of the above still could not say. Every chain here ends in a
+*quote*, and a quote against structured evidence is checked by substring containment: it
+proves the cited record contains a sentence, not that the claim's value is the one the
+record states. CR-7 adds anchor form — an RFC 6901 pointer into a hash-bound
+structured-view sidecar, checked by canonical equality — plus the write path that stops
+hosts hand-editing question frontmatter:
+
+- `AnchorGroundingChainTests` — the whole CR-7 loop against an adapter that emits
+  `structured`: sidecar written and bound, `grounding set`, `answer --require-grounding
+  --grounding-file`, `verify_quotes --write`, and the reporting surfaces (lint counts,
+  `export_answers`, the controller's answered-slug filter) agreeing about what happened.
+- `NativeTableAnchorTests` — the same loop with no adapter anywhere. A plain CSV
+  delivery, anchored past the 20-row body sample and past the 80-character cell cap:
+  content that was citable but permanently unquotable before CR-7, which is the gap
+  `normalized-source-format.md` documents. Plus the fail-closed half — a table that
+  cannot be addressed faithfully emits no sidecar and says why.
+- `AnchorGroundedWorkspaceShipsTests` — the cross-unit proof that anchor form is a
+  first-class way to ground a *publishable* answer, not merely a verifiable one.
+- `AnchorFailurePathTests` — the refusals, because fail-closed is the whole point of
+  replacing containment with equality.
+- `CrSevenAcceptanceCriteriaTests` — one named test per CR-7 acceptance criterion.
 """
 
 import contextlib
+import datetime
+import hashlib
 import importlib.util
 import io
 import json
@@ -85,6 +109,9 @@ VERIFY_QUOTES = load_script_module("e2e_structured_verify_quotes", "verify_quote
 LINT = load_script_module("e2e_structured_lint", "lint.py")
 STATUS = load_script_module("e2e_structured_workspace_status", "workspace_status.py")
 REQUEST_SCOPE = load_script_module("e2e_structured_request_scope", "_request_scope.py")
+EXPORT = load_script_module("e2e_structured_export_answers", "export_answers.py")
+READINESS = load_script_module("e2e_structured_publication_readiness", "publication_readiness.py")
+CONTROLLER = load_script_module("e2e_structured_controller", "orchestration_controller.py")
 
 FACET_KEY = REQUEST_SCOPE.FACET_SCOPE_KEY
 
@@ -963,6 +990,1100 @@ class StructuredDataRequestKindTests(StructuredEvidenceWorkspace, unittest.TestC
         # and unlinked, so the source that does answer it can still close it.
         self.assertEqual("open", refused["status"])
         self.assertIsNone(refused["source_id"])
+
+
+# --------------------------------------------------------------------------------------
+# CR-7: structured grounding anchors, and the supported write path for grounding
+# --------------------------------------------------------------------------------------
+
+STRUCTURED_ADAPTER_NAME = "stub-normalize-structured"
+
+# Written into the temp workspace rather than added to
+# `tests/fixtures/normalizer-adapter/stub_adapter.py`: several suites pin that adapter
+# emitting *no* structured view, which is what makes "a source without a sidecar cannot
+# use anchor form" testable at all. A second adapter is the honest way to add a second
+# behaviour.
+STRUCTURED_ADAPTER_SOURCE = r'''#!/usr/bin/env python3
+"""A conforming adapter that also emits `structured` — the CR-7 half of the protocol.
+
+Renders the same facet body the reference stub renders, and beside it the complete
+facet-shaped structured view an anchor resolves pointers against.
+"""
+
+import json
+import os
+import sys
+
+
+def main() -> int:
+    request = json.loads(sys.stdin.read())
+    project_root = request["project_root"]
+    payload = {}
+    for relative in request["raw_paths"]:
+        with open(os.path.join(project_root, relative), encoding="utf-8") as handle:
+            payload = json.load(handle)
+        break
+
+    sections = []
+    outline = []
+    coverage = []
+    for key, value in payload.items():
+        outline.append([3, key])
+        sections.append("### " + key + "\n\n- " + key + ": " + str(value) + "\n")
+        coverage.append({"heading": key, "total": 1, "rendered": 1})
+
+    # Facet-shaped, and deliberately richer than the body: `supplier_quote` is one string
+    # in the provider payload and a three-field facet here. That asymmetry is why anchors
+    # resolve against the normalizer's structured view rather than the raw bytes — the
+    # pointer reads `supplier_quote/price`, not whatever shape the provider happened to
+    # ship. It also gives the sidecar one value of every scalar type to compare.
+    structured = {
+        "asin": payload["asin"],
+        "supplier_quote": {
+            "price": payload["supplier_quote"],
+            "currency": payload["supplier_quote"].split()[-1],
+            "in_stock": True,
+        },
+        "price_history_median_90d": payload["price_history_median_90d"],
+        "offer_count": payload["offer_count"],
+    }
+
+    result = {
+        "schema_version": "1.0",
+        "document_type": "normalizer_adapter_result",
+        "adapter": {"name": "stub-normalize-structured", "version": "1.0.0"},
+        "status": "content_extracted",
+        "title": "Structured rendering of " + request["manifest_record"]["id"],
+        "abstract": "Structured payload rendered beside its structured view.",
+        "outline": outline,
+        "body_markdown": "\n".join(sections),
+        "rendered_coverage": {
+            "total_values": len(coverage),
+            "rendered_values": len(coverage),
+            "ratio": 1.0,
+            "sections": coverage,
+        },
+        "warnings": [],
+        "structured": structured,
+    }
+    sys.stdout.write(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+ANSWER_AGENT = "answer-agent"
+VERIFIER_AGENT = "verifier-agent"
+
+# The CR's own worked example, carried verbatim through every CR-7 case here.
+ANCHOR_CLAIM = "Current supplier price is 23.99 EUR"
+ANCHOR_POINTER = "supplier_quote/price"
+ANCHOR_EXPECTED = "23.99 EUR"
+# The quote-form half of a mixed block, and the backward-compatibility case: a value the
+# adapter rendered into a facet section of the body, checked by containment as always.
+QUOTE_CLAIM = "The record lists seven offers."
+QUOTE_TEXT = "offer_count: 7"
+QUOTE_HINT = "offer_count"
+
+
+def canonical_grounding_block(source_id: str) -> str:
+    """The bytes a compliant hand edit writes for the anchor entry, stated not rendered.
+
+    "Byte-identical to a compliant hand edit" is only checkable if the test says what the
+    hand edit is, so this is a literal rather than a call into the serializer under test.
+    Every free-text field is double-quoted; `source_id` is quoted because an inventoried
+    id carries a `:`, which YAML would otherwise read as the start of a mapping.
+    """
+    return (
+        "grounding:\n"
+        f'  - claim: "{ANCHOR_CLAIM}"\n'
+        f'    source_id: "{source_id}"\n'
+        "    anchor:\n"
+        f'      pointer: "{ANCHOR_POINTER}"\n'
+        f'      expected: "{ANCHOR_EXPECTED}"\n'
+    )
+
+
+class AnchorGroundingWorkspace(StructuredEvidenceWorkspace):
+    """CR-7 drivers layered on the CR-2 ones: an emitting adapter and the write path.
+
+    Same reason as the parent for not being a TestCase, and same in-process discipline:
+    every stage is a `MODULE.main([...])` call under redirected streams, so a refusal is
+    an exit code and an envelope rather than a subprocess to interpret.
+    """
+
+    # -- workspace construction --------------------------------------------------
+
+    def enable_structured_adapter(self, root: Path, workspace: Path) -> Path:
+        """Configure the emitting adapter, written outside the workspace it normalizes."""
+        adapter = root / "structured-adapter.py"
+        adapter.write_text(STRUCTURED_ADAPTER_SOURCE, encoding="utf-8")
+        config_path = workspace / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["raw"]["source_roots"] = sorted({*config["raw"]["source_roots"], "raw/data"})
+        config["normalization"] = {
+            "adapters": [
+                {
+                    "kinds": [STRUCTURED_KIND],
+                    "provider": "command",
+                    "command": [sys.executable, str(adapter)],
+                    "name": STRUCTURED_ADAPTER_NAME,
+                    "version": ADAPTER_VERSION,
+                }
+            ]
+        }
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        return adapter
+
+    def make_anchor_workspace(self, root: Path) -> tuple[Path, str]:
+        """A normalized structured source with a bound sidecar, and its question open."""
+        workspace = self.init_workspace(root)
+        self.enable_structured_adapter(root, workspace)
+        self.deliver_payload(workspace)
+        self.run_inventory(workspace)
+        source_id = self.structured_record(workspace)["id"]
+        code, _, stderr = self.run_normalize(workspace)
+        self.assertEqual(0, code, stderr)
+        return workspace, source_id
+
+    # -- the artefacts under test ------------------------------------------------
+
+    def question_page(self, workspace: Path) -> Path:
+        return workspace / "wiki" / "questions" / f"{QUESTION_SLUG}.md"
+
+    def page_digest(self, workspace: Path) -> str:
+        """The whole page, hashed. A refusal must leave these bytes alone."""
+        return hashlib.sha256(self.question_page(workspace).read_bytes()).hexdigest()
+
+    def structured_sidecar(self, workspace: Path, source_id: str) -> Path:
+        """Where the verifier itself looks for the sidecar, never a path restated here."""
+        path, _ = VERIFY_QUOTES.structured_view_path(
+            workspace, VERIFY_QUOTES.load_config(workspace), source_id
+        )
+        return path
+
+    def record_frontmatter(self, workspace: Path, source_id: str) -> dict:
+        text = self.normalized_path(workspace, source_id).read_text(encoding="utf-8")
+        return yaml.safe_load(text.split("---\n", 2)[1])
+
+    def record_body(self, workspace: Path, source_id: str) -> str:
+        return self.normalized_path(workspace, source_id).read_text(encoding="utf-8").split("---\n", 2)[2]
+
+    # -- grounding files ---------------------------------------------------------
+
+    def anchor_entry(self, source_id: str, *, expected: str = ANCHOR_EXPECTED, pointer: str = ANCHOR_POINTER) -> dict:
+        return {
+            "claim": ANCHOR_CLAIM,
+            "source_id": source_id,
+            "anchor": {"pointer": pointer, "expected": expected},
+        }
+
+    def quote_entry(self, source_id: str) -> dict:
+        return {
+            "claim": QUOTE_CLAIM,
+            "source_id": source_id,
+            "quote": QUOTE_TEXT,
+            "location_hint": QUOTE_HINT,
+        }
+
+    def grounding_file(self, root: Path, entries: list[dict], name: str = "grounding.yml") -> Path:
+        """A host's own file, dumped by a host's own YAML writer.
+
+        Deliberately not written in the canonical form: the point of the write path is
+        that whatever shape the host hands over, the page ends up canonical.
+        """
+        path = root / name
+        path.write_text(yaml.safe_dump({"grounding": entries}, sort_keys=False), encoding="utf-8")
+        return path
+
+    # -- pipeline stages ---------------------------------------------------------
+
+    def run_resolve(self, workspace: Path, *args: str) -> tuple[int, dict, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = RESOLVE.main(["--project-root", str(workspace), *args, "--format", "json"])
+        return int(code or 0), json.loads(stdout.getvalue() or stderr.getvalue()), stderr.getvalue()
+
+    def claim_question(self, workspace: Path, agent_id: str = ANSWER_AGENT) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            code = CLAIM.main(
+                [
+                    "--project-root", str(workspace),
+                    "claim", "--slug", QUESTION_SLUG,
+                    "--agent-id", agent_id, "--format", "json",
+                ]
+            )
+        self.assertEqual(0, code, stdout.getvalue())
+
+    def run_grounding_set(
+        self, workspace: Path, grounding_file: Path, *, agent_id: str = ANSWER_AGENT, extra: tuple[str, ...] = ()
+    ) -> tuple[int, dict, str]:
+        return self.run_resolve(
+            workspace,
+            "grounding", "set", "--slug", QUESTION_SLUG,
+            "--from-file", str(grounding_file), "--agent-id", agent_id, *extra,
+        )
+
+    def write_answer_page(self, workspace: Path, source_id: str) -> str:
+        page = workspace / "wiki" / "synthesis" / "supplier-price.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            "---\n"
+            "type: synthesis\n"
+            "created: 2026-08-09\n"
+            "updated: 2026-08-09\n"
+            "source_ids:\n"
+            f"  - {source_id}\n"
+            "summary: The supplier quotes 23.99 EUR for B0ABC12345.\n"
+            "---\n\n"
+            "# Supplier Price\n\nThe supplier quotes 23.99 EUR for B0ABC12345.\n",
+            encoding="utf-8",
+        )
+        return page.relative_to(workspace).as_posix()
+
+    def run_answer(
+        self,
+        workspace: Path,
+        source_id: str,
+        *,
+        answer_page: str | None = None,
+        grounding_file: Path | None = None,
+        require_grounding: bool = True,
+        extra: tuple[str, ...] = (),
+    ) -> tuple[int, dict, str]:
+        argv = [
+            "answer", "--slug", QUESTION_SLUG, "--agent-id", ANSWER_AGENT,
+            "--answer-page", answer_page or self.write_answer_page(workspace, source_id),
+            "--source-id", source_id,
+        ]
+        if require_grounding:
+            argv.append("--require-grounding")
+        if grounding_file is not None:
+            argv.extend(["--grounding-file", str(grounding_file)])
+        return self.run_resolve(workspace, *argv, *extra)
+
+    def run_quote_verify_write(self, workspace: Path) -> tuple[int, dict, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = VERIFY_QUOTES.main(
+                [
+                    "--project-root", str(workspace), "--slug", QUESTION_SLUG,
+                    "--format", "json", "--write", "--verified-by", VERIFIER_AGENT,
+                ]
+            )
+        raw = stdout.getvalue()
+        return int(code or 0), (json.loads(raw) if raw.strip() else {}), stderr.getvalue()
+
+    def run_readiness(self, workspace: Path) -> tuple[int, dict, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = READINESS.main(["--project-root", str(workspace), "--format", "json"])
+        return int(code or 0), json.loads(stdout.getvalue()), stderr.getvalue()
+
+    # -- helpers -----------------------------------------------------------------
+
+    def high_findings(self, results: dict) -> list[str]:
+        return sorted(issue["category"] for issue in results["issues"] if issue["severity"] == "HIGH")
+
+    def grounding_results(self, report: dict) -> list[dict]:
+        return report["questions"][0]["grounding"]
+
+
+class AnchorGroundingChainTests(AnchorGroundingWorkspace, unittest.TestCase):
+    """The whole CR-7 loop, one stage at a time, each asserted before the next runs."""
+
+    def test_structured_delivery_becomes_anchor_grounded_evidence_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_anchor_workspace(root)
+
+            # 1. The normalizer wrote the sidecar and the record binds it by digest. The
+            #    binding is the whole trust story: without it the sidecar is an
+            #    unattested file that happens to sit next to a record.
+            sidecar = self.structured_sidecar(workspace, source_id)
+            self.assertTrue(sidecar.is_file())
+            frontmatter = self.record_frontmatter(workspace, source_id)
+            binding = frontmatter["structured_view"]
+            self.assertEqual(sidecar.name, Path(binding["path"]).name)
+            self.assertEqual(
+                hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+                binding["content_hash"].removeprefix("sha256:"),
+            )
+            view = json.loads(sidecar.read_text(encoding="utf-8"))
+            self.assertEqual("23.99 EUR", view["supplier_quote"]["price"])
+
+            # 2. The contract validator treats the sidecar as part of the record.
+            code, verify_report, stderr = self.run_contract_verify(workspace)
+            self.assertEqual(VERIFY_CONTRACT.EXIT_OK, code, stderr)
+            entry = next(
+                record for record in verify_report["records"] if record["source_id"] == source_id
+            )
+            self.assertEqual("verified", entry["result"])
+            self.assertIs(True, entry["structured_view"]["declared"])
+            self.assertIs(True, entry["structured_view"]["verified"])
+
+            # 3. `grounding set` is the supported write path: the block lands canonical,
+            #    and the envelope says plainly that nothing was verified by writing it.
+            self.claim_question(workspace)
+            grounding_file = self.grounding_file(root, [self.anchor_entry(source_id)])
+            code, written, stderr = self.run_grounding_set(workspace, grounding_file)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual({"quote": 0, "anchor": 1}, written["by_form"])
+            self.assertEqual("not_performed", written["verification"])
+            self.assertIn("verify_quotes.py", written["remediation"])
+            self.assertIn(
+                canonical_grounding_block(source_id),
+                self.question_page(workspace).read_text(encoding="utf-8"),
+            )
+
+            # 4. Answering with the same file verifies the file's own entries and lands
+            #    grounding and status in one write, reporting the split it recorded.
+            #    (That the verification comes *first* is what `AnchorFailurePathTests`
+            #    and criterion 1 below pin, where there is a refusal to observe.)
+            code, answered, stderr = self.run_answer(workspace, source_id, grounding_file=grounding_file)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("answered", answered["status"])
+            self.assertEqual({"quote": 0, "anchor": 1}, answered["by_form"])
+
+            # 5. The standalone verifier stamps the page it just checked.
+            code, verified, stderr = self.run_quote_verify_write(workspace)
+            self.assertEqual(0, code, stderr)
+            result = self.grounding_results(verified)[0]
+            self.assertEqual("verified", result["result"])
+            self.assertEqual("anchor", result["form"])
+            self.assertEqual("/supplier_quote/price", result["pointer"])
+            self.assertEqual("23.99 EUR", result["resolved"])
+            self.assertEqual("structured_anchor_evidence", result["policy"])
+            self.assertIn(
+                self.structured_sidecar(workspace, source_id).name,
+                " ".join(result["artifacts"]),
+            )
+            page_frontmatter = yaml.safe_load(
+                self.question_page(workspace).read_text(encoding="utf-8").split("---\n", 2)[1]
+            )
+            self.assertEqual(VERIFIER_AGENT, page_frontmatter["verified_by"])
+
+            # 6. Every reporting surface agrees about what the workspace holds.
+            results = self.run_lint(workspace)
+            export = EXPORT.build_export(workspace, None)
+            status = STATUS.build_status_document(workspace)
+            controller_slugs = CONTROLLER.answered_grounded_slugs(export)
+
+        self.assertEqual([], self.high_findings(results))
+        self.assertEqual(0, results["stats"]["grounding_entries_quote"])
+        self.assertEqual(1, results["stats"]["grounding_entries_anchor"])
+        exported = export["questions"][0]
+        # The page's own entry, unsummarized, beside the verifier's verdict on it.
+        self.assertEqual(
+            {"pointer": ANCHOR_POINTER, "expected": ANCHOR_EXPECTED}, exported["grounding"][0]["anchor"]
+        )
+        self.assertEqual("anchor", exported["grounding"][0]["form"])
+        self.assertTrue(exported["grounding_verification"]["all_verified"])
+        self.assertEqual({"quote": 0, "anchor": 1}, exported["grounding_verification"]["by_form"])
+        # The controller reaches the verifier by "this answered question declared
+        # grounding", never by what form the grounding took — so an anchor-only question
+        # is scheduled for verification exactly as a quoted one is.
+        self.assertEqual([QUESTION_SLUG], controller_slugs)
+        self.assertTrue(status["workspace_health"]["materially_valid"], status["workspace_health"])
+
+    def test_the_persisted_quote_report_has_one_schema_whether_or_not_anything_was_grounded(self):
+        """The controller's empty-report template and a real report are the same document.
+
+        The controller persists `runs/<id>/evaluation/quote-verification.json` from one of
+        two branches. A host reading `counts.by_form` to measure its migration must not
+        have to discover that the file sometimes omits it and read the omission as "no
+        anchors" rather than "no questions".
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_anchor_workspace(root)
+            self.claim_question(workspace)
+            grounding_file = self.grounding_file(
+                root, [self.anchor_entry(source_id), self.quote_entry(source_id)]
+            )
+            code, _, stderr = self.run_answer(workspace, source_id, grounding_file=grounding_file)
+            self.assertEqual(0, code, stderr)
+            code, real, verify_stderr = self.run_quote_verify(workspace)
+            empty = CONTROLLER.empty_quote_verification_report()
+
+        self.assertEqual(0, code, verify_stderr)
+        self.assertEqual(sorted(empty["counts"]), sorted(real["counts"]), verify_stderr)
+        self.assertEqual(sorted(empty["counts"]["by_form"]), sorted(real["counts"]["by_form"]))
+        self.assertEqual({"quote": 0, "anchor": 0}, empty["counts"]["by_form"])
+        self.assertEqual({"quote": 1, "anchor": 1}, real["counts"]["by_form"])
+
+
+TABLE_COLUMNS = ("date", "price", "note")
+TABLE_ROWS = NORMALIZE.TABLE_SAMPLE_ROWS * 2
+# Inside the rendered sample, so the body shows this row — ellipsized. Outside it lives
+# whole in the structured view, which is the cell-cap half of the quotability gap.
+TABLE_LONG_CELL_ROW = 3
+# Past the sample, so the body never shows this row at all: the row-cap half.
+TABLE_DEEP_ROW = NORMALIZE.TABLE_SAMPLE_ROWS + 15
+# No commas: this is a real cell in a real comma-delimited file, and a quoted field would
+# make the fixture about `csv` quoting rather than about the rendering cap.
+TABLE_LONG_NOTE = (
+    "supplier confirmed the quoted price by email and stated that no rebate or "
+    "promotional credit applies to this order line"
+)
+TABLE_START = datetime.date(2026, 7, 1)
+
+
+def table_row(index: int) -> tuple[str, str, str]:
+    date = (TABLE_START + datetime.timedelta(days=index)).isoformat()
+    note = TABLE_LONG_NOTE if index == TABLE_LONG_CELL_ROW else f"routine daily quote {index}"
+    return date, f"{20 + index / 100:.2f}", note
+
+
+def price_history_csv(rows: int = TABLE_ROWS) -> str:
+    lines = [",".join(TABLE_COLUMNS)]
+    lines.extend(",".join(table_row(index)) for index in range(rows))
+    return "\n".join(lines) + "\n"
+
+
+class NativeTableAnchorTests(AnchorGroundingWorkspace, unittest.TestCase):
+    """No adapter anywhere: the package itself is the second producer of the sidecar.
+
+    `normalize_table_record` already streams every row of a CSV, then renders 20 of them
+    with cells ellipsized at 80 characters. Everything past those caps has been citable
+    and permanently unquotable — the gap `normalized-source-format.md` names and CR-7 was
+    filed to close. These tests are that closure stated as a workspace fact rather than a
+    documentation promise, in both directions: what the caps drop is anchorable, and a
+    table that cannot be addressed faithfully is not anchorable at all.
+    """
+
+    def make_table_workspace(self, root: Path, text: str) -> tuple[Path, str]:
+        workspace = self.init_workspace(root)
+        config_path = workspace / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # No `normalization` key at all, and none added: no adapter is configured
+        # anywhere, so whatever the record carries, the native tabular path produced.
+        self.assertNotIn("normalization", config)
+        config["raw"]["source_roots"] = sorted({*config["raw"]["source_roots"], "raw/data"})
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+        destination = workspace / "raw" / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "price-history.csv").write_text(text, encoding="utf-8")
+        (destination / "price-history.csv.provenance.yml").write_text(
+            "origin_url: https://api.keepa.test/history/B0ABC12345\n"
+            "license: CC-BY-4.0\n"
+            "retrieved_at: 2026-08-08T12:00:00Z\n"
+            "retrieved_by: fixture-agent/keepa\n",
+            encoding="utf-8",
+        )
+        self.run_inventory(workspace)
+        table_records = [
+            record for record in self.manifest(workspace).values() if record["kind"] == "table"
+        ]
+        self.assertEqual(1, len(table_records), self.manifest(workspace))
+        code, report, stderr = self.run_normalize(workspace)
+        self.assertEqual(0, code, stderr)
+        self.assertEqual(0, report["summary"]["methods"].get("adapter", 0))
+        self.assertEqual(1, report["summary"]["methods"]["tables"])
+        return workspace, table_records[0]["id"]
+
+    def ground_and_verify(
+        self, workspace: Path, root: Path, source_id: str, entries: list[dict], *, name: str = "grounding.yml"
+    ) -> tuple[int, dict, str]:
+        """Write the block through the supported path, then ask the verifier about it."""
+        grounding_file = self.grounding_file(root, entries, name=name)
+        code, _, stderr = self.run_grounding_set(workspace, grounding_file)
+        self.assertEqual(0, code, stderr)
+        return self.run_quote_verify(workspace)
+
+    def test_a_plain_csv_anchors_rows_and_cells_the_rendered_body_can_never_quote(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_table_workspace(root, price_history_csv())
+            self.claim_question(workspace)
+
+            # The sidecar holds every row, verbatim: no 20-row sample, no 80-character
+            # ellipsis, no type inference. The body holds neither of the two rows below.
+            view = json.loads(self.structured_sidecar(workspace, source_id).read_text(encoding="utf-8"))
+            self.assertEqual(list(TABLE_COLUMNS), view["columns"])
+            self.assertEqual(TABLE_ROWS, len(view["rows"]))
+            deep_date, deep_price, _ = table_row(TABLE_DEEP_ROW)
+            body = self.record_body(workspace, source_id)
+            self.assertGreater(len(TABLE_LONG_NOTE), NORMALIZE.TABLE_MAX_CELL_CHARS)
+            self.assertNotIn(deep_price, body)
+            self.assertNotIn(TABLE_LONG_NOTE, body)
+            # The long cell *is* in the body, but only as the truncation the reader sees;
+            # a quote of what the file says would not be found there.
+            self.assertIn(TABLE_LONG_NOTE[: NORMALIZE.TABLE_MAX_CELL_CHARS - 1] + "…", body)
+
+            deep_entry = {
+                "claim": f"The supplier quoted {deep_price} on {deep_date}.",
+                "source_id": source_id,
+                "anchor": {"pointer": f"rows/{TABLE_DEEP_ROW}/price", "expected": deep_price},
+            }
+            long_cell_entry = {
+                "claim": "The supplier stated that no rebate applies.",
+                "source_id": source_id,
+                "anchor": {"pointer": f"rows/{TABLE_LONG_CELL_ROW}/note", "expected": TABLE_LONG_NOTE},
+            }
+            code, report, stderr = self.ground_and_verify(
+                workspace, root, source_id, [deep_entry, long_cell_entry]
+            )
+            results = self.grounding_results(report)
+
+            # The same two values in quote form, which is all the workspace had before
+            # CR-7: both refuse, because the rendered body is where a quote is looked for
+            # and neither value survived the rendering.
+            unquotable_code, unquotable, unquotable_stderr = self.ground_and_verify(
+                workspace,
+                root,
+                source_id,
+                [
+                    {"claim": deep_entry["claim"], "source_id": source_id, "quote": f"{deep_date} | {deep_price}"},
+                    {"claim": long_cell_entry["claim"], "source_id": source_id, "quote": TABLE_LONG_NOTE},
+                ],
+                name="quotes.yml",
+            )
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual(["verified", "verified"], [result["result"] for result in results])
+        self.assertEqual(deep_price, results[0]["resolved"])
+        self.assertEqual(f"/rows/{TABLE_DEEP_ROW}/price", results[0]["pointer"])
+        self.assertEqual(TABLE_LONG_NOTE, results[1]["resolved"])
+        self.assertEqual(VERIFY_QUOTES.EXIT_NOT_VERIFIED, unquotable_code, unquotable_stderr)
+        self.assertEqual(
+            ["quote_not_found", "quote_not_found"],
+            [result["result"] for result in self.grounding_results(unquotable)],
+        )
+
+    def test_a_table_that_cannot_be_addressed_faithfully_emits_no_sidecar_and_says_why(self):
+        """Fail-closed, and nothing else about the record changes.
+
+        A duplicate column name makes `rows/41/price` ambiguous and a ragged row makes
+        every row index a guess, so neither table earns a structured view. What that
+        costs is exactly nothing a reader had: the record still renders, still verifies
+        against the contract, and still grounds a quote from its sample — the behaviour
+        every tabular source had before CR-7.
+        """
+        cases = {
+            "duplicate header": (
+                "date,price,price\n2026-07-01,20.00,21.00\n",
+                "the header repeats column name(s): price",
+            ),
+            "ragged row": (
+                "date,price,note\n2026-07-01,20.00\n2026-07-02,20.01,ok\n",
+                "1 row(s) do not match the 3-column header",
+            ),
+            "empty column name": (
+                "date,,note\n2026-07-01,20.00,ok\n",
+                "the header has an empty column name",
+            ),
+        }
+        for label, (text, reason) in cases.items():
+            with self.subTest(table=label):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    workspace, source_id = self.make_table_workspace(root, text)
+                    frontmatter = self.record_frontmatter(workspace, source_id)
+                    sidecar_exists = self.structured_sidecar(workspace, source_id).exists()
+                    body = self.record_body(workspace, source_id)
+                    code, contract, contract_stderr = self.run_contract_verify(workspace)
+                    self.claim_question(workspace)
+                    quote_code, quotes, quote_stderr = self.ground_and_verify(
+                        workspace,
+                        root,
+                        source_id,
+                        [
+                            {
+                                "claim": "The first quoted day is 2026-07-01.",
+                                "source_id": source_id,
+                                "quote": "2026-07-01",
+                            }
+                        ],
+                    )
+
+                self.assertFalse(sidecar_exists)
+                # Null, not a partial block: the record template writes every field, and
+                # a `structured_view` carrying only a path would still be a declaration
+                # the reader would then have to decide the meaning of.
+                self.assertIsNone(frontmatter["structured_view"])
+                self.assertIn(
+                    f"raw/data/price-history.csv: no structured view emitted: {reason}",
+                    frontmatter["parse_warnings"],
+                )
+                # Otherwise the record is what it always was: the same columns line and
+                # the same rendered sample a reader could already quote from.
+                self.assertIn("Columns (3): ", body)
+                self.assertIn("Sample rows (first ", body)
+                self.assertEqual(VERIFY_CONTRACT.EXIT_OK, code, contract_stderr)
+                self.assertEqual("verified", contract["records"][0]["result"])
+                self.assertEqual(0, quote_code, quote_stderr)
+                self.assertEqual("verified", self.grounding_results(quotes)[0]["result"])
+
+    def test_an_anchor_against_a_table_with_no_sidecar_refuses_per_entry(self):
+        """The other side of the same rule: no sidecar, no anchor form — never a fallback.
+
+        A record without a structured view is not resolved against its raw bytes or its
+        rendered body; the entry fails with the result that names what is missing.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_table_workspace(
+                root, "date,price,price\n2026-07-01,20.00,21.00\n"
+            )
+            self.claim_question(workspace)
+            entry = {
+                "claim": "The supplier quoted 20.00 on 2026-07-01.",
+                "source_id": source_id,
+                "anchor": {"pointer": "rows/0/price", "expected": "20.00"},
+            }
+            code, report, stderr = self.ground_and_verify(workspace, root, source_id, [entry])
+
+        self.assertEqual(VERIFY_QUOTES.EXIT_NOT_VERIFIED, code, stderr)
+        self.assertEqual("structured_view_missing", self.grounding_results(report)[0]["result"])
+
+
+class AnchorGroundedWorkspaceShipsTests(AnchorGroundingWorkspace, unittest.TestCase):
+    """An anchor-grounded answer is publishable, not merely verifiable.
+
+    Lint (CR-7 T9) and the readiness gate (T10) landed on separate branches, and until
+    both were merged an anchor-grounded question tripped lint's HIGH
+    `question_grounding_missing` — which readiness reads as `no_ship`. So no workspace
+    grounded by anchor could reach `ship`, and neither branch could hold the test that
+    said so. This is that test: the two halves connected, in a real workspace.
+
+    `coverage_required: true` is load-bearing rather than decoration — it is the only
+    condition under which lint raises that HIGH finding at all, so a workspace without it
+    would pass this test even with the defect present.
+    """
+
+    def publishable_workspace(self, root: Path) -> tuple[Path, str]:
+        """The delivery loop end to end, stopping just before the question is answered."""
+        workspace = self.init_workspace(root)
+        self.enable_structured_adapter(root, workspace)
+        self.deliver_payload(workspace)
+        request_id = self.block_the_question(workspace, kind=STRUCTURED_KIND)
+        self.run_inventory(workspace)
+        source_id = self.structured_record(workspace)["id"]
+        code, _, stderr = self.run_normalize(workspace)
+        self.assertEqual(0, code, stderr)
+
+        # The reviewed candidate the request selected, which is what lets the coverage
+        # facet's source policy pass locally instead of parking for manual review.
+        candidates = workspace / "sources" / "discovery" / "candidates.jsonl"
+        candidates.parent.mkdir(parents=True, exist_ok=True)
+        candidates.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "candidate_id": "cand-keepa-supplier-quote",
+                    "provider": "search",
+                    "url": "https://api.keepa.test/product/B0ABC12345",
+                    "title": "Keepa supplier quote snapshot",
+                    "source_type": "api",
+                    "trust_tier": "official_primary",
+                    "official_source": True,
+                    "recommended_action": "fetch",
+                    "status": "fetched",
+                    "selected_for_request_id": request_id,
+                    "fetched_source_id": source_id,
+                    "evidence_path": "vendor_product_spec",
+                    "source_policy": "official_vendor",
+                    "freshness_policy": "no_staleness_check",
+                    "identity_policy": "none",
+                    "reasoning": {"risk_flags": []},
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        code, reopened = self.run_reopen(workspace, source_id, request_id)
+        self.assertEqual(0, code, reopened)
+
+        coverage = workspace / "sources" / "coverage" / f"{QUESTION_SLUG}.yml"
+        coverage.parent.mkdir(parents=True, exist_ok=True)
+        coverage.write_text(
+            yaml.safe_dump(
+                {
+                    "schema_version": "1.0",
+                    "question_slug": QUESTION_SLUG,
+                    "created_at": "2026-08-09T00:00:00Z",
+                    "updated_at": "2026-08-09T00:00:00Z",
+                    "coverage_profile": "supplier-price",
+                    "coverage_verdict": "pending",
+                    "required_facets": [
+                        {
+                            "facet_id": "supplier-quote",
+                            "description": "Current supplier quote for the ASIN.",
+                            "required": True,
+                            "evidence_path": "vendor_product_spec",
+                            "source_policy": "official_vendor",
+                            "freshness_policy": "no_staleness_check",
+                            "identity_policy": "none",
+                            "min_sources": 1,
+                            "accepted_source_ids": [source_id],
+                            "blocking_request_ids": [],
+                            "facet_verdict": "pending",
+                        }
+                    ],
+                    "optional_facets": [],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        source_note = workspace / "wiki" / "sources" / "keepa-supplier-quote.md"
+        source_note.parent.mkdir(parents=True, exist_ok=True)
+        source_note.write_text(
+            "---\ntype: source\ncreated: 2026-08-09\nupdated: 2026-08-09\nsource_ids:\n"
+            f"  - {source_id}\n---\n\n# Keepa supplier quote\n\nDelivered price snapshot.\n",
+            encoding="utf-8",
+        )
+        self.claim_question(workspace)
+        return workspace, source_id
+
+    def test_an_anchor_grounded_answer_passes_lint_and_reaches_a_shippable_verdict(self):
+        forms = {
+            "anchor only": lambda source_id: [self.anchor_entry(source_id)],
+            "mixed quote and anchor": lambda source_id: [
+                self.anchor_entry(source_id),
+                self.quote_entry(source_id),
+            ],
+        }
+        for label, build_entries in forms.items():
+            with self.subTest(grounding=label):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    workspace, source_id = self.publishable_workspace(root)
+                    entries = build_entries(source_id)
+                    grounding_file = self.grounding_file(root, entries)
+                    code, answered, answer_stderr = self.run_answer(
+                        workspace, source_id, grounding_file=grounding_file, extra=("--require-coverage",)
+                    )
+                    self.assertEqual(0, code, answer_stderr)
+                    code, _, verify_stderr = self.run_quote_verify_write(workspace)
+                    self.assertEqual(0, code, verify_stderr)
+
+                    results = self.run_lint(workspace)
+                    readiness_code, readiness, readiness_stderr = self.run_readiness(workspace)
+                    page = yaml.safe_load(
+                        self.question_page(workspace).read_text(encoding="utf-8").split("---\n", 2)[1]
+                    )
+
+                anchors = sum(1 for entry in entries if "anchor" in entry)
+                self.assertEqual("answered", answered["status"], answer_stderr)
+                # Without this the HIGH finding under test cannot fire at all, and the
+                # assertions below would pass on a workspace that never exercised it.
+                self.assertIs(True, page["coverage_required"])
+                # Zero HIGH findings, and named rather than filtered: the finding this
+                # test exists for would otherwise hide behind a severity count.
+                self.assertEqual([], self.high_findings(results))
+                self.assertEqual(anchors, results["stats"]["grounding_entries_anchor"])
+                self.assertEqual(
+                    len(entries) - anchors, results["stats"]["grounding_entries_quote"]
+                )
+                self.assertEqual(READINESS.VERDICT_SHIP, readiness["verdict"], readiness["reasons"])
+                self.assertEqual(READINESS.EXIT_READY, readiness_code, readiness_stderr)
+                self.assertEqual([], readiness["reasons"]["grounding"])
+
+
+class AnchorFailurePathTests(AnchorGroundingWorkspace, unittest.TestCase):
+    """Fail-closed is the point: an anchor that cannot be proved must prove nothing."""
+
+    def test_a_mismatched_anchor_refuses_the_answer_before_any_byte_of_the_page_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_anchor_workspace(root)
+            self.claim_question(workspace)
+            grounding_file = self.grounding_file(
+                root, [self.anchor_entry(source_id, expected="19.99 EUR")]
+            )
+            before = self.page_digest(workspace)
+            code, payload, stderr = self.run_answer(workspace, source_id, grounding_file=grounding_file)
+            after = self.page_digest(workspace)
+
+        self.assertEqual(RESOLVE.EXIT_INVALID, code, stderr)
+        self.assertEqual("GROUNDING_ANCHOR_INVALID", payload["error_code"])
+        failure = payload["details"]["failures"][0]
+        self.assertEqual("anchor_value_mismatch", failure["result"])
+        self.assertEqual("23.99 EUR", failure["resolved"])
+        self.assertEqual("/supplier_quote/price", failure["pointer"])
+        # Not "the status is unchanged" — the whole file, byte for byte. A refusal that
+        # rewrote the page identically apart from an `updated:` stamp would still be a
+        # write, and the fail-closed order exists to prevent writes.
+        self.assertEqual(before, after)
+
+    def test_a_forged_sidecar_is_refused_by_the_hash_binding_before_any_value_is_compared(self):
+        """The tamper is chosen to *succeed* if the binding were dropped.
+
+        The forged sidecar states exactly what the anchor expects, so a verifier that
+        compared first and checked provenance later would report `verified`. Refusing
+        with `structured_view_corrupt` is what makes an anchor evidence about the record
+        rather than about a file that happens to sit beside it.
+        """
+        forged_price = "19.99 EUR"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_anchor_workspace(root)
+            self.claim_question(workspace)
+            grounding_file = self.grounding_file(
+                root, [self.anchor_entry(source_id, expected=forged_price)]
+            )
+            code, _, stderr = self.run_grounding_set(workspace, grounding_file)
+            self.assertEqual(0, code, stderr)
+
+            sidecar = self.structured_sidecar(workspace, source_id)
+            forged = json.loads(sidecar.read_text(encoding="utf-8"))
+            forged["supplier_quote"]["price"] = forged_price
+            sidecar.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            # The premise, checked rather than assumed: the file on disk now states
+            # exactly what the anchor expects, so equality alone would pass it.
+            self.assertEqual(
+                forged_price,
+                json.loads(sidecar.read_text(encoding="utf-8"))["supplier_quote"]["price"],
+            )
+
+            code, report, verify_stderr = self.run_quote_verify(workspace)
+            result = self.grounding_results(report)[0]
+            # And the workspace-level validator names the same breach in its own words,
+            # so the tamper is visible to an operator who never runs verification.
+            contract_code, contract, contract_stderr = self.run_contract_verify(workspace)
+
+        self.assertEqual(VERIFY_QUOTES.EXIT_NOT_VERIFIED, code, verify_stderr)
+        self.assertEqual("structured_view_corrupt", result["result"])
+        # No comparison happened: nothing was resolved to compare against.
+        self.assertIsNone(result["resolved"])
+        self.assertIn("hashes to", result["message"])
+        self.assertEqual(VERIFY_CONTRACT.EXIT_NOT_VERIFIED, contract_code, contract_stderr)
+        self.assertEqual(
+            ["NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID"],
+            [violation["code"] for violation in contract["records"][0]["violations"]],
+        )
+
+    def test_a_declared_but_deleted_sidecar_refuses_rather_than_falling_back(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_anchor_workspace(root)
+            self.claim_question(workspace)
+            grounding_file = self.grounding_file(root, [self.anchor_entry(source_id)])
+            code, _, stderr = self.run_grounding_set(workspace, grounding_file)
+            self.assertEqual(0, code, stderr)
+            self.structured_sidecar(workspace, source_id).unlink()
+
+            code, report, verify_stderr = self.run_quote_verify(workspace)
+            result = self.grounding_results(report)[0]
+
+        self.assertEqual(VERIFY_QUOTES.EXIT_NOT_VERIFIED, code, verify_stderr)
+        self.assertEqual("structured_view_missing", result["result"])
+        # The value is in the rendered body and in the raw payload, and neither is
+        # consulted: one resolution root, or an anchor stops saying what it proved.
+        self.assertIsNone(result["resolved"])
+
+    def test_a_pointer_into_a_subtree_is_a_different_mistake_than_a_wrong_value(self):
+        """`supplier_quote` is a real facet; it is simply not a field.
+
+        Reported apart from a mismatch because the repairs differ: one edit extends the
+        pointer, the other corrects the claim.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_anchor_workspace(root)
+            self.claim_question(workspace)
+            cases = {
+                "supplier_quote": "anchor_target_not_scalar",
+                "supplier_quote/list_price": "anchor_pointer_not_found",
+            }
+            observed = {}
+            for pointer in cases:
+                grounding_file = self.grounding_file(
+                    root, [self.anchor_entry(source_id, pointer=pointer)], name=f"{pointer.replace('/', '-')}.yml"
+                )
+                code, _, stderr = self.run_grounding_set(workspace, grounding_file)
+                self.assertEqual(0, code, stderr)
+                code, report, stderr = self.run_quote_verify(workspace)
+                observed[pointer] = (code, self.grounding_results(report)[0]["result"])
+
+        self.assertEqual(
+            {pointer: (VERIFY_QUOTES.EXIT_NOT_VERIFIED, result) for pointer, result in cases.items()},
+            observed,
+        )
+
+
+class CrSevenAcceptanceCriteriaTests(AnchorGroundingWorkspace, unittest.TestCase):
+    """One named test per CR-7 acceptance criterion, so criterion and test read as one.
+
+    The chain tests above walk the loop; these state the promises the CR was accepted on,
+    each in a name a reader can match to the change request without cross-referencing a
+    backlog. Overlap with the chain is deliberate — a criterion nobody can point at a test
+    for is a criterion nobody checked.
+    """
+
+    def test_criterion_1_an_anchor_that_resolves_and_matches_verifies_and_a_failing_one_names_the_entry_before_terminal_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_anchor_workspace(root)
+            self.claim_question(workspace)
+
+            # Resolves and matches -> verified, with the pointer it walked and the value
+            # it found, so the report says what was proved rather than that it passed.
+            good = self.grounding_file(root, [self.anchor_entry(source_id)], name="good.yml")
+            code, _, stderr = self.run_grounding_set(workspace, good)
+            self.assertEqual(0, code, stderr)
+            code, report, stderr = self.run_quote_verify(workspace)
+            self.assertEqual(0, code, stderr)
+            verified = self.grounding_results(report)[0]
+
+            # Non-resolving and mismatched, each a stable code naming the failing entry,
+            # and each refused before the terminal status is written.
+            refusals = {}
+            for label, entry in {
+                "mismatch": self.anchor_entry(source_id, expected="19.99 EUR"),
+                "not_found": self.anchor_entry(source_id, pointer="supplier_quote/rrp"),
+            }.items():
+                failing = self.grounding_file(root, [entry], name=f"{label}.yml")
+                before = self.page_digest(workspace)
+                code, payload, stderr = self.run_answer(workspace, source_id, grounding_file=failing)
+                refusals[label] = {
+                    "code": code,
+                    "error_code": payload["error_code"],
+                    "failure": payload["details"]["failures"][0],
+                    "page_unchanged": before == self.page_digest(workspace),
+                    "status": self.question_status(workspace),
+                }
+
+        self.assertEqual("verified", verified["result"])
+        self.assertEqual("anchor", verified["form"])
+        self.assertEqual("/supplier_quote/price", verified["pointer"])
+        self.assertEqual(ANCHOR_EXPECTED, verified["resolved"])
+        for label, refusal in refusals.items():
+            with self.subTest(refusal=label):
+                self.assertEqual(RESOLVE.EXIT_INVALID, refusal["code"])
+                self.assertEqual("GROUNDING_ANCHOR_INVALID", refusal["error_code"])
+                # Named, not merely counted: the failure carries the claim and the source
+                # of the entry a host has to go and repair.
+                self.assertEqual(ANCHOR_CLAIM, refusal["failure"]["claim"])
+                self.assertEqual(source_id, refusal["failure"]["source_id"])
+                # Before terminal state, in both senses: no status transition happened,
+                # and no byte of the page moved.
+                self.assertEqual("in_progress", refusal["status"])
+                self.assertTrue(refusal["page_unchanged"])
+        self.assertEqual(
+            {"mismatch": "anchor_value_mismatch", "not_found": "anchor_pointer_not_found"},
+            {label: refusal["failure"]["result"] for label, refusal in refusals.items()},
+        )
+
+    def test_criterion_2_the_grounding_file_writes_the_canonical_block_and_refuses_a_different_claim_holder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_anchor_workspace(root)
+            grounding_file = self.grounding_file(root, [self.anchor_entry(source_id)])
+            # The host's file is not already canonical, so "the page ends up canonical"
+            # is a statement about the write path rather than about the input.
+            self.assertNotIn(
+                canonical_grounding_block(source_id), grounding_file.read_text(encoding="utf-8")
+            )
+
+            # Unclaimed and unheld, the write needs the explicit flag; held by someone
+            # else, no flag helps. Grounding is a mutation of a claimed question, and the
+            # write path is under exactly the claim discipline every other mutation is.
+            unclaimed_code, unclaimed, _ = self.run_grounding_set(workspace, grounding_file)
+            self.claim_question(workspace, agent_id="holding-agent")
+            before_refusals = self.page_digest(workspace)
+            held_code, held, _ = self.run_grounding_set(workspace, grounding_file)
+            stolen_code, stolen, _ = self.run_grounding_set(
+                workspace, grounding_file, extra=("--allow-unclaimed",)
+            )
+            page_after_refusals = self.page_digest(workspace)
+
+            # Under the holder's own id, the block lands byte-identical to what a
+            # compliant hand edit writes — the host's own YAML dumper never reaches the
+            # page, so its key order and quoting cannot become the workspace's.
+            code, written, stderr = self.run_grounding_set(
+                workspace, grounding_file, agent_id="holding-agent"
+            )
+            self.assertEqual(0, code, stderr)
+            page = self.question_page(workspace).read_text(encoding="utf-8")
+            reloaded = yaml.safe_load(page.split("---\n", 2)[1])["grounding"]
+
+        self.assertEqual(RESOLVE.EXIT_INVALID, unclaimed_code)
+        self.assertEqual("QUESTION_NOT_CLAIMED", unclaimed["error_code"])
+        self.assertEqual(RESOLVE.EXIT_CONFLICT, held_code)
+        self.assertEqual("CLAIM_HELD", held["error_code"])
+        # `--allow-unclaimed` covers an unheld question, never another agent's hold.
+        self.assertEqual(RESOLVE.EXIT_CONFLICT, stolen_code)
+        self.assertEqual("CLAIM_HELD", stolen["error_code"])
+        self.assertEqual(before_refusals, page_after_refusals)
+        self.assertIn(canonical_grounding_block(source_id), page)
+        # And the canonical bytes reload as the entry the host handed over, unchanged.
+        self.assertEqual([self.anchor_entry(source_id)], reloaded)
+        self.assertEqual({"quote": 0, "anchor": 1}, written["by_form"])
+
+    def test_criterion_3_lint_counts_grounding_by_anchor_apart_from_grounding_by_quote(self):
+        mixtures = {
+            "quote only": (0, 1),
+            "anchor only": (1, 0),
+            "both forms": (1, 1),
+        }
+        for label, (anchors, quotes) in mixtures.items():
+            with self.subTest(mixture=label):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    workspace, source_id = self.make_anchor_workspace(root)
+                    self.claim_question(workspace)
+                    entries = [self.anchor_entry(source_id)] * anchors + [self.quote_entry(source_id)] * quotes
+                    grounding_file = self.grounding_file(root, entries)
+                    code, _, stderr = self.run_answer(
+                        workspace, source_id, grounding_file=grounding_file
+                    )
+                    self.assertEqual(0, code, stderr)
+                    results = self.run_lint(workspace)
+                    summary = LINT.format_grounding_summary(results["stats"])
+
+                self.assertEqual(anchors, results["stats"]["grounding_entries_anchor"])
+                self.assertEqual(quotes, results["stats"]["grounding_entries_quote"])
+                # The counts are what a workspace measures its own migration with, so the
+                # line lint writes to log.md has to name both forms, never one total.
+                self.assertEqual(f"quote={quotes} anchor={anchors}", summary)
+
+    def test_criterion_4_quote_form_is_verified_exactly_as_it_was_before_anchors_existed(self):
+        """Backward compatibility, including which code a quote failure still raises.
+
+        A host that switched on `GROUNDING_QUOTE_INVALID` before CR-7 must keep seeing it
+        for a quote failure; `GROUNDING_ANCHOR_INVALID` is additive, never a rename.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace, source_id = self.make_anchor_workspace(root)
+
+            # The pre-CR-7 shape, hand-written onto the page exactly as a host wrote it
+            # then — no anchor key anywhere near it.
+            self.ground_the_question(workspace, source_id, quote=QUOTE_TEXT, location_hint=QUOTE_HINT)
+            code, report, stderr = self.run_quote_verify(workspace)
+            result = self.grounding_results(report)[0]
+
+            self.claim_question(workspace)
+            failing = self.grounding_file(
+                root,
+                [{"claim": QUOTE_CLAIM, "source_id": source_id, "quote": "offer_count: 8"}],
+            )
+            refusal_code, refusal, refusal_stderr = self.run_answer(
+                workspace, source_id, grounding_file=failing
+            )
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual("verified", result["result"])
+        self.assertEqual("quote", result["form"])
+        self.assertEqual("retained_quote_evidence", result["policy"])
+        # A quote entry still reports the body locator it was checked against, and still
+        # carries no pointer: the two forms report what each actually cited.
+        self.assertEqual("section", result["anchor"]["type"])
+        self.assertNotIn("pointer", result)
+        self.assertEqual({"quote": 1, "anchor": 0}, report["counts"]["by_form"])
+        self.assertEqual(RESOLVE.EXIT_INVALID, refusal_code, refusal_stderr)
+        self.assertEqual("GROUNDING_QUOTE_INVALID", refusal["error_code"])
+        self.assertEqual("quote_not_found", refusal["details"]["failures"][0]["result"])
 
 
 if __name__ == "__main__":
