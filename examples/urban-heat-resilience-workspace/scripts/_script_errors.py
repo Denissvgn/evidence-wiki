@@ -140,6 +140,17 @@ _REMEDIATIONS = {
         "Wait for the provider's declared rate-limit window to clear, then rerun with fewer requests "
         "or raise integrations.acquisition.max_downloads_per_run after reviewing provider limits."
     ),
+    "PROVIDER_ACCOUNTING_ARGUMENT_INVALID": (
+        "Fix the reservation arguments: pass an existing run directory, a positive request count, "
+        "and a rate-limit declaration of the documented shape."
+    ),
+    "PROVIDER_ACCOUNTING_LEDGER_INVALID": (
+        "Preserve the run's provider-request ledger for audit and start a fresh run. A damaged ledger "
+        "is never treated as an empty budget."
+    ),
+    "PROVIDER_ACCOUNTING_WRITE_FAILED": (
+        "Restore write access and free space for the run directory, then rerun the command."
+    ),
     "DISCOVERY_DISABLED": (
         "Set integrations.discovery.enabled: true in research.yml to opt in. "
         "Discovery still performs no network I/O until a provider transport is implemented."
