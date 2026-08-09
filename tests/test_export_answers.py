@@ -468,6 +468,7 @@ optional_facets:
                 {
                     "claim": "GSM-Hard and ARC-X are reasoning benchmarks.",
                     "source_id": "raw:bench-survey-2026",
+                    "form": "quote",
                     "quote": "Benchmark Survey 2026",
                     "location_hint": "normalized title",
                 }
