@@ -987,6 +987,51 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual(0, code, stderr)
             self.assertEqual("fulfilled", payload["request"]["status"])
 
+    def test_require_scope_covers_keys_only_match_scope_asserts(self):
+        """An asserted key the delivery never states is unverified, not verified-ok.
+
+        The request declares no scope here, so nothing but the caller's own
+        --match-scope claim is at stake. Layer 2 can only catch a delivery that
+        *disagrees*; without asserted keys in the absence set, an explicit claim
+        against an unstamped source would pass with nothing checked at all.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            request_id = self.add_request(target)["request"]["request_id"]
+            source_id = self.deliver_scoped_source(target, "unstamped-delivery")
+
+            code, envelope, _ = self.error_envelope(
+                target,
+                "fulfill",
+                "--request-id",
+                request_id,
+                "--source-id",
+                source_id,
+                "--match-scope",
+                "facet_id=supplier_quote",
+                "--require-scope",
+            )
+            self.assertEqual(2, code)
+            self.assertEqual("REQUEST_SCOPE_MISSING", envelope["error_code"])
+            self.assertEqual(["facet_id"], envelope["details"]["missing_keys"])
+            self.assertEqual({"facet_id": "supplier_quote"}, envelope["details"]["asserted_scope"])
+            self.assertEqual("open", self.artifact_lines(target)[0]["status"])
+
+            # Without --require-scope the same call still passes: absence stays
+            # tolerated by default, which is what keeps pre-CR-4 deliveries fulfillable.
+            code, payload, stderr = self.requests_json(
+                target,
+                "fulfill",
+                "--request-id",
+                request_id,
+                "--source-id",
+                source_id,
+                "--match-scope",
+                "facet_id=supplier_quote",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("fulfilled", payload["request"]["status"])
+
     def test_fulfill_refuses_match_scope_that_contradicts_the_request(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))

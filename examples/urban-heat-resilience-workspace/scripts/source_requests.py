@@ -252,8 +252,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Refuse the fulfilment unless the delivered source's provenance scope states every key "
-            "the request declares. Without it, a key the delivery never states is tolerated; keys "
-            "both sides state must always agree."
+            "the request declares and every key --match-scope asserts. Without it, a key the "
+            "delivery never states is tolerated; keys both sides state must always agree."
         ),
     )
     fulfill_parser.add_argument(
@@ -1920,9 +1920,13 @@ def check_fulfill_scope(
     2. **Assertion** (``--match-scope``) — what the caller claims this fulfilment is,
        checked against the request *and* the delivery, so a caller cannot talk a
        facet-X request into accepting facet-Y evidence.
-    3. **Absence** (``--require-scope``) — a key the delivery never states. Tolerated by
-       default, since no pre-CR-4 delivery stamps scope; refused on request by hosts
-       whose pipeline does, which closes the hole where omitting scope evades layer 1.
+    3. **Absence** (``--require-scope``) — a key the delivery never states, whether the
+       request declared it or the caller asserted it. Tolerated by default, since no
+       pre-CR-4 delivery stamps scope; refused on request by hosts whose pipeline does,
+       which closes the hole where omitting scope evades layers 1 and 2. Asserted keys
+       belong in this set: layer 2 can only catch an assertion the delivery *disagrees*
+       with, so without this an explicit ``--match-scope`` claim against an unstamped
+       source would be accepted with nothing verified, and no flag could ask otherwise.
 
     ``REQUEST_SCOPE_MISMATCH`` and ``REQUEST_SCOPE_MISSING`` stay distinct codes: the
     first is a mis-pairing to investigate, the second a delivery pipeline to fix. Each
@@ -1933,7 +1937,7 @@ def check_fulfill_scope(
     request_id = str(request.get("request_id", ""))
     request_scope = normalize_scope(request.get("scope"))
 
-    conflicts, absences = scope_match(request_scope, source_scope)
+    conflicts, _ = scope_match(request_scope, source_scope)
     if conflicts:
         raise RequestScopeError(
             "REQUEST_SCOPE_MISMATCH",
@@ -1973,22 +1977,31 @@ def check_fulfill_scope(
                 },
             )
 
-    if require_scope and absences:
-        raise RequestScopeError(
-            "REQUEST_SCOPE_MISSING",
-            (
-                f"Source {source_id} declares no provenance scope for {', '.join(absences)}; "
-                f"--require-scope needs every scope key request {request_id} declares."
-            ),
-            remediation=remediation_for("REQUEST_SCOPE_MISSING"),
-            details={
-                "request_id": request_id,
-                "source_id": source_id,
-                "missing_keys": absences,
-                "request_scope": request_scope,
-                "source_scope": source_scope,
-            },
-        )
+    if require_scope:
+        # An asserted key is a claim the caller made on the command line; a request key
+        # is one the workspace recorded. Under --require-scope the delivery must state
+        # both, so neither can be verified by silence. Values that disagree were already
+        # refused above, so the union never hides a conflict behind a merge.
+        required = {**request_scope, **asserted_scope}
+        _, missing = scope_match(required, source_scope)
+        if missing:
+            raise RequestScopeError(
+                "REQUEST_SCOPE_MISSING",
+                (
+                    f"Source {source_id} declares no provenance scope for {', '.join(missing)}; "
+                    "--require-scope needs the delivery to state every scope key "
+                    f"request {request_id} declares or --match-scope asserts."
+                ),
+                remediation=remediation_for("REQUEST_SCOPE_MISSING"),
+                details={
+                    "request_id": request_id,
+                    "source_id": source_id,
+                    "missing_keys": missing,
+                    "request_scope": request_scope,
+                    "asserted_scope": asserted_scope,
+                    "source_scope": source_scope,
+                },
+            )
 
 
 def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
