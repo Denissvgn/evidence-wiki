@@ -58,14 +58,23 @@ TOOL_ARGUMENT_KEYS = {
     "query_index": frozenset({"query", "scope", "limit", "index_path"}),
     "intake_questions": frozenset({"batch", "dry_run"}),
     "export_answers": frozenset({"status"}),
-    "source_requests_list": frozenset({"status"}),
+    "source_requests_list": frozenset({"status", "kind", "scope"}),
 }
+# Request-filter failures the caller can fix from the message alone, so they keep the
+# actionable text. Anything else a kind/scope helper raises (a malformed pack
+# declaration surfaces as CONFIG_INVALID) is workspace state, not an argument, and
+# goes through the sanitizing path with the rest of the workspace failures.
+REQUEST_FILTER_ERROR_CODES = frozenset(
+    {"REQUEST_KIND_INVALID", "REQUEST_KIND_UNDECLARED", "REQUEST_SCOPE_INVALID"}
+)
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _intake_limits import mcp_intake_batch_limit
+from _request_kinds import RequestKindError, validate_kind
+from _request_scope import RequestScopeError, normalize_scope, parse_scope_pairs
 from _script_errors import classify_error_code, error_envelope
 from _workspace_module_loader import load_workspace_module
 
@@ -289,6 +298,103 @@ def reject_unknown_keys(value: dict[str, Any], allowed: frozenset[str], label: s
         )
 
 
+def request_filter_failure(exc: RequestKindError | RequestScopeError) -> BaseException:
+    """Route a kind/scope failure to the error path that matches whose fault it is.
+
+    A bad filter argument keeps its actionable text so the caller can fix the call.
+    Anything else these helpers raise (a malformed ``domain_pack.request_kinds``
+    declaration surfaces as ``CONFIG_INVALID``) is workspace state, so it goes
+    through the sanitizing ``SystemExit`` path every other workspace failure uses.
+    """
+    if exc.error_code in REQUEST_FILTER_ERROR_CODES:
+        return ToolExecutionError(exc.message, error_code=exc.error_code, details=dict(exc.details))
+    failure = SystemExit(exc.message)
+    failure.error_code = exc.error_code
+    return failure
+
+
+def request_kind_filter(value: Any, load_config: Any) -> list[str] | None:
+    """Validate the ``kind`` argument against this workspace's request-kind registry.
+
+    An unusable filter is refused rather than silently returning nothing: a client
+    that misspells a pack kind should learn that, not read an empty list as "no such
+    requests exist". Returns ``None`` when no filter was given, matching ``status``.
+
+    ``load_config`` is a thunk so an unfiltered call never pays for a second read of
+    ``research.yml`` — the underlying ``list`` contract loads it either way.
+    """
+    try:
+        kinds = validate_string_list(value, "kind")
+    except ToolExecutionError as exc:
+        # The shared shape validator carries no error code, so a malformed `kind`
+        # would classify as WORKSPACE_UNREADABLE — unactionable for a client that
+        # merely passed a bare string instead of an array. Restate it as the
+        # kind-specific refusal without touching the validator other args share.
+        raise ToolExecutionError(
+            exc.message,
+            error_code="REQUEST_KIND_INVALID",
+            details=exc.details,
+        ) from exc
+    if not kinds:
+        return None
+    config = load_config()
+    return list(dict.fromkeys(validate_kind(kind, config) for kind in kinds))
+
+
+def request_scope_filter(value: Any) -> dict[str, str]:
+    """Validate the ``scope`` argument object into an exact-match filter mapping.
+
+    Reuses the CLI's ``--scope key=value`` rules so the two read surfaces can never
+    disagree on what a well-formed scope key is.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ToolExecutionError(
+            "scope must be an object mapping scope keys to string values",
+            error_code="REQUEST_SCOPE_INVALID",
+        )
+    pairs: list[str] = []
+    for key, item in value.items():
+        # parse_scope_pairs splits on the first "=", so a key containing one would be
+        # re-read as a shorter key and silently filter on something else. No such key
+        # can be valid anyway, so refuse it here rather than mangling it.
+        if not isinstance(key, str) or "=" in key:
+            raise ToolExecutionError(
+                f"scope keys must be strings without '='; rejected {key!r}",
+                error_code="REQUEST_SCOPE_INVALID",
+                details={"key": key if isinstance(key, str) else repr(key)},
+            )
+        if not isinstance(item, str):
+            raise ToolExecutionError(
+                f"scope value for key {key!r} must be a string",
+                error_code="REQUEST_SCOPE_INVALID",
+                details={"key": key},
+            )
+        pairs.append(f"{key}={item}")
+    return parse_scope_pairs(pairs, option="scope")
+
+
+def request_matches_filters(
+    record: Any,
+    kinds: list[str] | None,
+    scope: dict[str, str],
+) -> bool:
+    """Exact-match filter: kind is any of ``kinds``, and every scope pair agrees.
+
+    Matching, never interpretation — AND over all given scope pairs, exact string
+    equality, no ranges, globs, or negation.
+    """
+    if not isinstance(record, dict):
+        return False
+    if kinds is not None and record.get("kind") not in kinds:
+        return False
+    if not scope:
+        return True
+    declared = normalize_scope(record.get("scope"))
+    return all(declared.get(key) == value for key, value in scope.items())
+
+
 def positive_int(value: Any, label: str, default: int) -> int:
     if value is None:
         return default
@@ -417,13 +523,41 @@ class ResearchWikiMcpServer:
             {
                 "name": "source_requests_list",
                 "title": "List Source Requests",
-                "description": "List structured source requests for fetch agents.",
+                "description": (
+                    "List structured source requests for fetch agents. Optional status, kind, "
+                    "and scope arguments narrow the result by exact match; every given filter "
+                    "must hold (AND)."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "status": {
                             "type": "array",
                             "items": {"type": "string", "enum": ["open", "fulfilled"]},
+                        },
+                        # No enum: the valid set is built-ins plus whatever the workspace's
+                        # domain pack declares, so it is not knowable from this schema alone.
+                        "kind": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Return only requests whose kind is one of these ids. Built-in kinds "
+                                "are unprefixed; domain-pack kinds are namespaced as "
+                                "pack:<pack-name>/<kind-id> and are carried verbatim. A kind this "
+                                "workspace does not accept is refused with REQUEST_KIND_INVALID or "
+                                "REQUEST_KIND_UNDECLARED rather than matching nothing."
+                            ),
+                        },
+                        "scope": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                            "description": (
+                                "Return only requests whose structured scope declares every one of "
+                                "these key/value pairs. Exact string equality, AND over all pairs, no "
+                                "operators (no ranges, globs, or negation). A key no request declares "
+                                "matches nothing and yields an empty list, not an error; a malformed "
+                                "key is refused with REQUEST_SCOPE_INVALID."
+                            ),
                         },
                     },
                     "additionalProperties": False,
@@ -529,8 +663,34 @@ class ResearchWikiMcpServer:
         if name == "source_requests_list":
             module = load_sibling_module("source_requests")
             statuses = validate_string_list(arguments.get("status"), "status", choices=module.REQUEST_STATUSES)
-            args = argparse.Namespace(project_root=str(self.project_root), status=statuses)
-            return module.run_list(args)
+            try:
+                kinds = request_kind_filter(
+                    arguments.get("kind"), lambda: module.load_config(self.project_root)
+                )
+                scope = request_scope_filter(arguments.get("scope"))
+            except (RequestKindError, RequestScopeError) as exc:
+                raise request_filter_failure(exc) from exc
+            # Forwarded in the CLI's own option shapes so `list` stays the single
+            # implementation of these filters. They are re-applied to the returned
+            # records below, which is a no-op once run_list honors them.
+            args = argparse.Namespace(
+                project_root=str(self.project_root),
+                status=statuses,
+                kind=list(kinds) if kinds else None,
+                scope=[f"{key}={scope[key]}" for key in sorted(scope)] or None,
+            )
+            payload = module.run_list(args)
+            if kinds is None and not scope:
+                return payload
+            records = payload.get("requests")
+            if not isinstance(records, list):
+                return payload
+            return {
+                **payload,
+                "requests": [
+                    record for record in records if request_matches_filters(record, kinds, scope)
+                ],
+            }
 
         raise KeyError(name)
 
