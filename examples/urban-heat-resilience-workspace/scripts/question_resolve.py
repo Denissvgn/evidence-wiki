@@ -11,6 +11,10 @@ research runs:
   ``--source-id`` is required unless ``--allow-uncited`` is explicit. When
   ``--require-coverage`` is supplied, the selected coverage manifest must
   evaluate to ``pass`` before the question can be marked ``answered``.
+  ``--grounding-file FILE`` records the answer's grounding from the same file
+  format ``grounding set`` reads, in the *same* atomic write as the resolution
+  fields, so the page never holds new grounding beside an old status. With
+  ``--require-grounding`` the file's entries are what must verify.
 - ``block --slug SLUG --agent-id ID --blocked-reason TEXT`` records the reason
   current evidence is insufficient. When ``--request-id`` is supplied, the
   request must exist in ``sources/source-requests.jsonl`` and reference the
@@ -27,6 +31,16 @@ research runs:
   rejection returns it to ``open``. ``--reviewed-by`` is a recorded principal on
   the same trust model as ``--reviewer``: these scripts authenticate nobody, and
   the audit trail is the frontmatter entry plus ``log.md``.
+- ``grounding set --slug SLUG --from-file FILE --agent-id ID`` replaces the
+  question's whole ``grounding`` block from a YAML (or JSON) file, under the same
+  claim rules and the same per-question lock every other mutation uses. It is the
+  supported alternative to hand-editing question frontmatter: the block is written
+  in the canonical serialization, so a host never has to round-trip a question page
+  through its own YAML dumper. Entry shape and manifest membership are enforced
+  before anything is written; verification is **not** performed here, because the
+  two-step flow records grounding while cited evidence may still be normalizing.
+  Run ``verify_quotes.py --slug SLUG`` for that, and see ``--grounding-file`` below
+  for the single-write alternative.
 - ``reopen --slug SLUG --agent-id ID --source-id MANIFEST_ID`` moves a
   ``blocked`` question back to ``open`` once the delivered evidence is in the
   manifest and has a normalized record, drops ``blocked_reason``, and adds the
@@ -66,6 +80,8 @@ from types import ModuleType
 from typing import Any
 from urllib.parse import urlparse
 
+import yaml
+
 SCHEMA_VERSION = "1.0"
 EXIT_OK = 0
 EXIT_INVALID = 2
@@ -76,6 +92,14 @@ TERMINAL_STATUSES = ("answered", "human_review", "blocked", "deferred", "rejecte
 REVIEW_VERDICT_ACCEPTED = "accepted"
 REVIEW_VERDICT_REJECTED = "rejected"
 REVIEW_VERDICTS = (REVIEW_VERDICT_ACCEPTED, REVIEW_VERDICT_REJECTED)
+# `grounding` is the only nested subcommand here, so `args.command` alone no longer names
+# the action. Reports and log entries carry the full spelling a host would type.
+GROUNDING_COMMAND = "grounding"
+GROUNDING_SET_ACTION = "grounding set"
+# Verifier stamps attest specific grounding entries. Replacing the block invalidates them,
+# so both write paths drop them rather than leave a page claiming verified state it lost.
+GROUNDING_VERIFICATION_STAMPS = ("verified_by", "grounding_verified_at")
+GROUNDING_VERIFICATION_NOT_PERFORMED = "not_performed"
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -140,6 +164,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--coverage-manifest",
         default=None,
         help="Workspace-relative coverage manifest path under sources.coverage_dir. Defaults to the slug manifest.",
+    )
+    answer.add_argument(
+        "--grounding-file",
+        default=None,
+        help=(
+            "YAML/JSON file whose grounding entries replace the question's grounding block in the same "
+            "atomic write as the answer. Same format as 'grounding set --from-file'."
+        ),
     )
 
     block = subparsers.add_parser("block", help="Resolve a question as blocked on missing evidence.")
@@ -216,6 +248,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     review.add_argument("--note", default=None, help="Optional reviewer note retained with the entry.")
     review.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Report format. Defaults to text.",
+    )
+
+    grounding = subparsers.add_parser(
+        GROUNDING_COMMAND,
+        help="Write the question's grounding block from a file, without resolving the question.",
+    )
+    # A distinct dest keeps the outer `command` equal to "grounding", so main()'s dispatch,
+    # principal lookup, and error envelopes keep reading one key. The action string a report
+    # or log entry carries is normalized to the full "grounding set" spelling instead.
+    grounding_commands = grounding.add_subparsers(dest="grounding_command", required=True)
+    grounding_set = grounding_commands.add_parser(
+        "set",
+        help="Replace the whole grounding block from a YAML/JSON file (never merged).",
+    )
+    grounding_set.add_argument("--slug", required=True, help="Question page slug (file name without .md).")
+    grounding_set.add_argument("--agent-id", required=True, help="Identifier of the writing agent.")
+    grounding_set.add_argument(
+        "--from-file",
+        required=True,
+        help="YAML/JSON file carrying a top-level 'grounding:' list, or a bare list of entries.",
+    )
+    grounding_set.add_argument(
+        "--allow-unclaimed",
+        action="store_true",
+        help="Allow writing grounding on an open or otherwise unheld question without a matching claim.",
+    )
+    grounding_set.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
@@ -875,6 +938,116 @@ def render_grounding_sequence(key: str, entries: list[dict[str, Any]]) -> list[s
     return lines
 
 
+def _grounding_file_invalid(path: Path, message: str) -> ResolveError:
+    return ResolveError(
+        EXIT_INVALID,
+        "GROUNDING_FILE_INVALID",
+        f"grounding file {path}: {message}",
+        details={"grounding_file": str(path)},
+    )
+
+
+def read_grounding_document(value: str) -> tuple[Path, list[Any]]:
+    """Read a grounding file down to its raw entry list, or refuse with a file-level code.
+
+    Accepted shapes are a mapping with a top-level ``grounding:`` list, or a bare list —
+    JSON is a subset of YAML, so a host that prefers JSON needs no second code path.
+    Everything that can be decided about the *file* (unreadable, not YAML, not one of the
+    two shapes) is refused here with ``GROUNDING_FILE_INVALID``. Everything that is a
+    statement about an *entry* stays with ``grounding_entries`` and its ``GROUNDING_INVALID``,
+    so the two write paths and the page reader never drift on entry shape.
+    """
+    path = Path(value).expanduser()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise _grounding_file_invalid(path, f"cannot be read ({exc.strerror or exc})") from exc
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise _grounding_file_invalid(path, f"is not valid YAML ({exc})") from exc
+    if isinstance(document, dict):
+        if "grounding" not in document:
+            raise _grounding_file_invalid(path, "is a mapping without a top-level 'grounding' key")
+        raw = document["grounding"]
+    else:
+        raw = document
+    # `grounding: ` with nothing after it loads as None. That is an unfinished edit, not the
+    # explicit empty set a host writes as `grounding: []`, so it is refused rather than read
+    # as "clear this question's grounding".
+    if not isinstance(raw, list):
+        raise _grounding_file_invalid(
+            path,
+            f"must carry a list of grounding entries, got {type(raw).__name__}",
+        )
+    return path, raw
+
+
+def load_grounding_file(value: str, slug: str) -> list[dict[str, Any]]:
+    """Read and validate a grounding file into canonical, renderable entries.
+
+    Entry shape is validated by ``verify_quotes.grounding_entries``, the one owner of those
+    rules, and the *validated* entries are what gets rendered — not the file's raw mappings.
+    That choice matters twice. It canonicalizes on the way in (``expected: 23.99`` becomes
+    the string ``"23.99"``, whitespace is trimmed, an empty ``location_hint`` disappears), so
+    two files differing only in how their author quoted a value write identical bytes. And it
+    means a host's formatting never reaches the page.
+
+    ``grounding_entries`` tags each entry with ``form``, which is a report field rather than
+    a frontmatter one — ``render_grounding_entry`` rejects it as an unknown key. It is
+    stripped here, at the single point where validated entries become writable ones. Keys
+    outside the entry schema are dropped for the same reason: the schema is what the
+    canonical serialization can express.
+    """
+    verify_quotes = load_sibling_module("verify_quotes")
+    path, raw = read_grounding_document(value)
+    try:
+        validated = verify_quotes.grounding_entries({"grounding": raw}, slug)
+    except verify_quotes.VerifyQuotesError as exc:
+        raise ResolveError(
+            EXIT_INVALID,
+            exc.error_code,
+            f"grounding file {path}: {exc}",
+            details={"grounding_file": str(path), **getattr(exc, "details", {})},
+        ) from exc
+    return [
+        {field: entry[field] for field in GROUNDING_ENTRY_FIELDS if field in entry}
+        for entry in validated
+    ]
+
+
+def grounding_source_ids(entries: list[dict[str, Any]]) -> list[str]:
+    """The distinct manifest ids the entries cite, in first-cited order."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for entry in entries:
+        source_id = entry.get("source_id")
+        if isinstance(source_id, str) and source_id not in seen:
+            seen.add(source_id)
+            ordered.append(source_id)
+    return ordered
+
+
+def grounding_form_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
+    """Forms breakdown for the result envelope, counted by ``verify_quotes.count_by_form``.
+
+    The form vocabulary and the zero-initialized shape both come from the verifier, so a
+    ``grounding set`` envelope and a verification report never disagree about what forms
+    exist or how an empty set is spelled.
+    """
+    verify_quotes = load_sibling_module("verify_quotes")
+    return verify_quotes.count_by_form(
+        {
+            "form": (
+                verify_quotes.GROUNDING_FORM_ANCHOR
+                if entry.get("anchor") is not None
+                else verify_quotes.GROUNDING_FORM_QUOTE
+            )
+        }
+        for entry in entries
+    )
+
+
 def render_frontmatter_value(
     key: str,
     value: str | bool | list[str] | list[dict[str, Any]],
@@ -907,7 +1080,7 @@ def set_frontmatter_field_block(
 
 def apply_resolution_edits(
     text: str,
-    set_fields: dict[str, str | bool | list[str]],
+    set_fields: dict[str, str | bool | list[str] | list[dict[str, Any]]],
     remove_fields: tuple[str, ...],
     quoted_fields: set[str] | None = None,
 ) -> str:
@@ -919,12 +1092,24 @@ def apply_resolution_edits(
     for key in remove_fields:
         frontmatter_lines = remove_frontmatter_field_block(frontmatter_lines, key)
     for key, value in set_fields.items():
-        frontmatter_lines = set_frontmatter_field_block(
-            frontmatter_lines,
-            key,
-            value,
-            quote=key in (quoted_fields or set()),
-        )
+        try:
+            frontmatter_lines = set_frontmatter_field_block(
+                frontmatter_lines,
+                key,
+                value,
+                quote=key in (quoted_fields or set()),
+            )
+        except ValueError as exc:
+            # The grounding renderer refuses a malformed entry rather than emit bytes that
+            # would reload as a different shape. That is a serializer-misuse signal, and the
+            # single choke point where both write paths turn it into a host-facing refusal —
+            # never a traceback — before anything reaches the page.
+            raise ResolveError(
+                EXIT_INVALID,
+                "GROUNDING_INVALID" if key == GROUNDING_FIELD else "PAGE_INVALID",
+                f"cannot serialize {key} into question frontmatter: {exc}",
+                details={"field": key},
+            ) from exc
     return "\n".join([*opening, *frontmatter_lines, *rest])
 
 
@@ -981,10 +1166,15 @@ def enforce_grounding(project_root: Path, config: dict[str, Any], slug: str, fro
         if isinstance(result, dict) and result.get("result") != verify_quotes.RESULT_VERIFIED
     ]
     if failed:
+        # Which code tops the envelope is the verifier's rule, not a second copy of it here:
+        # all-quote failures keep `GROUNDING_QUOTE_INVALID` bit-for-bit, because hosts switch
+        # on it, and one anchor failure raises `GROUNDING_ANCHOR_INVALID` so a caller is not
+        # sent looking for a quote there is none of. `details` enumerates every failure
+        # either way, so a mixed set is fully described whichever code names it.
         raise ResolveError(
             EXIT_INVALID,
-            "GROUNDING_QUOTE_INVALID",
-            f"answer resolution for {slug} has {len(failed)} grounding quote verification failure(s)",
+            verify_quotes.grounding_failure_error_code(failed),
+            f"answer resolution for {slug} has {len(failed)} grounding verification failure(s)",
             details={"slug": slug, "failures": failed},
         )
     return report
@@ -1008,9 +1198,19 @@ def resolution_fields(
         coverage_result: dict[str, Any] | None = None
         if getattr(args, "require_coverage", False):
             coverage_result = enforce_coverage(project_root, config, args.slug.strip(), getattr(args, "coverage_manifest", None))
+        # The file is read and validated before anything is verified or written, so a bad
+        # file refuses at the same point a bad --source-id does: with the page untouched.
+        file_entries: list[dict[str, Any]] | None = None
+        grounding_frontmatter = frontmatter
+        if getattr(args, "grounding_file", None):
+            file_entries = load_grounding_file(args.grounding_file, args.slug.strip())
+            validate_source_ids(project_root, config, grounding_source_ids(file_entries))
+            # What --require-grounding must verify is what this answer is about to record,
+            # not whatever the page still holds from a previous cycle.
+            grounding_frontmatter = {**frontmatter, GROUNDING_FIELD: file_entries}
         grounding_report = None
         if getattr(args, "require_grounding", False):
-            grounding_report = enforce_grounding(project_root, config, args.slug.strip(), frontmatter)
+            grounding_report = enforce_grounding(project_root, config, args.slug.strip(), grounding_frontmatter)
         status = "human_review" if coverage_result and coverage_result["human_review_required"] else "answered"
         fields: dict[str, Any] = {
             "status": status,
@@ -1032,12 +1232,21 @@ def resolution_fields(
             fields["confidence"] = args.confidence
         if args.evidence_strength:
             fields["evidence_strength"] = args.evidence_strength
+        remove_fields: tuple[str, ...] = ()
+        if file_entries is not None:
+            # One dict, one apply_resolution_edits, one lock, one atomic write: the page
+            # never exists in a state where the new grounding is present and the status is
+            # still the old one.
+            fields[GROUNDING_FIELD] = file_entries
+            remove_fields = GROUNDING_VERIFICATION_STAMPS
         return {
             "status": status,
             "fields": fields,
             "request_ids": [],
             "source_ids": source_ids,
             "grounding": grounding_report,
+            "remove_fields": remove_fields,
+            "grounding_entries": file_entries,
         }
     if args.command == "block":
         reason = args.blocked_reason.strip()
@@ -1116,6 +1325,9 @@ def transition_resolution(
                 "confidence",
                 "evidence_strength",
             )
+        # A resolution that also rewrites grounding drops the stamps that attested the
+        # previous entries; nothing else this verb does clears them.
+        remove_fields = (*remove_fields, *resolution.get("remove_fields", ()))
         updated = apply_resolution_edits(
             text,
             fields,
@@ -1123,7 +1335,7 @@ def transition_resolution(
             quoted_fields={"updated", "human_review_requested_at"},
         )
         question_claim.write_page_atomic(page_path, updated)
-        return {
+        result: dict[str, Any] = {
             "applied": True,
             "status": resolution["status"],
             "previous_holder": previous_holder,
@@ -1131,6 +1343,11 @@ def transition_resolution(
             "source_ids": fields.get("source_ids", []),
             "request_ids": resolution["request_ids"],
         }
+        entries = resolution.get("grounding_entries")
+        if entries is not None:
+            result["grounding_count"] = len(entries)
+            result["by_form"] = grounding_form_counts(entries)
+        return result
 
 
 def require_in_order_question_mutation(project_root: Path, config: dict[str, Any], slug: str) -> None:
@@ -1230,6 +1447,75 @@ def transition_reopen(
             "source_ids": merged,
             "request_ids": request_ids,
             "pairs": pairs,
+        }
+
+
+def transition_grounding_set(
+    page_path: Path,
+    project_root: Path,
+    config: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Replace a question's grounding block from a file, without resolving the question.
+
+    This exists so a host never hand-edits question frontmatter. Hand-editing means
+    round-tripping a page through some other YAML dumper — reordering keys, retyping dates,
+    losing the canonical grounding layout — on a file this package also writes under a lock.
+    Two writers and one file is how that ends.
+
+    The block is **replaced**, never merged. Grounding is authored as a set for one answer;
+    merging two sets invites duplicate claims in an order nobody chose. Replacement also
+    invalidates any verifier stamp on the page, so those are dropped in the same write.
+
+    Verification is deliberately not performed here (CR-7 §7.2). The two-step flow writes
+    grounding while cited evidence may still be normalizing, and ``verify_quotes.py --slug S``
+    already *is* the check step — a second spelling of it would be a second door every
+    future change to verification semantics had to remember.
+    """
+    question_claim = load_sibling_module("question_claim")
+    slug = args.slug.strip()
+    agent_id = args.agent_id.strip()
+    # Read and validate the file before taking the lock: a malformed file is a statement
+    # about the file, and holding a question lock to discover it helps nobody.
+    entries = load_grounding_file(args.from_file, slug)
+    with question_claim.question_lock(page_path):
+        text = page_path.read_text(encoding="utf-8")
+        parts = question_claim.split_frontmatter_lines(text)
+        if parts is None:
+            raise ResolveError(EXIT_INVALID, "PAGE_INVALID", "question page has no frontmatter block")
+        frontmatter = question_claim.frontmatter_mapping(parts[0])
+        if frontmatter.get("type") != "question":
+            raise ResolveError(EXIT_INVALID, "PAGE_INVALID", "page is not a question task record")
+        # Identical gate to the resolution verbs: terminal statuses are not rewritten
+        # (STATUS_NOT_RESOLVABLE), and grounding is never written over another agent's claim.
+        holder = enforce_claim(frontmatter, slug, agent_id, args.allow_unclaimed)
+        source_ids = validate_source_ids(project_root, config, grounding_source_ids(entries))
+        now = question_claim.timestamp_utc()
+        updated = apply_resolution_edits(
+            text,
+            {GROUNDING_FIELD: entries, "updated": now.split("T", 1)[0]},
+            GROUNDING_VERIFICATION_STAMPS,
+            quoted_fields={"updated"},
+        )
+        question_claim.write_page_atomic(page_path, updated)
+        return {
+            "applied": True,
+            # The question's own lifecycle is untouched; reporting the status it still has
+            # keeps this envelope readable beside the resolution verbs' envelopes.
+            "status": frontmatter.get("status"),
+            # Same key the resolution verbs report, so a host reads one envelope shape — but
+            # this verb does not release the claim, so the holder named here is still current.
+            "previous_holder": holder,
+            "answer_page": None,
+            "source_ids": source_ids,
+            "request_ids": [],
+            "grounding_count": len(entries),
+            "by_form": grounding_form_counts(entries),
+            "verification": GROUNDING_VERIFICATION_NOT_PERFORMED,
+            "verification_remediation": (
+                f"Run verify_quotes.py --slug {slug} to verify these grounding entries against "
+                "normalized source records."
+            ),
         }
 
 
@@ -1423,13 +1709,26 @@ def transition_approve(page_path: Path, args: argparse.Namespace) -> dict[str, A
 def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) -> str:
     question_claim = load_sibling_module("question_claim")
     date_text = question_claim.timestamp_utc().split("T", 1)[0]
-    headline = "reopened" if action == "reopen" else result["status"]
+    if action == "reopen":
+        headline = "reopened"
+    elif action == GROUNDING_SET_ACTION:
+        # The status did not change; naming it in the headline would read as if it had.
+        headline = "grounding recorded"
+    else:
+        headline = result["status"]
     lines = [
         f"## [{date_text}] resolve | Question {headline}",
         "",
         f"- Question: `{slug}` ({action}).",
         f"- Agent: {agent_id}.",
     ]
+    if action == GROUNDING_SET_ACTION:
+        forms = result.get("by_form", {})
+        rendered_forms = ", ".join(f"{form}: {count}" for form, count in forms.items())
+        lines.append(f"- Grounding entries: {result.get('grounding_count', 0)} ({rendered_forms}).")
+        if result.get("source_ids"):
+            lines.append(f"- Cited sources: {', '.join(result['source_ids'])}.")
+        lines.append(f"- Verification: {result.get('verification')}. {result.get('verification_remediation')}")
     if action == "reopen" and result.get("source_ids"):
         lines.append(f"- Reopened with sources: {', '.join(result['source_ids'])}.")
     if action == "reopen" and result.get("pairs"):
@@ -1484,10 +1783,27 @@ def build_report(action: str, slug: str, agent_id: str, page_path: Path, project
         report["review_ref"] = result.get("review_ref")
         report["pending_policies"] = result.get("pending_policies", [])
         report["human_reviews"] = result.get("human_reviews", [])
+    if "grounding_count" in result:
+        # Present for both write paths, so a host reads one shape whether grounding arrived
+        # with an answer or on its own.
+        report["grounding_count"] = result["grounding_count"]
+        report["by_form"] = result.get("by_form", {})
+    if action == GROUNDING_SET_ACTION:
+        # Named explicitly rather than left to be inferred from a missing key: this command
+        # writes grounding it has not checked, and the envelope says so and says what checks it.
+        report["verification"] = result.get("verification")
+        report["remediation"] = result.get("verification_remediation")
     return report
 
 
 def render_text_report(report: dict[str, Any]) -> str:
+    if report.get("action") == GROUNDING_SET_ACTION:
+        forms = report.get("by_form", {})
+        rendered_forms = ", ".join(f"{form}: {count}" for form, count in forms.items())
+        return (
+            f"grounding set: {report['slug']} ({report.get('grounding_count', 0)} entries; {rendered_forms}; "
+            f"verification {report.get('verification')})\n"
+        )
     return f"{report['status']}: {report['slug']}\n"
 
 
@@ -1501,7 +1817,13 @@ def main(argv: list[str] | None = None) -> int:
         agent_id = getattr(args, principal_flags[args.command][1]).strip()
     else:
         agent_id = args.agent_id.strip()
-    action = args.command
+    # `grounding` is the one nested command, so the action a report and a log entry carry is
+    # the full spelling a host typed. Dispatch below still switches on `args.command`.
+    action = (
+        f"{args.command} {args.grounding_command}"
+        if args.command == GROUNDING_COMMAND
+        else args.command
+    )
     try:
         if not agent_id:
             label = principal_flags.get(args.command, ("--agent-id",))[0]
@@ -1517,6 +1839,11 @@ def main(argv: list[str] | None = None) -> int:
             result = transition_approve(page_path, args)
         elif args.command == "review":
             result = transition_review(page_path, args)
+        elif args.command == GROUNDING_COMMAND:
+            # Explicit, not left to the trailing `else`: that branch funnels anything
+            # unrecognized into transition_resolution, which would then fail on an attribute
+            # a grounding namespace does not have.
+            result = transition_grounding_set(page_path, project_root, config, args)
         else:
             result = transition_resolution(page_path, project_root, config, args)
     except DelegationGateError as error:
