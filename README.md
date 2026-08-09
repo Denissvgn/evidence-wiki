@@ -9,6 +9,13 @@ evidence.
 [Quick start](#five-minute-tour) · [Documentation](#documentation) ·
 [Worked example][worked-example] · [PyPI][pypi] · [Contributing][contributing]
 
+### How This Project Was Built
+
+EvidenceWiki was planned, written, and tested entirely with AI coding agents.
+Most of the work was done with OpenAI Codex using GPT-5.5 and GPT-5.6, with
+Anthropic Claude also used for parts of the project. No code in this repository
+was manually authored by a human.
+
 ## Why EvidenceWiki
 
 - **Traceable answers.** Every citation resolves through a stable source ID to
