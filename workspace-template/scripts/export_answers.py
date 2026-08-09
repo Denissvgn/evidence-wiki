@@ -78,8 +78,48 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _handoff_signature import project_handoff_verification
-from _script_errors import handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
 from _workspace_module_loader import load_workspace_module
+
+
+class ExportRefusal(ScriptRefusal, SystemExit):
+    """A coded export refusal, raised from inside ``build_export``.
+
+    Before CR-6 this file declared no exception at all: ``build_export`` refused
+    by constructing a bare ``SystemExit`` and hanging ``error_code`` and
+    ``details`` on it as ad-hoc attributes. Naming the type is the improvement;
+    the envelope it produces is unchanged.
+
+    The two bases are deliberate. ``ScriptRefusal`` is what ``run_export`` must
+    raise so an in-process host can catch one type and read ``to_envelope()``
+    off it. ``SystemExit`` is what ``build_export`` has always raised, and three
+    callers this unit must not touch depend on it: ``serve_mcp.py`` sorts tool
+    failures with ``except SystemExit`` before ``except Exception`` and would
+    otherwise drop ``error_code`` and ``details``; ``publication_readiness.py``
+    turns a ``SystemExit`` out of ``build_export`` into an error envelope in its
+    own ``main`` and would otherwise crash with a traceback; and
+    ``orchestration_controller.py`` catches ``(Exception, SystemExit)`` and is
+    indifferent. Keeping both bases keeps all three on the arm they already
+    took.
+
+    ``exit_code`` is ``EXIT_UNREADABLE``, the code ``main`` already passed as its
+    ``default_exit_code``. ``text_line`` is the bare message for the same reason
+    as elsewhere -- it is what ``handle_system_exit`` printed -- though this
+    command has no text format, so only a host can ever observe it.
+    """
+
+    def __init__(self, message: str, *, error_code: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(
+            error_code,
+            message,
+            exit_code=EXIT_UNREADABLE,
+            details=details,
+            text_line=message,
+        )
+        # ``serve_mcp.system_exit_message`` reads ``SystemExit.code``; the old bare
+        # ``SystemExit(message)`` set it. Set it outright rather than leaning on the
+        # MRO detail that makes ``ScriptRefusal.__init__`` reach ``SystemExit.__init__``.
+        self.code = message
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -756,10 +796,11 @@ def build_export(project_root: Path, status_filter: list[str] | None) -> dict[st
     handoff = project.get("handoff")
     verification = project_handoff_verification(project_root, project)
     if verification.error_code is not None:
-        exc = SystemExit(verification.message or "Handoff signature verification failed.")
-        exc.error_code = verification.error_code
-        exc.details = verification.details or {}
-        raise exc
+        raise ExportRefusal(
+            verification.message or "Handoff signature verification failed.",
+            error_code=verification.error_code,
+            details=verification.details or {},
+        )
     try:
         questions_dir_label = questions_dir.relative_to(project_root).as_posix()
     except ValueError:
@@ -797,20 +838,43 @@ def render_output(document: dict[str, Any], output_format: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def run_export(project_root: str | Path, *, status: list[str] | None = None) -> dict[str, Any]:
+    """Return exactly the export document ``main`` prints under ``--format json``.
+
+    This is the library seam: a long-lived host can call it in-process instead
+    of shelling out to this script. ``status`` mirrors the repeatable
+    ``--status`` filter; ``None`` exports every status.
+
+    ``--format`` and ``--output`` have no counterpart here on purpose. Both are
+    about rendering and delivering the document, not producing it: ``jsonl`` is
+    the same document reshaped by ``render_output``, which stays public and
+    importable for a host that wants those bytes. The export itself is read-only
+    -- nothing under this seam writes to the workspace.
+
+    Refusals are raised as ``ScriptRefusal`` rather than printed; ``main``
+    renders them as the stderr envelope it always did.
+    """
+    try:
+        return build_export(
+            Path(project_root).expanduser().resolve(),
+            list(status) if status is not None else None,
+        )
+    except ScriptRefusal:
+        # ``ExportRefusal`` arrives here already carrying its code and details.
+        raise
+    except SystemExit as exc:
+        # An unreadable workspace or malformed research.yml is still a plain
+        # SystemExit(str); classified exactly as handle_system_exit classified it.
+        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_UNREADABLE) from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=True)
-    project_root = Path(args.project_root).expanduser().resolve()
     try:
-        document = build_export(project_root, args.status)
-    except SystemExit as exc:
-        return handle_system_exit(
-            exc,
-            json_mode=json_mode,
-            default_exit_code=EXIT_UNREADABLE,
-            error_code=getattr(exc, "error_code", None),
-            details=getattr(exc, "details", None),
-        )
+        document = run_export(args.project_root, status=args.status)
+    except ScriptRefusal as refusal:
+        return emit_refusal(refusal, json_mode=json_mode)
     rendered = render_output(document, args.format)
     if args.output:
         Path(args.output).expanduser().resolve().write_text(rendered, encoding="utf-8")
