@@ -117,8 +117,12 @@ All fields are optional strings (validated when present), except `license` may
 be explicit YAML `null` to record known uncertainty, `publication_year` may
 be an integer or four-digit string, `date_metadata` is a scalar mapping,
 `supported_evidence_areas` is a list of non-empty strings, and `scope` is a
-mapping of string keys to string values. Each `scope` key must match
-`^[a-z0-9_][a-z0-9._-]*$`; values are opaque non-empty strings. The workspace
+mapping of string keys to scalar values. Each `scope` key must match
+`^[a-z0-9_][a-z0-9._-]*$`; values are opaque and are compared as text. A
+non-string scalar is accepted and coerced — an unquoted `2026` matches a
+request scope of `"2026"` — but booleans, sequences, mappings, and empty
+values are dropped from the parsed scope rather than failing the sidecar, so
+quote any value whose YAML type is not obviously a string. The workspace
 stores and matches these keys — it never interprets them. `facet_id` is the
 convention `coverage_manifest.py` tooling uses to link a request to the facet
 it unblocks, not a schema this package knows; a pack or host may use any keys
