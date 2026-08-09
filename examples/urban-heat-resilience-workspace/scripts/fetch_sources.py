@@ -287,6 +287,7 @@ header_value = _acquisition_transport.header_value
 normalize_declared_domains = _acquisition_transport.normalize_declared_domains
 redact_diagnostic = _acquisition_transport.redact_diagnostic
 redact_url = _acquisition_transport.redact_url
+register_secret_env_name = _acquisition_transport.register_secret_env_name
 resolve_credential_placeholders = _acquisition_transport.resolve_credential_placeholders
 response_status = _acquisition_transport.response_status
 response_url = _acquisition_transport.response_url
@@ -621,13 +622,21 @@ def require_acquisition_registration(provider_id: str) -> Any:
     re-shapes the error rather than restating it.
     """
     try:
-        return require_registration(ACQUISITION_PHASE, provider_id)
+        registration = require_registration(ACQUISITION_PHASE, provider_id)
     except ProviderPluginError as exc:
         raise FetchSourcesError(
             exc.error_code,
             exc.message,
             remediation=exc.remediation,
         ) from exc
+    # Register the declared credential names for redaction here rather than at transport.
+    # The transport registers them when it resolves a placeholder, but validate_request and
+    # plan_fetch run before that and their refusals quote the request document, so a
+    # PROVIDER_REQUEST_INVALID or PROVIDER_PLAN_INVALID raised in between would render a
+    # value in the clear. Redaction has to be armed from the moment the declaration is known.
+    for name in registration.capabilities.credentials:
+        register_secret_env_name(name)
+    return registration
 
 
 def validate_provider_list(
