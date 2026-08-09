@@ -38,7 +38,7 @@
   `REQUEST_SCOPE_MISMATCH`, naming the conflicting keys and both values, and
   writes nothing — which is what stops a source that answers facet Y from
   being recorded as fulfilling a request for facet X. `fulfill --match-scope
-  key=value` lets the caller assert scope keys at fulfil time, checked the
+  key=value` lets the caller assert scope keys when fulfilling, checked the
   same way. `fulfill --require-scope` upgrades absence to a refusal: every key
   the request declares must be present and equal in the delivered scope, or
   the fulfilment is refused with `REQUEST_SCOPE_MISSING` — the fail-closed

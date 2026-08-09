@@ -82,7 +82,7 @@ python3 scripts/source_requests.py list --status open --format json
    Each record's `kind`, `query_or_identifier`, and `rationale` describe what
    would satisfy the request for a human reader. An optional `scope` mapping
    (for example `facet_id`, `candidate`) states the same thing
-   machine-readably — read it when present, because it is what fulfilment
+   machine-readably — read it when present, because it is what fulfillment
    checks the delivered evidence against, not just an informative hint.
 
 3. Plan the provider command without network I/O:
@@ -224,7 +224,7 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    sidecar's stamped `scope:` and refuses with `REQUEST_SCOPE_MISMATCH` when a
    key disagrees — deliver the evidence the request actually describes or open
    a matching request instead of editing the sidecar to force a match. Pass
-   `--match-scope key=value` to assert additional scope keys at fulfil time,
+   `--match-scope key=value` to assert additional scope keys when fulfilling,
    or `--require-scope` to also refuse a delivery that omits a key the request
    declares (`REQUEST_SCOPE_MISSING`).
 
