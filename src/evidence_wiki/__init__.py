@@ -19,6 +19,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
     # rather than written out, so this is what tells a static checker (and ruff)
     # that these names are deliberate re-exports and not dead imports.
     from . import errors as errors
+    from ._contract import contract as contract
     from .workspace import Workspace as Workspace
 
 # Attribute name -> (submodule to import, attribute on it, or ``None`` for the
@@ -26,12 +27,16 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
 # means ``__all__`` and ``__dir__`` stay derivable from one source.
 #
 # Register a name here only once its module exists, so ``__all__`` stays true
-# and ``from evidence_wiki import *`` cannot raise. The later units that add
-# ``contract.py`` extend this table -- ``"contract": (".contract", None)`` and
-# ``"fleet_status": (".contract", "fleet_status")`` -- plus the ``TYPE_CHECKING``
-# block above; nothing else here needs to change.
+# and ``from evidence_wiki import *`` cannot raise.
+#
+# ``contract`` resolves to ``._contract``, never a submodule spelled
+# ``contract``: the import system binds a submodule onto its package the first
+# time anything imports it, and ``cli`` does -- which would shadow the callable
+# below with a module and make ``evidence_wiki.contract()`` fail by import
+# order. The leading underscore keeps one meaning for the public name.
 _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "Workspace": (".workspace", "Workspace"),
+    "contract": ("._contract", "contract"),
     "errors": (".errors", None),
 }
 
