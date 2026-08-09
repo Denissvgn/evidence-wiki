@@ -32,8 +32,8 @@ from typing import Any
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-# The contract module owns the `rendered_coverage` shape, so an adapter response and a
-# written record are judged against one definition.
+# The contract module owns the `rendered_coverage` and structured-view shapes, so an
+# adapter response and a written record are judged against one definition.
 import _normalized_contract  # noqa: E402
 
 REQUEST_SCHEMA_VERSION = "1.0"
@@ -59,6 +59,7 @@ RESULT_KEYS = frozenset(
         "outline",
         "body_markdown",
         "rendered_coverage",
+        "structured",
         "warnings",
         "detail",
     }
@@ -96,6 +97,10 @@ class AdapterResult:
     body_markdown: str
     warnings: tuple[str, ...]
     rendered_coverage: dict[str, Any] | None
+    # The complete, uncapped structured rendering of the source, when the adapter has
+    # one to offer. Written beside the record as its structured-view sidecar and bound
+    # to it by hash; `None` simply means this source cannot be anchored.
+    structured: dict[str, Any] | None = None
 
 
 def build_request(
@@ -332,6 +337,21 @@ def validate_result(
         first = coverage_violations[0]
         raise _fail(source_id, adapter_name, f"returned an invalid `rendered_coverage`: {first.message}")
 
+    # Optional where `rendered_coverage` is required: an adapter whose source has no
+    # addressable structure has nothing to anchor against, which is a fact about the
+    # evidence rather than a protocol breach. Offered, it is checked here so a payload
+    # that could never be written is refused before anything is. The contract module owns
+    # the shape so the adapter response and the written record are judged by one code
+    # path — `field="structured"` names the response's key rather than the record's.
+    # Size needs no separate bound: `MAX_RESULT_BYTES` already caps the whole document
+    # this rides in.
+    structured = payload.get("structured")
+    if structured is not None:
+        structured_violations = _normalized_contract.validate_structured_payload(structured, field="structured")
+        if structured_violations:
+            first = structured_violations[0]
+            raise _fail(source_id, adapter_name, f"returned an invalid `structured`: {first.message}")
+
     warnings = _validate_warnings(payload.get("warnings"), source_id, adapter_name)
     if stderr:
         warnings = (*warnings, f"adapter stderr: {stderr}")
@@ -346,4 +366,5 @@ def validate_result(
         body_markdown=body.strip(),
         warnings=warnings,
         rendered_coverage=coverage,
+        structured=structured,
     )

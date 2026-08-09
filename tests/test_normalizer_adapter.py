@@ -40,10 +40,74 @@ CONFIG = load_script_module("adapter_tests_normalization_config", "_normalizatio
 INVENTORY = load_script_module("adapter_tests_inventory", "source_inventory.py")
 NORMALIZE = load_script_module("adapter_tests_normalize", "normalize_sources.py")
 CONTRACT = load_script_module("adapter_tests_contract", "_normalized_contract.py")
+STRUCTURED_VIEW = load_script_module("adapter_tests_structured_view", "_structured_view.py")
 
 SOURCE_ID = "raw:raw-data-keepa-40efe41f3b"
 RECORD_NAME = "raw--raw-data-keepa-40efe41f3b.md"
+SIDECAR_NAME = "raw--raw-data-keepa-40efe41f3b.structured.json"
+SIDECAR_REL = f"sources/normalized/{SIDECAR_NAME}"
 PAYLOAD = '{"supplier_quote": "23.99 EUR", "price_history": "90d median 21.40 EUR"}\n'
+FACETS = {"supplier_quote": "23.99 EUR", "price_history": "90d median 21.40 EUR"}
+
+# A second reference adapter, written into the temp workspace rather than added beside
+# the stub fixture. `structured` is optional in the protocol and the stub is what proves
+# an adapter offering none still works end to end, so the emitting case needs its own
+# implementation rather than a mode flag on that one. `EW_STRUCTURED_VIEW` carries the
+# JSON view to emit; the literal `omit` leaves the key out of the result entirely.
+STRUCTURED_ADAPTER_SOURCE = '''#!/usr/bin/env python3
+"""Conforming normalizer adapter that also emits a structured view."""
+
+import json
+import os
+import sys
+
+
+def main() -> int:
+    request = json.loads(sys.stdin.read())
+    project_root = request["project_root"]
+    payload = {}
+    for relative in request["raw_paths"]:
+        with open(os.path.join(project_root, relative), encoding="utf-8") as handle:
+            payload = json.load(handle)
+        break
+
+    result = {
+        "schema_version": "1.0",
+        "document_type": "normalizer_adapter_result",
+        "adapter": {
+            "name": "structured-normalize",
+            "version": os.environ.get("EW_STRUCTURED_VERSION", "1.0.0"),
+        },
+        "status": "content_extracted",
+        "title": "Structured rendering of " + request["manifest_record"]["id"],
+        "abstract": "Structured payload rendered beside a complete structured view.",
+        "outline": [[3, key] for key in payload],
+        "body_markdown": "\\n".join(
+            "### " + key + "\\n\\n- " + key + ": " + str(value) + "\\n"
+            for key, value in payload.items()
+        ),
+        "rendered_coverage": {
+            "total_values": len(payload),
+            "rendered_values": len(payload),
+            "ratio": 1.0,
+            "sections": [{"heading": key, "total": 1, "rendered": 1} for key in payload],
+        },
+        "warnings": [],
+    }
+    view = os.environ.get("EW_STRUCTURED_VIEW", "")
+    if view != "omit":
+        result["structured"] = (
+            json.loads(view)
+            if view
+            else {"source_id": request["manifest_record"]["id"], "facets": payload}
+        )
+    sys.stdout.write(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
 
 
 def adapter_config(**overrides):
@@ -387,6 +451,347 @@ class AdapterRenderedCoverageTests(AdapterWorkspaceMixin, unittest.TestCase):
             self.assertFalse(self.record_path(workspace).exists())
 
 
+class StructuredViewWorkspaceMixin(AdapterWorkspaceMixin):
+    """Workspaces whose adapter emits a structured view.
+
+    Deliberately not a TestCase, for the same reason `AdapterWorkspaceMixin` is not.
+    """
+
+    def structured_workspace(self, root: Path, **overrides) -> Path:
+        script = root / "structured_adapter.py"
+        script.write_text(STRUCTURED_ADAPTER_SOURCE, encoding="utf-8")
+        return self.make_workspace(
+            root,
+            adapter=adapter_config(
+                command=[sys.executable, str(script)],
+                name="structured-normalize",
+                **overrides,
+            ),
+        )
+
+    def sidecar_path(self, workspace: Path) -> Path:
+        return workspace / "sources" / "normalized" / SIDECAR_NAME
+
+    def contract_violations(self, workspace: Path) -> list:
+        manifest = {
+            record["id"]: record
+            for record in (
+                json.loads(line)
+                for line in (workspace / "sources" / "manifest.jsonl").read_text().splitlines()
+                if line.strip()
+            )
+        }
+        return CONTRACT.validate_record(
+            self.record_path(workspace),
+            manifest_by_id=manifest,
+            normalized_root=workspace / "sources" / "normalized",
+        )
+
+
+class AdapterStructuredViewTests(StructuredViewWorkspaceMixin, unittest.TestCase):
+    """The sidecar an adapter's `structured` becomes, and the binding that makes it evidence.
+
+    Grounding by quote is containment against the rendered body, which proves a record
+    contains a sentence. The structured view is the uncapped complement a pointer can
+    address — but only if the bytes on disk are the bytes the record attested, which is
+    what the `structured_view` binding is for. These tests check the two together,
+    because either alone is worthless.
+    """
+
+    def test_an_emitted_structured_view_is_written_and_bound_to_the_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            code, _, stderr = self.normalize(workspace)
+            sidecar = self.sidecar_path(workspace)
+            data = sidecar.read_bytes() if sidecar.is_file() else None
+            frontmatter = self.frontmatter(workspace)
+            violations = self.contract_violations(workspace)
+
+        self.assertIsNotNone(data, f"no sidecar was written: {stderr}")
+        self.assertEqual(0, code, stderr)
+        self.assertEqual({"source_id": SOURCE_ID, "facets": FACETS}, json.loads(data))
+        # The record binds these exact bytes, so the serialization has to be the one the
+        # writer would reproduce — sorted keys, two-space indent, one trailing newline.
+        self.assertEqual(NORMALIZE.render_structured_view(json.loads(data)), data)
+        self.assertTrue(data.endswith(b"\n"))
+        self.assertEqual(SIDECAR_REL, frontmatter["structured_view"]["path"])
+        self.assertEqual(
+            STRUCTURED_VIEW.content_hash(data),
+            frontmatter["structured_view"]["content_hash"],
+        )
+        self.assertEqual([], violations, [violation.message for violation in violations])
+
+    def test_the_declared_path_is_the_sidecars_canonical_location(self):
+        # A record that named a neighbour's sidecar would borrow evidence it never
+        # produced, so the contract pins the location rather than trusting the writer.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            self.normalize(workspace)
+            declared = self.frontmatter(workspace)["structured_view"]["path"]
+            expected = CONTRACT.expected_structured_path(
+                workspace / "sources" / "normalized", SOURCE_ID
+            )
+
+        self.assertEqual(SIDECAR_REL, declared)
+        self.assertEqual(expected.name, Path(declared).name)
+        self.assertFalse(Path(declared).is_absolute())
+
+    def test_an_adapter_that_emits_no_structured_view_leaves_no_sidecar(self):
+        # Not every source has addressable structure. Absence is a fact about the
+        # evidence, not a failure: the record is written, valid, and simply unanchorable.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            with stub_environment(EW_STRUCTURED_VIEW="omit"):
+                code, _, stderr = self.normalize(workspace)
+            sidecar_exists = self.sidecar_path(workspace).exists()
+            frontmatter = self.frontmatter(workspace)
+            violations = self.contract_violations(workspace)
+
+        self.assertEqual(0, code, stderr)
+        self.assertFalse(sidecar_exists, "a sidecar was written for an adapter that emitted none")
+        self.assertIn("structured_view", frontmatter)
+        self.assertIsNone(frontmatter["structured_view"])
+        self.assertEqual([], violations, [violation.message for violation in violations])
+
+    def test_regeneration_gains_a_sidecar_when_the_adapter_starts_emitting_one(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            with stub_environment(EW_STRUCTURED_VIEW="omit"):
+                self.normalize(workspace)
+            self.assertFalse(self.sidecar_path(workspace).exists())
+
+            code, _, stderr = self.normalize(workspace, "--force")
+            sidecar = self.sidecar_path(workspace)
+            data = sidecar.read_bytes() if sidecar.is_file() else None
+            frontmatter = self.frontmatter(workspace)
+            violations = self.contract_violations(workspace)
+
+        self.assertEqual(0, code, stderr)
+        self.assertIsNotNone(data, "regeneration did not write the newly offered structured view")
+        self.assertEqual(STRUCTURED_VIEW.content_hash(data), frontmatter["structured_view"]["content_hash"])
+        self.assertEqual([], violations, [violation.message for violation in violations])
+
+    def test_regeneration_removes_the_sidecar_when_the_adapter_stops_emitting_one(self):
+        """The direction that would otherwise leave an orphan nothing collects.
+
+        A sidecar no record declares is a contract violation and a file every consumer
+        here is blind to — they all glob `*.md`. So the record losing its binding has to
+        take the file with it, in the same action.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            self.normalize(workspace)
+            self.assertTrue(self.sidecar_path(workspace).is_file())
+
+            with stub_environment(EW_STRUCTURED_VIEW="omit"):
+                code, _, stderr = self.normalize(workspace, "--force")
+            sidecar_exists = self.sidecar_path(workspace).exists()
+            frontmatter = self.frontmatter(workspace)
+            violations = self.contract_violations(workspace)
+
+        self.assertEqual(0, code, stderr)
+        self.assertFalse(sidecar_exists, "a stale sidecar outlived the binding that declared it")
+        self.assertIsNone(frontmatter["structured_view"])
+        self.assertEqual([], violations, [violation.message for violation in violations])
+
+    def test_an_unchanged_source_reproduces_the_same_sidecar_bytes(self):
+        # The binding is by digest, so a serialization that varied between runs would
+        # invalidate a record nothing had a reason to rewrite.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            self.normalize(workspace)
+            first = self.sidecar_path(workspace).read_bytes()
+            self.normalize(workspace, "--force")
+            second = self.sidecar_path(workspace).read_bytes()
+            digest = self.frontmatter(workspace)["structured_view"]["content_hash"]
+
+        self.assertEqual(first, second)
+        self.assertEqual(STRUCTURED_VIEW.content_hash(second), digest)
+
+    def test_a_changed_payload_rewrites_the_sidecar_and_its_digest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            self.normalize(workspace)
+            before = self.frontmatter(workspace)["structured_view"]["content_hash"]
+
+            (workspace / "raw" / "data" / "keepa.json").write_text(
+                '{"supplier_quote": "24.99 EUR"}\n', encoding="utf-8"
+            )
+            self.inventory(workspace)
+            code, _, stderr = self.normalize(workspace)
+
+            after = self.frontmatter(workspace)["structured_view"]["content_hash"]
+            document = json.loads(self.sidecar_path(workspace).read_bytes())
+            violations = self.contract_violations(workspace)
+
+        self.assertEqual(0, code, stderr)
+        self.assertNotEqual(before, after)
+        self.assertEqual({"supplier_quote": "24.99 EUR"}, document["facets"])
+        self.assertEqual([], violations, [violation.message for violation in violations])
+
+    def test_an_anchor_resolves_against_the_written_sidecar(self):
+        """The whole point of the file: a pointer reaching one value in this record.
+
+        Written and read by different modules — the normalizer emits, `_structured_view`
+        resolves — so this is the first place the two halves of the binding meet.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            self.normalize(workspace)
+            frontmatter = self.frontmatter(workspace)
+            sidecar = self.sidecar_path(workspace)
+
+            match = STRUCTURED_VIEW.resolve_anchor(
+                frontmatter, sidecar, "facets/supplier_quote", "23.99 EUR"
+            )
+            mismatch = STRUCTURED_VIEW.resolve_anchor(
+                frontmatter, sidecar, "facets/supplier_quote", "24.99 EUR"
+            )
+            absent = STRUCTURED_VIEW.resolve_anchor(
+                frontmatter, sidecar, "facets/shipping", "0.00 EUR"
+            )
+
+        self.assertTrue(match.ok, match.detail)
+        self.assertEqual("/facets/supplier_quote", match.pointer)
+        self.assertEqual("23.99 EUR", match.resolved)
+        self.assertEqual(STRUCTURED_VIEW.RESULT_ANCHOR_VALUE_MISMATCH, mismatch.result)
+        self.assertEqual(STRUCTURED_VIEW.RESULT_ANCHOR_POINTER_NOT_FOUND, absent.result)
+
+    def test_a_structured_view_the_contract_refuses_fails_the_action(self):
+        # Refused in the response, before anything is written: a payload that could not
+        # be a valid sidecar must never become one.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            with stub_environment(EW_STRUCTURED_VIEW='["not", "an", "object"]'):
+                code, report, _ = self.normalize(workspace)
+
+            self.assertEqual(1, code)
+            self.assertIn("invalid `structured`", report["actions"][0]["error"])
+            self.assertFalse(self.record_path(workspace).exists())
+            self.assertFalse(self.sidecar_path(workspace).exists())
+
+
+class AdapterStructuredViewStalenessTests(StructuredViewWorkspaceMixin, unittest.TestCase):
+    """Records written before sidecars existed have to be able to gain one.
+
+    Without a signal they would stay `skipped_existing` forever. The signal is the
+    narrowest one that works — the key's absence on a method that could carry it — and
+    it has to fire exactly once, or every run re-executes an adapter to reproduce a
+    record it already had.
+    """
+
+    def normalize_pending(self, workspace: Path, *extra: str) -> tuple[int, dict, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = NORMALIZE.main(["--project-root", str(workspace), "--format", "json", *extra])
+        raw = stdout.getvalue()
+        return int(code or 0), (json.loads(raw) if raw.strip() else {}), stderr.getvalue()
+
+    def make_record_predate_the_sidecar(self, workspace: Path) -> None:
+        """Turn a record back into what this package wrote before CR-7."""
+        path = self.record_path(workspace)
+        frontmatter, body, error = CONTRACT.split_record(path.read_text(encoding="utf-8"))
+        self.assertIsNone(error)
+        self.assertIn("structured_view", frontmatter)
+        del frontmatter["structured_view"]
+        path.write_text(
+            "---\n"
+            + yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).strip()
+            + "\n---\n"
+            + body,
+            encoding="utf-8",
+        )
+        self.sidecar_path(workspace).unlink(missing_ok=True)
+
+    def test_a_record_predating_the_sidecar_is_stale_exactly_once(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            self.normalize(workspace)
+            self.make_record_predate_the_sidecar(workspace)
+
+            code, first, stderr = self.normalize_pending(workspace)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("updated", first["actions"][0]["action"])
+            self.assertTrue(first["actions"][0]["stale"])
+            self.assertTrue(self.sidecar_path(workspace).is_file())
+            self.assertIn("structured_view", self.frontmatter(workspace))
+
+            # Self-limiting: the key is there now, so the rule cannot fire again.
+            for run in range(2):
+                with self.subTest(run=run):
+                    _, settled, _ = self.normalize_pending(workspace)
+                    self.assertEqual([], settled["actions"], "the sidecar rule re-triggered")
+
+    def test_a_record_that_declares_no_view_still_settles(self):
+        # The key is present as `null`, which is a declaration too: this record has no
+        # structured view, and asking again would not change that.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            with stub_environment(EW_STRUCTURED_VIEW="omit"):
+                self.normalize(workspace)
+                self.assertIsNone(self.frontmatter(workspace)["structured_view"])
+                _, settled, _ = self.normalize_pending(workspace)
+
+        self.assertEqual([], settled["actions"])
+
+    def test_a_native_tabular_record_settles_even_though_it_emits_no_sidecar_yet(self):
+        """`table_text` is in the rule on eligibility, not on current behaviour.
+
+        Native tabular emission lands after this change, so a table record is written
+        with `structured_view: null` today. The key's presence is what settles it — if
+        the rule keyed on the sidecar file instead, every CSV in every workspace would
+        re-normalize on every run until that emission shipped.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.structured_workspace(Path(tmpdir))
+            (workspace / "raw" / "data" / "rows.csv").write_text(
+                "sku,price\nB0ABC,23.99\n", encoding="utf-8"
+            )
+            self.inventory(workspace)
+            self.normalize(workspace)
+
+            table_record = next(
+                path
+                for path in (workspace / "sources" / "normalized").glob("*.md")
+                if path.name != RECORD_NAME
+            )
+            frontmatter, _, _ = CONTRACT.split_record(table_record.read_text(encoding="utf-8"))
+            _, settled, stderr = self.normalize_pending(workspace)
+
+        self.assertEqual("table_text", frontmatter["extraction_method"])
+        self.assertIn("structured_view", frontmatter)
+        self.assertIsNone(frontmatter["structured_view"])
+        self.assertEqual([], settled["actions"], stderr)
+
+    def test_only_methods_that_can_emit_a_sidecar_are_stale_for_the_missing_key(self):
+        """Papers, PDFs, web links and codebase records are untouched by the rule.
+
+        They have no structured view to gain, so marking them stale would rewrite every
+        record in a workspace to reach the few that can carry one.
+        """
+        eligible = {"adapter", "table_text"}
+        methods = [
+            "adapter", "table_text", "pdf_text", "latex", "html_text",
+            "link_stub", "web_stub", "codebase_stub", "codebase_context",
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "rec.md"
+            for method in methods:
+                with self.subTest(extraction_method=method):
+                    header = (
+                        "---\nnormalizer:\n  name: normalize_sources.py\n"
+                        f"  version: {NORMALIZE.NORMALIZER_VERSION}\n"
+                        f"extraction_method: {method}\n"
+                    )
+                    output.write_text(header + "---\n\n# x\n", encoding="utf-8")
+                    self.assertEqual(method in eligible, NORMALIZE.is_stale({}, output))
+                    # Whatever its value, the key's presence settles the question.
+                    output.write_text(
+                        header + "structured_view: null\n---\n\n# x\n", encoding="utf-8"
+                    )
+                    self.assertFalse(NORMALIZE.is_stale({}, output))
+
+
 class AdapterStalenessTests(AdapterWorkspaceMixin, unittest.TestCase):
     """When an adapter re-runs, and — just as importantly — when it does not.
 
@@ -692,6 +1097,33 @@ class AdapterSelfCheckTests(unittest.TestCase):
             self.assertIn("NORMALIZED_CONTRACT_", str(caught.exception))
             self.assertFalse(record_path.exists(), "a rejected rendering must not be left on disk")
 
+    def test_a_rejected_rendering_takes_its_structured_view_with_it(self):
+        """Nothing else would ever collect the sidecar.
+
+        Every consumer here enumerates records by globbing `*.md` and `workspace_gc.py`
+        sweeps `runs/`, so a sidecar left beside a removed record would sit unread and
+        uncollected — and the contract would report it as undeclared on every run.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            normalized_root = workspace / "sources" / "normalized"
+            normalized_root.mkdir(parents=True)
+            record_path = normalized_root / RECORD_NAME
+            record_path.write_text("---\ntype: not_a_normalized_source\n---\n\n# broken\n", encoding="utf-8")
+            sidecar_path = normalized_root / SIDECAR_NAME
+            sidecar_path.write_bytes(NORMALIZE.render_structured_view({"facets": FACETS}))
+
+            with self.assertRaises(NORMALIZE.AdapterError):
+                NORMALIZE.verify_adapter_output(
+                    workspace,
+                    record_path,
+                    [{"id": SOURCE_ID, "kind": "structured_data", "raw_paths": ["raw/data/keepa.json"]}],
+                    normalized_root,
+                )
+
+            self.assertFalse(record_path.exists())
+            self.assertFalse(sidecar_path.exists(), "a rejected rendering left an orphaned sidecar")
+
     def test_conforming_rendering_passes_silently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -801,6 +1233,46 @@ class AdapterProtocolTests(unittest.TestCase):
 
     def test_warnings_must_be_strings(self):
         self.assertRejected(self.valid_payload(warnings=[1]), contains="non-string warning")
+
+    def test_structured_is_optional(self):
+        # Unlike `rendered_coverage`: an adapter whose source has no addressable
+        # structure has nothing to anchor, which is a property of the evidence.
+        self.assertIsNone(self.validate(self.valid_payload()).structured)
+
+    def test_an_emitted_structured_view_is_carried_through_unchanged(self):
+        view = {"source_id": "raw:x", "facets": {"price": "23.99 EUR", "units": 4}}
+        self.assertEqual(view, self.validate(self.valid_payload(structured=view)).structured)
+
+    def test_a_structured_view_that_is_not_one_object_is_rejected(self):
+        # An array or a bare scalar has no names to address, so every pointer into it
+        # would be positional.
+        self.assertRejected(self.valid_payload(structured=[1, 2]), contains="single JSON object")
+        self.assertRejected(self.valid_payload(structured="23.99"), contains="invalid `structured`")
+
+    def test_a_structured_view_that_cannot_be_addressed_is_rejected(self):
+        deep: dict = {}
+        cursor = deep
+        for _ in range(CONTRACT.STRUCTURED_VIEW_MAX_DEPTH + 2):
+            cursor["child"] = {}
+            cursor = cursor["child"]
+        self.assertRejected(self.valid_payload(structured=deep), contains="nests deeper")
+
+    def test_a_structured_view_that_is_not_json_is_rejected(self):
+        # `json.loads` accepts JavaScript's NaN extension, so a real adapter can send
+        # one; nothing downstream could write it back out as JSON.
+        self.assertRejected(
+            self.valid_payload(structured={"price": float("nan")}),
+            contains="not JSON-serializable",
+        )
+
+    def test_an_oversized_document_carrying_a_structured_view_is_refused(self):
+        # `structured` rides the same whole-stdout budget as everything else, so an
+        # adapter cannot consume the run by streaming a structured view instead of a body.
+        document = json.dumps(self.valid_payload(structured={"blob": "x" * ADAPTER.MAX_RESULT_BYTES}))
+        self.assertGreater(len(document.encode("utf-8")), ADAPTER.MAX_RESULT_BYTES)
+        with self.assertRaises(ADAPTER.AdapterError) as caught:
+            ADAPTER.parse_result_document(document, source_id="raw:x", adapter_name="stub")
+        self.assertIn("more than", str(caught.exception))
 
     def test_stderr_is_appended_as_a_warning(self):
         result = self.validate(self.valid_payload(), stderr="disk slow")
