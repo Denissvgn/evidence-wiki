@@ -53,10 +53,12 @@ STARTER_LOG_EXAMPLES = (
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _provider_plugins import ProviderPluginError, registered_ids, require_registration
 from _provider_registry import (
     ACQUISITION_PROVIDER_IDS,
     DISCOVERY_PROVIDER_IDS,
     ProviderListError,
+    ProviderNotRegisteredError,
     validate_provider_ids,
 )
 from _script_errors import handle_system_exit, json_mode_requested
@@ -102,6 +104,10 @@ class SmokeIssue:
     field: str | None = None
     expected: str | None = None
     actual: Any | None = None
+    # Optional, and set only where a stable code exists for the finding — today that is
+    # the provider-registration family.  ``issue`` drops keys whose value is ``None``, so
+    # every finding that had no code before still serializes exactly as it did.
+    error_code: str | None = None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -137,6 +143,7 @@ def issue(
     field: str | None = None,
     expected: str | None = None,
     actual: Any | None = None,
+    error_code: str | None = None,
 ) -> None:
     item = asdict(
         SmokeIssue(
@@ -148,6 +155,7 @@ def issue(
             field=field,
             expected=expected,
             actual=actual,
+            error_code=error_code,
         )
     )
     results["issues"].append({key: value for key, value in item.items() if value is not None})
@@ -318,12 +326,80 @@ def is_raw_target_path(relative_path: str) -> bool:
     return not path.is_absolute() and ".." not in parts and len(parts) >= 2 and parts[0] == "raw"
 
 
-def validate_provider_list(value: Any, *, phase: str = "acquisition") -> tuple[list[str], str | None, list[str]]:
+#: Prefix on the recommendation for an authorized id nothing supplies.  Smoke is the
+#: "safe to operate *here*" gate, so it is the surface that gets to say why an
+#: environment-shaped defect stops the workspace rather than merely annotating it.
+PROVIDER_REGISTRATION_RECOMMENDATION_PREFIX = (
+    "research.yml authorizes a provider this environment cannot supply, which is deploy drift on an "
+    "authorization boundary. "
+)
+
+
+def validate_provider_list(
+    value: Any,
+    *,
+    phase: str = "acquisition",
+) -> tuple[list[str], str | None, list[str], tuple[str, ...]]:
+    """Validate one configured allow-list, reporting rather than raising.
+
+    The fourth element is the ids the accepted set could not supply.  It is empty for
+    every other kind of provider-list defect (wrong shape, duplicates), which is what
+    keeps those findings worded exactly as they were: only an id that resolves to
+    nothing is a registration question.
+    """
+
     try:
-        validated = validate_provider_ids(value, phase=phase)
+        # Registration widens the accepted set to what is installed *here*, so a
+        # workspace authorizing a pip-installed provider passes only where it exists.
+        # With nothing installed this is ``()`` and the accepted set is the old one.
+        validated = validate_provider_ids(value, phase=phase, registered=registered_ids(phase))
+    except ProviderNotRegisteredError as exc:
+        return [], str(exc), [], exc.provider_ids
     except ProviderListError as exc:
-        return [], str(exc), []
-    return list(validated.providers), None, list(validated.legacy_strategies)
+        return [], str(exc), [], ()
+    return list(validated.providers), None, list(validated.legacy_strategies), ()
+
+
+def provider_registration_refusal(phase: str, provider_ids: tuple[str, ...]) -> ProviderPluginError | None:
+    """Diagnose ids nothing supplied, or ``None`` when there is nothing to diagnose.
+
+    ``require_registration`` separates the two states an operator must act on
+    differently: nothing registers the id (install a distribution) versus something
+    does and its declaration is broken (repair the named distribution).  A broken
+    registration wins when a list contains both, because telling someone to install
+    what is already installed is the advice that wastes the most time.
+    """
+
+    refusals: list[ProviderPluginError] = []
+    for provider_id in provider_ids:
+        try:
+            require_registration(phase, provider_id)
+        except ProviderPluginError as exc:
+            refusals.append(exc)
+        # A valid registration cannot appear here: it was in the accepted set already.
+    for refusal in refusals:
+        if refusal.error_code == "PROVIDER_REGISTRATION_INVALID":
+            return refusal
+    return refusals[0] if refusals else None
+
+
+def provider_list_finding(
+    phase: str,
+    unresolved: tuple[str, ...],
+    default_recommendation: str,
+) -> tuple[str, str | None]:
+    """Return the ``(recommendation, error_code)`` for one provider-list finding.
+
+    An unresolved id keeps the sentence hosts already parse and gains the registration
+    remediation plus a stable code, because the old advice — use only the built-ins —
+    is the closed-world statement CR-5 exists to retire, and it would now be wrong.
+    Every other provider-list defect keeps its recommendation verbatim.
+    """
+
+    refusal = provider_registration_refusal(phase, unresolved)
+    if refusal is None:
+        return default_recommendation, None
+    return f"{PROVIDER_REGISTRATION_RECOMMENDATION_PREFIX}{refusal.remediation}", refusal.error_code
 
 
 def check_codebase_analysis(project_root: Path, integrations_config: dict[str, Any], results: dict[str, Any]) -> None:
@@ -451,18 +527,24 @@ def check_acquisition(project_root: Path, integrations_config: dict[str, Any], r
             actual=type(enabled).__name__,
         )
         return
-    providers, provider_error, _legacy = validate_provider_list(acquisition.get("providers", []))
+    providers, provider_error, _legacy, unresolved = validate_provider_list(acquisition.get("providers", []))
     if provider_error is not None:
+        recommendation, error_code = provider_list_finding(
+            "acquisition",
+            unresolved,
+            f"Use only supported acquisition providers: {', '.join(ACQUISITION_ALLOWED_PROVIDERS)}.",
+        )
         issue(
             results,
             "HIGH",
             "config_shape",
             f"research.yml integrations.acquisition.providers {provider_error}",
             ["research.yml"],
-            f"Use only supported acquisition providers: {', '.join(ACQUISITION_ALLOWED_PROVIDERS)}.",
+            recommendation,
             field="integrations.acquisition.providers",
             expected="list of supported provider identifiers",
             actual=acquisition.get("providers"),
+            error_code=error_code,
         )
     elif enabled and not providers:
         issue(
@@ -570,21 +652,27 @@ def check_discovery(project_root: Path, integrations_config: dict[str, Any], res
         )
         return
 
-    providers, provider_error, legacy = validate_provider_list(
+    providers, provider_error, legacy, unresolved = validate_provider_list(
         discovery.get("providers", []),
         phase="discovery",
     )
     if provider_error is not None:
+        recommendation, error_code = provider_list_finding(
+            "discovery",
+            unresolved,
+            f"Use only supported discovery providers: {', '.join(DISCOVERY_PROVIDER_IDS)}.",
+        )
         issue(
             results,
             "HIGH",
             "config_shape",
             f"research.yml integrations.discovery.providers {provider_error}",
             ["research.yml"],
-            f"Use only supported discovery providers: {', '.join(DISCOVERY_PROVIDER_IDS)}.",
+            recommendation,
             field="integrations.discovery.providers",
             expected="list of supported provider identifiers",
             actual=discovery.get("providers"),
+            error_code=error_code,
         )
     elif enabled and not providers:
         issue(
