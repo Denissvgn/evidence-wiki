@@ -5165,6 +5165,52 @@ def verify_delegated_acquisition_postconditions(
     return "research", None
 
 
+def answered_grounded_slugs(export: dict[str, Any]) -> list[str]:
+    """The answered questions that declared grounding, and so have something to verify.
+
+    The test is that ``grounding`` is a non-empty list — never what an entry inside it
+    holds. A claim anchored to a field of its source's structured view is grounded exactly
+    as a quoted claim is, and a question grounded only by anchors must reach the verifier
+    like any other; deciding here which forms count would put a second, quieter opinion
+    about what grounding is next to the verifier's.
+    """
+    return [
+        str(question.get("slug"))
+        for question in export.get("questions", [])
+        if isinstance(question, dict)
+        and question.get("status") == "answered"
+        and isinstance(question.get("slug"), str)
+        and isinstance(question.get("grounding"), list)
+        and bool(question["grounding"])
+    ]
+
+
+def empty_quote_verification_report() -> dict[str, Any]:
+    """The grounding report persisted when no answered question declared any grounding.
+
+    Shaped key for key like `verify_quotes.build_report`'s, so
+    ``runs/<id>/evaluation/quote-verification.json`` has one schema whichever branch wrote
+    it. A consumer reading ``counts.by_form`` to measure a workspace's migration off
+    quote-only grounding must not have to discover that the file sometimes omits it,
+    and read the omission as zero anchors rather than as no questions.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": timestamp_utc(),
+        "network_io_executed": False,
+        "questions": [],
+        "counts": {
+            "questions": 0,
+            "grounding_entries": 0,
+            "verified": 0,
+            "failed": 0,
+            "missing_grounding": 0,
+            "by_form": {"quote": 0, "anchor": 0},
+        },
+        "overall_result": "verified",
+    }
+
+
 def verify_action_postconditions(
     project_root: Path,
     session: dict[str, Any],
@@ -6029,29 +6075,14 @@ def verify_action_postconditions(
         lint = authoritative["lint.json"]
         export = authoritative["export.json"]
         readiness = authoritative["publication-readiness.json"]
-        answered_slugs = [
-            str(question.get("slug"))
-            for question in export.get("questions", [])
-            if isinstance(question, dict)
-            and question.get("status") == "answered"
-            and isinstance(question.get("slug"), str)
-            and isinstance(question.get("grounding"), list)
-            and bool(question["grounding"])
-        ]
+        answered_slugs = answered_grounded_slugs(export)
         if answered_slugs:
             quotes = load_sibling_module("verify_quotes").build_report(
                 project_root,
                 SimpleNamespace(slug=answered_slugs),
             )
         else:
-            quotes = {
-                "schema_version": SCHEMA_VERSION,
-                "generated_at": timestamp_utc(),
-                "network_io_executed": False,
-                "questions": [],
-                "counts": {"questions": 0, "grounding_entries": 0, "verified": 0, "failed": 0, "missing_grounding": 0},
-                "overall_result": "verified",
-            }
+            quotes = empty_quote_verification_report()
         coverage = status.get("coverage") if isinstance(status.get("coverage"), dict) else {}
         coverage_report = {
             "schema_version": SCHEMA_VERSION,

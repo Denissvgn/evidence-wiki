@@ -590,7 +590,20 @@ def grounding_for_question(
     config: dict[str, Any],
     slug: str,
     warnings: list[str],
-) -> tuple[list[dict[str, str]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """A question's declared grounding entries, and the verifier's verdict on them.
+
+    Both are passed through as the verifier produced them, whichever evidence form each
+    entry carries: a quote entry is flat, an anchor entry nests ``anchor: {pointer,
+    expected}``, and the per-entry results carry ``form`` and ``policy`` beside the
+    pointer and resolved value an anchor was decided on. Nothing here summarizes or
+    re-renders that — the export and the MCP question detail are the same document, and a
+    host reading either sees exactly what the verifier saw.
+
+    A shape violation in either form is fatal to this question only: it becomes a warning
+    plus a verdict envelope carrying the stable ``error_code``, so one malformed entry
+    cannot take the export down with it.
+    """
     verify_quotes = load_sibling_module("verify_quotes")
     try:
         entries = verify_quotes.grounding_entries(frontmatter, slug)
@@ -607,6 +620,9 @@ def grounding_for_question(
             "slug": slug,
             "question_page": workspace_relative(question_path, project_root) or question_path.name,
             "grounding_count": 0,
+            # Counted from nothing rather than restated, so this refusal carries the same
+            # keys a real verification does and adding a form can never leave it behind.
+            "by_form": verify_quotes.count_by_form([]),
             "all_verified": False,
             "grounding": [],
             "error_code": exc.error_code,
