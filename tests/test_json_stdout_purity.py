@@ -16,7 +16,9 @@ the case table below, so a new command cannot quietly skip the contract.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -26,6 +28,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
+#: The CR-5 fixture provider distribution, discoverable by putting its parent on the
+#: child's import path. Registration is packaging metadata, so a subcommand that only
+#: exists for registered providers is unreachable until something is registered.
+PROVIDER_PLUGIN_ROOT = REPO_ROOT / "tests" / "fixtures" / "provider-plugins"
 
 # Declares `--format` so callers can detect json mode, but is a shared helper rather
 # than a command. Excluded explicitly so the enrollment guard stays honest.
@@ -43,6 +49,9 @@ class Case:
     argv: tuple[str, ...]
     stdout: str
     note: str = ""
+    #: Put the CR-5 fixture provider distribution on the child's import path. Off by
+    #: default so every pre-existing case runs in exactly the environment it always did.
+    plugins_installed: bool = False
 
 
 def enrolled_scripts() -> set[str]:
@@ -60,7 +69,17 @@ def enrolled_scripts() -> set[str]:
 ROOT = ("--project-root", "{ws}")
 WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
     "coverage_manifest.py": (Case((*ROOT, "validate", "--slug", "{slug}", "--format", "json"), DOCUMENT),),
-    "discover_sources.py": (Case((*ROOT, "--format", "json", "candidates", "list"), DOCUMENT),),
+    "discover_sources.py": (
+        Case((*ROOT, "--format", "json", "candidates", "list"), DOCUMENT),
+        Case(
+            ("--project-root", "{provider_ws}", "--format", "json", "registered", "search",
+             "--id", "keepa-search-fixture", "--request-file", "{registered_search_request}"),
+            EMPTY,
+            "registered discovery: the deepest path that reaches no network is the "
+            "provider's own refusal of the request document",
+            plugins_installed=True,
+        ),
+    ),
     "doctor.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
     "export_answers.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
     "fetch_sources.py": (
@@ -68,6 +87,14 @@ WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
             (*ROOT, "--format", "json", "arxiv", "search", "--query", "probe", "--max-results", "1"),
             EMPTY,
             "acquisition is disabled by default, so the reachable path is the refusal envelope",
+        ),
+        Case(
+            ("--project-root", "{provider_ws}", "--format", "json", "registered", "get",
+             "--id", "keepa-fixture", "--request-file", "requests/keepa.json"),
+            EMPTY,
+            "registered acquisition: the provider refuses the request document, which is as "
+            "far as this command goes without a network",
+            plugins_installed=True,
         ),
     ),
     "fleet_status.py": (Case(("--target", "{ws}", "--format", "json"), DOCUMENT),),
@@ -143,6 +170,7 @@ REPORTS_ON_A_BROKEN_WORKSPACE = {
 class JsonStdoutPurityTests(unittest.TestCase):
     workspace: Path
     not_a_workspace: Path
+    provider_workspace: Path
     tmp: tempfile.TemporaryDirectory
     substitutions: dict[str, str]
 
@@ -153,6 +181,7 @@ class JsonStdoutPurityTests(unittest.TestCase):
         cls.workspace = root / "workspace"
         cls.not_a_workspace = root / "not-a-workspace"
         cls.not_a_workspace.mkdir()
+        cls.provider_workspace = root / "provider-workspace"
 
         # A fully initialized workspace, not the minimal fixture: several commands only
         # reach a success path when the workspace has the structure init produces, and a
@@ -220,6 +249,12 @@ class JsonStdoutPurityTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+        # A second workspace, for the two subcommands that only exist for registered
+        # providers. It is separate on purpose: reaching them means enabling acquisition
+        # and discovery and authorizing provider ids, and doing that to the shared
+        # workspace would change what every other case above is running against.
+        registered_search_request = cls._build_provider_workspace()
+
         cls.substitutions = {
             "{slug}": slug,
             "{batch}": str(batch),
@@ -228,7 +263,48 @@ class JsonStdoutPurityTests(unittest.TestCase):
             "{request}": request_id,
             "{grounding_slug}": grounding_slug,
             "{grounding_file}": str(grounding_file),
+            "{provider_ws}": str(cls.provider_workspace),
+            "{registered_search_request}": str(registered_search_request),
         }
+
+    @classmethod
+    def _build_provider_workspace(cls) -> Path:
+        """Authorize both fixture providers, and hand each one a request it will refuse.
+
+        A refused request document is the deepest point these commands reach without a
+        network: registration is resolved, the id is authorized, the provider is loaded
+        and asked, and the refusal is rendered -- all of it new code that must not print
+        a word to stdout.
+        """
+        cls._run_setup(
+            "init_research_workspace.py",
+            [
+                "--target", str(cls.provider_workspace),
+                "--project-name", "stdout-purity-registered",
+                "--project-description", "Machine-output purity for registered providers.",
+            ],
+        )
+        config_path = cls.provider_workspace / "research.yml"
+        config = config_path.read_text(encoding="utf-8")
+        config = config.replace(
+            "  acquisition:\n    enabled: false\n    providers: []\n",
+            "  acquisition:\n    enabled: true\n    providers:\n      - keepa-fixture\n",
+        ).replace(
+            "  discovery:\n    enabled: false\n    providers: []\n",
+            "  discovery:\n    enabled: true\n    providers:\n      - keepa-search-fixture\n",
+        )
+        assert "keepa-fixture" in config and "keepa-search-fixture" in config, (
+            "the research.yml integrations block no longer matches what this setup edits"
+        )
+        config_path.write_text(config, encoding="utf-8")
+
+        acquisition_request = cls.provider_workspace / "requests" / "keepa.json"
+        acquisition_request.parent.mkdir(parents=True, exist_ok=True)
+        # 'asin' must be a ten-character product id, so the provider refuses this one.
+        acquisition_request.write_text('{"asin": "not-an-asin"}\n', encoding="utf-8")
+        search_request = cls.provider_workspace / "requests" / "search.json"
+        search_request.write_text('{"query": ""}\n', encoding="utf-8")
+        return search_request
 
     @classmethod
     def _run_setup(cls, script: str, argv: list[str]) -> None:
@@ -252,13 +328,24 @@ class JsonStdoutPurityTests(unittest.TestCase):
             resolved.append(value)
         return resolved
 
-    def run_script(self, script: str, argv: tuple[str, ...], project_root: Path) -> subprocess.CompletedProcess:
+    def child_environment(self, case: Case) -> dict[str, str] | None:
+        if not case.plugins_installed:
+            return None
+        environment = dict(os.environ)
+        existing = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            str(PROVIDER_PLUGIN_ROOT) if not existing else f"{PROVIDER_PLUGIN_ROOT}{os.pathsep}{existing}"
+        )
+        return environment
+
+    def run_script(self, script: str, case: Case, project_root: Path) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, str(SCRIPTS / script), *self.resolve(argv, project_root)],
+            [sys.executable, str(SCRIPTS / script), *self.resolve(case.argv, project_root)],
             capture_output=True,
             text=True,
             check=False,
             cwd=str(project_root),
+            env=self.child_environment(case),
         )
 
     # -- assertions --------------------------------------------------------------
@@ -303,7 +390,7 @@ class JsonStdoutPurityTests(unittest.TestCase):
         self.assertIn("message", envelope, f"{context}: envelope has no message")
 
     def check(self, script: str, case: Case, project_root: Path, label: str) -> None:
-        result = self.run_script(script, case.argv, project_root)
+        result = self.run_script(script, case, project_root)
         context = f"{script} [{label}] exit={result.returncode}"
         if case.note:
             context += f" ({case.note})"
@@ -336,7 +423,9 @@ class JsonStdoutPurityTests(unittest.TestCase):
             case = cases[0]
             expected = DOCUMENT if script in REPORTS_ON_A_BROKEN_WORKSPACE else EMPTY
             with self.subTest(script=script):
-                self.check(script, Case(case.argv, expected, case.note), self.not_a_workspace, "no workspace")
+                self.check(
+                    script, dataclasses.replace(case, stdout=expected), self.not_a_workspace, "no workspace"
+                )
 
 
 if __name__ == "__main__":
