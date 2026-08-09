@@ -3,50 +3,26 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib.util
 import json
 import sys
 from pathlib import Path
 from types import ModuleType
 
 from . import __version__
+
+# The script loader and its caches now live in ``_script_host`` so the library
+# API can share them without importing this argparse-shaped module. They stay
+# reachable under their original ``cli`` names: in-tree callers and the CLI test
+# suite reach for ``cli._load_script`` and clear the caches through ``cli``.
+from ._script_host import (
+    _LOADER_MODULE_CACHE,  # noqa: F401
+    _SCRIPT_MODULE_CACHE,  # noqa: F401
+    _load_script,
+    _load_workspace_loader,  # noqa: F401
+)
 from .resources import ORCHESTRATOR_SKILL, STARTER_DIR, assets_root, orchestrator_skill_path, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
-_SCRIPT_MODULE_CACHE: dict[str, ModuleType] = {}
-_LOADER_MODULE_CACHE: dict[str, ModuleType] = {}
-
-
-def _load_workspace_loader(script_dir: Path) -> ModuleType:
-    root = script_dir.expanduser().resolve()
-    path = root / "_workspace_module_loader.py"
-    if not path.is_file():
-        raise SystemExit(f"Missing packaged script loader: {path}")
-    content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-    key = f"{root}\0{content_hash}"
-    if key in _LOADER_MODULE_CACHE:
-        return _LOADER_MODULE_CACHE[key]
-    module_name = f"_evidence_wiki_loader_{abs(hash(key))}"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"Cannot load packaged script loader: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.modules.pop(module_name, None)
-    _LOADER_MODULE_CACHE[key] = module
-    return module
-
-
-def _load_script(script_path: Path, module_name: str) -> ModuleType:
-    if not script_path.is_file():
-        raise SystemExit(f"Missing packaged script: {script_path}")
-    del module_name  # retained for the stable internal call signature
-    loader = _load_workspace_loader(script_path.parent)
-    return loader.load_workspace_module(script_path.parent, script_path.stem, cache=_SCRIPT_MODULE_CACHE)
 
 
 def _load_initializer(starter_root: Path) -> ModuleType:
