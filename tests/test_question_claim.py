@@ -778,5 +778,110 @@ class VerificationFieldTests(ClaimTestBase):
             self.assertIn("evidence_strength", flagged_fields)
 
 
+class ClaimSeamTests(ClaimTestBase):
+    """CR-6 T9: the library seam and the CLI are one operation, audit entry included.
+
+    ``tests/test_seam_conformance.py`` already holds the two paths to the same
+    *document*. It cannot see ``log.md``, and that is the half of this command that
+    matters most: a claim moves a question between agents, and the entry recording
+    that move is the workspace's only account of who held what and when. These
+    tests are the guard on it — if the append is ever hoisted back out of the seam
+    and into ``main``, an in-process host mutates the backlog silently and the CLI
+    does not, and this fails.
+    """
+
+    def prepare(self, root: Path, name: str) -> Path:
+        scratch = root / name
+        scratch.mkdir()
+        return self.init_workspace(scratch)
+
+    def test_the_seam_appends_the_entry_the_cli_appends(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            via_cli = self.prepare(root, "cli")
+            via_seam = self.prepare(root, "seam")
+            before_cli = (via_cli / "log.md").read_text(encoding="utf-8")
+            before_seam = (via_seam / "log.md").read_text(encoding="utf-8")
+
+            code, _, stderr = self.run_claim(
+                "--project-root", str(via_cli), "claim",
+                "--slug", "which-benchmarks", "--agent-id", "agent-a", "--format", "json",
+            )
+            self.assertEqual(0, code, stderr)
+            report = CLAIM.run_claim(via_seam, slug="which-benchmarks", agent_id="agent-a")
+
+            self.assertTrue(report["applied"])
+            appended_cli = (via_cli / "log.md").read_text(encoding="utf-8")[len(before_cli):]
+            appended_seam = (via_seam / "log.md").read_text(encoding="utf-8")[len(before_seam):]
+            self.assertIn("Question claim", appended_seam)
+            self.assertIn("`which-benchmarks` (claimed)", appended_seam)
+            self.assertEqual(appended_cli, appended_seam)
+
+    def test_release_through_the_seam_is_recorded_too(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(Path(tmpdir), "seam")
+            CLAIM.run_claim(target, slug="which-benchmarks", agent_id="agent-a")
+            before = (target / "log.md").read_text(encoding="utf-8")
+
+            report = CLAIM.run_release(target, slug="which-benchmarks", agent_id="agent-a")
+
+            self.assertTrue(report["applied"])
+            appended = (target / "log.md").read_text(encoding="utf-8")[len(before):]
+            self.assertIn("Question release", appended)
+            self.assertIn("`which-benchmarks` (released)", appended)
+
+    def test_an_idempotent_no_op_appends_nothing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(Path(tmpdir), "seam")
+            CLAIM.run_claim(target, slug="which-benchmarks", agent_id="agent-a")
+            after_first = (target / "log.md").read_text(encoding="utf-8")
+
+            report = CLAIM.run_claim(target, slug="which-benchmarks", agent_id="agent-a")
+
+            self.assertFalse(report["applied"])
+            self.assertEqual("already_claimed_by_agent", report["outcome"])
+            self.assertEqual(after_first, (target / "log.md").read_text(encoding="utf-8"))
+
+    def test_a_refused_claim_raises_the_envelope_the_cli_emits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(Path(tmpdir), "seam")
+            CLAIM.run_claim(target, slug="which-benchmarks", agent_id="agent-a")
+            before = (target / "log.md").read_text(encoding="utf-8")
+
+            with self.assertRaises(CLAIM.ClaimError) as caught:
+                CLAIM.run_claim(target, slug="which-benchmarks", agent_id="agent-b")
+
+            refusal = caught.exception
+            self.assertEqual("CLAIM_HELD", refusal.error_code)
+            # Contention is exit 3, and stays exit 3: an orchestrator distinguishes a
+            # question someone else holds from a question it asked for wrongly.
+            self.assertEqual(3, refusal.exit_code)
+            envelope = refusal.to_envelope()
+            self.assertEqual("CLAIM_HELD", envelope["error_code"])
+            self.assertFalse(envelope["recoverable"])
+            self.assertEqual(
+                {"action": "claim", "slug": "which-benchmarks", "agent_id": "agent-b"},
+                envelope["details"],
+            )
+            self.assertEqual(before, (target / "log.md").read_text(encoding="utf-8"))
+
+    def test_a_refused_usage_error_keeps_exit_two(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(Path(tmpdir), "seam")
+            for kwargs, expected in (
+                ({"slug": "no-such-question", "agent_id": "agent-a"}, "SLUG_UNKNOWN"),
+                ({"slug": "which-benchmarks", "agent_id": "  "}, "AGENT_ID_INVALID"),
+                (
+                    {"slug": "which-benchmarks", "agent_id": "agent-a", "if_older_than": 4.0},
+                    "STEAL_FLAG_REQUIRED",
+                ),
+            ):
+                with self.subTest(expected=expected):
+                    with self.assertRaises(CLAIM.ClaimError) as caught:
+                        CLAIM.run_claim(target, **kwargs)
+                    self.assertEqual(expected, caught.exception.error_code)
+                    self.assertEqual(2, caught.exception.exit_code)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -64,7 +64,7 @@ _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
 
@@ -121,13 +121,42 @@ def load_sibling_module(stem: str) -> ModuleType:
     return _SIBLING_CACHE[stem]
 
 
-class ClaimError(Exception):
-    """A refused transition with a machine-readable error code."""
+class ClaimError(ScriptRefusal):
+    """A refused transition with a machine-readable error code.
 
-    def __init__(self, exit_code: int, error_code: str, message: str) -> None:
-        super().__init__(message)
-        self.exit_code = exit_code
-        self.error_code = error_code
+    Every helper in this file raises this, and two callers consume it: ``main``,
+    which renders it as the error envelope on stderr, and the ``run_claim`` /
+    ``run_release`` seams, which let it reach an embedding host as an exception.
+    Subclassing the shared refusal is what makes those one thing rather than two —
+    the seam does not translate, it just lets the raise through.
+
+    The positional signature stays ``(exit_code, error_code, message)`` because
+    roughly fifteen raise sites here and the helpers ``question_resolve.py`` and
+    ``verify_quotes.py`` call use it. ``details`` and ``remediation`` are new and
+    default to ``None``, which is exactly what ``error_envelope`` was already
+    given for both: a raise site that names neither produces the same envelope
+    bytes it always did, and only the seam — which knows the action, slug, and
+    agent id a bare helper cannot — fills ``details`` in.
+    """
+
+    def __init__(
+        self,
+        exit_code: int,
+        error_code: str,
+        message: str,
+        *,
+        recoverable: bool | None = None,
+        remediation: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            error_code,
+            message,
+            exit_code=exit_code,
+            recoverable=recoverable,
+            remediation=remediation,
+            details=details,
+        )
 
 
 def timestamp_utc() -> str:
@@ -447,69 +476,130 @@ def build_report(action: str, slug: str, agent_id: str, result: dict[str, Any]) 
     }
 
 
-def build_refusal(action: str, slug: str, agent_id: str, error: ClaimError) -> dict[str, Any]:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "action": action,
-        "ok": False,
-        "slug": slug,
-        "agent_id": agent_id,
-        "error_code": error.error_code,
-        "message": str(error),
-    }
-
-
 def render_text_report(report: dict[str, Any]) -> str:
     holder = report.get("holder")
     holder_text = f" (held by {holder['claimed_by']} since {holder['claimed_at']})" if holder else ""
     return f"{report['outcome']}: {report['slug']}{holder_text}\n"
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    json_mode = json_mode_requested(argv, default_json=args.format == "json")
-    project_root = Path(args.project_root).expanduser().resolve()
-    action = args.command
-    slug = args.slug.strip()
-    agent_id = args.agent_id.strip()
+def resolved_project_root(value: str | Path) -> Path:
+    """Resolve a caller-supplied project root the way this command always has."""
+    return Path(value).expanduser().resolve()
+
+
+def _run_transition(
+    project_root: str | Path,
+    action: str,
+    slug: str,
+    agent_id: str,
+    *,
+    steal: bool = False,
+    if_older_than: float | None = None,
+) -> dict[str, Any]:
+    """Apply one claim-lifecycle transition and return the report ``main`` prints.
+
+    ``run_claim`` and ``run_release`` are the two seams a host calls; this is the
+    body they share, because the two verbs differ only in which transition runs
+    and which flags are meaningful.
+
+    The ``log.md`` append is deliberately *inside* this function, exactly where
+    ``main`` used to perform it: after the page is written and before the report
+    is built. A claim is a workspace mutation, and the audit entry is part of the
+    mutation rather than part of printing it. Were the append left in ``main``, a
+    host calling this seam would move a question between agents and leave no
+    trace of it in the one file this package exists to keep honest, while the CLI
+    doing the identical thing wrote the entry — the audit log would then depend on
+    which door the caller came through. It must not.
+
+    ``result["applied"]`` still guards the append, so an idempotent no-op (a
+    re-claim by the holder, a release of an already-open question) writes nothing,
+    just as before.
+    """
+    root = resolved_project_root(project_root)
+    slug = slug.strip()
+    agent_id = agent_id.strip()
     try:
         if not agent_id:
             raise ClaimError(EXIT_INVALID, "AGENT_ID_INVALID", "--agent-id must be a non-empty string")
-        if action == "claim" and args.if_older_than is not None and not args.steal:
+        if action == "claim" and if_older_than is not None and not steal:
             raise ClaimError(EXIT_INVALID, "STEAL_FLAG_REQUIRED", "--if-older-than requires --steal")
-        page_path = question_page_path(project_root, slug)
+        page_path = question_page_path(root, slug)
         if action == "claim":
-            result = transition_claim(page_path, agent_id, args.steal, args.if_older_than)
+            result = transition_claim(page_path, agent_id, steal, if_older_than)
         else:
             result = transition_release(page_path, agent_id)
     except ClaimError as error:
-        if json_mode:
-            emit_error(
-                str(error),
-                json_mode=True,
-                error_code=error.error_code,
-                details={"action": action, "slug": slug, "agent_id": agent_id},
-            )
-        else:
-            print(f"refused ({error.error_code}): {error}", file=sys.stderr)
-        return error.exit_code
+        # A helper raising this cannot know which verb it was called under, so the
+        # operation it belongs to is stamped here. This is the same detail block
+        # `main` used to attach while rendering; anything a raise site named itself
+        # is kept, so a future coded refusal can carry its own detail without
+        # having to know that the seam also stamps one.
+        error.details = {"action": action, "slug": slug, "agent_id": agent_id, **(error.details or {})}
+        raise
     except LockUnavailableError as error:
-        if json_mode:
-            emit_error(
-                str(error),
-                json_mode=True,
-                error_code=error.error_code,
-                details=error.details,
-            )
-        else:
-            print(f"refused ({error.error_code}): {error}", file=sys.stderr)
-        return EXIT_INVALID
+        raise ScriptRefusal(
+            error.error_code,
+            str(error),
+            exit_code=EXIT_INVALID,
+            details=error.details,
+        ) from error
     except SystemExit as exc:
-        return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
+        # An unreadable workspace reaches here as SystemExit(str); from_system_exit
+        # re-raises anything else untouched.
+        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
 
     if result["applied"]:
-        append_log_entry(project_root / "log.md", render_log(action, slug, agent_id, result["outcome"]))
-    report = build_report(action, slug, agent_id, result)
+        append_log_entry(root / "log.md", render_log(action, slug, agent_id, result["outcome"]))
+    return build_report(action, slug, agent_id, result)
+
+
+def run_claim(
+    project_root: str | Path,
+    *,
+    slug: str,
+    agent_id: str,
+    steal: bool = False,
+    if_older_than: float | None = None,
+) -> dict[str, Any]:
+    """Claim a question (``open`` -> ``in_progress``), returning the CLI's JSON report.
+
+    Keyword arguments mirror the ``claim`` subcommand's flags one for one.
+    Refusals are raised as ``ScriptRefusal`` (here always a ``ClaimError``, which
+    is one) instead of printed, so the caller decides how to render them;
+    ``tests/test_seam_conformance.py`` holds this and the CLI to each other.
+    """
+    return _run_transition(
+        project_root,
+        "claim",
+        slug,
+        agent_id,
+        steal=steal,
+        if_older_than=if_older_than,
+    )
+
+
+def run_release(project_root: str | Path, *, slug: str, agent_id: str) -> dict[str, Any]:
+    """Release a claim (``in_progress`` -> ``open``), returning the CLI's JSON report."""
+    return _run_transition(project_root, "release", slug, agent_id)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    json_mode = json_mode_requested(argv, default_json=args.format == "json")
+    try:
+        if args.command == "claim":
+            report = run_claim(
+                args.project_root,
+                slug=args.slug,
+                agent_id=args.agent_id,
+                steal=args.steal,
+                if_older_than=args.if_older_than,
+            )
+        else:
+            report = run_release(args.project_root, slug=args.slug, agent_id=args.agent_id)
+    except ScriptRefusal as refusal:
+        return emit_refusal(refusal, json_mode=json_mode)
+
     if args.format == "json":
         print(json.dumps(report, indent=2, sort_keys=False))
     else:

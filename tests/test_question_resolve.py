@@ -1683,5 +1683,141 @@ class QuestionResolveTests(unittest.TestCase):
                     self.assertIn("remediation", payload)
 
 
+class QuestionResolveSeamTests(unittest.TestCase):
+    """CR-6 T9: the library seam and the CLI are one operation, audit entry included.
+
+    ``tests/test_seam_conformance.py`` holds the two paths to the same *document*.
+    It cannot see ``log.md``, which for a resolution is the record that a question
+    left the backlog and why. These tests pin the append inside the seam, and pin
+    the exit code each refusal family carries — a resolution has two of them, and a
+    rewrite that collapses the claim conflict onto exit 2 would be invisible to
+    every document-level check in the suite.
+    """
+
+    def prepare(self, root: Path, name: str) -> Path:
+        scratch = root / name
+        scratch.mkdir()
+        target = scratch / "resolve-workspace"
+        profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text(encoding="utf-8"))
+        profile["workspace_init"]["target_path"] = str(target)
+        profile["workspace_init"]["questions"] = [
+            {"id": "which-benchmarks", "question": "Which benchmarks matter?", "priority": "high"},
+        ]
+        profile_path = scratch / "profile.yml"
+        profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            INIT.main(["--profile", str(profile_path)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            CLAIM.main(
+                [
+                    "--project-root", str(target), "claim",
+                    "--slug", "which-benchmarks", "--agent-id", "agent-a", "--format", "json",
+                ]
+            )
+        return target
+
+    def test_the_seam_appends_the_entry_the_cli_appends(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            via_cli = self.prepare(root, "cli")
+            via_seam = self.prepare(root, "seam")
+            before_cli = (via_cli / "log.md").read_text(encoding="utf-8")
+            before_seam = (via_seam / "log.md").read_text(encoding="utf-8")
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = RESOLVE.main(
+                    [
+                        "--project-root", str(via_cli), "block",
+                        "--slug", "which-benchmarks", "--agent-id", "agent-a",
+                        "--blocked-reason", "Needs evidence.", "--format", "json",
+                    ]
+                )
+            self.assertEqual(0, int(code or 0), stdout.getvalue())
+            report = RESOLVE.run_block(
+                via_seam,
+                slug="which-benchmarks",
+                agent_id="agent-a",
+                blocked_reason="Needs evidence.",
+            )
+
+            self.assertEqual("blocked", report["status"])
+            appended_cli = (via_cli / "log.md").read_text(encoding="utf-8")[len(before_cli):]
+            appended_seam = (via_seam / "log.md").read_text(encoding="utf-8")[len(before_seam):]
+            self.assertIn("Question blocked", appended_seam)
+            self.assertIn("`which-benchmarks` (block)", appended_seam)
+            self.assertEqual(appended_cli, appended_seam)
+
+    def test_every_resolution_verb_records_itself(self):
+        for verb, call, headline in (
+            (
+                "defer",
+                lambda target: RESOLVE.run_defer(
+                    target, slug="which-benchmarks", agent_id="agent-a", reason="Later."
+                ),
+                "Question deferred",
+            ),
+            (
+                "reject",
+                lambda target: RESOLVE.run_reject(
+                    target, slug="which-benchmarks", agent_id="agent-a", reason="Out of scope."
+                ),
+                "Question rejected",
+            ),
+        ):
+            with self.subTest(verb=verb), tempfile.TemporaryDirectory() as tmpdir:
+                target = self.prepare(Path(tmpdir), "seam")
+                before = (target / "log.md").read_text(encoding="utf-8")
+                call(target)
+                appended = (target / "log.md").read_text(encoding="utf-8")[len(before):]
+                self.assertIn(headline, appended)
+                self.assertIn(f"`which-benchmarks` ({verb})", appended)
+
+    def test_a_claim_conflict_is_exit_three_and_everything_else_is_exit_two(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(Path(tmpdir), "seam")
+            before = (target / "log.md").read_text(encoding="utf-8")
+            cases = (
+                (
+                    lambda: RESOLVE.run_defer(
+                        target, slug="which-benchmarks", agent_id="agent-b", reason="Later."
+                    ),
+                    "CLAIM_HELD",
+                    3,
+                ),
+                (
+                    lambda: RESOLVE.run_defer(
+                        target, slug="no-such-question", agent_id="agent-a", reason="Later."
+                    ),
+                    "SLUG_UNKNOWN",
+                    2,
+                ),
+                (
+                    lambda: RESOLVE.run_answer(
+                        target, slug="which-benchmarks", agent_id="agent-a", answer_page="wiki/nope.md"
+                    ),
+                    "ANSWER_SOURCE_REQUIRED",
+                    2,
+                ),
+                (
+                    lambda: RESOLVE.run_approve(target, slug="which-benchmarks", reviewer="  "),
+                    "REVIEWER_INVALID",
+                    2,
+                ),
+            )
+            for call, expected_code, expected_exit in cases:
+                with self.subTest(expected_code=expected_code):
+                    with self.assertRaises(RESOLVE.ScriptRefusal) as caught:
+                        call()
+                    refusal = caught.exception
+                    self.assertEqual(expected_code, refusal.error_code)
+                    self.assertEqual(expected_exit, refusal.exit_code)
+                    envelope = refusal.to_envelope()
+                    self.assertEqual(expected_code, envelope["error_code"])
+                    self.assertIn("remediation", envelope)
+            # A refused resolution writes no audit entry, on this path as on the CLI's.
+            self.assertEqual(before, (target / "log.md").read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
