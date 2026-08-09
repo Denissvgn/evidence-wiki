@@ -36,6 +36,10 @@ CLAIM = load_script_module("research_workspace_status_claim", CLAIM_SCRIPT_PATH)
 INIT = load_script_module("research_workspace_status_init", INIT_SCRIPT_PATH)
 RUN_CONTROLLER = load_script_module("research_workspace_status_run_controller", RUN_CONTROLLER_SCRIPT_PATH)
 
+# CR-4: a domain pack may namespace its own request kinds. Status reporting keys on
+# request *status*, so the id is carried, never parsed — these tests hold that line.
+PACK_REQUEST_KIND = "pack:market-data/supplier_quote"
+
 
 class WorkspaceStatusTests(unittest.TestCase):
     def init_workspace(
@@ -321,6 +325,81 @@ optional_facets: []
     def write_source_requests(self, target: Path, records: list[dict]) -> None:
         path = target / "sources" / "source-requests.jsonl"
         path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records), encoding="utf-8")
+
+    def declare_pack_request_kind(self, target: Path) -> None:
+        """Give the workspace a domain pack that declares one namespaced request kind."""
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text())
+        config["domain_pack"] = {
+            "name": "market-data",
+            "request_kinds": [
+                {
+                    "id": PACK_REQUEST_KIND,
+                    "label": "Supplier quote",
+                    "description": "Live SKU price from a named supplier.",
+                }
+            ],
+        }
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def blocked_on_one_request(self, root: Path, name: str, request: dict) -> dict:
+        """Status document for a workspace whose only blocked question links to ``request``.
+
+        Everything except the request fields under test is held constant, so two
+        calls differing only in ``kind`` are directly comparable.
+        """
+        target = self.init_workspace(
+            root,
+            name=name,
+            questions=[{"id": "needs-evidence", "question": "Needs evidence?"}],
+        )
+        self.declare_pack_request_kind(target)
+        self.write_source_requests(
+            target,
+            [
+                {
+                    "schema_version": "1.0",
+                    "request_id": "req-needs-evidence",
+                    "query_or_identifier": "official benchmark report",
+                    "rationale": "Need an official benchmark report.",
+                    "priority": "high",
+                    "question_slugs": ["needs-evidence"],
+                    "status": "open",
+                    "source_id": None,
+                    **request,
+                }
+            ],
+        )
+        self.set_question_status(
+            target,
+            "needs-evidence",
+            "blocked",
+            {
+                "blocked_reason": "Needs a benchmark report from the fetch agent.",
+                "blocking_request_ids": "\n  - req-needs-evidence",
+            },
+        )
+        code, document = self.status_json(target)
+        self.assertEqual(0, code)
+        return document
+
+    @staticmethod
+    def request_carry_through_facts(document: dict) -> dict:
+        """The status fields a request's kind must never perturb."""
+        questions = document["questions"]
+        sources = document["sources"]
+        return {
+            "verdict": document["readiness"]["verdict"],
+            "blocked_slugs": questions["blocked_slugs"],
+            "blocked_questions_with_requests": questions["blocked_questions_with_requests"],
+            "blocked_questions_missing_requests": questions["blocked_questions_missing_requests"],
+            "blocked_slugs_missing_requests": questions["blocked_slugs_missing_requests"],
+            "missing_blocking_request_ids": questions["missing_blocking_request_ids"],
+            "blocked_request_link_errors": questions["blocked_request_link_errors"],
+            "blocked_open_request_ids": questions["blocked_open_request_ids"],
+            "requests_open": sources["requests_open"],
+            "requests_open_ids": sources["requests_open_ids"],
+        }
 
     def write_cited_web_manifest_record(self, target: Path) -> None:
         source_id = "web:official-fixture"
@@ -1916,6 +1995,81 @@ question: Does cache invalidation work?
 
             check_code, _, _ = self.run_status("--project-root", str(target), "--check-complete", "--format", "json")
             self.assertEqual(3, check_code)
+
+    def test_pack_namespaced_kind_reaches_the_same_blocked_on_sources_verdict(self):
+        """CR-4: a namespaced kind id must count exactly like a built-in one.
+
+        The verdict and every open-request count key on request status, so swapping
+        ``paper`` for ``pack:market-data/supplier_quote`` may not move a single field.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            builtin = self.blocked_on_one_request(root, "builtin-kind-workspace", {"kind": "paper"})
+            pack = self.blocked_on_one_request(
+                root,
+                "pack-kind-workspace",
+                {"kind": PACK_REQUEST_KIND},
+            )
+
+        self.assertEqual(
+            self.request_carry_through_facts(builtin),
+            self.request_carry_through_facts(pack),
+        )
+        self.assertEqual("blocked_on_sources", pack["readiness"]["verdict"])
+        self.assertEqual(1, pack["sources"]["requests_open"])
+        self.assertEqual(["req-needs-evidence"], pack["sources"]["requests_open_ids"])
+        self.assertEqual(1, pack["questions"]["blocked_questions_with_requests"])
+        self.assertEqual(0, pack["questions"]["blocked_questions_missing_requests"])
+        self.assertEqual([], pack["questions"]["blocked_request_link_errors"])
+        self.assertEqual(["req-needs-evidence"], pack["questions"]["blocked_open_request_ids"])
+
+    def test_structured_data_kind_reaches_the_same_blocked_on_sources_verdict(self):
+        """CR-4 added ``structured_data`` as a built-in; it is not a special case."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            builtin = self.blocked_on_one_request(root, "paper-kind-workspace", {"kind": "paper"})
+            structured = self.blocked_on_one_request(
+                root,
+                "structured-kind-workspace",
+                {"kind": "structured_data"},
+            )
+
+        self.assertEqual(
+            self.request_carry_through_facts(builtin),
+            self.request_carry_through_facts(structured),
+        )
+        self.assertEqual("blocked_on_sources", structured["readiness"]["verdict"])
+        self.assertEqual(1, structured["sources"]["requests_open"])
+        self.assertEqual(1, structured["questions"]["blocked_questions_with_requests"])
+        self.assertEqual([], structured["questions"]["blocked_request_link_errors"])
+
+    def test_request_scope_mapping_does_not_disturb_the_status_verdict(self):
+        """A scoped request carries an extra record field; status must ignore it.
+
+        Rendering ``scope`` here is not required — not choking on it is.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            unscoped = self.blocked_on_one_request(
+                root,
+                "unscoped-workspace",
+                {"kind": PACK_REQUEST_KIND},
+            )
+            scoped = self.blocked_on_one_request(
+                root,
+                "scoped-workspace",
+                {
+                    "kind": PACK_REQUEST_KIND,
+                    "scope": {"facet_id": "supplier_quote", "candidate": "acme-widget"},
+                },
+            )
+
+        self.assertEqual(
+            self.request_carry_through_facts(unscoped),
+            self.request_carry_through_facts(scoped),
+        )
+        self.assertEqual("blocked_on_sources", scoped["readiness"]["verdict"])
+        self.assertEqual(1, scoped["sources"]["requests_open"])
 
     def test_blocked_question_without_request_link_requires_attention(self):
         with tempfile.TemporaryDirectory() as tmpdir:
