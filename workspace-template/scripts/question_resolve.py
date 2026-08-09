@@ -753,10 +753,138 @@ def render_mapping_sequence(key: str, entries: list[dict[str, str]]) -> list[str
     return lines
 
 
-def render_frontmatter_value(key: str, value: str | bool | list[str] | list[dict[str, str]], quote: bool) -> list[str]:
+GROUNDING_FIELD = "grounding"
+GROUNDING_HEAD_FIELDS = ("claim", "source_id")
+GROUNDING_ANCHOR_FIELDS = ("pointer", "expected")
+GROUNDING_ENTRY_FIELDS = ("claim", "source_id", "quote", "location_hint", "anchor")
+# Free-text grounding fields are always emitted in the JSON double-quoted form: claims,
+# quotes, hints, pointers and expected values are host prose, and `quote_scalar`'s bare
+# character class silently loses leading/trailing spaces and retypes number-, date- and
+# bool-shaped values on the way back through `yaml.safe_load`. `source_id` is the one
+# grounding scalar left to `quote_scalar`, because it is a validated manifest identifier
+# and the workspace already renders bare ids in the `source_ids` list.
+GROUNDING_ALWAYS_QUOTED_FIELDS = frozenset({"claim", "quote", "location_hint", "pointer", "expected"})
+GROUNDING_ENTRY_LEAD = "  - "
+GROUNDING_ENTRY_INDENT = "    "
+GROUNDING_NESTED_INDENT = "      "
+
+
+def quote_grounding_scalar(value: str, *, always_quote: bool = False) -> str:
+    """Render one grounding scalar so ``yaml.safe_load`` returns the identical string.
+
+    Delegates to ``quote_scalar`` and forces its JSON double-quoted branch in the two
+    cases where the bare form does not round-trip: ``always_quote`` (every free-text
+    grounding field, so ``expected: "23.99"`` cannot reload as a float) and values with
+    leading or trailing whitespace, which YAML strips from a plain scalar.
+    """
+    if always_quote or value != value.strip():
+        return json.dumps(value)
+    return quote_scalar(value)
+
+
+def _grounding_scalar(index: int, field: str, value: Any, *, path: str = "") -> str:
+    """Render one already-canonical grounding scalar, or refuse if it is not a string.
+
+    Grounding scalars are canonically strings by the time they reach the renderer
+    (``verify_quotes.grounding_entries`` canonicalizes ``expected`` at load). Refusing a
+    non-string here is the guard against the failure this renderer exists to prevent:
+    ``str()``-ing a mapping into a YAML string that reloads as the wrong type.
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            f"grounding[{index}].{path}{field} must be a string; canonicalize scalars before "
+            f"rendering (got {type(value).__name__})"
+        )
+    return quote_grounding_scalar(value, always_quote=field in GROUNDING_ALWAYS_QUOTED_FIELDS)
+
+
+def render_grounding_entry(index: int, entry: dict[str, Any]) -> list[str]:
+    """Render one grounding entry in canonical key order.
+
+    ``claim``, ``source_id``, then exactly one form: ``quote`` (optionally followed by
+    ``location_hint``) or a nested ``anchor`` block carrying ``pointer`` then ``expected``.
+    Keys whose value is ``None`` count as absent.
+
+    This is a serializer for an already-validated entry, not a validator: it refuses a
+    malformed entry with ``ValueError`` rather than emitting bytes that would reload as a
+    different shape. Callers validate entry shape first (``verify_quotes.grounding_entries``
+    owns those rules and their stable ``GROUNDING_INVALID`` code).
+    """
+    fields = {field: value for field, value in entry.items() if value is not None}
+    unknown = sorted(str(field) for field in fields if field not in GROUNDING_ENTRY_FIELDS)
+    if unknown:
+        raise ValueError(f"grounding[{index}] has unsupported key(s): {', '.join(unknown)}")
+
+    lines: list[str] = []
+    indent = GROUNDING_ENTRY_LEAD
+    for field in GROUNDING_HEAD_FIELDS:
+        if field not in fields:
+            raise ValueError(f"grounding[{index}] is missing required {field}")
+        lines.append(f"{indent}{field}: {_grounding_scalar(index, field, fields[field])}")
+        indent = GROUNDING_ENTRY_INDENT
+
+    has_quote = "quote" in fields
+    has_anchor = "anchor" in fields
+    if has_quote and has_anchor:
+        raise ValueError(f"grounding[{index}] carries both forms; an entry must carry exactly one of quote or anchor")
+    if not has_quote and not has_anchor:
+        raise ValueError(f"grounding[{index}] carries no form; an entry must carry exactly one of quote or anchor")
+
+    if has_quote:
+        lines.append(f"{indent}quote: {_grounding_scalar(index, 'quote', fields['quote'])}")
+        if "location_hint" in fields:
+            hint = _grounding_scalar(index, "location_hint", fields["location_hint"])
+            lines.append(f"{indent}location_hint: {hint}")
+        return lines
+
+    if "location_hint" in fields:
+        # location_hint anchors a quote inside the rendered body; it is meaningless beside a
+        # pointer into the structured view, so emitting it would record a claim about nothing.
+        raise ValueError(f"grounding[{index}] cannot carry location_hint beside anchor")
+    anchor = fields["anchor"]
+    if not isinstance(anchor, dict):
+        raise ValueError(f"grounding[{index}].anchor must be a mapping, got {type(anchor).__name__}")
+    anchor_fields = {field: value for field, value in anchor.items() if value is not None}
+    unknown_anchor = sorted(str(field) for field in anchor_fields if field not in GROUNDING_ANCHOR_FIELDS)
+    if unknown_anchor:
+        raise ValueError(f"grounding[{index}].anchor has unsupported key(s): {', '.join(unknown_anchor)}")
+    lines.append(f"{indent}anchor:")
+    for field in GROUNDING_ANCHOR_FIELDS:
+        if field not in anchor_fields:
+            raise ValueError(f"grounding[{index}].anchor is missing required {field}")
+        rendered = _grounding_scalar(index, field, anchor_fields[field], path="anchor.")
+        lines.append(f"{GROUNDING_NESTED_INDENT}{field}: {rendered}")
+    return lines
+
+
+def render_grounding_sequence(key: str, entries: list[dict[str, Any]]) -> list[str]:
+    """Render the canonical `grounding` block — the one nested mapping sequence this schema has.
+
+    `render_mapping_sequence` cannot serve grounding: it hardcodes two indentation levels
+    and stringifies every value, so a nested `anchor` mapping would be written as a Python
+    repr inside a YAML string and reload silently as the wrong type.
+
+    The emitted bytes are normative. Hosts that hand-edit `grounding` must match them
+    exactly, and the write path is specified against them.
+    """
+    lines = [f"{key}:"]
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"grounding[{index}] must be a mapping, got {type(entry).__name__}")
+        lines.extend(render_grounding_entry(index, entry))
+    return lines
+
+
+def render_frontmatter_value(
+    key: str,
+    value: str | bool | list[str] | list[dict[str, Any]],
+    quote: bool,
+) -> list[str]:
     if isinstance(value, list):
         if not value:
             return [f"{key}: []"]
+        if key == GROUNDING_FIELD:
+            return render_grounding_sequence(key, value)
         if all(isinstance(item, dict) for item in value):
             return render_mapping_sequence(key, value)
         return [f"{key}:"] + [f"  - {item}" for item in value]
@@ -766,7 +894,13 @@ def render_frontmatter_value(key: str, value: str | bool | list[str] | list[dict
     return [f"{key}: {rendered}"]
 
 
-def set_frontmatter_field_block(lines: list[str], key: str, value: str | bool | list[str], *, quote: bool = False) -> list[str]:
+def set_frontmatter_field_block(
+    lines: list[str],
+    key: str,
+    value: str | bool | list[str] | list[dict[str, Any]],
+    *,
+    quote: bool = False,
+) -> list[str]:
     lines = remove_frontmatter_field_block(lines, key)
     return [*lines, *render_frontmatter_value(key, value, quote)]
 
