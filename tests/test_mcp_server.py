@@ -84,6 +84,50 @@ class McpServerTests(unittest.TestCase):
             INIT.main(["--profile", str(profile_path)])
         return target
 
+    def declare_pack_request_kinds(self, target: Path, pack_name: str, kind_ids: list[str]) -> None:
+        """Give a workspace a domain pack that declares the given request kinds."""
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["domain_pack"] = {
+            "name": pack_name,
+            "request_kinds": [
+                {"id": kind_id, "label": kind_id, "description": f"Fixture kind {kind_id}."}
+                for kind_id in kind_ids
+            ],
+        }
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def seed_source_requests(self, target: Path, records: list[dict]) -> list[str]:
+        """Write request records straight to the JSONL store and return their ids in order."""
+        config = SOURCE_REQUESTS.load_config(target)
+        path = SOURCE_REQUESTS.requests_path(target, config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        request_ids = []
+        for index, record in enumerate(records):
+            created_at = f"2026-08-09T10:{index:02d}:00Z"
+            full = {
+                "schema_version": SOURCE_REQUESTS.SCHEMA_VERSION,
+                "query_or_identifier": f"seed query {index}",
+                "rationale": "Fixture request for read-surface filtering.",
+                "priority": "medium",
+                "question_slugs": [],
+                "status": "open",
+                "created_at": created_at,
+                "updated_at": created_at,
+                "source_id": None,
+                **record,
+            }
+            request_ids.append(full["request_id"])
+            lines.append(json.dumps(full, sort_keys=False))
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return request_ids
+
+    def listed_request_ids(self, server: object, arguments: dict) -> list[str]:
+        result = self.call_tool(server, "source_requests_list", arguments)
+        self.assertFalse(result["isError"], result["structuredContent"])
+        return [record["request_id"] for record in result["structuredContent"]["requests"]]
+
     def call_tool(self, server: object, name: str, arguments: dict | None = None, request_id: int = 1) -> dict:
         response = server.handle_message(
             {
@@ -288,6 +332,210 @@ class McpServerTests(unittest.TestCase):
             self.assertEqual(
                 without_generated_at(expected_requests),
                 without_generated_at(request_result["structuredContent"]),
+            )
+
+    PACK_KIND = "pack:market-data/supplier_quote"
+
+    def scoped_request_workspace(self, root: Path) -> Path:
+        """A workspace whose pack declares one kind, seeded with five requests."""
+        target = self.init_workspace(root)
+        self.declare_pack_request_kinds(target, "market-data", [self.PACK_KIND])
+        self.seed_source_requests(
+            target,
+            [
+                {
+                    "request_id": "req-paper-acme",
+                    "kind": "paper",
+                    "scope": {"facet_id": "pricing", "candidate": "acme"},
+                },
+                {
+                    "request_id": "req-paper-globex",
+                    "kind": "paper",
+                    "scope": {"facet_id": "pricing", "candidate": "globex"},
+                },
+                {
+                    "request_id": "req-quote-acme",
+                    "kind": self.PACK_KIND,
+                    "scope": {"facet_id": "supplier_quote", "candidate": "acme"},
+                },
+                {
+                    "request_id": "req-quote-globex",
+                    "kind": self.PACK_KIND,
+                    "scope": {"facet_id": "supplier_quote", "candidate": "globex"},
+                },
+                {"request_id": "req-dataset-plain", "kind": "dataset"},
+            ],
+        )
+        return target
+
+    def test_source_requests_list_kind_filter_selects_declared_and_pack_kinds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.scoped_request_workspace(Path(tmpdir))
+            server = MCP.ResearchWikiMcpServer(target)
+
+            self.assertEqual(
+                ["req-quote-acme", "req-quote-globex"],
+                self.listed_request_ids(server, {"kind": [self.PACK_KIND]}),
+            )
+            self.assertEqual(
+                ["req-quote-acme", "req-quote-globex", "req-dataset-plain"],
+                self.listed_request_ids(server, {"kind": ["dataset", self.PACK_KIND]}),
+            )
+            self.assertEqual(
+                ["req-paper-acme", "req-paper-globex"],
+                self.listed_request_ids(server, {"kind": ["paper"]}),
+            )
+
+            # The pack-namespaced id is carried verbatim, not rewritten or resolved.
+            result = self.call_tool(server, "source_requests_list", {"kind": [self.PACK_KIND]})
+            self.assertEqual(
+                [self.PACK_KIND, self.PACK_KIND],
+                [record["kind"] for record in result["structuredContent"]["requests"]],
+            )
+
+    def test_source_requests_list_scope_filter_is_exact_match_and_ands_pairs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.scoped_request_workspace(Path(tmpdir))
+            server = MCP.ResearchWikiMcpServer(target)
+
+            self.assertEqual(
+                ["req-paper-acme", "req-quote-acme"],
+                self.listed_request_ids(server, {"scope": {"candidate": "acme"}}),
+            )
+            # AND semantics: req-paper-acme matches only `candidate`, req-quote-globex only
+            # `facet_id`, so neither survives both pairs.
+            self.assertEqual(
+                ["req-quote-acme"],
+                self.listed_request_ids(
+                    server, {"scope": {"facet_id": "supplier_quote", "candidate": "acme"}}
+                ),
+            )
+            # Exact string equality: no prefix, glob, or case-insensitive matching.
+            self.assertEqual([], self.listed_request_ids(server, {"scope": {"candidate": "acm"}}))
+            self.assertEqual([], self.listed_request_ids(server, {"scope": {"candidate": "ACME"}}))
+            # A key no request declares is an empty result, not an error.
+            self.assertEqual([], self.listed_request_ids(server, {"scope": {"region": "emea"}}))
+            # Filters compose with each other and with `status`.
+            self.assertEqual(
+                ["req-quote-globex"],
+                self.listed_request_ids(
+                    server,
+                    {"kind": [self.PACK_KIND], "scope": {"candidate": "globex"}, "status": ["open"]},
+                ),
+            )
+
+    def test_source_requests_list_filters_pass_through_run_list_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.scoped_request_workspace(Path(tmpdir))
+            server = MCP.ResearchWikiMcpServer(target)
+
+            arguments = {"kind": [self.PACK_KIND], "scope": {"candidate": "acme"}}
+            payload = self.call_tool(server, "source_requests_list", arguments)["structuredContent"]
+            baseline = SOURCE_REQUESTS.run_list(
+                type(
+                    "Args",
+                    (),
+                    {
+                        "project_root": str(target),
+                        "status": None,
+                        "kind": [self.PACK_KIND],
+                        "scope": ["candidate=acme"],
+                    },
+                )()
+            )
+
+            # Everything but the filtered record list is the script's payload verbatim, so
+            # the MCP surface cannot drift from the CLI contract.
+            self.assertEqual(
+                {key: value for key, value in without_generated_at(baseline).items() if key != "requests"},
+                {key: value for key, value in without_generated_at(payload).items() if key != "requests"},
+            )
+            self.assertEqual(["req-quote-acme"], [record["request_id"] for record in payload["requests"]])
+            self.assertTrue(all(record in baseline["requests"] for record in payload["requests"]))
+
+    def test_source_requests_list_rejects_bad_filters_with_stable_error_codes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.scoped_request_workspace(Path(tmpdir))
+            server = MCP.ResearchWikiMcpServer(target)
+            before = self.workspace_snapshot(target)
+
+            undeclared = self.call_tool(server, "source_requests_list", {"kind": ["pack:other/thing"]})
+            malformed_kind = self.call_tool(
+                server, "source_requests_list", {"kind": ["market-data/supplier_quote"]}
+            )
+            malformed_scope_key = self.call_tool(
+                server, "source_requests_list", {"scope": {"Facet ID": "pricing"}}
+            )
+            non_string_value = self.call_tool(server, "source_requests_list", {"scope": {"candidate": 7}})
+            non_object_scope = self.call_tool(server, "source_requests_list", {"scope": ["candidate=acme"]})
+            unknown_argument = self.call_tool(server, "source_requests_list", {"unexpected": True})
+
+            self.assertEqual(before, self.workspace_snapshot(target))
+
+        self.assertTrue(undeclared["isError"])
+        self.assertEqual("REQUEST_KIND_UNDECLARED", undeclared["structuredContent"]["error_code"])
+        self.assertTrue(malformed_kind["isError"])
+        self.assertEqual("REQUEST_KIND_INVALID", malformed_kind["structuredContent"]["error_code"])
+        # The bare-id near miss names the id the caller actually wants.
+        self.assertIn(self.PACK_KIND, malformed_kind["structuredContent"]["message"])
+        for result in (malformed_scope_key, non_string_value, non_object_scope):
+            self.assertTrue(result["isError"])
+            self.assertEqual("REQUEST_SCOPE_INVALID", result["structuredContent"]["error_code"])
+        self.assertTrue(unknown_argument["isError"])
+        self.assertEqual("VALUE_INVALID", unknown_argument["structuredContent"]["error_code"])
+        self.assertEqual(["unexpected"], unknown_argument["structuredContent"]["details"]["unknown_fields"])
+
+    def test_source_requests_list_sanitizes_broken_pack_kind_declaration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.scoped_request_workspace(Path(tmpdir))
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["domain_pack"]["request_kinds"] = [{"id": self.PACK_KIND, "label": "  "}]
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            server = MCP.ResearchWikiMcpServer(target)
+            stderr = io.StringIO()
+
+            # A broken declaration is workspace state, not a bad argument: it must not
+            # reach the client as raw text, and it must not break unfiltered reads.
+            with contextlib.redirect_stderr(stderr):
+                unfiltered = self.call_tool(server, "source_requests_list")
+                broken = self.call_tool(server, "source_requests_list", {"kind": [self.PACK_KIND]})
+
+        self.assertFalse(unfiltered["isError"])
+        self.assertEqual(5, len(unfiltered["structuredContent"]["requests"]))
+        self.assertTrue(broken["isError"])
+        self.assertEqual("CONFIG_INVALID", broken["structuredContent"]["error_code"])
+        self.assertEqual(
+            MCP.CLIENT_ERROR_MESSAGES["CONFIG_INVALID"], broken["structuredContent"]["message"]
+        )
+        correlation_id = self.assert_error_payload_has_correlation_id(broken)
+        self.assertNotIn("request_kinds", json.dumps(broken))
+        self.assertIn(correlation_id, stderr.getvalue())
+        self.assertIn("domain_pack.request_kinds is invalid", stderr.getvalue())
+
+    def test_source_requests_list_schema_declares_kind_and_scope_arguments(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            server = MCP.ResearchWikiMcpServer(target)
+
+            tools_response = server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+            schema = next(
+                tool for tool in tools_response["result"]["tools"] if tool["name"] == "source_requests_list"
+            )["inputSchema"]
+
+            self.assertEqual({"status", "kind", "scope"}, set(schema["properties"]))
+            self.assertFalse(schema["additionalProperties"])
+            self.assertEqual({"type": "string"}, schema["properties"]["kind"]["items"])
+            self.assertEqual("array", schema["properties"]["kind"]["type"])
+            self.assertEqual("object", schema["properties"]["scope"]["type"])
+            self.assertEqual({"type": "string"}, schema["properties"]["scope"]["additionalProperties"])
+            self.assertIn("pack:<pack-name>/<kind-id>", schema["properties"]["kind"]["description"])
+            scope_description = schema["properties"]["scope"]["description"]
+            self.assertIn("Exact string equality", scope_description)
+            self.assertIn("AND over all pairs", scope_description)
+            self.assertEqual(
+                MCP.TOOL_ARGUMENT_KEYS["source_requests_list"],
+                frozenset(schema["properties"]),
             )
 
     def test_query_index_limit_is_capped_before_search(self):

@@ -72,7 +72,37 @@ that only read textual tool output.
 | `query_index` | `scripts/query_index.py QUERY --format json` | `query` required; optional `scope`, `limit` capped at 100, workspace-relative `index_path` |
 | `intake_questions` | `scripts/intake_questions.py --format json` | `batch` required; optional `dry_run` |
 | `export_answers` | `scripts/export_answers.py --format json` | optional `status: string[]` |
-| `source_requests_list` | `scripts/source_requests.py list --format json` | optional `status: ["open"|"fulfilled"]` |
+| `source_requests_list` | `scripts/source_requests.py list --format json` | optional `status: ["open"|"fulfilled"]`, `kind: string[]`, `scope: {string: string}` |
+
+### Source Request Filters
+
+`source_requests_list` takes three optional filters. They are applied together —
+a request must satisfy every filter given — and each one matches, never
+interprets:
+
+- `status` — an array of `open`/`fulfilled`, unchanged.
+- `kind` — an array of request-kind ids; a request matches when its kind is any
+  one of them. Built-in kinds are unprefixed (`paper`, `dataset`, `web`, `code`,
+  `structured_data`, `other`); kinds a domain pack declares are namespaced
+  `pack:<pack-name>/<kind-id>` and are carried through the payload verbatim. A
+  kind this workspace does not accept is refused rather than quietly matching
+  nothing: a malformed id returns `REQUEST_KIND_INVALID`, and a well-formed id
+  the active pack does not declare returns `REQUEST_KIND_UNDECLARED`.
+- `scope` — an object of scope keys to values. A request matches when its own
+  structured `scope` declares **every** given key with an **exactly** equal
+  string value (AND over all pairs). There are no operators: no ranges, globs,
+  negation, prefix, or case-insensitive matching. Requests that declare no
+  scope, or that declare a key with a different value, are excluded. A key no
+  request declares is simply an empty result, not an error; a key that is not a
+  well-formed scope key, or a non-string value, returns
+  `REQUEST_SCOPE_INVALID`.
+
+Filtering narrows the returned `requests` array only. `counts` stays a census of
+the whole store, so a host can tell "nothing matches" from "nothing exists".
+
+```json
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"source_requests_list","arguments":{"status":["open"],"kind":["pack:market-data/supplier_quote"],"scope":{"facet_id":"supplier_quote","candidate":"acme-widget"}}}}
+```
 
 ### Human Review Over MCP
 
