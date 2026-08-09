@@ -2824,6 +2824,60 @@ def render_sample_table(header: list[str], sample_rows: list[list[str]]) -> list
     return lines
 
 
+def table_header_problem(header: list[str]) -> str | None:
+    """Why ``header`` cannot name a table's columns, or ``None`` when it can.
+
+    A structured view keys every row by its column name, so the names have to be usable
+    as keys: present, non-empty, and distinct. An empty name gives a pointer nothing to
+    say, and a repeated one makes `rows/41/price` ambiguous — the last column of that
+    name would silently win, and an anchor would cite a value the reader cannot locate
+    in the file. Both are refusals rather than repairs (no `price_2` invention), because
+    a synthesized name addresses a column the source never had.
+    """
+    if not header:
+        return "the table has no header row"
+    if any(not cell for cell in header):
+        return "the header has an empty column name"
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for cell in header:
+        if cell in seen and cell not in duplicates:
+            duplicates.append(cell)
+        seen.add(cell)
+    if duplicates:
+        return "the header repeats column name(s): " + ", ".join(duplicates)
+    return None
+
+
+def table_structured_skip_reason(
+    header: list[str],
+    header_problem: str | None,
+    truncated: bool,
+    ragged_rows: int,
+) -> str | None:
+    """Why this table gets no structured view, or ``None`` when it earns one.
+
+    Fail-closed, and deliberately the only authority on the question: a table that
+    cannot be addressed faithfully gets no sidecar at all rather than a partial one.
+    Skipping costs nothing a reader had — the record still renders its sample table, so
+    the source degrades to exactly the quote-form behaviour it has today — whereas a
+    half-truthful sidecar would let an anchor claim the file says something it does not.
+
+    Truncation is the subtle one. `read_table_text` stops at `TABLE_MAX_BYTES`, so every
+    row past the ceiling is invisible to the parse; a sidecar built from what was read
+    would look complete and address `rows/N` positions that mean nothing in the real
+    file. The ceiling is inherited, not escapable, so the honest move is to decline.
+    """
+    if truncated:
+        return (
+            f"the row scan stopped at the {TABLE_MAX_BYTES}-byte read ceiling, so a "
+            "structured view could only cover part of the table"
+        )
+    if ragged_rows:
+        return f"{ragged_rows} row(s) do not match the {len(header)}-column header"
+    return header_problem
+
+
 def normalize_table_record(project_root: Path, record: dict[str, Any]) -> NormalizedSource:
     source_id = record_id(record)
     warnings = manifest_warnings(record)
@@ -2870,19 +2924,47 @@ def normalize_table_record(project_root: Path, record: dict[str, Any]) -> Normal
     delimiter = infer_table_delimiter(text[:8192], suffix)
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     header: list[str] = []
+    # Seeded from the empty header rather than from `None`, so "the loop never found a
+    # header" is a refusal by default instead of an acceptance by default. Fail-closed
+    # has to survive the paths nobody reached, or it is only a convention.
+    header_problem: str | None = table_header_problem(header)
     sample_rows: list[list[str]] = []
+    # Every row, header-keyed, for the structured view — the uncapped complement to the
+    # 20-row, 80-char-per-cell sample the body renders. `collecting` mirrors the three
+    # conditions `table_structured_skip_reason` weighs, so that it is False by the end of
+    # the loop for exactly the tables that get no sidecar; it exists only so a table
+    # already known to be unemittable stops paying for rows nothing will read.
+    structured_rows: list[dict[str, str]] = []
+    collecting = not truncated and header_problem is None
     row_count = 0
     ragged_rows = 0
     first_ragged_line: int | None = None
     for line_number, row in enumerate(reader, start=1):
         if not header:
+            # Recomputed, never latched: a leading blank line leaves `header` empty and
+            # brings this branch round again, and a verdict carried over from that
+            # non-header would disqualify the real header on the next line — emitting
+            # `rows: []` for a table that has rows, the one outcome fail-closed forbids.
+            # Safe to recompute because no data row can have been seen yet: `ragged_rows`
+            # is only ever counted once `header` is non-empty, which ends this branch.
             header = [cell.strip() for cell in row]
+            header_problem = table_header_problem(header)
+            collecting = not truncated and header_problem is None
             continue
         row_count += 1
         if len(row) != len(header):
             ragged_rows += 1
             if first_ragged_line is None:
                 first_ragged_line = line_number
+            collecting = False
+            structured_rows = []
+        elif collecting:
+            # Cells verbatim: `escape_table_cell`'s whitespace collapse and 80-char
+            # ellipsis are render-time concessions to a Markdown table, and applying them
+            # here would make an anchor's `expected` match a truncation of the evidence
+            # rather than the evidence. No type inference either — CSV is untyped, so
+            # "007" stays "007" and canonical equality compares it as the string it is.
+            structured_rows.append(dict(zip(header, row, strict=True)))
         if len(sample_rows) < TABLE_SAMPLE_ROWS:
             sample_rows.append(row)
     if ragged_rows:
@@ -2890,6 +2972,14 @@ def normalize_table_record(project_root: Path, record: dict[str, Any]) -> Normal
             f"{raw_path}: {ragged_rows} row(s) do not match the {len(header)}-column header "
             f"(first at line {first_ragged_line})"
         )
+    structured_skip_reason = table_structured_skip_reason(
+        header, header_problem, truncated, ragged_rows
+    )
+    structured: dict[str, Any] | None = None
+    if structured_skip_reason is None:
+        structured = {"columns": list(header), "rows": structured_rows}
+    else:
+        warnings.append(f"{raw_path}: no structured view emitted: {structured_skip_reason}")
 
     delimiter_label = "tab" if delimiter == "\t" else f"`{delimiter}`"
     row_count_label = f"at least {row_count} (truncated)" if truncated else str(row_count)
@@ -2915,6 +3005,7 @@ def normalize_table_record(project_root: Path, record: dict[str, Any]) -> Normal
         bibliography_files=[],
         included_paths=[],
         warnings=unique_values(warnings),
+        structured=structured,
     )
 
 

@@ -734,18 +734,19 @@ class AdapterStructuredViewStalenessTests(StructuredViewWorkspaceMixin, unittest
 
         self.assertEqual([], settled["actions"])
 
-    def test_a_native_tabular_record_settles_even_though_it_emits_no_sidecar_yet(self):
-        """`table_text` is in the rule on eligibility, not on current behaviour.
+    def test_a_native_tabular_record_that_emits_no_sidecar_still_settles(self):
+        """`table_text` is in the rule on eligibility, not on what any one table yields.
 
-        Native tabular emission lands after this change, so a table record is written
-        with `structured_view: null` today. The key's presence is what settles it — if
-        the rule keyed on the sidecar file instead, every CSV in every workspace would
-        re-normalize on every run until that emission shipped.
+        Native tabular emission (CR-7 T13) is fail-closed: a ragged table cannot be
+        faithfully addressed, so it is written with `structured_view: null` and no
+        sidecar. The key's presence is what settles it — if the rule keyed on the
+        sidecar file instead, every unaddressable CSV in every workspace would
+        re-normalize on every run, forever.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.structured_workspace(Path(tmpdir))
             (workspace / "raw" / "data" / "rows.csv").write_text(
-                "sku,price\nB0ABC,23.99\n", encoding="utf-8"
+                "sku,price\nB0ABC,23.99,stray\n", encoding="utf-8"
             )
             self.inventory(workspace)
             self.normalize(workspace)
