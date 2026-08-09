@@ -285,6 +285,38 @@ SEARCH_QUERY_PLACEHOLDER = "{query}"
 # Transport seam so tests exercise the HTTP adapter without real network I/O.
 SEARCH_HTTP_TRANSPORT = None
 
+# --- Registered discovery providers (CR-5 T7) --------------------------------
+# A registered provider is code-declared rather than config-declared: an
+# installed distribution advertises it through an entry point and declares, in
+# machine-checkable form, which hosts it may reach. The provider *plans*; this
+# script executes the plan through the package's own pinned transport, so the
+# declaration is the egress boundary rather than a promise. Everything the
+# provider then returns is untrusted output: it re-enters the candidate pipeline
+# through the same shape validation, classification, and trust rejection a
+# `search` result does, and it is never fetched as evidence.
+REGISTERED_DISCOVERED_BY_PREFIX = "discover_sources.py/registered"
+# One command proposes candidates; a plan is not a crawl. Matches the acquisition
+# path's cap so a provider serving both phases meets one number.
+REGISTERED_MAX_PLANNED_REQUESTS = 8
+REGISTERED_REQUEST_MAX_BYTES = 64 * 1024
+REGISTERED_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
+REGISTERED_TIMEOUT_SECONDS = 30.0
+# Bounds the untrusted candidate list before any of it is classified, so a
+# provider returning a million results costs one slice rather than one run.
+REGISTERED_MAX_RAW_CANDIDATES = 200
+# Registered discovery keeps its own run-scoped ledger. It cannot share the
+# academic one: that reader refuses any record whose provider is outside
+# {arxiv, openalex}, so a registered reservation written there would make the
+# academic budget unreadable for the rest of the run.
+REGISTERED_PROVIDER_REQUESTS_FILENAME = "registered-provider-requests.jsonl"
+REGISTERED_PROVIDER_REQUESTS_LOCK_FILENAME = "registered-provider-requests.lock"
+REGISTERED_PROVIDER_REQUEST_EVENT_TYPE = "registered_provider_request"
+# Transport seams so tests exercise the whole executor — declaration check,
+# credential custody, bounded read — without DNS or a socket. Both default to
+# None, which is the package's real pinned transport.
+REGISTERED_OPENER = None
+REGISTERED_RESOLVER = None
+
 # --- Reasoned search query planner (E33-T02) ---------------------------------
 # A research need is expanded into a small, bounded set of explained queries
 # before any backend is contacted. Planning is the default (read-only, no
@@ -638,10 +670,19 @@ _QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+import _acquisition_transport as TRANSPORT
+import _provider_accounting as ACCOUNTING
+from _provider_plugins import (
+    DISCOVERY_PHASE,
+    ProviderPluginError,
+    registered_ids,
+    require_registration,
+)
 from _provider_registry import (
     DISCOVERY_ACCEPTED_IDS,
     STANDARDS_DISCOVERY_PROVIDER_IDS,
     ProviderListError,
+    ProviderNotRegisteredError,
     provider_is_allowed,
     validate_provider_ids,
 )
@@ -650,6 +691,21 @@ from _workspace_locks import LockUnavailableError, workspace_lock
 
 STANDARDS_PROVIDER_IDS = STANDARDS_DISCOVERY_PROVIDER_IDS
 DISCOVERY_PROVIDER_REGISTRY = DISCOVERY_ACCEPTED_IDS
+
+
+def discovery_registered_ids() -> tuple[str, ...]:
+    """Return the ids installed distributions register for discovery.
+
+    Enumeration is fail-open by construction (``_provider_plugins`` turns every
+    plugin failure into an invalid registration rather than an exception), but a
+    surface that only *validates* a config must never be the thing that breaks
+    because a plugin is broken: with no plugins installed the accepted set, and
+    every message quoting it, is exactly what it was before registration existed.
+    """
+    try:
+        return registered_ids(DISCOVERY_PHASE)
+    except Exception:  # noqa: BLE001 - a broken environment must not break validation
+        return ()
 
 
 class DiscoverSourcesError(Exception):
@@ -889,6 +945,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     nist.add_argument("--publication-fixture", help="JSON fixture for a concrete NIST CSRC/FIPS/SP publication.")
     nist.add_argument("--max-results", type=positive_int, default=10, help="Maximum standards candidates to propose.")
 
+    registered = commands.add_parser(
+        "registered",
+        help="Run a provider supplied by an installed distribution (read-only; never fetches evidence).",
+    )
+    registered_commands = registered.add_subparsers(dest="registered_command", required=True)
+
+    registered_search = registered_commands.add_parser(
+        "search",
+        help="Propose candidates through a registered discovery provider (read-only).",
+    )
+    # The id flag is --id, never --provider: the academic route already stores a
+    # provider list in `args.provider`, and a second option writing that dest
+    # would silently overwrite it (CR-5 §7.2).
+    registered_search.add_argument(
+        "--id",
+        dest="provider_id",
+        required=True,
+        metavar="PROVIDER_ID",
+        help="Registered discovery provider id. Must also be listed in integrations.discovery.providers.",
+    )
+    registered_search.add_argument(
+        "--request-file",
+        required=True,
+        metavar="PATH",
+        help="Path to a JSON object the provider's own validate_request accepts.",
+    )
+    registered_search.add_argument("--max-results", type=positive_int, default=10, help="Maximum candidates to propose.")
+    registered_search.add_argument(
+        "--run-id",
+        default=None,
+        help=(
+            "Active run-controller id that owns the provider-call budget. "
+            "When omitted, the sole active run is selected automatically."
+        ),
+    )
+    registered_search.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("text", "json"),
+        default=argparse.SUPPRESS,
+        help="Report format; accepted here as well as before the subcommand for copy-paste workflows.",
+    )
+
     candidates = commands.add_parser(
         "candidates",
         help="Review and select discovered candidates (read/write, never network).",
@@ -1073,6 +1172,11 @@ def validate_command_arguments(args: argparse.Namespace) -> None:
             require_non_empty(args.request_id, "--request-id")
     elif args.command == "standards":
         validate_standards_arguments(args)
+    elif args.command == "registered":
+        require_non_empty(args.provider_id, "--id")
+        require_non_empty(args.request_file, "--request-file")
+        if args.run_id is not None:
+            require_non_empty(args.run_id, "--run-id")
     elif args.command == "candidates":
         validate_candidates_arguments(args)
     elif args.command == "jurisdictions":
@@ -1178,13 +1282,45 @@ def require_discovery_enabled(config: dict[str, Any], command: str) -> dict[str,
             command,
             "Discovery is disabled: integrations.discovery.enabled is not true.",
         )
-    validate_discovery_provider_list(discovery.get("providers", []), "integrations.discovery.providers")
+    validate_discovery_provider_list(
+        discovery.get("providers", []),
+        "integrations.discovery.providers",
+        command=command,
+    )
     return discovery
 
 
-def validate_discovery_provider_list(value: Any, label: str) -> list[str]:
+def provider_not_registered(command: str, label: str, exc: ProviderNotRegisteredError) -> DiscoverSourcesError:
+    """Turn an unsupplied authorized id into the CR-5 refusal hosts switch on.
+
+    An id in ``integrations.discovery.providers`` that neither a built-in nor an
+    installed registration supplies is deploy drift on an *authorization*
+    boundary, not a typo in a free-text field, so it gets its own stable code
+    naming the missing ids and the entry-point group that would supply them.
+    """
+    return DiscoverSourcesError(
+        "PROVIDER_NOT_REGISTERED",
+        f"research.yml {label} {exc}",
+        recoverable=False,
+        remediation=(
+            "Install a distribution registering the provider in the evidence_wiki.discovery_providers "
+            "entry-point group, or remove the id from the discovery provider allow-list in research.yml."
+        ),
+        details={
+            "command": command,
+            "phase": "discovery",
+            "provider_ids": list(exc.provider_ids),
+            "entry_point_group": "evidence_wiki.discovery_providers",
+            "network_io_executed": False,
+        },
+    )
+
+
+def validate_discovery_provider_list(value: Any, label: str, *, command: str = "discovery") -> list[str]:
     try:
-        validated = validate_provider_ids(value, phase="discovery")
+        validated = validate_provider_ids(value, phase="discovery", registered=discovery_registered_ids())
+    except ProviderNotRegisteredError as exc:
+        raise provider_not_registered(command, label, exc) from exc
     except ProviderListError as exc:
         raise SystemExit(f"research.yml {label} {exc}") from exc
     return list(validated.configured)
@@ -1192,7 +1328,13 @@ def validate_discovery_provider_list(value: Any, label: str) -> list[str]:
 
 def require_discovery_provider_allowed(command: str, discovery: dict[str, Any], provider_ids: tuple[str, ...]) -> None:
     try:
-        providers = validate_provider_ids(discovery.get("providers", []), phase="discovery")
+        providers = validate_provider_ids(
+            discovery.get("providers", []),
+            phase="discovery",
+            registered=discovery_registered_ids(),
+        )
+    except ProviderNotRegisteredError as exc:
+        raise provider_not_registered(command, "integrations.discovery.providers", exc) from exc
     except ProviderListError as exc:
         raise SystemExit(f"research.yml integrations.discovery.providers {exc}") from exc
     if any(provider_is_allowed(providers, provider_id) for provider_id in provider_ids):
@@ -1324,7 +1466,18 @@ def validate_academic_provider_accounting(
     return path
 
 
-def _load_academic_run_state(path: Path, *, requested_run_id: str | None) -> dict[str, Any]:
+def _load_academic_run_state(
+    path: Path,
+    *,
+    requested_run_id: str | None,
+    command: str = "academic",
+) -> dict[str, Any]:
+    """Read and shape-check one retained run state.
+
+    ``command`` only names the caller in the error envelope; the academic route
+    is the default so its long-standing messages are unchanged, and the
+    registered-discovery route reuses the identical checks under its own name.
+    """
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -1333,7 +1486,7 @@ def _load_academic_run_state(path: Path, *, requested_run_id: str | None) -> dic
             f"Cannot read retained discovery run state {path}: {exc}",
             recoverable=False,
             remediation="Repair or recover the retained run-state artifact before contacting an academic provider.",
-            details={"command": "academic", "network_io_executed": False},
+            details={"command": command, "network_io_executed": False},
         ) from exc
     state = document.get("state") if isinstance(document, dict) and isinstance(document.get("state"), dict) else {}
     run_id = document.get("run_id") if isinstance(document, dict) else None
@@ -1351,14 +1504,14 @@ def _load_academic_run_state(path: Path, *, requested_run_id: str | None) -> dic
             f"Retained discovery run state has an invalid shape: {path}",
             recoverable=False,
             remediation="Repair or recover the retained run-state artifact before contacting an academic provider.",
-            details={"command": "academic", "network_io_executed": False},
+            details={"command": command, "network_io_executed": False},
         )
     if document.get("_pending_event") is not None:
         raise DiscoverSourcesError(
             "DISCOVERY_RUN_RECOVERY_REQUIRED",
             f"Run {run_id} has an interrupted mutation and cannot reserve an academic provider call.",
             remediation=f"Run run_controller.py recover --run-id {run_id} before retrying discovery.",
-            details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+            details={"command": command, "run_id": run_id, "network_io_executed": False},
         )
     return {
         "run_id": run_id,
@@ -1369,7 +1522,23 @@ def _load_academic_run_state(path: Path, *, requested_run_id: str | None) -> dic
     }
 
 
-def resolve_academic_discovery_run(project_root: Path, requested_run_id: str | None) -> dict[str, Any] | None:
+def resolve_academic_discovery_run(
+    project_root: Path,
+    requested_run_id: str | None,
+    *,
+    command: str = "academic",
+    validate_accounting: bool = True,
+) -> dict[str, Any] | None:
+    """Select the active run that owns a provider-call budget, or None when there is none.
+
+    ``validate_accounting`` gates the academic run-state marker check alone. That
+    marker pins the *academic* ledger's existence, so a route keeping a different
+    ledger under the same run must not be refused for its absence. Every other
+    check here — id shape, retained state, interrupted mutation, terminal state,
+    ambiguity — is about the run itself and applies to any route accounting
+    against it, which is why the registered-discovery route reuses this function
+    rather than growing a second, subtly different run resolver.
+    """
     runs_root = project_root / "runs"
     if requested_run_id is not None:
         run_id = requested_run_id.strip()
@@ -1379,7 +1548,7 @@ def resolve_academic_discovery_run(project_root: Path, requested_run_id: str | N
                 f"Invalid discovery run id: {requested_run_id!r}",
                 recoverable=False,
                 remediation="Use a filename-safe active run id from runs/<run-id>/run-state.json.",
-                details={"command": "academic", "network_io_executed": False},
+                details={"command": command, "network_io_executed": False},
             )
         state_path = runs_root / run_id / "run-state.json"
         if not state_path.is_file():
@@ -1387,25 +1556,26 @@ def resolve_academic_discovery_run(project_root: Path, requested_run_id: str | N
                 "DISCOVERY_RUN_UNKNOWN",
                 f"No retained run state exists for discovery run {run_id}.",
                 remediation="Start the run with run_controller.py or pass an existing active --run-id.",
-                details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+                details={"command": command, "run_id": run_id, "network_io_executed": False},
             )
-        selected = _load_academic_run_state(state_path, requested_run_id=run_id)
+        selected = _load_academic_run_state(state_path, requested_run_id=run_id, command=command)
         if selected["state"] in RUN_TERMINAL_STATES:
             raise DiscoverSourcesError(
                 "DISCOVERY_RUN_TERMINAL",
                 f"Discovery run {run_id} is already terminal: {selected['state']}.",
                 recoverable=False,
                 remediation="Start a new run before contacting additional academic providers.",
-                details={"command": "academic", "run_id": run_id, "network_io_executed": False},
+                details={"command": command, "run_id": run_id, "network_io_executed": False},
             )
-        validate_academic_provider_accounting(project_root, run_id, run_state=selected["document"])
+        if validate_accounting:
+            validate_academic_provider_accounting(project_root, run_id, run_state=selected["document"])
         return selected
 
     if not runs_root.is_dir():
         return None
     active: list[dict[str, Any]] = []
     for state_path in sorted(runs_root.glob("*/run-state.json")):
-        selected = _load_academic_run_state(state_path, requested_run_id=None)
+        selected = _load_academic_run_state(state_path, requested_run_id=None, command=command)
         if selected["state"] not in RUN_TERMINAL_STATES:
             active.append(selected)
     if not active:
@@ -1415,14 +1585,15 @@ def resolve_academic_discovery_run(project_root: Path, requested_run_id: str | N
             "DISCOVERY_RUN_ID_REQUIRED",
             "Multiple active runs exist; academic provider-call budget ownership is ambiguous.",
             remediation="Pass --run-id for the active run that owns this discovery call.",
-            details={"command": "academic", "network_io_executed": False},
+            details={"command": command, "network_io_executed": False},
         )
     selected = active[0]
-    validate_academic_provider_accounting(
-        project_root,
-        selected["run_id"],
-        run_state=selected["document"],
-    )
+    if validate_accounting:
+        validate_academic_provider_accounting(
+            project_root,
+            selected["run_id"],
+            run_state=selected["document"],
+        )
     return selected
 
 
@@ -1549,65 +1720,114 @@ def reserve_academic_provider_request(
     provider: str,
     attempt: int,
 ) -> dict[str, Any] | None:
-    """Durably consume one provider-call slot immediately before transport."""
+    """Durably consume one provider-call slot immediately before transport.
+
+    The ledger, the lock, the on-disk framing, and both ceilings now live in
+    ``_provider_accounting``; discovery keeps only what the shared module has no
+    business owning — the run-state accounting marker, the academic record
+    vocabulary, and the error codes hosts already switch on.
+
+    The strict academic read stays here deliberately, ahead of the reservation.
+    It validates the run-state marker — the shared module cannot tell a deleted
+    ledger from a run that has reserved nothing, so the marker is what makes
+    deletion fatal — and it enforces academic-specific record rules (the
+    ``academic_provider_request`` event type, a provider inside
+    ``{arxiv, openalex}``, no repeated ``call_id``) that a general-purpose ledger
+    reader has no opinion about. Dropping it would let a tampered record be
+    counted rather than refused. The authoritative count and the append remain
+    atomic inside the shared module's own lock; this pass is a fail-closed
+    inspection in front of it, not a second budget.
+    """
     if context is None:
         return None
     project_root = context["project_root"]
     run_id = context["run_id"]
     limit = int(context["limit"])
-    ledger_path = academic_provider_requests_path(project_root, run_id)
-    lock_path = academic_provider_requests_lock_path(project_root, run_id)
-    with workspace_lock(lock_path, purpose=f"academic provider-call budget for {run_id}"):
-        used = academic_provider_request_count(project_root, run_id)
-        if used >= limit:
-            raise DiscoverSourcesError(
-                "ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED",
-                (
-                    f"Run {run_id} already reserved {used} academic provider request(s); "
-                    f"the next {provider} call would exceed max_academic_provider_requests_per_run={limit}."
-                ),
-                remediation="Start a new run or raise the reviewed academic provider request budget.",
-                details={
-                    "command": context["command"],
-                    "provider": provider,
-                    "run_id": run_id,
-                    "used": used,
-                    "limit": limit,
-                    "network_io_executed": bool(context.get("network_io_executed")),
-                },
-            )
-        record = {
-            "schema_version": SCHEMA_VERSION,
-            "event_type": "academic_provider_request",
-            "call_id": f"academic-call-{uuid.uuid4().hex}",
-            "run_id": run_id,
+    academic_provider_request_count(project_root, run_id)
+    try:
+        reservation = ACCOUNTING.reserve(
+            project_root / "runs" / run_id,
+            provider,
+            1,
+            ledger_filename=ACADEMIC_PROVIDER_REQUESTS_FILENAME,
+            lock_filename=ACADEMIC_PROVIDER_REQUESTS_LOCK_FILENAME,
+            schema_version=SCHEMA_VERSION,
+            per_run_max=limit,
+            extra_fields={
+                "event_type": "academic_provider_request",
+                "command": context["command"],
+                "scope_id": context["scope_id"],
+                "attempt": attempt,
+                "budget_consumed": True,
+            },
+        )
+    except ACCOUNTING.ProviderAccountingError as exc:
+        raise academic_accounting_failure(exc, context=context, provider=provider, run_id=run_id) from exc
+    return dict(reservation.events[0].record)
+
+
+def academic_accounting_failure(
+    exc: Any,
+    *,
+    context: dict[str, Any],
+    provider: str,
+    run_id: str,
+) -> DiscoverSourcesError:
+    """Re-raise a shared-ledger refusal in discovery's long-standing envelope.
+
+    Mapping is by ``error_code`` alone: the shared module's vocabulary is a
+    second name for conditions this command surface already named, and a host
+    that has switched on ``ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED`` since the
+    academic route landed must not have to learn a new one because the
+    implementation underneath moved.
+    """
+    limit = int(context["limit"])
+    details = exc.details if isinstance(getattr(exc, "details", None), dict) else {}
+    if exc.error_code == ACCOUNTING.ERROR_RATE_LIMITED and details.get("ceiling") == "per_run_max":
+        used = details.get("used", limit)
+        return DiscoverSourcesError(
+            "ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED",
+            (
+                f"Run {run_id} already reserved {used} academic provider request(s); "
+                f"the next {provider} call would exceed max_academic_provider_requests_per_run={limit}."
+            ),
+            remediation="Start a new run or raise the reviewed academic provider request budget.",
+            details={
+                "command": context["command"],
+                "provider": provider,
+                "run_id": run_id,
+                "used": used,
+                "limit": limit,
+                "network_io_executed": bool(context.get("network_io_executed")),
+            },
+        )
+    if exc.error_code == ACCOUNTING.ERROR_WRITE_FAILED:
+        return DiscoverSourcesError(
+            "ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED",
+            f"Cannot persist the academic provider-call reservation for run {run_id}: {exc.message}",
+            recoverable=False,
+            remediation="Restore workspace write access before retrying; no provider transport was invoked.",
+            details={
+                "command": context["command"],
+                "provider": provider,
+                "run_id": run_id,
+                "network_io_executed": False,
+            },
+        )
+    # Every remaining shared-ledger code describes damage to, or misuse of, the
+    # ledger itself, which discovery has always reported as an invalid ledger.
+    return DiscoverSourcesError(
+        "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
+        exc.message,
+        recoverable=False,
+        remediation="Repair or restore the run-bound provider-call ledger before retrying discovery.",
+        details={
             "command": context["command"],
-            "scope_id": context["scope_id"],
             "provider": provider,
-            "attempt": attempt,
-            "reserved_at": timestamp_utc(),
-            "budget_consumed": True,
-        }
-        ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with ledger_path.open("a", encoding="utf-8") as handle:
-                handle.write(compact_json(record) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-        except OSError as exc:
-            raise DiscoverSourcesError(
-                "ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED",
-                f"Cannot persist the academic provider-call reservation for run {run_id}: {exc}",
-                recoverable=False,
-                remediation="Restore workspace write access before retrying; no provider transport was invoked.",
-                details={
-                    "command": context["command"],
-                    "provider": provider,
-                    "run_id": run_id,
-                    "network_io_executed": False,
-                },
-            ) from exc
-        return record
+            "run_id": run_id,
+            "network_io_executed": False,
+        },
+    )
 
 
 def configured_candidate_store_relative(config: dict[str, Any] | None) -> str:
@@ -4636,6 +4856,587 @@ def run_search_discovery(
     return report
 
 
+# --- Registered discovery providers (CR-5 T7) --------------------------------
+#
+# The house philosophy for plugins, stated once: the *code* is authorized (an
+# operator installed the distribution and named its id in research.yml), the
+# *output* is not. Everything a registered provider hands back — the plan, the
+# candidate list, every field of every candidate — is treated exactly like a
+# response off the wire: bounded, shape-checked, and pushed through the same
+# classification and trust rejection a `search` hit gets. A registered provider
+# buys reach, never trust.
+#
+# These two codes are provably raised before any DNS or socket work, so a refusal
+# carrying one of them is honest when it reports network_io_executed: false.
+REGISTERED_PRE_TRANSPORT_ERROR_CODES = frozenset({"ACQUISITION_DOMAIN_NOT_DECLARED", "PROVIDER_PLAN_INVALID"})
+
+
+def registered_reason(exc: BaseException) -> str:
+    """Render a plugin's own failure text safely enough to print.
+
+    A provider never holds a credential, but it does see the request document and
+    its service's response, either of which an operator may have loaded with
+    something that should not reach a log. Every string a plugin hands back goes
+    through the same redaction pass the transport applies to its own
+    diagnostics, so a registered provider cannot become the one path that prints
+    a secret in the clear.
+    """
+    return TRANSPORT.redact_diagnostic(str(exc) or type(exc).__name__)
+
+
+def registered_error(
+    error_code: str,
+    message: str,
+    *,
+    provider_id: str | None = None,
+    recoverable: bool = True,
+    remediation: str | None = None,
+    details: dict[str, Any] | None = None,
+    network_io: bool = False,
+) -> DiscoverSourcesError:
+    """Build a registered-route refusal in the envelope every discovery command uses."""
+    payload: dict[str, Any] = {"command": "registered", "network_io_executed": bool(network_io)}
+    if provider_id is not None:
+        payload["provider"] = provider_id
+    for key, value in (details or {}).items():
+        if key not in {"command", "network_io_executed"}:
+            payload[key] = value
+    return DiscoverSourcesError(
+        error_code,
+        message,
+        recoverable=recoverable,
+        remediation=remediation,
+        details=payload,
+    )
+
+
+def require_registered_discovery_provider(provider_id: str):
+    """Resolve an authorized id to its installed registration, or refuse with CR-5's codes.
+
+    The declared credential *names* are registered for redaction here, the moment
+    the declaration is known, rather than when the transport later resolves them.
+    Everything between those two points — the provider's own ``validate_request``
+    and ``plan_search`` messages — can quote the request document, and a refusal
+    raised there must redact the same values a refusal raised after transport
+    would. Waiting for the first placeholder substitution would leave exactly the
+    pre-transport failures unredacted.
+    """
+    try:
+        registration = require_registration(DISCOVERY_PHASE, provider_id)
+    except ProviderPluginError as exc:
+        raise registered_error(
+            exc.error_code,
+            exc.message,
+            provider_id=provider_id,
+            recoverable=False,
+            remediation=exc.remediation,
+            details=dict(exc.details),
+        ) from exc
+    for name in registration.capabilities.credentials:
+        TRANSPORT.register_secret_env_name(name)
+    return registration
+
+
+def load_registered_request_document(provider_id: str, request_file: str) -> dict[str, Any]:
+    """Read ``--request-file`` as exactly one JSON object.
+
+    The document's *contents* are the provider's business; its envelope is this
+    script's. A bounded read keeps a mistyped path at a multi-gigabyte file from
+    becoming a memory fault, and refusing anything but a top-level object keeps
+    the provider's ``validate_request`` contract to a single shape.
+    """
+    path = Path(request_file).expanduser()
+    try:
+        resolved = path.resolve()
+        size = resolved.stat().st_size if resolved.is_file() else None
+    except OSError as exc:
+        raise registered_error(
+            "PROVIDER_REQUEST_INVALID",
+            f"Cannot read the registered provider request file {request_file}: {exc}",
+            provider_id=provider_id,
+            remediation="Pass --request-file a readable JSON document containing one object.",
+        ) from exc
+    if size is None:
+        raise registered_error(
+            "PROVIDER_REQUEST_INVALID",
+            f"Registered provider request file is not a regular file: {request_file}",
+            provider_id=provider_id,
+            remediation="Pass --request-file a readable JSON document containing one object.",
+        )
+    if size > REGISTERED_REQUEST_MAX_BYTES:
+        raise registered_error(
+            "PROVIDER_REQUEST_INVALID",
+            (
+                f"Registered provider request file is {size} bytes; the limit is "
+                f"{REGISTERED_REQUEST_MAX_BYTES} bytes."
+            ),
+            provider_id=provider_id,
+            remediation="A provider request is a small JSON object; shrink it or point at the right file.",
+        )
+    try:
+        document = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise registered_error(
+            "PROVIDER_REQUEST_INVALID",
+            f"Registered provider request file is not readable UTF-8 JSON: {exc}",
+            provider_id=provider_id,
+            remediation="Pass --request-file a readable JSON document containing one object.",
+        ) from exc
+    if not isinstance(document, dict):
+        raise registered_error(
+            "PROVIDER_REQUEST_INVALID",
+            f"Registered provider request must be a single JSON object, not {type(document).__name__}.",
+            provider_id=provider_id,
+            remediation="Wrap the request in a single JSON object.",
+        )
+    return document
+
+
+def validate_registered_request(registration, document: dict[str, Any], *, provider_id: str) -> None:
+    """Let the provider refuse what it does not understand, in its own words."""
+    validator = getattr(registration.provider, "validate_request", None)
+    if not callable(validator):
+        raise registered_error(
+            "PROVIDER_REGISTRATION_INVALID",
+            f"Provider {provider_id!r} does not expose a callable validate_request.",
+            provider_id=provider_id,
+            recoverable=False,
+            remediation="Upgrade or fix the distribution supplying this provider.",
+        )
+    try:
+        validator(document)
+    except Exception as exc:  # noqa: BLE001 - a plugin refusal is data, never a crashed command
+        reason = registered_reason(exc)
+        raise registered_error(
+            "PROVIDER_REQUEST_INVALID",
+            f"Provider {provider_id!r} refused the request document: {reason}",
+            provider_id=provider_id,
+            remediation="Fix the request document to what this provider documents; its reason is above.",
+            details={"provider_reason": reason},
+        ) from exc
+
+
+def plan_registered_search(registration, document: dict[str, Any], *, provider_id: str) -> list[Any]:
+    """Ask the provider for its plan and refuse anything the envelope will not carry.
+
+    Every request is shape-checked before *any* of them executes: a plan whose
+    third entry is malformed must not leave two requests already on the wire.
+    """
+    planner = getattr(registration.provider, "plan_search", None)
+    if not callable(planner):
+        raise registered_error(
+            "PROVIDER_REGISTRATION_INVALID",
+            f"Provider {provider_id!r} does not expose a callable plan_search.",
+            provider_id=provider_id,
+            recoverable=False,
+            remediation="Upgrade or fix the distribution supplying this provider.",
+        )
+    try:
+        planned = planner(document)
+    except Exception as exc:  # noqa: BLE001 - a crashing planner is an invalid plan
+        raise registered_error(
+            "PROVIDER_PLAN_INVALID",
+            f"Provider {provider_id!r} failed to plan a search: {registered_reason(exc)}",
+            provider_id=provider_id,
+            remediation="Report this to the distribution's maintainer; nothing was fetched and nothing was written.",
+        ) from exc
+    if not isinstance(planned, (list, tuple)):
+        raise registered_error(
+            "PROVIDER_PLAN_INVALID",
+            f"Provider {provider_id!r} returned {type(planned).__name__}, not a sequence of planned requests.",
+            provider_id=provider_id,
+            remediation="plan_search must return a tuple of PlannedRequest objects.",
+        )
+    if not planned:
+        raise registered_error(
+            "PROVIDER_PLAN_INVALID",
+            f"Provider {provider_id!r} planned no requests for this document.",
+            provider_id=provider_id,
+            remediation="A search plan must contain at least one request, or validate_request should have refused.",
+        )
+    if len(planned) > REGISTERED_MAX_PLANNED_REQUESTS:
+        raise registered_error(
+            "PROVIDER_PLAN_INVALID",
+            (
+                f"Provider {provider_id!r} planned {len(planned)} requests; one discovery command executes at "
+                f"most {REGISTERED_MAX_PLANNED_REQUESTS}."
+            ),
+            provider_id=provider_id,
+            remediation="A plan is not a crawl; narrow the request or split it across commands.",
+            details={"planned_request_count": len(planned), "limit": REGISTERED_MAX_PLANNED_REQUESTS},
+        )
+    validated: list[Any] = []
+    for index, item in enumerate(planned, start=1):
+        try:
+            validated.append(TRANSPORT.validate_planned_request(item))
+        except TRANSPORT.AcquisitionTransportError as exc:
+            raise registered_error(
+                exc.error_code,
+                f"Provider {provider_id!r} planned request {index} is invalid: {exc.message}",
+                provider_id=provider_id,
+                remediation=exc.remediation,
+                details={"planned_request_index": index},
+            ) from exc
+    return validated
+
+
+def registered_budget_context(
+    project_root: Path,
+    requested_run_id: str | None,
+    *,
+    provider_id: str,
+    capabilities,
+) -> dict[str, Any] | None:
+    """Bind this command to the run whose ledger accounts its provider calls.
+
+    Mirrors the academic precedent exactly, including its one concession: with no
+    active run there is nowhere durable to account, so the command proceeds
+    unaccounted rather than inventing run state. The report says which happened,
+    so a host never has to guess whether the declared ceiling was enforced.
+    """
+    run = resolve_academic_discovery_run(
+        project_root,
+        requested_run_id,
+        command="registered",
+        validate_accounting=False,
+    )
+    if run is None:
+        return None
+    return {
+        "project_root": project_root,
+        "run_id": run["run_id"],
+        "provider_id": provider_id,
+        "rate_limit": getattr(capabilities, "rate_limit", None),
+    }
+
+
+def reserve_registered_provider_requests(
+    context: dict[str, Any] | None,
+    *,
+    count: int,
+    scope_id: str,
+):
+    """Durably consume ``count`` provider-call slots immediately before transport."""
+    if context is None:
+        return None
+    provider_id = context["provider_id"]
+    run_id = context["run_id"]
+    try:
+        return ACCOUNTING.reserve(
+            context["project_root"] / "runs" / run_id,
+            provider_id,
+            count,
+            ledger_filename=REGISTERED_PROVIDER_REQUESTS_FILENAME,
+            lock_filename=REGISTERED_PROVIDER_REQUESTS_LOCK_FILENAME,
+            schema_version=SCHEMA_VERSION,
+            rate_limit=context["rate_limit"],
+            extra_fields={
+                "event_type": REGISTERED_PROVIDER_REQUEST_EVENT_TYPE,
+                "command": "registered",
+                "scope_id": scope_id,
+                "budget_consumed": True,
+            },
+        )
+    except ACCOUNTING.ProviderAccountingError as exc:
+        # The shared module's codes are the CR-5 codes for this route, so they
+        # pass through unchanged; only the academic route has an older
+        # host-visible vocabulary that has to be preserved.
+        raise registered_error(
+            exc.error_code,
+            exc.message,
+            provider_id=provider_id,
+            recoverable=exc.error_code == ACCOUNTING.ERROR_RATE_LIMITED,
+            remediation=exc.remediation,
+            details={"run_id": run_id, **dict(exc.details)},
+        ) from exc
+
+
+def execute_registered_plan(validated: list[Any], *, registration, provider_id: str) -> tuple[bytes, ...]:
+    """Execute each planned request through the package's own pinned transport.
+
+    The provider never holds a socket and never holds a secret: the declared
+    ``allowed_domains`` bound the egress, and ``{{credential:NAME}}`` placeholders
+    in header values are resolved here, from this process's environment, against
+    the names the provider declared.
+    """
+    executor_kwargs: dict[str, Any] = {}
+    if REGISTERED_OPENER is not None:
+        executor_kwargs["opener"] = REGISTERED_OPENER
+    if REGISTERED_RESOLVER is not None:
+        executor_kwargs["resolver"] = REGISTERED_RESOLVER
+    allowed_domains = list(registration.capabilities.allowed_domains)
+    credentials = list(registration.capabilities.credentials)
+    responses: list[bytes] = []
+    for index, plan in enumerate(validated, start=1):
+        try:
+            result = TRANSPORT.execute_planned_request(
+                plan,
+                allowed_domains=allowed_domains,
+                credentials=credentials,
+                env=os.environ,
+                timeout=REGISTERED_TIMEOUT_SECONDS,
+                max_bytes=REGISTERED_RESPONSE_MAX_BYTES,
+                **executor_kwargs,
+            )
+        except TRANSPORT.AcquisitionTransportError as exc:
+            raise registered_error(
+                exc.error_code,
+                f"Registered discovery request {index} for {provider_id!r} failed: {exc.message}",
+                provider_id=provider_id,
+                remediation=exc.remediation,
+                details={"planned_request_index": index},
+                network_io=bool(responses) or exc.error_code not in REGISTERED_PRE_TRANSPORT_ERROR_CODES,
+            ) from exc
+        responses.append(result.content)
+    return tuple(responses)
+
+
+def interpret_registered_candidates(
+    registration,
+    document: dict[str, Any],
+    responses: tuple[bytes, ...],
+    *,
+    provider_id: str,
+) -> list[Any]:
+    """Turn provider responses into raw candidate records, bounded and shape-checked."""
+    interpreter = getattr(registration.provider, "interpret_candidates", None)
+    if not callable(interpreter):
+        raise registered_error(
+            "PROVIDER_REGISTRATION_INVALID",
+            f"Provider {provider_id!r} does not expose a callable interpret_candidates.",
+            provider_id=provider_id,
+            recoverable=False,
+            remediation="Upgrade or fix the distribution supplying this provider.",
+            network_io=True,
+        )
+    try:
+        produced = interpreter(document, responses)
+    except Exception as exc:  # noqa: BLE001 - a crashing interpreter is a provider bug, not a traceback
+        raise registered_error(
+            "PROVIDER_PLAN_INVALID",
+            f"Provider {provider_id!r} failed to interpret its own search responses: {registered_reason(exc)}",
+            provider_id=provider_id,
+            remediation="Report this to the distribution's maintainer; no candidate was written.",
+            network_io=True,
+        ) from exc
+    if isinstance(produced, (str, bytes, bytearray)) or not isinstance(produced, (list, tuple)):
+        raise registered_error(
+            "PROVIDER_PLAN_INVALID",
+            (
+                f"Provider {provider_id!r} returned {type(produced).__name__} from interpret_candidates, "
+                "not a sequence of candidate records."
+            ),
+            provider_id=provider_id,
+            remediation="interpret_candidates must return a tuple of raw search-result mappings.",
+            network_io=True,
+        )
+    return list(produced)
+
+
+def registered_classification_query(document: dict[str, Any], provider_id: str) -> str:
+    """Pick the text the trust classifier scores candidate titles against.
+
+    The request document is provider-defined, so there is no field this script
+    may insist on. A top-level ``query`` string is the near-universal convention
+    and is used when present; otherwise the provider id stands in, which keeps
+    relevance scoring well-defined (an empty query would make every candidate's
+    matched-terms list degenerate) while stating plainly that no free-text query
+    was declared.
+    """
+    value = document.get("query")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return provider_id
+
+
+def run_registered_search(
+    project_root: Path,
+    config: dict[str, Any],
+    discovery: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Propose candidates through a registered discovery provider. Never fetches evidence.
+
+    The gates are the discovery gates, in the order the rest of this script uses
+    them: discovery enabled, the id authorized in research.yml, then the id
+    supplied by an installed registration. Only then is the provider asked
+    anything. What it returns is written to the candidate store and nowhere else.
+    """
+    provider_id = require_non_empty(args.provider_id, "--id")
+    request_file = require_non_empty(args.request_file, "--request-file")
+    # Authorization before existence: an unlisted id is refused with the same
+    # DISCOVERY_PROVIDER_DISABLED envelope a built-in gets, and only an
+    # authorized id is ever looked up among the installed registrations.
+    require_discovery_provider_allowed("registered", discovery, (provider_id,))
+    registration = require_registered_discovery_provider(provider_id)
+
+    document = load_registered_request_document(provider_id, request_file)
+    validate_registered_request(registration, document, provider_id=provider_id)
+    validated = plan_registered_search(registration, document, provider_id=provider_id)
+
+    query = registered_classification_query(document, provider_id)
+    discovery_id = discovery_run_id(f"registered:{provider_id}", [query])
+    discovered_by = f"{REGISTERED_DISCOVERED_BY_PREFIX}:{provider_id}"
+
+    # Reserve every slot the plan needs before the first request leaves, so a
+    # crash between here and the network counts the attempt rather than losing it.
+    budget = registered_budget_context(
+        project_root,
+        args.run_id,
+        provider_id=provider_id,
+        capabilities=registration.capabilities,
+    )
+    reservation = reserve_registered_provider_requests(budget, count=len(validated), scope_id=discovery_id)
+
+    responses = execute_registered_plan(validated, registration=registration, provider_id=provider_id)
+    produced = interpret_registered_candidates(registration, document, responses, provider_id=provider_id)
+
+    warnings: list[dict[str, str]] = []
+    if len(produced) > REGISTERED_MAX_RAW_CANDIDATES:
+        warnings.append(
+            {
+                "code": "registered_results_truncated",
+                "message": (
+                    f"Provider {provider_id!r} returned {len(produced)} results; only the first "
+                    f"{REGISTERED_MAX_RAW_CANDIDATES} were considered."
+                ),
+            }
+        )
+    bounded = produced[:REGISTERED_MAX_RAW_CANDIDATES]
+    # The same shape rule every search backend's payload passes through.
+    results = coerce_search_results(bounded)
+    refused = len(bounded) - len(results)
+    if refused:
+        warnings.append(
+            {
+                "code": "registered_candidate_refused",
+                "message": (
+                    f"{refused} result(s) from {provider_id!r} were not JSON objects and were refused "
+                    "without being proposed as candidates."
+                ),
+            }
+        )
+    unmodelled = sorted(
+        {
+            value.strip()
+            for value in (item.get("source_type") for item in results)
+            if isinstance(value, str) and value.strip() and value.strip() not in ALLOWED_SEARCH_SOURCE_TYPES
+        }
+    )
+    if unmodelled:
+        # The source_type hint is confined to the types this workspace models
+        # (classify_search_result already falls back to web_page). Saying so out
+        # loud is the difference between a deliberate demotion and a silent one:
+        # a candidate labelled web_page also gets web_page review policy, and an
+        # operator should know the provider meant something else.
+        warnings.append(
+            {
+                "code": "registered_source_type_unmodelled",
+                "message": (
+                    f"Provider {provider_id!r} proposed source_type(s) this workspace does not model "
+                    f"({', '.join(unmodelled)}); those candidates are recorded as web_page and carry "
+                    "web_page review policy."
+                ),
+            }
+        )
+
+    request = {
+        "query": query,
+        "request_id": None,
+        "jurisdiction": None,
+        # The declaration bounds *egress*, not the hosts a provider may propose:
+        # a catalogue search legitimately returns product pages on a different
+        # host than the API it queried. Candidate URLs are therefore classified,
+        # never filtered, exactly as a search backend's results are.
+        "domain_allowlist": [],
+        "domain_blocklist": [],
+        "max_results": args.max_results,
+        "prefer_official": False,
+        "expected_source_type": None,
+        "official_domains": [],
+    }
+    discovered_at = timestamp_utc()
+    candidates = normalize_search_candidates(
+        results,
+        request=request,
+        request_id=None,
+        discovery_id=discovery_id,
+        network_io=True,
+        discovered_at=discovered_at,
+        provider=provider_id,
+        discovered_by=discovered_by,
+    )
+    dropped = len(results) - len(candidates)
+    if dropped:
+        warnings.append(
+            {
+                "code": "registered_candidate_refused",
+                "message": (
+                    f"{dropped} result(s) from {provider_id!r} carried no usable http(s) URL, duplicated an "
+                    "earlier result, or exceeded --max-results, and were not proposed as candidates."
+                ),
+            }
+        )
+    candidates = apply_search_trust_rejection(candidates)
+    candidates.sort(key=search_candidate_sort_key)
+    candidates = candidates[: args.max_results]
+
+    registration_block = registration.registration_block()
+    capability_block = registration.capabilities.as_dict()
+    for candidate in candidates:
+        # The candidate-record mirror of the acquisition sidecar: which installed
+        # code proposed this, and what did it claim it could reach.
+        candidate["provider_registration"] = dict(registration_block)
+        candidate["provider_capabilities"] = dict(capability_block)
+
+    store_path = candidate_store_path(project_root, config)
+    written = append_candidates(store_path, candidates)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "provider": provider_id,
+        "command": "registered",
+        "registered_command": "search",
+        "generated_at": discovered_at,
+        "discovered_by": discovered_by,
+        "discovery_run_id": discovery_id,
+        "request_id": None,
+        "query": query,
+        "max_results": args.max_results,
+        "planned_request_count": len(validated),
+        "provider_registration": registration_block,
+        "provider_capabilities": capability_block,
+        "accounting": {
+            "run_id": budget["run_id"] if budget is not None else None,
+            "ledger_path": (
+                relative_label(project_root, reservation.ledger_path) if reservation is not None else None
+            ),
+            "reserved": reservation.count if reservation is not None else 0,
+        },
+        "network_io_executed": True,
+        "count": len(candidates),
+        "written": len(written),
+        "candidates_path": relative_label(project_root, store_path),
+        "candidates": candidates,
+        "warnings": warnings,
+    }
+
+
+def run_registered_discovery(
+    project_root: Path,
+    config: dict[str, Any],
+    discovery: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if args.registered_command == "search":
+        return run_registered_search(project_root, config, discovery, args)
+    raise DiscoverSourcesError(
+        "NOT_IMPLEMENTED",
+        f"registered {args.registered_command} is not implemented.",
+        remediation="Use `registered search`; acquisition through a registered provider is fetch_sources.py's route.",
+        details={"command": "registered", "network_io_executed": False},
+    )
+
+
 def run_jurisdictions_command(project_root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     if args.jurisdictions_command == "validate":
         return run_jurisdictions_validate(project_root, config)
@@ -7278,10 +8079,20 @@ def run_companions_discovery(
     source_id = require_non_empty(args.source_id, "--source-id")
     request_id_arg = getattr(args, "request_id", None)
     request_id = request_id_arg.strip() if isinstance(request_id_arg, str) and request_id_arg.strip() else None
-    configured_providers = validate_provider_ids(
-        discovery.get("providers", []),
-        phase="discovery",
-    )
+    # Registered ids must widen the accepted set here too: this call re-reads the
+    # same authorized list the discovery gate already validated, and without the
+    # registrations a workspace authorizing a registered provider would raise an
+    # unenveloped ValueError out of an unrelated route.
+    try:
+        configured_providers = validate_provider_ids(
+            discovery.get("providers", []),
+            phase="discovery",
+            registered=discovery_registered_ids(),
+        )
+    except ProviderNotRegisteredError as exc:
+        raise provider_not_registered("companions", "integrations.discovery.providers", exc) from exc
+    except ProviderListError as exc:
+        raise SystemExit(f"research.yml integrations.discovery.providers {exc}") from exc
     github_requested = not bool(getattr(args, "no_github", False))
     search_requested = not bool(getattr(args, "no_search", False))
     use_github = github_requested and provider_is_allowed(configured_providers, "github")
@@ -7602,6 +8413,13 @@ def run_discovery_command(args: argparse.Namespace) -> dict[str, Any]:
         if args.discover_publications:
             require_discovery_provider_allowed("authors", discovery, ("openalex",))
         return run_authors_discovery(project_root, config, args)
+    if args.command == "registered":
+        # A discovery provider supplied by an installed distribution (CR-5 T7).
+        # Read-only like every other discovery route: it proposes candidates
+        # through the package's own transport and never fetches evidence. The
+        # per-provider authorization check lives inside the route, beside the
+        # registration lookup, so the two refusals stay adjacent and ordered.
+        return run_registered_discovery(project_root, config, discovery, args)
     if args.command == "companions":
         # Companion artifact discovery (E35-T03): a paper-centered composite that
         # prefers links already in the paper/provider metadata, then GitHub and the

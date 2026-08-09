@@ -61,6 +61,18 @@ DOCUMENTCLASS_RE = re.compile(r"\\documentclass\s*(?:\[[^\]]*\])?\s*\{")
 FALLBACK_ENTRYPOINTS = ("main.tex", "main_arxiv.tex", "arxiv.tex", "example_paper.tex")
 URL_TRAILING_PUNCTUATION = ".,;:)]}"
 PROVENANCE_SIDECAR_SUFFIX = ".provenance.yml"
+# Fields the package writes into a sidecar but deliberately does not copy into the
+# manifest. They are listed so a registered provider's own artifacts do not draw an
+# "unknown provenance field" warning for fields this package authored:
+#
+#   provider_capabilities  the declaration is per-provider, not per-artifact; the sidecar
+#                          is its system of record and `doctor` renders it. The manifest
+#                          carries provider_registration, which joins to both, instead of
+#                          duplicating the whole declaration on every row.
+#   provider_metadata      plugin-supplied and untrusted. It is nested in the sidecar
+#                          precisely so it cannot forge a policy field; promoting it into
+#                          the manifest would hand it the authority that nesting withheld.
+PROVENANCE_RECOGNIZED_ONLY_FIELDS = frozenset({"provider_capabilities", "provider_metadata"})
 PROVENANCE_FIELDS = (
     "url",
     "final_url",
@@ -99,6 +111,8 @@ PROVENANCE_FIELDS = (
     "provider_license_slug",
     "license_source",
     "license",
+    "license_check_required",
+    "provider_registration",
     "retrieved_at",
     "retrieved_by",
     "source_type",
@@ -1443,7 +1457,8 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
         return {}, [f"{relative_path}: provenance sidecar must be a YAML mapping"]
 
     data: dict[str, Any] = {}
-    for key in sorted(str(key) for key in set(document) - set(PROVENANCE_FIELDS)):
+    unknown = set(document) - set(PROVENANCE_FIELDS) - PROVENANCE_RECOGNIZED_ONLY_FIELDS
+    for key in sorted(str(key) for key in unknown):
         warnings.append(f"{relative_path}: unknown provenance field ignored: {key}")
     for field in PROVENANCE_FIELDS:
         if field not in document:
@@ -1527,6 +1542,21 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
                 data[field] = dict(value)
                 continue
             warnings.append(f"{relative_path}: provenance {field} must be a mapping")
+            continue
+        if field == "provider_registration":
+            # Which installed distribution supplied this source. Recorded so a manifest
+            # reader can attribute evidence to a provider without opening every sidecar,
+            # and so an uninstalled provider's past deliveries stay attributable.
+            if isinstance(value, dict):
+                data[field] = dict(value)
+                continue
+            warnings.append(f"{relative_path}: provenance provider_registration must be a mapping")
+            continue
+        if field == "license_check_required":
+            if isinstance(value, bool):
+                data[field] = value
+                continue
+            warnings.append(f"{relative_path}: provenance license_check_required must be a boolean")
             continue
         if field in {"openalex_title_lag", "openalex_identity_conflict"}:
             if isinstance(value, bool):

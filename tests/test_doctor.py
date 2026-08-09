@@ -2,11 +2,18 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from tests._provider_plugin_fixture import (
+    ACQUISITION_PROVIDER_ID,
+    DISCOVERY_PROVIDER_ID,
+    installed_provider_plugins,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCTOR_PATH = REPO_ROOT / "workspace-template" / "scripts" / "doctor.py"
@@ -397,6 +404,519 @@ class NormalizerAdapterDoctorTests(unittest.TestCase):
 
         self.assertEqual("ok", check["status"])
         self.assertEqual(["/definitely/not/a/real/binary-ew"], check["details"]["adapters"][0]["command"])
+
+
+class RegisteredProviderDoctorTests(unittest.TestCase):
+    """Doctor is the only place an auditor can see what a workspace *could* reach.
+
+    Registration is packaging metadata, so installing a distribution makes a provider id
+    available and nothing more; ``research.yml`` is still what enables it. Those two
+    states have four combinations with four different fixes, and telling them apart is
+    the entire job of this section — which is why every test below is written as a
+    question an operator would actually ask of a workspace that "isn't working".
+
+    The section must also never make doctor worse at its other job: with nothing
+    installed, everything outside the section stays exactly as it was, and a broken
+    plugin is a finding rather than a crashed report.
+    """
+
+    #: The whole ordered contract of doctor's checks. Pinned because a host reads them
+    #: positionally in text output, and because a check that silently disappeared would
+    #: otherwise be caught by nothing.
+    EXPECTED_CHECK_IDS = [
+        "python",
+        "pyyaml",
+        "pypdf",
+        "pdftotext",
+        "git",
+        "workspace_write",
+        "contract",
+        "semantic_retrieval",
+        "normalization_adapters",
+        "acquisition_mode",
+        "registered_providers",
+        "secret_exposure",
+        "workspace_health",
+    ]
+
+    CREDENTIAL_NAME = "KEEPA_FIXTURE_API_KEY"
+    CREDENTIAL_VALUE = "super-secret-value-never-printed"
+
+    def setUp(self):
+        self.doctor = load_script_module("evidence_wiki_doctor_registered_providers", DOCTOR_PATH)
+
+    def workspace(
+        self,
+        tmpdir: str,
+        *,
+        acquisition: tuple[str, ...] = (),
+        discovery: tuple[str, ...] = (),
+        acquisition_enabled: bool = True,
+        discovery_enabled: bool = False,
+        env_file: str | None = None,
+    ) -> Path:
+        workspace = make_workspace(Path(tmpdir))
+        (workspace / "research.yml").write_text(
+            "project: {}\n"
+            "raw: {}\n"
+            "sources: {}\n"
+            "wiki: {}\n"
+            "taxonomy: {}\n"
+            "ingest: {}\n"
+            "lint: {}\n"
+            "outputs: {}\n"
+            "integrations:\n"
+            "  acquisition:\n"
+            f"    enabled: {'true' if acquisition_enabled else 'false'}\n"
+            "    providers: [" + ", ".join(acquisition) + "]\n"
+            "  discovery:\n"
+            f"    enabled: {'true' if discovery_enabled else 'false'}\n"
+            "    providers: [" + ", ".join(discovery) + "]\n",
+            encoding="utf-8",
+        )
+        if env_file is not None:
+            (workspace / ".env").write_text(env_file, encoding="utf-8")
+        return workspace
+
+    def report(self, workspace: Path) -> dict:
+        return self.doctor.build_report(workspace, env=FakeEnvironment())
+
+    def section(self, workspace: Path) -> dict:
+        checks = {check["id"]: check for check in self.report(workspace)["checks"]}
+        return checks["registered_providers"]
+
+    def test_the_ordered_check_contract_includes_the_new_section_and_drops_nothing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = self.report(self.workspace(tmpdir))
+
+        self.assertEqual(self.EXPECTED_CHECK_IDS, [check["id"] for check in report["checks"]])
+
+    def test_an_environment_with_no_registrations_reports_the_section_as_present_and_empty(self):
+        # Present-but-empty rather than absent, deliberately: an absent section cannot be
+        # told apart from a doctor that does not know about registration at all, and
+        # "nothing is installed" is a positive answer an auditor needs to be able to read.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = self.report(self.workspace(tmpdir))
+
+        section = {check["id"]: check for check in report["checks"]}["registered_providers"]
+        self.assertEqual("ok", section["status"])
+        self.assertFalse(section["required"])
+        self.assertEqual("ok", report["verdict"])
+        self.assertEqual("No third-party providers are registered in this environment.", section["message"])
+        self.assertEqual([], section["details"]["registered"])
+        self.assertEqual([], section["details"]["invalid"])
+        self.assertEqual([], section["details"]["findings"])
+        self.assertEqual(
+            {"registered": 0, "enabled": 0, "available": 0, "invalid": 0},
+            section["details"]["counts"],
+        )
+
+    def test_with_nothing_installed_the_secrets_check_keeps_its_pre_registration_output(self):
+        # The one existing check this unit touches. With no declared credential names it
+        # must be byte-identical to what it emitted before registration existed, so the
+        # extension cannot become drift for every workspace that has no plugins.
+        cases = (
+            (None, {"readable_env_files": []}, "No readable .env file found at the workspace or invocation root."),
+            (
+                "OPENALEX_API_KEY=value\n",
+                {"readable_env_files": [".env"]},
+                "Readable .env file(s) are present; values were not inspected or printed.",
+            ),
+        )
+        for env_file, expected_details, expected_message in cases:
+            with self.subTest(env_file=bool(env_file)), tempfile.TemporaryDirectory() as tmpdir:
+                workspace = self.workspace(tmpdir, env_file=env_file)
+                checks = {check["id"]: check for check in self.report(workspace)["checks"]}
+                secrets = checks["secret_exposure"]
+
+            self.assertEqual(expected_details, secrets["details"])
+            self.assertEqual(expected_message, secrets["message"])
+            if env_file is None:
+                self.assertEqual(
+                    "Operator-managed per-run environment injection remains the expected secret path.",
+                    secrets["implication"],
+                )
+                self.assertEqual("No action required.", secrets["remediation"])
+            else:
+                self.assertEqual(
+                    "Provider credentials can leak into source/workspace state if .env files are treated "
+                    "as runtime configuration.",
+                    secrets["implication"],
+                )
+                self.assertEqual(
+                    "Move provider keys into the operator secret store, rotate exposed keys, and keep "
+                    "repo-root .env development-only.",
+                    secrets["remediation"],
+                )
+
+    def test_installing_a_provider_changes_only_the_registration_and_secrets_checks(self):
+        # Pins that nothing else in doctor became environment-dependent. Every other
+        # check is a function of the workspace tree and must not notice a pip install.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(tmpdir)
+            before = self.report(workspace)
+            with installed_provider_plugins():
+                after = self.report(workspace)
+
+        changed = {
+            check["id"]
+            for check, other in zip(before["checks"], after["checks"], strict=True)
+            if json.dumps(check, sort_keys=True) != json.dumps(other, sort_keys=True)
+        }
+        secrets = {check["id"]: check for check in after["checks"]}["secret_exposure"]
+        self.assertEqual({"registered_providers", "secret_exposure"}, changed)
+        self.assertEqual(before["verdict"], after["verdict"])
+        # And the secrets check changed only by learning the declared *names*: its status,
+        # message, and the .env listing it already produced are untouched.
+        for field in ("status", "message", "implication", "remediation"):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    {check["id"]: check for check in before["checks"]}["secret_exposure"][field],
+                    secrets[field],
+                )
+        self.assertEqual([self.CREDENTIAL_NAME], secrets["details"]["declared_credentials"])
+        self.assertEqual([], secrets["details"]["exposed_credentials"])
+
+    def test_a_registration_research_yml_does_not_authorize_is_available_not_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(tmpdir)
+            with installed_provider_plugins():
+                report = self.report(workspace)
+
+        section = {check["id"]: check for check in report["checks"]}["registered_providers"]
+        entries = {entry["id"]: entry for entry in section["details"]["registered"]}
+        self.assertEqual("ok", section["status"])
+        self.assertEqual("ok", report["verdict"])
+        self.assertEqual([], section["details"]["findings"])
+        self.assertEqual(
+            {ACQUISITION_PROVIDER_ID, DISCOVERY_PROVIDER_ID},
+            set(entries),
+        )
+        for provider_id, entry in entries.items():
+            with self.subTest(provider=provider_id):
+                self.assertEqual("available", entry["state"])
+                self.assertFalse(entry["authorized"])
+        self.assertEqual(
+            {"registered": 2, "enabled": 0, "available": 2, "invalid": 0},
+            section["details"]["counts"],
+        )
+
+    def test_an_authorized_registration_in_a_disabled_phase_is_not_called_enabled(self):
+        """Authorization alone does not make a provider reachable; the phase switch also gates it.
+
+        With `enabled: false` the acquisition path refuses every call with
+        ACQUISITION_DISABLED, so reporting the provider as "enabled" would tell an auditor
+        asking what this workspace can reach exactly the wrong thing. This matches
+        orchestration_controller.provider_policy, which reads enabled as the switch AND a
+        non-empty allow-list.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(
+                tmpdir,
+                acquisition=(ACQUISITION_PROVIDER_ID,),
+                acquisition_enabled=False,
+            )
+            with installed_provider_plugins():
+                report = self.report(workspace)
+
+        section = {check["id"]: check for check in report["checks"]}["registered_providers"]
+        entries = {entry["id"]: entry for entry in section["details"]["registered"]}
+        acquisition = entries[ACQUISITION_PROVIDER_ID]
+        self.assertEqual("available", acquisition["state"])
+        # Still authorized -- the allow-list does name it, so an operator is not sent to
+        # fix the wrong line; it is the phase switch that makes it unreachable.
+        self.assertTrue(acquisition["authorized"])
+        self.assertFalse(acquisition["phase_enabled"])
+        text = self.doctor.render_text(report)
+        self.assertIn("authorized, but the phase is not enabled", text)
+
+    def test_an_authorized_registration_is_listed_as_enabled_with_its_declaration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(tmpdir, acquisition=(ACQUISITION_PROVIDER_ID,))
+            with installed_provider_plugins():
+                report = self.report(workspace)
+
+        section = {check["id"]: check for check in report["checks"]}["registered_providers"]
+        entries = {entry["id"]: entry for entry in section["details"]["registered"]}
+        acquisition = entries[ACQUISITION_PROVIDER_ID]
+        self.assertEqual("ok", section["status"])
+        self.assertEqual("ok", report["verdict"])
+        self.assertEqual("enabled", acquisition["state"])
+        self.assertTrue(acquisition["authorized"])
+        self.assertEqual("acquisition", acquisition["phase"])
+        self.assertEqual("keepa-fixture", acquisition["distribution"])
+        self.assertEqual("0.1.0", acquisition["version"])
+        self.assertEqual(1, acquisition["provider_api_version"])
+        self.assertEqual("evidence_wiki.acquisition_providers", acquisition["entry_point_group"])
+        self.assertEqual(
+            ["api.keepa-fixture.invalid", "assets.keepa-fixture.invalid"],
+            acquisition["capabilities"]["allowed_domains"],
+        )
+        self.assertEqual({"requests": 60, "per": "minute"}, acquisition["capabilities"]["rate_limit"])
+        self.assertEqual([self.CREDENTIAL_NAME], acquisition["capabilities"]["credentials"])
+        self.assertEqual(["market-data/price_history"], acquisition["capabilities"]["request_kinds"])
+        # The other registration is installed too and stays *available*: authorizing one
+        # provider must never quietly enable the rest of its distribution.
+        self.assertEqual("available", entries[DISCOVERY_PROVIDER_ID]["state"])
+
+    def test_an_authorized_provider_that_is_not_installed_is_an_error_the_operator_can_act_on(self):
+        # The §2.7 posture: smoke already refuses this workspace. Doctor is where the
+        # operator learns which id, in which entry-point group, and what to install.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(tmpdir, acquisition=(ACQUISITION_PROVIDER_ID,))
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = self.doctor.main(
+                    ["--project-root", str(workspace), "--format", "json"], env=FakeEnvironment()
+                )
+
+        report = json.loads(stdout.getvalue())
+        section = {check["id"]: check for check in report["checks"]}["registered_providers"]
+        finding = section["details"]["findings"][0]
+        self.assertEqual(1, exit_code)
+        self.assertEqual("missing", report["verdict"])
+        self.assertEqual("missing", section["status"])
+        self.assertTrue(section["required"])
+        self.assertIn(ACQUISITION_PROVIDER_ID, section["message"])
+        self.assertEqual("error", finding["severity"])
+        self.assertEqual("PROVIDER_NOT_REGISTERED", finding["code"])
+        self.assertEqual(ACQUISITION_PROVIDER_ID, finding["provider_id"])
+        self.assertEqual("evidence_wiki.acquisition_providers", finding["details"]["entry_point_group"])
+        self.assertIn("evidence_wiki.acquisition_providers", finding["remediation"])
+
+    def test_a_built_in_provider_id_is_never_reported_as_unregistered(self):
+        # The closed built-in list is still the universe when nothing is installed; a
+        # workspace authorizing only built-ins must not gain a finding from this section.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            section = self.section(
+                self.workspace(tmpdir, acquisition=("arxiv", "web"), discovery=("openalex", "standards:nist"))
+            )
+
+        self.assertEqual("ok", section["status"])
+        self.assertEqual([], section["details"]["findings"])
+
+    def test_a_duplicate_id_collision_is_an_error_naming_both_distributions(self):
+        # The loader refuses both claims so behaviour cannot depend on install order.
+        # From outside, the id simply is not there — unless doctor names who claimed it.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(tmpdir)
+            with installed_provider_plugins("duplicate-id"):
+                section = self.section(workspace)
+
+        finding = next(
+            item for item in section["details"]["findings"] if item["provider_id"] == ACQUISITION_PROVIDER_ID
+        )
+        self.assertEqual("degraded", section["status"])
+        self.assertFalse(section["required"])
+        self.assertEqual("error", finding["severity"])
+        self.assertEqual("PROVIDER_REGISTRATION_INVALID", finding["code"])
+        self.assertEqual(["keepa-fixture", "keepa-rival-fixture"], finding["details"]["distributions"])
+        for distribution in ("keepa-fixture", "keepa-rival-fixture"):
+            with self.subTest(distribution=distribution):
+                self.assertIn(distribution, finding["message"])
+        self.assertNotIn(
+            ACQUISITION_PROVIDER_ID,
+            [entry["id"] for entry in section["details"]["registered"]],
+        )
+
+    def test_an_authorized_duplicate_id_collision_still_names_both_distributions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(tmpdir, acquisition=(ACQUISITION_PROVIDER_ID,))
+            with installed_provider_plugins("duplicate-id"):
+                section = self.section(workspace)
+
+        finding = section["details"]["findings"][0]
+        self.assertEqual("missing", section["status"])
+        self.assertTrue(section["required"])
+        self.assertEqual("error", finding["severity"])
+        # Installed-but-invalid, not "go install it": telling an operator to install what
+        # is already installed is the failure mode the two codes exist to keep apart.
+        self.assertEqual("PROVIDER_REGISTRATION_INVALID", finding["code"])
+        for distribution in ("keepa-fixture", "keepa-rival-fixture"):
+            with self.subTest(distribution=distribution):
+                self.assertIn(distribution, finding["message"])
+
+    def test_a_registration_that_cannot_load_or_validate_is_listed_with_its_reason(self):
+        cases = (
+            ("invalid-declaration", "keepa-broken-fixture"),
+            ("import-error", "keepa-exploding-fixture"),
+            ("reserved-id", "keepa-reserved-fixture"),
+        )
+        for variant, distribution in cases:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as tmpdir:
+                workspace = self.workspace(tmpdir)
+                with installed_provider_plugins(variant, base=False):
+                    section = self.section(workspace)
+
+            entries = [entry for entry in section["details"]["invalid"] if entry["distribution"] == distribution]
+            self.assertTrue(entries, section["details"]["invalid"])
+            self.assertEqual("degraded", section["status"])
+            self.assertFalse(section["required"])
+            for entry in entries:
+                self.assertTrue(entry["reason"], entry)
+                self.assertIn(entry["phase"], ("acquisition", "discovery"))
+            # A registration that never loads must be visible, not silently absent: an
+            # invisible broken plugin and an uninstalled one are the same picture.
+            warnings = [
+                item
+                for item in section["details"]["findings"]
+                if item["severity"] == "warning" and item["details"].get("distribution") == distribution
+            ]
+            self.assertTrue(warnings, section["details"]["findings"])
+
+    def test_the_json_section_shape_is_stable_for_every_consumer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(tmpdir, acquisition=(ACQUISITION_PROVIDER_ID,))
+            with installed_provider_plugins("import-error"):
+                section = self.section(workspace)
+
+        details = section["details"]
+        self.assertEqual(
+            ["authorization", "counts", "findings", "invalid", "registered"],
+            sorted(details),
+        )
+        self.assertEqual(["acquisition", "discovery"], sorted(details["authorization"]))
+        self.assertEqual(
+            {
+                "enabled": True,
+                "providers": [ACQUISITION_PROVIDER_ID],
+                "entry_point_group": "evidence_wiki.acquisition_providers",
+            },
+            details["authorization"]["acquisition"],
+        )
+        self.assertEqual(
+            [
+                "authorized",
+                "capabilities",
+                "distribution",
+                "entry_point",
+                "entry_point_group",
+                "id",
+                "phase",
+                "phase_enabled",
+                "provider_api_version",
+                "state",
+                "version",
+            ],
+            sorted(details["registered"][0]),
+        )
+        self.assertEqual(
+            ["authorized", "distribution", "entry_point", "entry_point_group", "id", "phase", "reason"],
+            sorted(details["invalid"][0]),
+        )
+        self.assertEqual(
+            ["code", "details", "message", "phase", "provider_id", "remediation", "severity"],
+            sorted(details["findings"][0]),
+        )
+        # Serializable as one JSON document, which is what the purity contract requires.
+        json.dumps(section)
+
+    def test_declared_credential_names_join_the_secrets_hygiene_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(
+                tmpdir,
+                acquisition=(ACQUISITION_PROVIDER_ID,),
+                env_file=f"{self.CREDENTIAL_NAME}={self.CREDENTIAL_VALUE}\nUNRELATED=x\n",
+            )
+            with installed_provider_plugins():
+                checks = {check["id"]: check for check in self.report(workspace)["checks"]}
+
+        secrets = checks["secret_exposure"]
+        self.assertEqual("degraded", secrets["status"])
+        self.assertEqual([self.CREDENTIAL_NAME], secrets["details"]["declared_credentials"])
+        self.assertEqual([self.CREDENTIAL_NAME], secrets["details"]["exposed_credentials"])
+        self.assertIn(self.CREDENTIAL_NAME, secrets["message"])
+        # Only *declared* names are named. Doctor has no business enumerating the rest of
+        # an operator's environment just because it can read the file.
+        self.assertNotIn("UNRELATED", json.dumps(secrets))
+
+    def test_a_credential_value_never_appears_in_any_output(self):
+        # The single property the whole capability summary is built to guarantee. The
+        # value is in the process environment *and* in a readable .env, which is the
+        # worst realistic case, and neither format may echo it.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(
+                tmpdir,
+                acquisition=(ACQUISITION_PROVIDER_ID,),
+                env_file=f"{self.CREDENTIAL_NAME}={self.CREDENTIAL_VALUE}\n",
+            )
+            with (
+                mock.patch.dict(os.environ, {self.CREDENTIAL_NAME: self.CREDENTIAL_VALUE}),
+                installed_provider_plugins(),
+            ):
+                report = self.report(workspace)
+                text = self.doctor.render_text(report)
+
+        serialized = json.dumps(report, sort_keys=True)
+        for rendered in (serialized, text):
+            with self.subTest(format="json" if rendered is serialized else "text"):
+                self.assertNotIn(self.CREDENTIAL_VALUE, rendered)
+                self.assertIn(self.CREDENTIAL_NAME, rendered)
+
+    def test_the_text_report_answers_what_this_workspace_can_reach_and_what_was_authorized(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(tmpdir, acquisition=(ACQUISITION_PROVIDER_ID,))
+            with installed_provider_plugins():
+                text = self.doctor.render_text(self.report(workspace))
+
+        expected = (
+            "  Authorized in research.yml:",
+            f"    acquisition (enabled): {ACQUISITION_PROVIDER_ID}",
+            "  Enabled (registered here, authorized in research.yml, phase enabled):",
+            "  Available (registered here, not reachable as research.yml stands):",
+            "      Declared domains: api.keepa-fixture.invalid, assets.keepa-fixture.invalid",
+            "      Rate limit: 60 request(s) per minute",
+            f"      Credential names (values never read): {self.CREDENTIAL_NAME}",
+            "      Licence inference: partial",
+            "      Request kinds: market-data/price_history",
+        )
+        for line in expected:
+            with self.subTest(line=line):
+                self.assertIn(line, text)
+
+    def test_a_broken_workspace_still_reports_the_section_rather_than_refusing(self):
+        # doctor.py is in the purity harness' REPORTS_ON_A_BROKEN_WORKSPACE set: an
+        # unreadable workspace is something it describes, never something it refuses. A
+        # broken registration must not turn that into a fatal envelope either.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            not_a_workspace = Path(tmpdir) / "not-a-workspace"
+            not_a_workspace.mkdir()
+            stdout = io.StringIO()
+            with (
+                installed_provider_plugins("import-error", "invalid-declaration"),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = self.doctor.main(
+                    ["--project-root", str(not_a_workspace), "--format", "json"], env=FakeEnvironment()
+                )
+
+        report = json.loads(stdout.getvalue())
+        section = {check["id"]: check for check in report["checks"]}["registered_providers"]
+        self.assertEqual(1, exit_code)
+        self.assertEqual("missing", report["verdict"])
+        # Missing because the workspace has no directories, not because a plugin broke.
+        self.assertEqual("degraded", section["status"])
+        self.assertTrue(section["details"]["invalid"])
+        self.assertEqual({"acquisition": [], "discovery": []},
+                         {phase: block["providers"] for phase, block in section["details"]["authorization"].items()})
+
+    def test_an_enumeration_failure_is_a_finding_rather_than_a_crashed_report(self):
+        # The loader promises never to raise. If that promise is ever broken, doctor must
+        # still produce its report: one plugin defect cannot cost an operator every other
+        # answer on the page.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(tmpdir)
+            with mock.patch.object(
+                self.doctor, "registration_report", side_effect=RuntimeError("metadata is unreadable")
+            ):
+                report = self.report(workspace)
+
+        section = {check["id"]: check for check in report["checks"]}["registered_providers"]
+        self.assertEqual("degraded", section["status"])
+        self.assertFalse(section["required"])
+        self.assertIn("metadata is unreadable", section["message"])
+        self.assertEqual([], section["details"]["registered"])
+        self.assertEqual("degraded", report["verdict"])
 
 
 if __name__ == "__main__":

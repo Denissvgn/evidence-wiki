@@ -434,7 +434,7 @@ Defines optional external tooling behavior.
 - `codebase_analysis.background_sync`: must remain `false` during initialization.
 - `codebase_analysis.untrusted_input`: set to `acknowledged` when enabled only after choosing an adapter safe for untrusted input; missing acknowledgement produces a LOW lint finding.
 - `acquisition.enabled`: whether explicit source acquisition is active.
-- `acquisition.providers`: enabled provider IDs. Supported IDs are `arxiv`, `openalex`, `github`, and `web`.
+- `acquisition.providers`: enabled provider IDs. Built-in IDs are `arxiv`, `openalex`, `github`, and `web`. The list also accepts the ID of any acquisition provider supplied by an installed third-party distribution (see [provider-registration.md](provider-registration.md)); listing an ID here is what *enables* it, exactly as for a built-in.
 - `acquisition.target_root`: raw evidence directory for downloaded or delivered papers. Defaults to `raw/papers`.
 - `acquisition.max_downloads_per_run`: positive per-run download budget.
 - `acquisition.require_license_check`: whether acquisition workflows must surface license status before handoff.
@@ -444,7 +444,7 @@ Defines optional external tooling behavior.
 - `acquisition.web.allowed_domains`: required non-empty domain allow-list for `web get` when the `web` provider is enabled.
 - `acquisition.web.max_download_bytes` (optional): positive byte ceiling for one web response. Defaults to 10485760 (10 MiB).
 - `discovery.enabled`: whether optional source discovery is active. `true` requires a non-empty concrete provider allow-list.
-- `discovery.providers`: explicit network authorization. Supported IDs are `arxiv`, `openalex`, `github`, `search`, `standards`, `standards:iso-open-data`, `standards:eu-product-requirements`, `standards:uk-geospatial-register`, and `standards:nist`.
+- `discovery.providers`: explicit network authorization. Built-in IDs are `arxiv`, `openalex`, `github`, `search`, `standards`, `standards:iso-open-data`, `standards:eu-product-requirements`, `standards:uk-geospatial-register`, and `standards:nist`. The list also accepts the ID of any discovery provider supplied by an installed third-party distribution (see [provider-registration.md](provider-registration.md)).
 - `discovery.candidate_store_path`: workspace-relative JSONL path for proposed source candidates. Defaults to `sources/discovery/candidates.jsonl`.
 - `discovery.search`: required backend configuration when `search` is allowed. Its `provider` is `fixture`, `command`, or `http`; provider-specific command, fixture, endpoint, and environment-secret settings stay in this nested block.
 - `retrieval.provider`: retrieval engine name; `lexical` uses the bundled local engine.
@@ -535,6 +535,20 @@ background agents, and background sync. This repository records the contract
 only; adding a provider recommendation to a domain pack does not add network
 behavior. Provider terms, provenance requirements, and the acquisition safety
 model are documented in [acquisition.md](acquisition.md).
+
+A provider ID supplied by an installed distribution is authorized by the same
+list and validated by the same rules — the authorization semantics do not change
+because the provider is third-party. Registration is packaging metadata and
+decides only which IDs *exist*; `research.yml` remains the sole statement of
+which of them may run. The two states are checked separately: an installed but
+unlisted provider is available and refuses with `ACQUISITION_PROVIDER_DISABLED`,
+while an ID listed here whose distribution is not installed in the running
+environment is deploy drift on an authorization boundary and fails smoke
+validation with `PROVIDER_NOT_REGISTERED`. Neither state can be declared away in
+config: a provider cannot be brought into existence by writing it into
+`research.yml`. `scripts/doctor.py` prints both states per provider, and
+[provider-registration.md](provider-registration.md) documents the contract and
+its failure modes in full.
 
 When discovery is enabled, its provider list must also be non-empty. Unknown or
 duplicate IDs are invalid. The repeated initializer flags

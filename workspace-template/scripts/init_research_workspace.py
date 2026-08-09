@@ -28,11 +28,26 @@ if str(_SCRIPT_DIR) not in sys.path:
 # resolved path to stay inside an already-resolved root. Reused here for the
 # init/upgrade *writer* paths so the readers and writers cannot drift (SEC-E1-T04).
 from _handoff_signature import handoff_secret, sign_handoff
+from _provider_plugins import ProviderPluginError, registered_ids, require_registration
+
+
+def safe_registered_ids(phase: str) -> tuple[str, ...]:
+    """Return the ids installed registrations supply, ``()`` if enumeration fails.
+
+    Deploying a workspace must not fail because some unrelated installed distribution's
+    metadata is unreadable. The fallback only narrows the accepted set, so it can refuse
+    a registered id but never admit one.
+    """
+    try:
+        return registered_ids(phase)
+    except Exception:  # noqa: BLE001 - a broken environment must not break deployment
+        return ()
 from _provider_registry import (
     ACQUISITION_PROVIDER_IDS,
     DISCOVERY_ACCEPTED_IDS,
     DISCOVERY_PROVIDER_IDS,
     ProviderListError,
+    ProviderNotRegisteredError,
     validate_provider_ids,
 )
 from _script_errors import error_envelope
@@ -598,6 +613,82 @@ def validate_raw_target_path(value: str, label: str) -> None:
         raise SystemExit(f"{label} must be under the raw/ evidence directory: {value}")
 
 
+class ProviderRegistrationExit(SystemExit):
+    """A ``SystemExit`` that also carries a registration refusal's code and remediation.
+
+    Initialization reports every validation failure as a ``SystemExit`` message string,
+    and :func:`initializer_error_contract` infers an error code from the sentence.  A
+    provider id no registration supplies has a stable code of its own and a remediation
+    that names the entry-point group to install into — or the installed distribution to
+    repair — neither of which can be recovered from the sentence afterwards.  Carrying
+    them here keeps the refusal machine-readable without teaching the generic contract
+    to pattern-match provider vocabulary.
+
+    Subclassing ``SystemExit`` rather than replacing it is deliberate: ``main`` still
+    raises one exception type, every ``except SystemExit`` keeps catching this, and the
+    message stays byte-for-byte the sentence the validator produced.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str,
+        remediation: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.remediation = remediation
+        self.details = details or {}
+
+
+def provider_registration_refusal(phase: str, provider_ids: tuple[str, ...]) -> ProviderPluginError | None:
+    """Diagnose ids the accepted set could not supply, or ``None`` when none can be named.
+
+    ``require_registration`` draws the one distinction that matters to an operator:
+    nothing supplies the id (install something) versus something does and its
+    declaration is broken (repair the named distribution).  Telling someone to install
+    what is already installed is the failure that split exists to prevent, so a broken
+    registration wins whenever both appear in one list.
+    """
+
+    refusals: list[ProviderPluginError] = []
+    for provider_id in provider_ids:
+        try:
+            require_registration(phase, provider_id)
+        except ProviderPluginError as exc:
+            refusals.append(exc)
+        # A valid registration cannot reach here: it would have been in ``registered``
+        # and the id would never have been reported unresolved.
+    for refusal in refusals:
+        if refusal.error_code == "PROVIDER_REGISTRATION_INVALID":
+            return refusal
+    return refusals[0] if refusals else None
+
+
+def provider_registration_exit(
+    message: str,
+    *,
+    phase: str,
+    provider_ids: tuple[str, ...],
+) -> SystemExit:
+    """Build the refusal for a provider list naming ids this environment cannot supply."""
+
+    refusal = provider_registration_refusal(phase, provider_ids)
+    if refusal is None:  # pragma: no cover - defensive; every unresolved id names a refusal
+        return SystemExit(message)
+    details = dict(refusal.details)
+    details["phase"] = phase
+    details["unresolved_provider_ids"] = list(provider_ids)
+    return ProviderRegistrationExit(
+        message,
+        error_code=refusal.error_code,
+        remediation=refusal.remediation,
+        details=details,
+    )
+
+
 def validate_provider_list(
     value: Any,
     label: str,
@@ -610,7 +701,17 @@ def validate_provider_list(
             value,
             phase=phase,
             require_non_empty=require_non_empty,
+            # Deployment must not authorize what this environment cannot supply, so the
+            # accepted set is the built-ins plus whatever is actually installed here.
+            # With nothing installed this is ``()`` and the old universe is unchanged.
+            registered=safe_registered_ids(phase),
         )
+    except ProviderNotRegisteredError as exc:
+        raise provider_registration_exit(
+            f"{label} {exc}",
+            phase=phase,
+            provider_ids=exc.provider_ids,
+        ) from exc
     except ProviderListError as exc:
         raise SystemExit(f"{label} {exc}") from exc
     return list(validated.providers)
@@ -999,7 +1100,18 @@ def normalize_cli_provider_flags(values: Any, *, phase: str, label: str) -> tupl
     if values is None:
         return None
     try:
-        validated = validate_provider_ids(values, phase=phase, require_non_empty=True)
+        validated = validate_provider_ids(
+            values,
+            phase=phase,
+            require_non_empty=True,
+            registered=safe_registered_ids(phase),
+        )
+    except ProviderNotRegisteredError as exc:
+        raise provider_registration_exit(
+            f"{label} {exc}",
+            phase=phase,
+            provider_ids=exc.provider_ids,
+        ) from exc
     except ProviderListError as exc:
         raise SystemExit(f"{label} {exc}") from exc
     if validated.legacy_strategies:
@@ -2692,6 +2804,16 @@ def entrypoint(argv: list[str] | None = None) -> int:
     """Normalize direct-script validation failures without changing ``main`` tests."""
     try:
         return main(argv)
+    except ProviderRegistrationExit as exc:
+        # Checked before the generic branch: this refusal already knows its own stable
+        # code and the install-or-repair route, which the sentence alone cannot express.
+        return emit_initializer_error(
+            str(exc),
+            operation="initialization",
+            error_code=exc.error_code,
+            remediation=exc.remediation,
+            details=exc.details,
+        )
     except SystemExit as exc:
         if not isinstance(exc.code, str):
             raise

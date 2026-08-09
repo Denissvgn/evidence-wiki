@@ -2,6 +2,100 @@
 
 ## Unreleased
 
+- Add a source family the package has never heard of, without forking it.
+  Provider ids were validated against closed tuples — `arxiv`, `openalex`,
+  `github`, `web` for acquisition — so an embedder whose evidence is market
+  data, marketplace listings, or instrument output had exactly one route to it:
+  edit the starter scripts, and inherit the maintenance of every transport,
+  provenance, budget, and quarantine guarantee those scripts carry. A
+  pip-installed distribution can now **register** a provider through an entry
+  point, behind a capability declaration the package machine-checks:
+
+  ```toml
+  [project.entry-points."evidence_wiki.acquisition_providers"]
+  keepa = "autoseller_connectors.evidence_wiki:KeepaProvider"
+  ```
+
+  ```python
+  class KeepaProvider(AcquisitionProvider):
+      id = "keepa"
+      provider_api_version = 1
+      capabilities = ProviderCapabilities(
+          allowed_domains=("api.keepa.com",),
+          terms_urls=("https://keepa.com/#!api",),
+          license_inference="none",
+          rate_limit=RateLimit(60, per="minute"),
+          credentials=("KEEPA_API_KEY",),      # env-var NAMES, never values
+      )
+  ```
+
+  Authorize `keepa` in `research.yml` and fetch through one generic subcommand
+  — `fetch_sources.py registered get --id keepa --request-file request.json`,
+  with `discover_sources.py registered search` as the read-only mirror.
+
+  What makes the declaration worth more than a comment is a **planner/executor
+  split**. The provider is a request planner and a response interpreter: it
+  returns `PlannedRequest` values and later turns responses into a
+  `SourceArtifact`, and the *package* performs every fetch, through the same
+  pinned transport the built-in adapters use — `allowed_domains` checked before
+  any socket work, DNS pinning, public-address enforcement, bounded downloads,
+  redacted diagnostics — and the package's own writer produces the sidecar and
+  the bytes, in that order, with the quarantine discipline built-in acquisition
+  already has. The alternative designs were both rejected for the same reason:
+  a plugin that owns its sockets, in-process or in a subprocess, turns
+  `allowed_domains` into documentation, which is the failure this change exists
+  to avoid. Credentials follow from the same split — a provider declares
+  variable *names*, writes `{{credential:KEEPA_API_KEY}}` in a header value, and
+  the package resolves it at execution and registers the value for redaction.
+  Placeholders are refused in URLs, because a secret in a query string would
+  survive URL redaction and surface in logs and in `origin_url`.
+
+  Enforcement is stated per field rather than implied. `allowed_domains` and
+  `credentials` are enforced at transport, a declared `rate_limit` is enforced
+  against a durable per-run ledger that tightens but never loosens
+  `max_downloads_per_run`, `captures_raw` and `quarantine_on_incomplete` are
+  validated once at registration (v1 requires both `true`, since the writer
+  provides both unconditionally and would not honor a `false`), and
+  `terms_urls`, `license_inference`, and `request_kinds` are recorded and shown
+  by doctor. Recording is not nothing: every artifact acquired this way carries
+  `provider_registration` (id, phase, distribution, version, entry point, api
+  version) and `provider_capabilities` beside its usual provenance, so an
+  auditor can ask which installed code produced a record and what it claimed it
+  could reach. `evidence-wiki doctor` gains a Registered providers section
+  listing each valid registration with that summary and whether `research.yml`
+  authorizes it, plus every invalid registration with the reason it was refused
+  — a broken entry point never crashes enumeration and never silently vanishes.
+  Six stable codes join the set: `PROVIDER_NOT_REGISTERED`,
+  `PROVIDER_REGISTRATION_INVALID`, `PROVIDER_REQUEST_INVALID`,
+  `PROVIDER_PLAN_INVALID`, `ACQUISITION_DOMAIN_NOT_DECLARED`, and
+  `ACQUISITION_PROVIDER_RATE_LIMITED`.
+
+  One claim is deliberately not made. Installing a Python distribution is
+  arbitrary code execution, so a malicious plugin can always open its own
+  sockets in-process; nothing here sandboxes third-party code. The enforceable
+  guarantee is narrower and is the one the docs state: every fetch performed
+  *through the package's acquisition flow* is executed by the package's
+  transport and checked against the declaration, and nothing enters the
+  workspace except through the package's writer.
+
+  **The authorization boundary is untouched.** Registration makes a provider
+  *available*; `research.yml` still *enables* it, by explicit id, and an
+  installed-but-unlisted provider refuses with the byte-identical
+  `ACQUISITION_PROVIDER_DISABLED` envelope a disabled built-in produces. The
+  inverse — an id authorized in an environment where the distribution is not
+  installed — is a smoke failure naming the missing distribution, not a warning,
+  because an authorization the environment cannot satisfy is drift on an
+  authorization boundary; lint deliberately gains no check, so a lint report
+  stays a pure function of the workspace tree. Built-in providers, their
+  subcommand trees, and every existing error envelope are unchanged, and with no
+  entry points installed the built-in lists are the whole universe, bit for bit
+  as before. The new
+  [provider-registration.md](workspace-template/docs/provider-registration.md)
+  documents the authoring contract, the trust boundary, credential custody, the
+  failure modes, and the v1 limits — no request signing or OAuth refresh, no
+  subprocess isolation, `request_kinds` recorded but not routed, and no
+  registering a provider from configuration.
+
 - Ground a claim in a named field instead of a quoted line, and give hosts a
   supported way to write grounding at all. Grounding was one shape — a verbatim
   quote, checked by substring containment against a normalized record's Markdown
@@ -326,7 +420,7 @@
   asserted rather than glossed — a record with no frontmatter names no producing tool,
   so lint cannot tell it from a stray Markdown file and leaves it alone, while
   `normalize_verify.py` still refuses it.
-- Guard the "no adapters configured, no change in behaviour" promise.
+- Guard the "no adapters configured, no change in behavior" promise.
   `tests/test_no_adapter_backward_compat.py` runs an existing fixture twice with one
   variable changed — whether `research.yml` has a `normalization:` section at all — and
   compares whole artifacts: the manifest, every normalized record byte for byte, the
@@ -442,7 +536,7 @@
   rebuilds an adapter record only when the configured adapter `name`/`version` differs
   from the producer the record names, or when the source's `raw_fingerprint` changed;
   otherwise it is reported `skipped_existing`. Bumping `version` in `research.yml` is
-  the way to force a rebuild after changing an adapter's behaviour. Native records are
+  the way to force a rebuild after changing an adapter's behavior. Native records are
   unaffected and still use the `NORMALIZER_VERSION` axis.
 - Run external normalizer adapters from `normalize_sources.py`, closing the loop for
   evidence this package cannot extract. A record whose kind is mapped in

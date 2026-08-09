@@ -29,8 +29,27 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _normalization_config import NormalizationConfigError, adapter_summaries, normalization_config
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
+from _provider_plugins import (
+    ACQUISITION_PHASE,
+    DISCOVERY_PHASE,
+    ENTRY_POINT_GROUPS,
+    PROVIDER_PHASES,
+    ProviderPluginError,
+    registration_report,
+    require_registration,
+)
+from _provider_registry import ACQUISITION_PROVIDER_IDS, DISCOVERY_ACCEPTED_IDS
 from _script_errors import handle_system_exit, json_mode_requested
 from _workspace_health import evaluate_workspace_health
+
+REGISTERED_PROVIDERS_CHECK_ID = "registered_providers"
+
+#: Ids each phase already accepts without any registration. Everything else in a
+#: research.yml provider list has to be supplied by an installed distribution.
+BUILT_IN_PROVIDER_IDS = {
+    ACQUISITION_PHASE: frozenset(ACQUISITION_PROVIDER_IDS),
+    DISCOVERY_PHASE: frozenset(DISCOVERY_ACCEPTED_IDS),
+}
 
 
 @dataclass
@@ -553,9 +572,397 @@ def acquisition_mode_check(project_root: Path, yaml_module: Any | None) -> dict[
     )
 
 
-def secret_exposure_check(project_root: Path) -> dict[str, Any]:
+def authorized_provider_ids(config: dict[str, Any], phase: str) -> tuple[list[str], bool | None]:
+    """Return the provider ids ``research.yml`` authorizes for one phase, and its switch.
+
+    Read straight from the document rather than through the shared validator: doctor
+    reports on workspaces whose configuration is broken, and a validator that refuses
+    would take the whole section down with it. Anything that is not a plain non-empty
+    string is not an authorization, so it is not counted as one.
+    """
+    integrations = config.get("integrations")
+    section = integrations.get(phase) if isinstance(integrations, dict) else None
+    if not isinstance(section, dict):
+        return [], None
+    providers = section.get("providers")
+    ids = (
+        [value.strip() for value in providers if isinstance(value, str) and value.strip()]
+        if isinstance(providers, list)
+        else []
+    )
+    enabled = section.get("enabled")
+    return ids, enabled if isinstance(enabled, bool) else None
+
+
+def _registration_entries(report: dict[str, Any], authorization: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten every valid registration, stamped with whether research.yml authorizes it."""
+    entries: list[dict[str, Any]] = []
+    for phase in PROVIDER_PHASES:
+        phase_report = report.get(phase) or {}
+        group = phase_report.get("entry_point_group") or ENTRY_POINT_GROUPS[phase]
+        authorized_ids = set(authorization[phase]["providers"])
+        # The phase switch is half of the answer: an id listed under a phase whose
+        # `enabled` is not true is authorized but unreachable, because acquisition and
+        # discovery both refuse before consulting the allow-list. Matching
+        # orchestration_controller.provider_policy, which reads enabled as the switch
+        # AND a non-empty list, keeps one definition of "enabled" across the package.
+        phase_enabled = authorization[phase].get("enabled") is True
+        for record in phase_report.get("registered") or []:
+            provider_id = record.get("id")
+            authorized = provider_id in authorized_ids
+            entries.append(
+                {
+                    "id": provider_id,
+                    "phase": record.get("phase") or phase,
+                    "distribution": record.get("distribution"),
+                    "version": record.get("version"),
+                    "entry_point": record.get("entry_point"),
+                    "entry_point_group": group,
+                    "provider_api_version": record.get("provider_api_version"),
+                    "authorized": authorized,
+                    "phase_enabled": phase_enabled,
+                    # The CR's distinction, in one word an auditor can scan a column of:
+                    # installing a distribution can only ever produce "available".
+                    "state": "enabled" if authorized and phase_enabled else "available",
+                    "capabilities": record.get("capabilities") or {},
+                }
+            )
+    entries.sort(key=lambda entry: (str(entry["id"]), str(entry["phase"])))
+    return entries
+
+
+def _invalid_entries(report: dict[str, Any], authorization: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten every registration that exists but cannot be used, with its reason."""
+    entries: list[dict[str, Any]] = []
+    for phase in PROVIDER_PHASES:
+        phase_report = report.get(phase) or {}
+        group = phase_report.get("entry_point_group") or ENTRY_POINT_GROUPS[phase]
+        authorized_ids = set(authorization[phase]["providers"])
+        for record in phase_report.get("invalid") or []:
+            provider_id = record.get("id")
+            entries.append(
+                {
+                    "id": provider_id,
+                    "phase": record.get("phase") or phase,
+                    "distribution": record.get("distribution"),
+                    "entry_point": record.get("entry_point"),
+                    "entry_point_group": group,
+                    "authorized": provider_id in authorized_ids,
+                    "reason": record.get("reason"),
+                }
+            )
+    entries.sort(key=lambda entry: (str(entry["distribution"]), str(entry["entry_point"]), str(entry["id"])))
+    return entries
+
+
+def _unsatisfied_authorization_findings(
+    authorization: dict[str, Any],
+    seen: set[tuple[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Report every authorized id no valid registration supplies (backlog §2.7).
+
+    The refusal text comes from ``require_registration`` rather than being written
+    again here, so what doctor explains is word-for-word what smoke and the
+    acquisition commands refuse with — including its split between *nothing supplies
+    this id* and *something does and its declaration is broken*, which are two
+    different fixes.
+    """
+    findings: list[dict[str, Any]] = []
+    unsatisfied: list[dict[str, Any]] = []
+    for phase in PROVIDER_PHASES:
+        for provider_id in authorization[phase]["providers"]:
+            if provider_id in BUILT_IN_PROVIDER_IDS[phase]:
+                continue
+            try:
+                require_registration(phase, provider_id)
+            except ProviderPluginError as exc:
+                code, message, remediation, details = exc.error_code, exc.message, exc.remediation, exc.details
+            except Exception as exc:  # pragma: no cover - the loader promises not to raise
+                # A plugin that breaks enumeration is a finding about that plugin, never
+                # a doctor that cannot report on the rest of the workspace.
+                reason = " ".join(f"{type(exc).__name__}: {exc}".split())
+                code = "PROVIDER_REGISTRATION_INVALID"
+                message = f"Provider {provider_id!r} could not be resolved for {phase}: {reason}"
+                remediation = f"Fix or uninstall the distribution registering {provider_id!r}, then rerun doctor."
+                details = {"provider_id": provider_id, "phase": phase}
+            else:
+                continue
+            unsatisfied.append({"phase": phase, "provider_id": provider_id})
+            findings.append(
+                {
+                    "severity": "error",
+                    "code": code,
+                    "phase": phase,
+                    "provider_id": provider_id,
+                    "message": message,
+                    "remediation": remediation,
+                    "details": details,
+                }
+            )
+            seen.add((phase, provider_id))
+    return findings, unsatisfied
+
+
+def _collision_findings(report: dict[str, Any], seen: set[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Report ids more than one installed distribution claims, naming every claimant.
+
+    The loader refuses *both* sides of a duplicated id on purpose, so that behaviour
+    cannot depend on installation order. That deliberate choice is invisible from the
+    outside — the id simply is not there — unless doctor says who claimed it.
+    """
+    findings: list[dict[str, Any]] = []
+    for phase in PROVIDER_PHASES:
+        phase_report = report.get(phase) or {}
+        valid_ids = {record.get("id") for record in phase_report.get("registered") or []}
+        claims: dict[str, list[dict[str, Any]]] = {}
+        for record in phase_report.get("invalid") or []:
+            provider_id = record.get("id")
+            if isinstance(provider_id, str) and provider_id:
+                claims.setdefault(provider_id, []).append(record)
+        for provider_id, records in sorted(claims.items()):
+            distributions = sorted({str(record.get("distribution")) for record in records})
+            if provider_id in valid_ids or len(distributions) < 2 or (phase, provider_id) in seen:
+                continue
+            findings.append(
+                {
+                    "severity": "error",
+                    "code": "PROVIDER_REGISTRATION_INVALID",
+                    "phase": phase,
+                    "provider_id": provider_id,
+                    "message": (
+                        f"Provider id {provider_id!r} is claimed for {phase} by more than one installed "
+                        f"distribution ({', '.join(distributions)}); every claim on a duplicated id is "
+                        "refused, so the id is not available to research.yml."
+                    ),
+                    "remediation": f"Uninstall all but one of: {', '.join(distributions)}, then rerun doctor.",
+                    "details": {
+                        "provider_id": provider_id,
+                        "phase": phase,
+                        "distributions": distributions,
+                        "reasons": [record.get("reason") for record in records],
+                    },
+                }
+            )
+            seen.add((phase, provider_id))
+    return findings
+
+
+def _invalid_registration_findings(
+    invalid: list[dict[str, Any]],
+    seen: set[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    """Report the unusable registrations no authorization is already waiting on.
+
+    A warning rather than an error: the ids these would have supplied are not in any
+    provider list, so nothing in the workspace is blocked. They are still listed,
+    because a broken plugin that vanished silently would look exactly like one that was
+    never installed — and those have different fixes.
+    """
+    findings: list[dict[str, Any]] = []
+    for entry in invalid:
+        provider_id = entry["id"]
+        if isinstance(provider_id, str) and provider_id and (entry["phase"], provider_id) in seen:
+            continue
+        named = f"Provider {provider_id!r}" if provider_id else "An entry point"
+        # An authorized id reaching here is one another registration already supplies;
+        # saying "nothing depends on it" would be false for exactly that case.
+        dependency = (
+            f"research.yml authorizes {provider_id!r}, which a different installed registration supplies."
+            if entry["authorized"]
+            else "nothing in research.yml depends on it today."
+        )
+        findings.append(
+            {
+                "severity": "warning",
+                "code": "PROVIDER_REGISTRATION_INVALID",
+                "phase": entry["phase"],
+                "provider_id": provider_id,
+                "message": (
+                    f"{named} registered for {entry['phase']} by {entry['distribution']} "
+                    f"(entry point {entry['entry_point'] or 'unnamed'}) is unusable: {entry['reason']}"
+                ),
+                "remediation": f"Fix or uninstall {entry['distribution']}; {dependency}",
+                "details": {
+                    "provider_id": provider_id,
+                    "phase": entry["phase"],
+                    "distribution": entry["distribution"],
+                    "entry_point": entry["entry_point"],
+                    "reason": entry["reason"],
+                },
+            }
+        )
+    return findings
+
+
+def registered_providers_check(project_root: Path, yaml_module: Any | None) -> dict[str, Any]:
+    """List the third-party providers this environment makes available, and their declarations.
+
+    Registration is packaging metadata: installing a distribution makes a provider id
+    *available*, and only ``research.yml`` makes it *enabled*. Those are the two
+    questions an auditor has — what could this workspace reach, and what did I
+    authorize — and they have different answers, so this section prints both for every
+    registration rather than one merged verdict.
+
+    The check's own status is an operability verdict, not a defect count: it goes
+    ``missing`` only when research.yml authorizes an id this environment cannot supply
+    (smoke already refuses such a workspace, and doctor is where the operator learns
+    why), ``degraded`` when something installed is broken but nothing depends on it,
+    and ``ok`` otherwise. Individual defects carry their own severity in ``findings``.
+    """
+    config = load_research_config(project_root, yaml_module)
+    authorization = {}
+    for phase in PROVIDER_PHASES:
+        providers, enabled = authorized_provider_ids(config, phase)
+        authorization[phase] = {
+            "enabled": enabled,
+            "providers": providers,
+            "entry_point_group": ENTRY_POINT_GROUPS[phase],
+        }
+
+    try:
+        report = registration_report()
+    except Exception as exc:  # pragma: no cover - the loader promises not to raise
+        reason = " ".join(f"{type(exc).__name__}: {exc}".split())
+        return check_item(
+            REGISTERED_PROVIDERS_CHECK_ID,
+            "Registered providers",
+            "degraded",
+            False,
+            f"Installed provider registrations could not be enumerated: {reason}",
+            "Doctor cannot say which third-party providers this environment makes available.",
+            "Repair the installed distribution metadata for this environment, then rerun doctor.",
+            details={
+                "authorization": authorization,
+                "registered": [],
+                "invalid": [],
+                "findings": [],
+                "counts": {"registered": 0, "enabled": 0, "available": 0, "invalid": 0},
+                "enumeration_error": reason,
+            },
+        )
+
+    registered = _registration_entries(report, authorization)
+    invalid = _invalid_entries(report, authorization)
+    seen: set[tuple[str, str]] = set()
+    findings, unsatisfied = _unsatisfied_authorization_findings(authorization, seen)
+    findings.extend(_collision_findings(report, seen))
+    findings.extend(_invalid_registration_findings(invalid, seen))
+
+    enabled = [entry for entry in registered if entry["state"] == "enabled"]
+    available = [entry for entry in registered if entry["state"] == "available"]
+    counts = {
+        "registered": len(registered),
+        "enabled": len(enabled),
+        "available": len(available),
+        "invalid": len(invalid),
+    }
+    details = {
+        "authorization": authorization,
+        "registered": registered,
+        "invalid": invalid,
+        "findings": findings,
+        "counts": counts,
+    }
+
+    if unsatisfied:
+        named = ", ".join(f"{item['provider_id']} ({item['phase']})" for item in unsatisfied)
+        return check_item(
+            REGISTERED_PROVIDERS_CHECK_ID,
+            "Registered providers",
+            "missing",
+            True,
+            f"research.yml authorizes provider id(s) this environment cannot supply: {named}.",
+            (
+                "Smoke validation fails and the orchestration controller refuses to start a session "
+                "until every authorized provider id is registered here."
+            ),
+            (
+                "Install the distribution that registers each id into the environment that runs this "
+                "workspace, or remove the id from the research.yml provider list."
+            ),
+            details=details,
+        )
+
+    if not registered and not invalid:
+        return check_item(
+            REGISTERED_PROVIDERS_CHECK_ID,
+            "Registered providers",
+            "ok",
+            False,
+            "No third-party providers are registered in this environment.",
+            "This workspace can reach only the built-in providers research.yml authorizes.",
+            "No action required.",
+            details=details,
+        )
+
+    summary = f"{counts['registered']} registered provider(s): {counts['enabled']} enabled by research.yml, "
+    summary += f"{counts['available']} available but not enabled."
+    if invalid:
+        summary += f" {counts['invalid']} installed registration(s) are unusable."
+    return check_item(
+        REGISTERED_PROVIDERS_CHECK_ID,
+        "Registered providers",
+        "degraded" if invalid else "ok",
+        False,
+        summary,
+        (
+            "Registration only makes a provider available; research.yml authorization is what enables it. "
+            "An enabled provider may reach the domains it declares below, and nothing else."
+            if not invalid
+            else "Registration only makes a provider available; research.yml authorization is what enables it. "
+            "The unusable registrations supply no provider id at all, so authorizing one would fail."
+        ),
+        (
+            "Confirm each enabled provider is one you intended to authorize."
+            if not invalid
+            else "Confirm each enabled provider is one you intended to authorize, and fix or uninstall the "
+            "distribution behind each unusable registration."
+        ),
+        details=details,
+    )
+
+
+def declared_credential_names(registered_providers: dict[str, Any]) -> tuple[str, ...]:
+    """Return the credential variable *names* every valid registration declares.
+
+    Names only — a :class:`CapabilitySummary` never carries a value, and this is the
+    one path by which registration data reaches the secrets check.
+    """
+    names: set[str] = set()
+    for entry in (registered_providers.get("details") or {}).get("registered") or []:
+        for name in (entry.get("capabilities") or {}).get("credentials") or []:
+            if isinstance(name, str) and name:
+                names.add(name)
+    return tuple(sorted(names))
+
+
+def _env_file_variable_names(path: Path) -> set[str]:
+    """Return the variable names assigned in a dotenv-style file, and nothing else.
+
+    Only the text to the left of the first ``=`` on a line is ever kept. The value is
+    dropped inside this function and never reaches a caller, a report, or a log.
+    """
+    names: set[str] = set()
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return names
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        if name.startswith("export "):
+            name = name[len("export ") :].strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def secret_exposure_check(project_root: Path, credential_names: tuple[str, ...] = ()) -> dict[str, Any]:
     candidates = [project_root / ".env"]
     readable: list[str] = []
+    declared_names: set[str] = set()
     for path in candidates:
         if not path.is_file():
             continue
@@ -570,27 +977,54 @@ def secret_exposure_check(project_root: Path) -> dict[str, Any]:
             label = path.resolve().as_posix()
         if label not in readable:
             readable.append(label)
+        # Names only, and only the ones a registered provider declared: doctor has no
+        # business enumerating an operator's whole environment, and never reads a value.
+        if credential_names:
+            declared_names |= _env_file_variable_names(path) & set(credential_names)
+
+    exposed = sorted(declared_names)
+    details: dict[str, Any] = {"readable_env_files": readable}
+    if credential_names:
+        details["declared_credentials"] = list(credential_names)
+        details["exposed_credentials"] = exposed
+
+    if exposed:
+        message = (
+            "Readable .env file(s) define declared provider credential name(s): "
+            f"{', '.join(exposed)}; values were not inspected or printed."
+        )
+        implication = (
+            "A credential a registered provider declares by name is defined in a repo-root .env, where it can "
+            "leak into source/workspace state if .env files are treated as runtime configuration."
+        )
+        remediation = (
+            f"Move {', '.join(exposed)} into the operator secret store, rotate the exposed key(s), and keep "
+            "repo-root .env development-only."
+        )
+    elif readable:
+        message = "Readable .env file(s) are present; values were not inspected or printed."
+        implication = (
+            "Provider credentials can leak into source/workspace state if .env files are treated as "
+            "runtime configuration."
+        )
+        remediation = (
+            "Move provider keys into the operator secret store, rotate exposed keys, "
+            "and keep repo-root .env development-only."
+        )
+    else:
+        message = "No readable .env file found at the workspace or invocation root."
+        implication = "Operator-managed per-run environment injection remains the expected secret path."
+        remediation = "No action required."
+
     return check_item(
         "secret_exposure",
         "Secret exposure",
         "degraded" if readable else "ok",
         False,
-        (
-            "Readable .env file(s) are present; values were not inspected or printed."
-            if readable
-            else "No readable .env file found at the workspace or invocation root."
-        ),
-        (
-            "Provider credentials can leak into source/workspace state if .env files are treated as runtime configuration."
-            if readable
-            else "Operator-managed per-run environment injection remains the expected secret path."
-        ),
-        (
-            "Move provider keys into the operator secret store, rotate exposed keys, and keep repo-root .env development-only."
-            if readable
-            else "No action required."
-        ),
-        details={"readable_env_files": readable},
+        message,
+        implication,
+        remediation,
+        details=details,
     )
 
 
@@ -618,6 +1052,7 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
         },
     )
     health_codes = ", ".join(workspace_health["finding_codes"]) or "none"
+    registered_providers = registered_providers_check(project_root, yaml_module)
     checks = [
         python_check(env),
         pyyaml,
@@ -637,7 +1072,8 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
         semantic_retrieval_check(project_root, yaml_module),
         normalization_adapters_check(project_root, yaml_module),
         acquisition_mode_check(project_root, yaml_module),
-        secret_exposure_check(project_root),
+        registered_providers,
+        secret_exposure_check(project_root, declared_credential_names(registered_providers)),
         check_item(
             "workspace_health",
             "Shared workspace health",
@@ -663,6 +1099,87 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
     }
 
 
+def _joined(values: Any, empty: str = "none declared") -> str:
+    items = [str(value) for value in values or [] if str(value)]
+    return ", ".join(items) if items else empty
+
+
+def _capability_lines(capabilities: dict[str, Any]) -> list[str]:
+    rate_limit = capabilities.get("rate_limit")
+    rate = (
+        f"{rate_limit.get('requests')} request(s) per {rate_limit.get('per')}"
+        if isinstance(rate_limit, dict)
+        else "none declared"
+    )
+    return [
+        f"      Declared domains: {_joined(capabilities.get('allowed_domains'))}",
+        f"      Rate limit: {rate}",
+        # Names, never values — stated in the label so nobody has to trust the code.
+        f"      Credential names (values never read): {_joined(capabilities.get('credentials'))}",
+        f"      Terms: {_joined(capabilities.get('terms_urls'))}",
+        f"      Licence inference: {capabilities.get('license_inference') or 'unknown'}",
+        f"      Request kinds: {_joined(capabilities.get('request_kinds'))}",
+    ]
+
+
+def registered_providers_lines(check: dict[str, Any]) -> list[str]:
+    """Render the registered-provider detail that the one-line check summary cannot carry.
+
+    Text is the format an operator actually reads, so the declaration an auditor is
+    being asked to trust — the domains, the credential names, the rate ceiling — has to
+    be on the page, not only in ``--format json``.
+    """
+    if check.get("id") != REGISTERED_PROVIDERS_CHECK_ID:
+        return []
+    details = check.get("details") or {}
+    lines: list[str] = ["  Authorized in research.yml:"]
+    for phase, block in (details.get("authorization") or {}).items():
+        enabled = block.get("enabled")
+        state = "enabled" if enabled is True else "disabled" if enabled is False else "unset"
+        lines.append(f"    {phase} ({state}): {_joined(block.get('providers'), 'no providers listed')}")
+
+    registered = details.get("registered") or []
+    for state, heading in (
+        ("enabled", "Enabled (registered here, authorized in research.yml, phase enabled)"),
+        ("available", "Available (registered here, not reachable as research.yml stands)"),
+    ):
+        entries = [entry for entry in registered if entry.get("state") == state]
+        if not entries:
+            continue
+        lines.append(f"  {heading}:")
+        for entry in entries:
+            # Authorized but unreachable is the case worth naming: the id IS in the
+            # allow-list, so "not authorized" would send an operator to fix the wrong line.
+            reason = (
+                " - authorized, but the phase is not enabled"
+                if entry.get("authorized") and not entry.get("phase_enabled")
+                else ""
+            )
+            lines.append(
+                f"    {entry.get('id')} [{entry.get('phase')}] from {entry.get('distribution')} "
+                f"{entry.get('version')} (entry point {entry.get('entry_point') or 'unnamed'}, "
+                f"provider API v{entry.get('provider_api_version')}){reason}"
+            )
+            lines.extend(_capability_lines(entry.get("capabilities") or {}))
+
+    invalid = details.get("invalid") or []
+    if invalid:
+        lines.append("  Invalid (installed here, supplying no provider id):")
+        for entry in invalid:
+            lines.append(
+                f"    {entry.get('distribution')} [{entry.get('phase')}] "
+                f"(entry point {entry.get('entry_point') or 'unnamed'}): {entry.get('reason')}"
+            )
+
+    findings = details.get("findings") or []
+    if findings:
+        lines.append("  Findings:")
+        for finding in findings:
+            lines.append(f"    {str(finding.get('severity')).upper()} {finding.get('code')}: {finding.get('message')}")
+            lines.append(f"      Remediation: {finding.get('remediation')}")
+    return lines
+
+
 def render_text(report: dict[str, Any]) -> str:
     lines = [
         "Research Wiki Doctor",
@@ -679,6 +1196,7 @@ def render_text(report: dict[str, Any]) -> str:
         lines.append(f"  Remediation: {check['remediation']}")
         if check.get("version"):
             lines.append(f"  Version: {check['version']}")
+        lines.extend(registered_providers_lines(check))
     lines.append("")
     return "\n".join(lines)
 

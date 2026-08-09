@@ -16,6 +16,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 INIT_SCRIPT_PATH = REPO_ROOT / "workspace-template" / "scripts" / "init_research_workspace.py"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
 
+sys.path.insert(0, str(REPO_ROOT))
+from tests._provider_plugin_fixture import (  # noqa: E402
+    ACQUISITION_PROVIDER_ID,
+    DISCOVERY_PROVIDER_ID,
+    installed_provider_plugins,
+    refresh_provider_plugin_caches,
+)
+
 
 def load_init_module():
     spec = importlib.util.spec_from_file_location("research_workspace_init", INIT_SCRIPT_PATH)
@@ -1517,6 +1525,269 @@ class OptionalSectionFooterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             self.assertEqual([], INIT.optional_section_examples(Path(tmpdir) / "absent"))
             self.assertEqual("", INIT.render_optional_section_footer(Path(tmpdir) / "absent"))
+
+
+#: The sentences initialization produced for an unresolvable provider id before
+#: registration existed.  Written out rather than rebuilt from the module's constants:
+#: hosts parse them, so a test that recomputed them could not notice them changing.
+PROFILE_ACQUISITION_UNKNOWN_MESSAGE = (
+    "setup profile integrations.acquisition.providers has unknown provider(s): not-a-real-provider. "
+    "Allowed providers: arxiv, openalex, github, web"
+)
+PROFILE_DISCOVERY_UNKNOWN_MESSAGE = (
+    "setup profile integrations.discovery.providers has unknown provider(s): not-a-real-provider. "
+    "Allowed providers: arxiv, openalex, github, search, standards, standards:iso-open-data, "
+    "standards:eu-product-requirements, standards:uk-geospatial-register, standards:nist, "
+    "legal, authors, companions"
+)
+FLAG_ACQUISITION_UNKNOWN_MESSAGE = (
+    "--acquisition-provider has unknown provider(s): not-a-real-provider. "
+    "Allowed providers: arxiv, openalex, github, web"
+)
+FLAG_ACQUISITION_DUPLICATE_MESSAGE = "--acquisition-provider has duplicate provider(s): arxiv"
+
+
+class InitResearchWorkspaceRegisteredProviderTests(unittest.TestCase):
+    """Deployment must only authorize providers the deploying environment can supply.
+
+    Initialization is where a profile's provider list becomes a workspace's
+    ``research.yml`` — the authorization boundary itself.  Registration makes an id
+    *available*, never *enabled*, so the profile still has to name it; but writing an
+    authorization the environment cannot satisfy would hand the operator a workspace
+    that is already drifted at the moment it is created.  So a registered id deploys
+    exactly where its distribution is installed, and nowhere else.
+
+    The refusal has to distinguish the two states an operator acts on differently:
+    nothing supplies the id (install a distribution) versus something does and its
+    declaration is broken (repair the named one).  And with nothing installed, every
+    sentence is byte-for-byte what it was before registration existed.
+    """
+
+    maxDiff = None
+
+    def setUp(self):
+        refresh_provider_plugin_caches()
+
+    def tearDown(self):
+        refresh_provider_plugin_caches()
+
+    def profile_authorizing(self, target: Path, *, acquisition=None, discovery=None) -> dict:
+        profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text())
+        profile["workspace_init"]["target_path"] = str(target)
+        integrations = profile["workspace_init"]["integrations"]
+        if acquisition is not None:
+            integrations["acquisition"] = {
+                "enabled": True,
+                "providers": list(acquisition),
+                "target_root": "raw/papers",
+                "max_downloads_per_run": 10,
+                "require_license_check": True,
+            }
+        if discovery is not None:
+            integrations["discovery"] = {
+                "enabled": True,
+                "providers": list(discovery),
+                "candidate_store_path": "sources/discovery/candidates.jsonl",
+            }
+        return profile
+
+    def write_profile(self, root: Path, target: Path, **authorization) -> Path:
+        profile_path = root / "profile.yml"
+        profile_path.write_text(
+            yaml.safe_dump(self.profile_authorizing(target, **authorization), sort_keys=False)
+        )
+        return profile_path
+
+    def run_init(self, *args: str) -> str:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            INIT.main(list(args))
+        return stdout.getvalue()
+
+    def refuse_init(self, *args: str) -> SystemExit:
+        with self.assertRaises(SystemExit) as caught:
+            with contextlib.redirect_stdout(io.StringIO()):
+                INIT.main(list(args))
+        return caught.exception
+
+    def cli_common(self, target: Path) -> tuple[str, ...]:
+        return (
+            "--target",
+            str(target),
+            "--project-name",
+            "registered-provider-workspace",
+            "--project-description",
+            "Workspace created for registered provider initialization tests.",
+        )
+
+    def test_a_profile_authorizing_an_installed_registration_deploys_it(self):
+        """The whole point: an installed distribution's id survives into research.yml."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "registered-workspace"
+            profile_path = self.write_profile(
+                root,
+                target,
+                acquisition=[ACQUISITION_PROVIDER_ID],
+                discovery=[DISCOVERY_PROVIDER_ID],
+            )
+
+            with installed_provider_plugins():
+                self.run_init("--profile", str(profile_path))
+
+            config = yaml.safe_load((target / "research.yml").read_text())
+            self.assertEqual([ACQUISITION_PROVIDER_ID], config["integrations"]["acquisition"]["providers"])
+            self.assertEqual([DISCOVERY_PROVIDER_ID], config["integrations"]["discovery"]["providers"])
+
+    def test_a_profile_authorizing_an_uninstalled_registration_refuses_and_writes_nothing(self):
+        """Deploy drift is refused at deploy time rather than baked into a new workspace."""
+        for phase, provider_id, group in (
+            ("acquisition", ACQUISITION_PROVIDER_ID, "evidence_wiki.acquisition_providers"),
+            ("discovery", DISCOVERY_PROVIDER_ID, "evidence_wiki.discovery_providers"),
+        ):
+            with self.subTest(phase=phase):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    target = root / "drifted-workspace"
+                    profile_path = self.write_profile(root, target, **{phase: [provider_id]})
+
+                    error = self.refuse_init("--profile", str(profile_path))
+
+                    self.assertIsInstance(error, INIT.ProviderRegistrationExit)
+                    self.assertEqual("PROVIDER_NOT_REGISTERED", error.error_code)
+                    self.assertIn(f"Install a distribution that registers '{provider_id}'", error.remediation)
+                    self.assertIn(group, error.remediation)
+                    self.assertEqual([provider_id], error.details["unresolved_provider_ids"])
+                    self.assertEqual(phase, error.details["phase"])
+                    self.assertFalse(target.exists(), "a refused deployment must leave no workspace behind")
+
+    def test_an_installed_but_invalid_registration_asks_for_a_repair_not_an_install(self):
+        """Naming the broken distribution is the only advice that can be acted on."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "broken-registration-workspace"
+            profile_path = self.write_profile(root, target, acquisition=["Keepa_Broken_Fixture"])
+
+            with installed_provider_plugins("invalid-declaration", base=False):
+                error = self.refuse_init("--profile", str(profile_path))
+
+            self.assertEqual("PROVIDER_REGISTRATION_INVALID", error.error_code)
+            self.assertIn("Upgrade or fix keepa-broken-fixture", error.remediation)
+            self.assertNotIn("Install a distribution", error.remediation)
+            self.assertFalse(target.exists())
+
+    def test_cli_provider_flags_accept_an_installed_registration_and_refuse_an_absent_one(self):
+        """``--acquisition-provider`` is the second authorization surface and behaves the same."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            installed_target = root / "flag-installed"
+            with installed_provider_plugins():
+                self.run_init(
+                    *self.cli_common(installed_target),
+                    "--acquisition-provider",
+                    ACQUISITION_PROVIDER_ID,
+                )
+            config = yaml.safe_load((installed_target / "research.yml").read_text())
+            self.assertEqual([ACQUISITION_PROVIDER_ID], config["integrations"]["acquisition"]["providers"])
+
+            absent_target = root / "flag-absent"
+            error = self.refuse_init(
+                *self.cli_common(absent_target),
+                "--acquisition-provider",
+                ACQUISITION_PROVIDER_ID,
+            )
+            self.assertEqual("PROVIDER_NOT_REGISTERED", error.error_code)
+            self.assertFalse(absent_target.exists())
+
+    def test_builtin_providers_deploy_identically_with_and_without_registrations(self):
+        """An unrelated installed plugin must not change a built-in-only deployment."""
+        configs = []
+        for install in (False, True):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                target = root / "builtin-workspace"
+                profile_path = self.write_profile(root, target, acquisition=["arxiv"], discovery=["openalex"])
+                if install:
+                    with installed_provider_plugins():
+                        self.run_init("--profile", str(profile_path))
+                else:
+                    self.run_init("--profile", str(profile_path))
+                configs.append(yaml.safe_load((target / "research.yml").read_text())["integrations"])
+
+        self.assertEqual(["arxiv"], configs[0]["acquisition"]["providers"])
+        self.assertEqual(configs[0]["acquisition"], configs[1]["acquisition"])
+        self.assertEqual(configs[0]["discovery"], configs[1]["discovery"])
+
+    def test_no_plugins_installed_keeps_every_provider_sentence_byte_identical(self):
+        """The backward-compatibility criterion, asserted against literals hosts parse."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "unchanged-messages"
+
+            profile_path = self.write_profile(root, target, acquisition=["not-a-real-provider"])
+            self.assertEqual(PROFILE_ACQUISITION_UNKNOWN_MESSAGE, str(self.refuse_init("--profile", str(profile_path))))
+
+            profile_path = self.write_profile(root, target, discovery=["not-a-real-provider"])
+            self.assertEqual(PROFILE_DISCOVERY_UNKNOWN_MESSAGE, str(self.refuse_init("--profile", str(profile_path))))
+
+            flag_target = root / "unchanged-flag-messages"
+            self.assertEqual(
+                FLAG_ACQUISITION_UNKNOWN_MESSAGE,
+                str(
+                    self.refuse_init(
+                        *self.cli_common(flag_target),
+                        "--acquisition-provider",
+                        "not-a-real-provider",
+                    )
+                ),
+            )
+            duplicate = self.refuse_init(
+                *self.cli_common(flag_target),
+                "--acquisition-provider",
+                "arxiv",
+                "--acquisition-provider",
+                "arxiv",
+            )
+            self.assertEqual(FLAG_ACQUISITION_DUPLICATE_MESSAGE, str(duplicate))
+            # A shape defect is not a registration question: it stays a plain SystemExit
+            # with no code of its own, exactly as before.
+            self.assertNotIsInstance(duplicate, INIT.ProviderRegistrationExit)
+
+    def test_the_unresolved_id_answer_does_not_depend_on_which_environment_asks(self):
+        """A typo and a missing distribution are one observation, answered one way.
+
+        The same profile must not refuse with one code in a bare virtual environment and
+        another where an unrelated provider happens to be installed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "environment-independent"
+            profile_path = self.write_profile(root, target, acquisition=["not-a-real-provider"])
+
+            bare = self.refuse_init("--profile", str(profile_path))
+            with installed_provider_plugins():
+                with_unrelated_plugin = self.refuse_init("--profile", str(profile_path))
+
+            self.assertEqual("PROVIDER_NOT_REGISTERED", bare.error_code)
+            self.assertEqual(bare.error_code, with_unrelated_plugin.error_code)
+            self.assertEqual(bare.remediation, with_unrelated_plugin.remediation)
+
+    def test_the_refusal_renders_as_an_envelope_on_stderr_with_stdout_empty(self):
+        """Refusals exit 2 with an empty stdout and the stable code leading stderr."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "envelope-workspace"
+            profile_path = self.write_profile(root, target, acquisition=[ACQUISITION_PROVIDER_ID])
+
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exit_code = INIT.entrypoint(["--profile", str(profile_path)])
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual("", stdout.getvalue(), "a refusal must leave stdout empty")
+            rendered = stderr.getvalue()
+            self.assertTrue(rendered.startswith("PROVIDER_NOT_REGISTERED: "), rendered)
+            self.assertIn("evidence_wiki.acquisition_providers", rendered)
 
 
 if __name__ == "__main__":

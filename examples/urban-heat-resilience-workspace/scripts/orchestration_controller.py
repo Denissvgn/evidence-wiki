@@ -48,7 +48,8 @@ from _orchestration_config import (
     orchestration_config,
     valid_agent_id,
 )
-from _provider_registry import ProviderListError, validate_provider_ids
+from _provider_plugins import registered_ids
+from _provider_registry import ProviderListError, ProviderNotRegisteredError, validate_provider_ids
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
@@ -1325,13 +1326,55 @@ def load_config(project_root: Path) -> dict[str, Any]:
     return document
 
 
+def safe_registered_ids(phase: str) -> tuple[str, ...]:
+    """Return the ids installed registrations supply, ``()`` if enumeration fails.
+
+    This policy is recomputed on every replay, so an environment that cannot be
+    enumerated must degrade to "supplies nothing" rather than crash the controller and
+    block every session. The fallback only narrows the accepted set, so it can refuse a
+    registered id but never admit one.
+    """
+    try:
+        return registered_ids(phase)
+    except Exception:  # noqa: BLE001 - a broken environment must not break the controller
+        return ()
+
+
 def provider_policy(config: dict[str, Any]) -> dict[str, Any]:
     integrations = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
     policy: dict[str, Any] = {}
     for phase in ("discovery", "acquisition"):
         block = integrations.get(phase) if isinstance(integrations.get(phase), dict) else {}
         try:
-            validated = validate_provider_ids(block.get("providers"), phase=phase)
+            validated = validate_provider_ids(
+                block.get("providers"),
+                phase=phase,
+                registered=safe_registered_ids(phase),
+            )
+        except ProviderNotRegisteredError as exc:
+            # The code stays CONFIG_INVALID because an unresolvable id is indistinguishable
+            # from a typo -- no registration exists either way -- and hosts have parsed that
+            # code for this input since before registration existed. The distinction is
+            # carried in the remediation and details instead, which cost a host nothing and
+            # tell an operator the one thing the generic sentence cannot: that installing a
+            # distribution is a fix. Being loud about authorized-but-not-installed is smoke's
+            # job (it refuses the workspace) and doctor's (it names the distribution).
+            #
+            # Recomputing this policy is also how a mid-session uninstall is caught:
+            # verify_provider_policy_unchanged calls back into here, so a distribution that
+            # vanishes under a running session refuses on the next call instead of being
+            # reported as an allow-list the operator narrowed and must restore.
+            raise OrchestrationControllerError(
+                "CONFIG_INVALID",
+                f"research.yml integrations.{phase}.providers {exc}",
+                recoverable=False,
+                remediation=(
+                    "Correct the provider id, or install a distribution registering it under the "
+                    "evidence_wiki.acquisition_providers or evidence_wiki.discovery_providers "
+                    "entry-point group, or remove the id from research.yml."
+                ),
+                details={"phase": phase, "unresolved_provider_ids": list(exc.provider_ids)},
+            ) from exc
         except ProviderListError as exc:
             raise OrchestrationControllerError(
                 "CONFIG_INVALID",

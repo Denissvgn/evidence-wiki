@@ -1,0 +1,10 @@
+Metadata-Version: 2.1
+Name: keepa-exploding-fixture
+Version: 0.1.0
+Summary: Synthetic provider distribution whose module raises on import.
+Author: EvidenceWiki contributors
+License: MIT
+Requires-Python: >=3.10
+
+Exists to prove that an entry point which fails to import becomes a reported invalid
+registration rather than an enumeration crash.

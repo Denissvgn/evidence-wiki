@@ -147,6 +147,50 @@ WEB_DEFAULT_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 WEB_TIMEOUT_SECONDS = 30.0
 WEB_RETRIEVED_BY = "fetch_sources.py/web"
 WEB_TRANSPORT = None
+# --- Registered third-party acquisition (CR-5 T5) -----------------------------
+# A registered provider plans requests and interprets responses; this script fetches,
+# bounds, and writes. Registered ids deliberately stay out of PROVIDER_REGISTRY and
+# ACQUISITION_PROVIDER_IDS: the built-in allow-lists are a closed set by design, and a
+# registration widens what is *available* without ever widening what is *authorized*.
+REGISTERED_SUBCOMMAND = "registered"
+REGISTERED_DEFAULT_TARGET_ROOT = "raw/data"
+# One command acquires one artifact. A plan is the small set of calls that artifact needs,
+# never a crawl, so the count is capped before anything executes.
+REGISTERED_MAX_PLANNED_REQUESTS = 8
+REGISTERED_TIMEOUT_SECONDS = 30.0
+REGISTERED_DEFAULT_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
+REGISTERED_MAX_REQUEST_DOCUMENT_BYTES = 64 * 1024
+REGISTERED_MAX_METADATA_BYTES = 64 * 1024
+REGISTERED_MAX_WARNINGS = 32
+REGISTERED_MAX_WARNING_CHARACTERS = 500
+REGISTERED_MAX_FILENAME_CHARACTERS = 128
+# A distinct ledger name on purpose: discover_sources' academic reader refuses any record
+# whose provider is outside {arxiv, openalex}, so registered calls must never share the
+# academic-provider-requests.jsonl file or they would invalidate it for discovery.
+REGISTERED_LEDGER_FILENAME = "provider-requests.jsonl"
+REGISTERED_LEDGER_LOCK_FILENAME = "provider-requests.lock"
+# The delivery vocabulary source_requests.py already routes by; a registered provider
+# cannot invent a source type the rest of the workspace does not understand.
+REGISTERED_SOURCE_TYPES = frozenset(
+    {
+        "paper",
+        "publisher_page",
+        "official_web",
+        "official_legal",
+        "standards_registry_entry",
+        "harmonised_standard_reference",
+        "product_requirement_guidance",
+        "geospatial_standard_register_entry",
+        "dataset",
+        "code_repository",
+        "project_page",
+        "supplemental_material",
+        "web_page",
+    }
+)
+# Test seam mirroring WEB_TRANSPORT: an injected opener keeps the suite off the network
+# and off DNS, exactly as the shipped path keeps strict resolution on.
+REGISTERED_OPENER = None
 SPDX_LICENSE_IDS = {
     "0BSD",
     "Apache-2.0",
@@ -230,21 +274,37 @@ PROVIDER_REGISTRY: dict[str, dict[str, Any]] = {
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from _provider_registry import ProviderListError, validate_provider_ids
+from _provider_registry import ProviderListError, ProviderNotRegisteredError, validate_provider_ids
 
 _acquisition_transport = load_workspace_module(_SCRIPT_DIR, "_acquisition_transport")
 AcquisitionTransportError = _acquisition_transport.AcquisitionTransportError
 DownloadResult = _acquisition_transport.DownloadResult
 bounded_download = _acquisition_transport.bounded_download
 build_default_opener = _acquisition_transport.build_default_opener
+enforce_declared_domain = _acquisition_transport.enforce_declared_domain
+execute_planned_request = _acquisition_transport.execute_planned_request
 header_value = _acquisition_transport.header_value
+normalize_declared_domains = _acquisition_transport.normalize_declared_domains
 redact_diagnostic = _acquisition_transport.redact_diagnostic
 redact_url = _acquisition_transport.redact_url
+register_secret_env_name = _acquisition_transport.register_secret_env_name
+resolve_credential_placeholders = _acquisition_transport.resolve_credential_placeholders
 response_status = _acquisition_transport.response_status
 response_url = _acquisition_transport.response_url
 result_from_bytes = _acquisition_transport.result_from_bytes
 validate_download_result = _acquisition_transport.validate_download_result
 validate_https_url = _acquisition_transport.validate_https_url
+validate_planned_request = _acquisition_transport.validate_planned_request
+_provider_plugins = load_workspace_module(_SCRIPT_DIR, "_provider_plugins")
+ACQUISITION_PHASE = _provider_plugins.ACQUISITION_PHASE
+ProviderPluginError = _provider_plugins.ProviderPluginError
+registered_ids = _provider_plugins.registered_ids
+require_registration = _provider_plugins.require_registration
+_provider_accounting = load_workspace_module(_SCRIPT_DIR, "_provider_accounting")
+ACCOUNTING_SCHEMA_VERSION = _provider_accounting.ACCOUNTING_SCHEMA_VERSION
+ProviderAccountingError = _provider_accounting.ProviderAccountingError
+coerce_rate_limit = _provider_accounting.coerce_rate_limit
+reserve_provider_requests = _provider_accounting.reserve
 _script_errors = load_workspace_module(_SCRIPT_DIR, "_script_errors")
 emit_error = _script_errors.emit_error
 handle_system_exit = _script_errors.handle_system_exit
@@ -419,6 +479,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--standards-metadata",
         help="Workspace-relative JSON/YAML file to merge into provenance.standards.",
     )
+
+    # One generic subcommand for every registered provider. The provider id arrives as
+    # --id, never --provider: the subparser tree above claims dest="provider", so a
+    # --provider option here would silently overwrite the subcommand name argparse
+    # stored there.
+    registered = providers.add_parser(
+        REGISTERED_SUBCOMMAND,
+        help="Acquire through a provider registered by an installed distribution.",
+        description=(
+            "Acquire one artifact through a registered acquisition provider. The provider plans "
+            "the HTTPS requests and interprets the responses; this script executes them against "
+            "the provider's declared allowed_domains and writes the evidence."
+        ),
+    )
+    registered_commands = registered.add_subparsers(dest="command", required=True)
+    registered_get = registered_commands.add_parser(
+        "get",
+        help="Acquire one artifact through a registered provider's planned requests.",
+    )
+    registered_get.add_argument("--id", required=True, help="Registered acquisition provider id.")
+    registered_get.add_argument(
+        "--request-file",
+        required=True,
+        help="Workspace-relative JSON file holding one provider-defined request object.",
+    )
+    registered_get.add_argument(
+        "--target-root",
+        default=REGISTERED_DEFAULT_TARGET_ROOT,
+        help=f"Workspace-relative raw/ directory for the artifact. Defaults to {REGISTERED_DEFAULT_TARGET_ROOT}.",
+    )
+    registered_get.add_argument("--request-id", help="Optional source request id satisfied by this acquisition.")
+    registered_get.add_argument("--candidate-id", help="Optional discovery candidate id satisfied by this acquisition.")
     return parser.parse_args(argv)
 
 
@@ -510,13 +602,72 @@ def acquisition_config(config: dict[str, Any]) -> dict[str, Any]:
     return acquisition
 
 
-def validate_provider_list(value: Any, label: str, *, require_non_empty: bool = False) -> list[str]:
+def registered_acquisition_ids() -> tuple[str, ...]:
+    """Return the acquisition ids installed registrations supply, ``()`` when none do.
+
+    The loader never raises for a plugin's sake, so a broken distribution cannot stop a
+    workspace that only uses built-ins: with nothing installed this is ``()``, and every
+    accepted set and refusal message below is what it was before registration existed.
+    That promise is defence in depth rather than a type guarantee, so it is backed here:
+    a built-in acquisition must not fail because some unrelated distribution's metadata
+    is unreadable. Falling back to ``()`` narrows the accepted set, so this can only
+    refuse a registered id, never admit one.
+    """
+    try:
+        return registered_ids(ACQUISITION_PHASE)
+    except Exception:  # noqa: BLE001 - a broken environment must not break validation
+        return ()
+
+
+def require_acquisition_registration(provider_id: str) -> Any:
+    """Return the registration for ``provider_id``, or refuse in this script's envelope.
+
+    The loader already draws the distinction that matters — nothing supplies the id
+    (``PROVIDER_NOT_REGISTERED``, fix by installing) versus something does and its
+    declaration is broken (``PROVIDER_REGISTRATION_INVALID``, fix by upgrading the named
+    distribution) — and both remediations name the entry-point group, so this only
+    re-shapes the error rather than restating it.
+    """
+    try:
+        registration = require_registration(ACQUISITION_PHASE, provider_id)
+    except ProviderPluginError as exc:
+        raise FetchSourcesError(
+            exc.error_code,
+            exc.message,
+            remediation=exc.remediation,
+        ) from exc
+    # Register the declared credential names for redaction here rather than at transport.
+    # The transport registers them when it resolves a placeholder, but validate_request and
+    # plan_fetch run before that and their refusals quote the request document, so a
+    # PROVIDER_REQUEST_INVALID or PROVIDER_PLAN_INVALID raised in between would render a
+    # value in the clear. Redaction has to be armed from the moment the declaration is known.
+    for name in registration.capabilities.credentials:
+        register_secret_env_name(name)
+    return registration
+
+
+def validate_provider_list(
+    value: Any,
+    label: str,
+    *,
+    require_non_empty: bool = False,
+    registered: tuple[str, ...] = (),
+    requested_id: str | None = None,
+) -> list[str]:
     try:
         providers = validate_provider_ids(
             value,
             phase="acquisition",
             require_non_empty=require_non_empty,
+            registered=registered,
         )
+    except ProviderNotRegisteredError as exc:
+        # Only a caller that asked for one specific provider can tell "this workspace
+        # authorizes an id nothing installed supplies" apart from "this list has a typo".
+        # Built-in commands pass no requested_id and keep today's message verbatim.
+        if requested_id is not None and requested_id in exc.provider_ids:
+            require_acquisition_registration(requested_id)
+        raise SystemExit(f"research.yml {label} {exc}") from exc
     except ProviderListError as exc:
         raise SystemExit(f"research.yml {label} {exc}") from exc
     return list(providers.providers)
@@ -675,12 +826,16 @@ def acquisition_context(
     requested_count: int,
     *,
     run_id: str | None = None,
+    registered: tuple[str, ...] = (),
+    requested_id: str | None = None,
 ) -> dict[str, Any]:
     acquisition = acquisition_config(config)
     providers = validate_provider_list(
         acquisition.get("providers", []),
         "integrations.acquisition.providers",
         require_non_empty=True,
+        registered=registered,
+        requested_id=requested_id,
     )
     require_provider_allowed(provider, providers)
     limit = max_downloads_per_run(acquisition)
@@ -3384,6 +3539,638 @@ def run_web_command(project_root: Path, context: dict[str, Any], args: argparse.
     )
 
 
+# --- Registered provider acquisition (CR-5 T5) --------------------------------
+#
+# The plugin is a request planner and a response interpreter; it never opens a socket and
+# never touches the workspace. This section is the whole of what the package does on its
+# behalf: gate on config exactly as a built-in does, treat everything the plugin returns
+# as untrusted input, execute the plan through the package's pinned transport against the
+# provider's own declared allowed_domains, and write bytes plus provenance through the
+# same marker-backed transaction every other artifact uses.
+#
+# Nothing is written until every gate has passed: the transaction below is entered only
+# after the artifact bytes are already in hand and validated, so any refusal at any step
+# leaves the evidence tree exactly as it was.
+
+
+def provider_request_invalid(message: str, *, detail: str | None = None) -> FetchSourcesError:
+    """Refuse a request document, carrying the provider's own reason when it gave one."""
+    text = f"{message} {detail}".strip() if detail else message
+    return FetchSourcesError(
+        "PROVIDER_REQUEST_INVALID",
+        redact_diagnostic(text),
+        remediation=(
+            "Fix the --request-file document to match what the provider documents, or choose a "
+            "provider that serves this request."
+        ),
+    )
+
+
+def provider_plan_invalid(message: str, *, detail: str | None = None) -> FetchSourcesError:
+    """Refuse what a provider returned: a plan, or the artifact it interpreted."""
+    text = f"{message} {detail}".strip() if detail else message
+    return FetchSourcesError(
+        "PROVIDER_PLAN_INVALID",
+        redact_diagnostic(text),
+        remediation=(
+            "Upgrade or fix the provider distribution so it returns a plan and a source artifact "
+            "matching the declared provider contract."
+        ),
+    )
+
+
+def plugin_failure_detail(exc: BaseException) -> str:
+    """Collapse a plugin exception into one redacted line fit for an error envelope."""
+    return redact_diagnostic(" ".join(f"{type(exc).__name__}: {exc}".split()))
+
+
+def provider_attribute(value: Any, name: str, default: Any) -> Any:
+    """Read one attribute off an untrusted provider object without letting it crash us."""
+    try:
+        return getattr(value, name, default)
+    except Exception as exc:
+        # A property or descriptor that raises is a malformed return value, never a
+        # traceback escaping the command.
+        raise provider_plan_invalid(
+            f"Provider return value attribute {name!r} could not be read.",
+            detail=plugin_failure_detail(exc),
+        ) from None
+
+
+def registered_provider_id(value: Any) -> str:
+    """Normalize --id, refusing an empty one before any registration lookup."""
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        raise FetchSourcesError(
+            "PROVIDER_NOT_REGISTERED",
+            "registered get --id must name a registered acquisition provider.",
+            remediation="Pass --id with the provider id an installed distribution registers.",
+        )
+    return text
+
+
+def registered_max_download_bytes(acquisition: dict[str, Any]) -> int:
+    """Return the reviewed per-response byte ceiling for registered providers."""
+    value = acquisition.get("registered")
+    registered = value if isinstance(value, dict) else {}
+    max_bytes = registered.get("max_download_bytes", REGISTERED_DEFAULT_MAX_DOWNLOAD_BYTES)
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
+        raise SystemExit("research.yml integrations.acquisition.registered.max_download_bytes must be a positive integer")
+    return max_bytes
+
+
+def resolve_registered_target_root(project_root: Path, value: Any) -> Path:
+    """Resolve --target-root under raw/, with the same rules research.yml roots obey."""
+    try:
+        relative = validate_raw_target_path(value, "--target-root")
+    except SystemExit as exc:
+        raise FetchSourcesError(
+            "ACQUISITION_PATH_UNSAFE",
+            f"registered get --target-root must be a workspace-relative path under raw/: {value!r}",
+            recoverable=False,
+            remediation=f"Pass a workspace-relative path under raw/, for example {REGISTERED_DEFAULT_TARGET_ROOT}.",
+        ) from exc
+    return safe_workspace_path(project_root, project_root / relative, "registered get --target-root")
+
+
+def load_registered_request(project_root: Path, value: Any) -> tuple[Path, dict[str, Any], str]:
+    """Load the request document: exactly one JSON object, from inside the workspace."""
+    if not isinstance(value, str) or not value.strip():
+        raise provider_request_invalid("registered get --request-file must be a workspace-relative path.")
+    try:
+        relative = validate_workspace_relative_path(value, "--request-file")
+    except SystemExit as exc:
+        raise provider_request_invalid(
+            f"registered get --request-file must be a workspace-relative path: {value!r}"
+        ) from exc
+    path = safe_workspace_path(project_root, project_root / relative, "registered get --request-file")
+    if not path.is_file():
+        raise provider_request_invalid(f"registered get --request-file does not exist: {relative}")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise provider_request_invalid(
+            f"registered get --request-file cannot be read: {relative}",
+            detail=plugin_failure_detail(exc),
+        ) from exc
+    if len(payload) > REGISTERED_MAX_REQUEST_DOCUMENT_BYTES:
+        raise provider_request_invalid(
+            f"registered get --request-file is larger than {REGISTERED_MAX_REQUEST_DOCUMENT_BYTES} bytes: {relative}"
+        )
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise provider_request_invalid(
+            f"registered get --request-file must contain one UTF-8 JSON object: {relative}",
+            detail=plugin_failure_detail(exc),
+        ) from exc
+    if not isinstance(document, dict):
+        raise provider_request_invalid(
+            f"registered get --request-file must contain one JSON object, not "
+            f"{type(document).__name__}: {relative}"
+        )
+    return path, document, f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def validate_registered_request(provider: Any, provider_id: str, request: dict[str, Any]) -> None:
+    """Let the provider refuse what it cannot serve, and carry its reason outward."""
+    try:
+        provider.validate_request(request)
+    except Exception as exc:
+        # Every failure on this surface is one code: the request document is the thing
+        # the operator can fix, whether the provider refused it or choked on it.
+        raise provider_request_invalid(
+            f"Provider {provider_id!r} refused the request document:",
+            detail=plugin_failure_detail(exc),
+        ) from None
+
+
+def registered_plan(provider: Any, provider_id: str, request: dict[str, Any]) -> tuple[Any, ...]:
+    """Ask the provider for its plan and check the whole envelope before anything runs."""
+    try:
+        planned = provider.plan_fetch(request)
+    except Exception as exc:
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} could not plan the request:",
+            detail=plugin_failure_detail(exc),
+        ) from None
+    if isinstance(planned, (str, bytes, bytearray)) or not isinstance(planned, (list, tuple)):
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} must return a sequence of planned requests, not "
+            f"{type(planned).__name__}."
+        )
+    if not planned:
+        raise provider_plan_invalid(f"Provider {provider_id!r} returned an empty plan.")
+    if len(planned) > REGISTERED_MAX_PLANNED_REQUESTS:
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} planned {len(planned)} requests, which exceeds the per-command "
+            f"cap of {REGISTERED_MAX_PLANNED_REQUESTS}. One command acquires one artifact, not a crawl."
+        )
+    return tuple(planned)
+
+
+def check_registered_plan(plan: tuple[Any, ...], capabilities: Any) -> tuple[Any, ...]:
+    """Shape, declaration, and credentials for the whole plan, before any transport.
+
+    ``execute_planned_request`` re-checks each of these at execution — this pass is what
+    makes the check hold for *every* request in the plan before the first one is sent, so
+    a plan whose last hop leaves the declaration never gets to make its first call.
+
+    Returns the checked requests. Everything downstream reads those and never the plugin's
+    own objects again: a second read of an untrusted attribute could answer differently.
+    """
+    declared_domains = normalize_declared_domains(capabilities.allowed_domains)
+    checked: list[Any] = []
+    for planned in plan:
+        validated = validate_planned_request(planned)
+        # resolve_hostnames=False keeps this pass a pure declaration check: no DNS, no
+        # sockets. Execution repeats it with the pinned resolver.
+        enforce_declared_domain(validated.url, declared_domains, resolve_hostnames=False)
+        resolve_credential_placeholders(
+            validated.headers,
+            capabilities_credentials=capabilities.credentials,
+            env=os.environ,
+        )
+        checked.append(validated)
+    return tuple(checked)
+
+
+def reserve_registered_requests(
+    context: dict[str, Any],
+    provider_id: str,
+    count: int,
+    capabilities: Any,
+) -> dict[str, Any] | None:
+    """Spend the plan's request slots durably, under the active run, before transport."""
+    rate_limit = capabilities.rate_limit
+    run_budget = context.get("run_budget")
+    if not isinstance(run_budget, dict):
+        # No active run means no durable ledger to spend against, so the declared window
+        # cannot be accounted across commands: each invocation starts from an empty one.
+        # What still binds is the plan itself, refused with the same code the ledger would
+        # have used. Enforcement across commands is therefore run-scoped, exactly like
+        # max_downloads_per_run, and provider-registration.md says so rather than
+        # promising a ceiling this path does not keep.
+        enforce_declared_rate_limit(provider_id, rate_limit, count)
+        return None
+    run_dir = Path(run_budget["path"]).parent
+    try:
+        reservation = reserve_provider_requests(
+            run_dir,
+            provider_id,
+            count,
+            ledger_filename=REGISTERED_LEDGER_FILENAME,
+            lock_filename=REGISTERED_LEDGER_LOCK_FILENAME,
+            schema_version=ACCOUNTING_SCHEMA_VERSION,
+            rate_limit=rate_limit,
+            extra_fields={"phase": ACQUISITION_PHASE, "command": f"{REGISTERED_SUBCOMMAND} get"},
+        )
+    except ProviderAccountingError as exc:
+        raise FetchSourcesError(
+            exc.error_code,
+            redact_diagnostic(exc.message),
+            remediation=redact_diagnostic(exc.remediation) if exc.remediation else None,
+        ) from exc
+    except RuntimeError as exc:
+        # The ledger takes the run's reservation lock through its own copy of
+        # _workspace_locks, so the LockUnavailableError it raises is a different class
+        # object from the one main() catches. Contention must still be an envelope, not a
+        # traceback, so it is recognised by the stable error_code it carries.
+        code = getattr(exc, "error_code", None)
+        if not isinstance(code, str):
+            raise
+        raise FetchSourcesError(
+            code,
+            redact_diagnostic(exc),
+            remediation=redact_diagnostic(getattr(exc, "remediation", "") or "") or None,
+        ) from exc
+    return {
+        "run_id": reservation.run_id,
+        "reserved": reservation.count,
+        "ledger_path": reservation.ledger_path,
+        "reserved_at": reservation.reserved_at,
+    }
+
+
+def enforce_declared_rate_limit(provider_id: str, rate_limit: Any, count: int) -> None:
+    """Refuse a plan that exceeds the declared ceiling even against an empty window."""
+    try:
+        limit = coerce_rate_limit(rate_limit)
+    except ProviderAccountingError as exc:
+        raise FetchSourcesError(
+            exc.error_code,
+            redact_diagnostic(exc.message),
+            remediation=redact_diagnostic(exc.remediation) if exc.remediation else None,
+        ) from exc
+    if limit is None or count <= limit.requests:
+        return
+    raise FetchSourcesError(
+        "ACQUISITION_PROVIDER_RATE_LIMITED",
+        (
+            f"Provider {provider_id} planned {count} request(s) at once, which exceeds its declared "
+            f"rate limit of {limit.requests} per {limit.per}."
+        ),
+        remediation=(
+            "Waiting cannot admit this plan; reduce the planned request count. Start a run with "
+            "run_controller.py so provider calls are also accounted durably across commands."
+        ),
+    )
+
+
+def execute_registered_plan(
+    plan: tuple[Any, ...],
+    capabilities: Any,
+    *,
+    max_bytes: int,
+    provider_id: str,
+) -> tuple[DownloadResult, ...]:
+    """Run each planned request through the package's transport, in plan order."""
+    results: list[DownloadResult] = []
+    for index, planned in enumerate(plan, start=1):
+        try:
+            result = execute_planned_request(
+                planned,
+                allowed_domains=capabilities.allowed_domains,
+                credentials=capabilities.credentials,
+                env=os.environ,
+                timeout=REGISTERED_TIMEOUT_SECONDS,
+                max_bytes=max_bytes,
+                opener=REGISTERED_OPENER,
+                # An injected opener is a deterministic test adapter; the shipped path
+                # always resolves and pins hostnames, exactly as the built-ins do.
+                resolve_hostnames=REGISTERED_OPENER is None,
+            )
+        except AcquisitionTransportError as exc:
+            raise fetch_error_from_transport(exc) from exc
+        if not isinstance(result, DownloadResult):
+            raise provider_plan_invalid(
+                f"Registered transport returned no verifiable response metadata for planned request {index}."
+            )
+        enforce_payload_size(result.content, max_bytes, f"registered provider {provider_id} request {index}")
+        results.append(result)
+    return tuple(results)
+
+
+def registered_artifact(
+    provider: Any,
+    provider_id: str,
+    request: dict[str, Any],
+    responses: tuple[DownloadResult, ...],
+) -> Any:
+    """Let the provider fold the responses into one artifact descriptor."""
+    payloads = tuple(result.content for result in responses)
+    try:
+        return provider.interpret(request, payloads)
+    except Exception as exc:
+        # A plugin that raises here has produced no artifact at all, which is the same
+        # outcome as returning a malformed one: nothing is written either way.
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} could not interpret the responses:",
+            detail=plugin_failure_detail(exc),
+        ) from None
+
+
+def registered_artifact_filename(value: Any, provider_id: str) -> str:
+    """Accept only a plain, portable leaf name; the provider never chooses a directory."""
+    if not isinstance(value, str) or not value.strip():
+        raise provider_plan_invalid(f"Provider {provider_id!r} returned an artifact without a filename.")
+    name = value.strip()
+    if len(name) > REGISTERED_MAX_FILENAME_CHARACTERS:
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} returned an artifact filename longer than "
+            f"{REGISTERED_MAX_FILENAME_CHARACTERS} characters."
+        )
+    unsafe = (
+        name != PurePosixPath(name).name
+        or "/" in name
+        or "\\" in name
+        or name.startswith(".")
+        or name in {".", ".."}
+        or name.endswith((" ", "."))
+        or any(ord(character) < 32 or character in '<>:"|?*' for character in name)
+        or name.split(".", 1)[0].casefold() in WINDOWS_RESERVED_NAMES
+    )
+    if unsafe:
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} returned an unsafe artifact filename: {name!r}"
+        )
+    return name
+
+
+def registered_artifact_metadata(value: Any, provider_id: str) -> dict[str, Any]:
+    """Return the plugin's provenance hints as bounded, JSON-safe data.
+
+    Recorded under one nested key rather than merged into the sidecar root: a plugin must
+    not be able to plant a top-level field the workspace reads for policy — a forged
+    ``repository_artifact_kind`` would otherwise steer the run's archive-byte budget.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        try:
+            value = dict(value)
+        except Exception as exc:
+            raise provider_plan_invalid(
+                f"Provider {provider_id!r} returned provenance_metadata that is not a mapping.",
+                detail=plugin_failure_detail(exc),
+            ) from None
+    if any(not isinstance(key, str) or not key.strip() for key in value):
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} returned provenance_metadata with a non-string key."
+        )
+    metadata = {str(key): item for key, item in value.items()}
+    try:
+        encoded = json.dumps(metadata, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} returned provenance_metadata that is not JSON-serializable.",
+            detail=plugin_failure_detail(exc),
+        ) from None
+    if len(encoded.encode("utf-8")) > REGISTERED_MAX_METADATA_BYTES:
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} returned provenance_metadata larger than "
+            f"{REGISTERED_MAX_METADATA_BYTES} bytes."
+        )
+    return redacted_metadata(metadata)
+
+
+def redacted_metadata(value: Any) -> Any:
+    """Run every string in a JSON-safe structure through the diagnostic redactor.
+
+    The package resolves credentials at execution, so a well-behaved plugin never holds
+    one — but a plugin that echoes part of an upstream response into its metadata can
+    still carry a token it did not recognise. Redacting the strings costs nothing and
+    keeps the sidecar honest without trusting the plugin to have been careful.
+    """
+    if isinstance(value, str):
+        return redact_diagnostic(value)
+    if isinstance(value, dict):
+        return {key: redacted_metadata(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redacted_metadata(item) for item in value]
+    return value
+
+
+def registered_artifact_warnings(value: Any, provider_id: str) -> list[str]:
+    """Return the plugin's warnings, bounded in count and length."""
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, (list, tuple)):
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} returned warnings that are not a list or tuple."
+        )
+    if len(value) > REGISTERED_MAX_WARNINGS:
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} returned more than {REGISTERED_MAX_WARNINGS} warnings."
+        )
+    warnings: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise provider_plan_invalid(f"Provider {provider_id!r} returned a warning that is not a string.")
+        text = collapse_whitespace(item) or ""
+        if text:
+            warnings.append(redact_diagnostic(text[:REGISTERED_MAX_WARNING_CHARACTERS]))
+    return warnings
+
+
+def validated_registered_artifact(
+    artifact: Any,
+    *,
+    provider_id: str,
+    project_root: Path,
+    target_root: Path,
+    max_bytes: int,
+) -> dict[str, Any]:
+    """Check every field of an untrusted artifact descriptor before a byte is written."""
+    filename = registered_artifact_filename(provider_attribute(artifact, "filename", None), provider_id)
+    source_type = provider_attribute(artifact, "source_type", None)
+    if not isinstance(source_type, str) or source_type.strip() not in REGISTERED_SOURCE_TYPES:
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} returned an unknown artifact source_type: {source_type!r}. "
+            f"Known source types: {', '.join(sorted(REGISTERED_SOURCE_TYPES))}"
+        )
+    content = provider_attribute(artifact, "content", None)
+    if isinstance(content, bytearray):
+        content = bytes(content)
+    if not isinstance(content, bytes):
+        raise provider_plan_invalid(
+            f"Provider {provider_id!r} returned artifact content that is not bytes: {type(content).__name__}"
+        )
+    if not content:
+        raise provider_plan_invalid(f"Provider {provider_id!r} returned an empty artifact.")
+    enforce_payload_size(content, max_bytes, f"registered provider {provider_id} artifact")
+
+    target = safe_workspace_path(project_root, target_root / filename, "registered get artifact")
+    # The filename check above already forbids separators; this proves the resolved
+    # target really is a direct child of the resolved root, symlinks included.
+    if target.parent.resolve(strict=False) != target_root.resolve(strict=False):
+        raise FetchSourcesError(
+            "ACQUISITION_PATH_UNSAFE",
+            f"registered get artifact resolves outside {relative_label(project_root, target_root)}: {filename!r}",
+            remediation="Fix the provider distribution to return a plain filename inside the target root.",
+        )
+    return {
+        "filename": filename,
+        "source_type": source_type.strip(),
+        "content": content,
+        "target": target,
+        "metadata": registered_artifact_metadata(provider_attribute(artifact, "provenance_metadata", None), provider_id),
+        "warnings": registered_artifact_warnings(provider_attribute(artifact, "warnings", None), provider_id),
+    }
+
+
+def registered_terms_url(capabilities: Any) -> str | None:
+    """Return the first concrete declared terms URL; ``per-origin`` names no document."""
+    for value in capabilities.terms_urls:
+        if isinstance(value, str) and value.startswith("https://"):
+            return value
+    return None
+
+
+def registered_response_records(
+    plan: tuple[Any, ...],
+    responses: tuple[DownloadResult, ...],
+) -> list[dict[str, Any]]:
+    """Record what was actually fetched, with every URL redacted before it is stored.
+
+    ``plan`` holds the *checked* requests, so the URLs recorded here are the ones the
+    transport was actually given.
+    """
+    records: list[dict[str, Any]] = []
+    for planned, result in zip(plan, responses, strict=True):
+        records.append(
+            {
+                "url": redact_url(planned.url),
+                "final_url": redact_url(result.final_url),
+                "http_status": result.http_status,
+                "content_type": result.content_type,
+                "byte_count": result.byte_count,
+                "checksum": result.checksum,
+                "tls_verified": result.tls_verified,
+            }
+        )
+    return records
+
+
+def run_registered_get(project_root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    provider_id = registered_provider_id(args.id)
+    # Gate order matches the built-ins exactly: acquisition enabled, then the research.yml
+    # allow-list (an unauthorized id is ACQUISITION_PROVIDER_DISABLED whether it is a
+    # built-in or a registered one), then the run budget.
+    context = acquisition_context(
+        project_root,
+        config,
+        provider_id,
+        1,
+        run_id=args.run_id,
+        registered=registered_acquisition_ids(),
+        requested_id=provider_id,
+    )
+    registration = require_acquisition_registration(provider_id)
+    capabilities = registration.capabilities
+    acquisition = context["acquisition"]
+    max_bytes = registered_max_download_bytes(acquisition)
+    target_root = resolve_registered_target_root(project_root, args.target_root)
+    # The transaction below re-checks this under the acquisition lock, which is the
+    # authoritative check. Doing it here as well means an already-exhausted run budget
+    # refuses without first spending the provider's declared rate limit on the network.
+    enforce_retained_acquisition_budget(
+        project_root,
+        context,
+        additional_downloads=1,
+        additional_github_archive_bytes=0,
+    )
+
+    request_path, request, request_digest = load_registered_request(project_root, args.request_file)
+    validate_registered_request(registration.provider, provider_id, request)
+
+    try:
+        plan = check_registered_plan(
+            registered_plan(registration.provider, provider_id, request),
+            capabilities,
+        )
+    except AcquisitionTransportError as exc:
+        raise fetch_error_from_transport(exc) from exc
+
+    reservation = reserve_registered_requests(context, provider_id, len(plan), capabilities)
+    responses = execute_registered_plan(plan, capabilities, max_bytes=max_bytes, provider_id=provider_id)
+    artifact = validated_registered_artifact(
+        registered_artifact(registration.provider, provider_id, request, responses),
+        provider_id=provider_id,
+        project_root=project_root,
+        target_root=target_root,
+        max_bytes=max_bytes,
+    )
+
+    target = artifact["target"]
+    origin_url = redact_url(plan[0].url)
+    extra: dict[str, Any] = {
+        "provider_registration": registration.registration_block(),
+        "provider_capabilities": capabilities.as_dict(),
+        "source_type": artifact["source_type"],
+        "provider_request_path": relative_label(project_root, request_path),
+        "provider_request_digest": request_digest,
+        "provider_responses": registered_response_records(plan, responses),
+        "provider_metadata": artifact["metadata"] or None,
+        "provider_warnings": artifact["warnings"] or None,
+        # The workspace's own policy flag, recorded beside the provider's declared
+        # license_inference so an auditor sees both. It does not gate this path: the
+        # package cannot infer a licence for a provider it did not write, exactly as it
+        # cannot for `web get` (license_inference "none").
+        "license_check_required": context["require_license_check"],
+        **acquisition_provenance_fields(context, byte_count=len(artifact["content"])),
+    }
+    with acquisition_artifact_transaction(target, project_root=project_root, context=context):
+        atomic_write_bytes(target, artifact["content"])
+        sidecar = write_provenance_sidecar(
+            target,
+            origin_url=origin_url,
+            license_value=None,
+            retrieved_by=f"fetch_sources.py/{REGISTERED_SUBCOMMAND}:{provider_id}",
+            request_id=args.request_id,
+            candidate_id=args.candidate_id,
+            terms_url=registered_terms_url(capabilities),
+            notes=(
+                "License not inferred by the package for registered providers; the declaration "
+                f"records license_inference={capabilities.license_inference}."
+            ),
+            extra=extra,
+        )
+    report: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "provider": REGISTERED_SUBCOMMAND,
+        "command": "get",
+        "provider_id": provider_id,
+        "target_path": relative_label(project_root, target),
+        "sidecar_path": relative_label(project_root, sidecar),
+        "source_type": artifact["source_type"],
+        "byte_count": len(artifact["content"]),
+        "planned_requests": len(plan),
+        "provider_registration": registration.registration_block(),
+        "provider_capabilities": capabilities.as_dict(),
+        "provider_warnings": artifact["warnings"],
+    }
+    if reservation is not None:
+        report["acquisition_run_id"] = reservation["run_id"]
+        report["provider_requests_reserved"] = reservation["reserved"]
+        report["provider_request_ledger"] = relative_label(project_root, reservation["ledger_path"])
+    return report
+
+
+def run_registered_command(
+    project_root: Path,
+    config: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if args.command == "get":
+        return run_registered_get(project_root, config, args)
+    raise FetchSourcesError(
+        "NOT_IMPLEMENTED",
+        f"{REGISTERED_SUBCOMMAND} {args.command} is not implemented.",
+        remediation=f"Choose {REGISTERED_SUBCOMMAND} get.",
+    )
+
+
 # --- GitHub transport --------------------------------------------------------
 
 
@@ -3945,12 +4732,16 @@ def run_github_command(project_root: Path, context: dict[str, Any], args: argpar
 def run_provider_command(args: argparse.Namespace) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
     config = load_config(project_root)
+    if args.provider == REGISTERED_SUBCOMMAND:
+        # args.provider holds the literal subcommand word here; the provider id is --id.
+        return run_registered_command(project_root, config, args)
     context = acquisition_context(
         project_root,
         config,
         args.provider,
         command_requested_count(args),
         run_id=args.run_id,
+        registered=registered_acquisition_ids(),
     )
     if args.provider == "arxiv":
         return run_arxiv_command(project_root, context, args)

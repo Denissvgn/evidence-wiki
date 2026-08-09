@@ -2,8 +2,10 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,9 +16,15 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
-LINT_PATH = REPO_ROOT / "workspace-template" / "scripts" / "lint.py"
-INIT_PATH = REPO_ROOT / "workspace-template" / "scripts" / "init_research_workspace.py"
+SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
+LINT_PATH = SCRIPTS / "lint.py"
+INIT_PATH = SCRIPTS / "init_research_workspace.py"
+SMOKE_PATH = SCRIPTS / "smoke_validate_workspace.py"
 PROFILE_FIXTURE_PATH = FIXTURES / "workspace-init-profile.yml"
+#: The CR-5 fixture provider distribution: a directory that becomes an installed
+#: distribution the moment it is on a Python process's import path.
+PROVIDER_PLUGIN_ROOT = FIXTURES / "provider-plugins"
+REGISTERED_PROVIDER_ID = "keepa-fixture"
 
 
 def load_script_module(name: str, path: Path):
@@ -2933,6 +2941,107 @@ class OrphanedStructuredSidecarLintTests(unittest.TestCase):
             results = self.run_lint(project)
 
         self.assertEqual([], results["issues"])
+
+
+class LintEnvironmentIndependenceTests(unittest.TestCase):
+    """Lint is a pure function of the workspace tree, never of the environment (CR-5 §7.1).
+
+    CR-5 lets a provider id come from a pip-installed distribution rather than a built-in
+    tuple, which makes "is this provider available?" a question about the *environment*.
+    The change request deliberately keeps that question out of lint: smoke enforces it and
+    doctor explains it, so that two lint runs over the same tree, on two machines or in
+    two virtualenvs, stay comparable. That property was previously true by accident -- no
+    lint check consulted anything outside the workspace -- and CR-5 is the first change
+    that could have broken it, so it is pinned here.
+
+    The workspace under test authorizes a provider id that only the fixture distribution
+    supplies, which is the sharpest case: it is exactly the workspace where an
+    environment-sensitive lint check would have something to say.
+
+    Both arms run as subprocesses. Registration lookups are cached per process, so an
+    in-process comparison would be asking whether a cache was warm rather than whether the
+    environment differs -- and PYTHONPATH is the difference an operator actually has
+    between one machine and another.
+    """
+
+    def workspace_authorizing_an_unregistered_provider(self, root: Path) -> Path:
+        target = root / "authorizes-a-registered-provider"
+        profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text(encoding="utf-8"))
+        profile["workspace_init"]["target_path"] = str(target)
+        profile_path = root / "profile.yml"
+        profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            INIT.main(["--profile", str(profile_path)])
+
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["integrations"]["acquisition"]["enabled"] = True
+        config["integrations"]["acquisition"]["providers"] = [REGISTERED_PROVIDER_ID]
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        return target
+
+    def run_in_subprocess(self, script: Path, project_root: Path, *, plugins_installed: bool):
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        if plugins_installed:
+            environment["PYTHONPATH"] = str(PROVIDER_PLUGIN_ROOT)
+        return subprocess.run(
+            [sys.executable, str(script), "--project-root", str(project_root), "--format", "json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+
+    def test_lint_output_is_identical_with_and_without_the_distribution_installed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.workspace_authorizing_an_unregistered_provider(Path(tmpdir))
+
+            uninstalled = self.run_in_subprocess(LINT_PATH, project, plugins_installed=False)
+            installed = self.run_in_subprocess(LINT_PATH, project, plugins_installed=True)
+
+        self.assertEqual(uninstalled.returncode, installed.returncode, installed.stderr)
+        self.assertEqual(
+            uninstalled.stdout,
+            installed.stdout,
+            "lint reported differently in two environments over one unchanged workspace tree",
+        )
+        report = json.loads(uninstalled.stdout)
+        self.assertEqual(
+            [],
+            [issue for issue in report["issues"] if REGISTERED_PROVIDER_ID in json.dumps(issue)],
+            "lint has no provider-registration findings to report, in either environment",
+        )
+
+    def test_smoke_does_see_the_difference_lint_ignores(self):
+        """The control. Without it, the invariance above would also hold if the fixture
+        distribution were invisible to both arms -- proving nothing about lint."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.workspace_authorizing_an_unregistered_provider(Path(tmpdir))
+
+            uninstalled = self.run_in_subprocess(SMOKE_PATH, project, plugins_installed=False)
+            installed = self.run_in_subprocess(SMOKE_PATH, project, plugins_installed=True)
+
+        self.assertNotEqual(uninstalled.returncode, installed.returncode)
+        uninstalled_report = json.loads(uninstalled.stdout or uninstalled.stderr)
+        installed_report = json.loads(installed.stdout or installed.stderr)
+        self.assertEqual(
+            [REGISTERED_PROVIDER_ID],
+            [
+                provider
+                for issue in uninstalled_report["issues"]
+                if issue.get("error_code") == "PROVIDER_NOT_REGISTERED"
+                for provider in issue["actual"]
+            ],
+        )
+        self.assertEqual(
+            [],
+            [
+                issue
+                for issue in installed_report["issues"]
+                if issue.get("error_code") == "PROVIDER_NOT_REGISTERED"
+            ],
+        )
 
 
 if __name__ == "__main__":
