@@ -284,7 +284,10 @@ class NoAdapterBackwardCompatTests(unittest.TestCase):
     # The frontmatter keys a native record emits. Pinned, not derived: this is the
     # shape a host parses, so adding or removing one is a change to the public record
     # and should require saying so here. `normalized_format` and `rendered_coverage`
-    # are CR-2's two additions; everything else predates it.
+    # are CR-2's two additions; `structured_view` is CR-7's one, and it lands on every
+    # record — `frontmatter_for` builds one flat mapping with every key present, and a
+    # record with no structured view to bind carries the key as `null` rather than
+    # omitting it. Everything else predates all of them.
     NATIVE_FRONTMATTER_KEYS = frozenset(
         {
             "abstract_confidence", "academic", "arxiv_id", "authors",
@@ -298,9 +301,9 @@ class NoAdapterBackwardCompatTests(unittest.TestCase):
             "normalized_format", "normalizer", "openalex_id", "parse_warnings",
             "pdf_extractor", "provenance", "provider", "raw_fingerprint", "raw_paths",
             "raw_pdf", "references_source_ids", "rendered_coverage", "repo_full_name",
-            "source_id", "source_kind", "standards", "status", "title",
-            "title_confidence", "title_source", "type", "unusable_evidence_reasons",
-            "updated", "url", "venue",
+            "source_id", "source_kind", "standards", "status", "structured_view",
+            "title", "title_confidence", "title_source", "type",
+            "unusable_evidence_reasons", "updated", "url", "venue",
         }
     )
 
@@ -324,6 +327,37 @@ class NoAdapterBackwardCompatTests(unittest.TestCase):
         for name, keys in shapes.items():
             with self.subTest(record=name):
                 self.assertEqual(self.NATIVE_FRONTMATTER_KEYS, keys)
+
+    def test_a_native_record_binds_no_structured_view_and_writes_no_sidecar(self):
+        """CR-7's field lands on every record and is null where there is nothing to bind.
+
+        `frontmatter_for` builds one flat mapping with every key present, so the key is
+        unconditional — that is what NATIVE_FRONTMATTER_KEYS pins. What must not happen
+        is a *file* appearing beside a paper or a link record: a sidecar no record
+        declares is a contract violation, and `normalize verify` would say so.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build(Path(tmpdir), name="no-sidecar")
+            self.run_inventory(workspace)
+            self.run_normalize(workspace)
+            sidecars = sorted(
+                path.name
+                for path in (workspace / "sources" / "normalized").rglob("*.structured.json")
+            )
+            frontmatters = {
+                name: CONTRACT.split_record(content.decode("utf-8"))[0]
+                for name, content in self.records(workspace).items()
+            }
+            verify_code, verify_report = self.run_verify(workspace)
+
+        self.assertEqual([], sidecars)
+        self.assertEqual(3, len(frontmatters))
+        for name, frontmatter in frontmatters.items():
+            with self.subTest(record=name):
+                self.assertIn("structured_view", frontmatter)
+                self.assertIsNone(frontmatter["structured_view"])
+        self.assertEqual(VERIFY.EXIT_OK, verify_code)
+        self.assertEqual("verified", verify_report["overall_result"])
 
     def test_regenerating_a_legacy_record_changes_only_the_version_stamp(self):
         """The upgrade path for records an existing workspace already has.

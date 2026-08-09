@@ -191,6 +191,8 @@ if str(_SCRIPT_DIR) not in sys.path:
 from _normalization_config import NormalizationConfigError, adapter_for_kind, normalization_config
 from _normalized_contract import (
     NORMALIZED_FORMAT_VERSION,
+    STRUCTURED_VIEW_SUFFIX,
+    expected_structured_path,
     safe_source_id,
 )
 from _normalized_contract import (
@@ -205,6 +207,10 @@ from _normalizer_adapter import (
     run_adapter,
 )
 from _script_errors import emit_error, handle_system_exit
+
+# Aliased because this module already has a `content_hash` — that one hashes a record's
+# extracted content, this one hashes the sidecar bytes a `structured_view` block binds.
+from _structured_view import content_hash as structured_view_content_hash
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import unusable_evidence_reasons as delivery_unusable_evidence_reasons
 
@@ -251,6 +257,10 @@ class NormalizedSource:
     adapter_name: str | None = None
     adapter_version: str | None = None
     rendered_coverage: dict[str, Any] | None = None
+    # The uncapped structured rendering of this source, when it has one. It becomes the
+    # record's structured-view sidecar; `None` means the record binds no sidecar, which
+    # is every source that is not structured evidence.
+    structured: dict[str, Any] | None = None
 
 
 @dataclass
@@ -535,6 +545,33 @@ def stored_normalizer_identity(frontmatter: dict[str, Any]) -> tuple[str | None,
     )
 
 
+# The two extraction methods that can produce a structured-view sidecar: an adapter
+# supplies one in its result, and the native tabular path renders one from the parse it
+# already runs. Every other method — papers, PDFs, web links, codebases — has no
+# structured view to gain, so none of them is touched by the rule below.
+STRUCTURED_VIEW_EXTRACTION_METHODS = frozenset({"table_text", ADAPTER_EXTRACTION_METHOD})
+
+
+def missing_structured_view_key(frontmatter: dict[str, Any]) -> bool:
+    """True for a record that could carry a structured view but predates the field.
+
+    Deliberately the narrowest signal that works. `structured_view` is now written
+    unconditionally — `null` when there is nothing to bind — so a record missing the key
+    entirely was written before sidecars existed. Without this it would stay
+    `skipped_existing` forever and never gain the structured view anchor-form grounding
+    resolves against. The rule is self-limiting: after one regeneration the key is
+    present whatever its value, so it never fires for that record again.
+
+    The two blunter instruments were considered and rejected. Raising NORMALIZER_VERSION
+    would re-write every record in the workspace to reach the few that can carry a
+    sidecar; raising NORMALIZED_FORMAT_VERSION would invalidate all of them at once,
+    since ACCEPTED_NORMALIZED_FORMATS holds a single version.
+    """
+    if "structured_view" in frontmatter:
+        return False
+    return frontmatter.get("extraction_method") in STRUCTURED_VIEW_EXTRACTION_METHODS
+
+
 def is_stale(
     record: dict[str, Any],
     output_path: Path,
@@ -561,8 +598,14 @@ def is_stale(
     version is the adapter's, and a string like ``"1.4.0"`` is not this script's integer
     — so each run would re-execute the adapter to reproduce a record it already had.
     They are stale when the configured adapter identity changes or the raw payload does.
+
+    One further trigger, narrow and one-shot: a record whose extraction method can emit a
+    structured-view sidecar but which carries no `structured_view` key at all — see
+    ``missing_structured_view_key``.
     """
     frontmatter = read_output_frontmatter(output_path)
+    if missing_structured_view_key(frontmatter):
+        return True
     if adapter is not None:
         stored_name, stored_version = stored_normalizer_identity(frontmatter)
         if (stored_name, stored_version) != (adapter.name, adapter.version):
@@ -996,6 +1039,7 @@ def normalize_adapter_record(
         adapter_name=result.name,
         adapter_version=result.version,
         rendered_coverage=result.rendered_coverage,
+        structured=result.structured,
     )
 
 
@@ -3462,6 +3506,7 @@ def frontmatter_for(
     manifest_records: list[dict[str, Any]] | None = None,
     project_root: Path | None = None,
     normalized_at: str | None = None,
+    structured_view: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     record = source.record
     metadata = record_metadata(record)
@@ -3542,6 +3587,11 @@ def frontmatter_for(
         # containment, so capped-away content is citable but never quotable; this is
         # what makes that visible instead of silent.
         "rendered_coverage": source.rendered_coverage,
+        # The uncapped complement to that coverage: where `rendered_coverage` measures
+        # what the body lost, this binds the file that lost nothing. Passed in rather
+        # than derived from `source`, because the digest can only be computed from bytes
+        # that are already on disk — see `write_normalized_source`.
+        "structured_view": structured_view,
         "content_hash": content_hash(source),
         "raw_fingerprint": record_raw_fingerprint(record),
         "references_source_ids": matched_reference_source_ids(source, manifest_records, project_root) or None,
@@ -3692,6 +3742,91 @@ def normalized_output_path(source: NormalizedSource, normalized_root: Path) -> P
     return normalized_output_path_for_record(source.record, normalized_root)
 
 
+def structured_view_path_for_record(output_path: Path) -> Path:
+    """The sidecar belonging to a record file, named the way the record is.
+
+    Both names are built from the same `safe_source_id`, so the sidecar can be found
+    from the record without re-reading the record — which matters on the cleanup path,
+    where the record may be the malformed thing being removed.
+    """
+    return output_path.with_name(output_path.stem + STRUCTURED_VIEW_SUFFIX)
+
+
+def render_structured_view(payload: dict[str, Any]) -> bytes:
+    """The exact bytes a structured-view sidecar holds, for a given payload.
+
+    Deterministic by construction: keys sorted, two-space indent, one trailing newline,
+    UTF-8, no ASCII escaping. The record binds these bytes by digest, so the same payload
+    has to render identically on every machine and every run — otherwise re-normalizing
+    an unchanged source would produce a different hash and invalidate a binding nothing
+    had a reason to change. Sorted keys also make the file diffable, which is the whole
+    argument for indenting a machine-read artifact at all.
+    """
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        separators=(",", ": "),
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def declared_structured_path(sidecar: Path, project_root: Path | None) -> str:
+    """The sidecar's location as the record declares it.
+
+    Workspace-relative and POSIX-spelled, like every other path in the frontmatter, so a
+    reader resolves them all the same way. The contract requires the declaration to be a
+    relative, traversal-free tail of the sidecar's canonical location; when the caller
+    did not say where the workspace root is, the bare filename is the longest tail that
+    is still certainly relative.
+    """
+    if project_root is not None:
+        try:
+            return sidecar.resolve().relative_to(Path(project_root).resolve()).as_posix()
+        except ValueError:
+            pass
+    return sidecar.name
+
+
+def sync_structured_view(
+    payload: dict[str, Any] | None,
+    normalized_root: Path,
+    source_id: str,
+    *,
+    project_root: Path | None = None,
+) -> dict[str, str] | None:
+    """Put a record's structured-view sidecar into the state ``payload`` describes.
+
+    Both directions live in one function because the contract makes them one decision.
+    A sidecar no record declares is a violation, so bytes may never be written without
+    the binding this returns for the frontmatter; and a regenerated record that stops
+    declaring a view must take its now-stale sidecar with it, or leave behind a file
+    every consumer in the package is blind to (they all glob `*.md`).
+
+    Written with the same dot-prefixed temporary plus `Path.replace` as the record, so a
+    reader never observes half a sidecar: the digest a record binds either matches the
+    file or the file is not there.
+
+    Returns the `{path, content_hash}` block to stamp, or ``None`` when the record binds
+    no structured view. Native tabular emission (CR-7 T13) is the second caller.
+    """
+    sidecar = expected_structured_path(normalized_root, source_id)
+    if payload is None:
+        sidecar.unlink(missing_ok=True)
+        return None
+    data = render_structured_view(payload)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = sidecar.with_name(f".{sidecar.name}.tmp")
+    temporary_path.write_bytes(data)
+    temporary_path.replace(sidecar)
+    return {
+        "path": declared_structured_path(sidecar, project_root),
+        "content_hash": structured_view_content_hash(data),
+    }
+
+
 def write_normalized_source(
     source: NormalizedSource,
     normalized_root: Path,
@@ -3706,6 +3841,17 @@ def write_normalized_source(
     existed = output_path.exists()
     if existed and not force:
         return output_path, "skipped_existing"
+    # Sidecar first, record second. `frontmatter_for` has to stamp a digest of bytes,
+    # which means those bytes exist before the record that binds them does; and it makes
+    # the worst outcome of an interrupted write an undeclared sidecar — inert, detected
+    # by the contract, collected on the adapter failure path — rather than a record
+    # pointing at a file that was never written.
+    structured_view = sync_structured_view(
+        source.structured,
+        normalized_root,
+        record_id(source.record),
+        project_root=project_root,
+    )
     frontmatter = frontmatter_for(
         source,
         manifest_path,
@@ -3714,6 +3860,7 @@ def write_normalized_source(
         normalized_at=normalized_at,
         manifest_records=manifest_records,
         project_root=project_root,
+        structured_view=structured_view,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(f".{output_path.name}.tmp")
@@ -3911,8 +4058,15 @@ def verify_adapter_output(
     Lint checks foreign records because it cannot trust their writer. Here the writer is
     this script, so a violation is a bug in the rendering above rather than in the
     adapter's content — and shipping it would put a non-conforming record into the
-    workspace under the package's own name. The written file is removed so a failed
+    workspace under the package's own name. The written files are removed so a failed
     action never leaves evidence behind.
+
+    The sidecar goes with the record, and has to: nothing else would ever collect it.
+    Every consumer in this package enumerates normalized evidence by globbing `*.md`,
+    and `workspace_gc.py` sweeps `runs/`, so a structured view whose record was just
+    removed would sit in `sources/normalized/` unread and uncollected — and the contract
+    would rightly report it as a sidecar no record declares, on every run, until someone
+    deleted it by hand.
     """
     violations = validate_normalized_record(
         output_path,
@@ -3922,6 +4076,7 @@ def verify_adapter_output(
     if not violations:
         return
     output_path.unlink(missing_ok=True)
+    structured_view_path_for_record(output_path).unlink(missing_ok=True)
     first = violations[0]
     field = f" (field: {first.field})" if first.field else ""
     raise AdapterError(
