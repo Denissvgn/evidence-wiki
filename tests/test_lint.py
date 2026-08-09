@@ -2647,5 +2647,293 @@ class RenderedCoverageLintTests(unittest.TestCase):
         self.assertEqual(1, len(self.findings(results)))
 
 
+class GroundingFormLintTests(unittest.TestCase):
+    """CR-7 T9: lint accepts both grounding forms and measures the migration between them.
+
+    Lint checks entry *shape* only — whether an anchor actually resolves to its expected
+    value is `verify_quotes`' job against the sidecar, and is deliberately not re-derived
+    here. What these tests pin down is that the shape rules are the verifier's own.
+    """
+
+    SLUG = "which-benchmarks"
+    SOURCE_ID = "paper:fixture-static"
+    QUOTE_ENTRY = {
+        "claim": "Coverage-backed answer uses fixture evidence.",
+        "source_id": SOURCE_ID,
+        "quote": "Fixture Static Source",
+        "location_hint": "Fixture source title",
+    }
+    ANCHOR_ENTRY = {
+        "claim": "The fixture source reports one benchmark.",
+        "source_id": SOURCE_ID,
+        "anchor": {"pointer": "benchmarks/0/name", "expected": "Fixture Benchmark"},
+    }
+
+    def copy_fixture(self, fixture_name: str, workspace: Path) -> Path:
+        source = FIXTURES / fixture_name
+        target = workspace / fixture_name
+        shutil.copytree(source, target)
+        return target
+
+    def run_lint(self, project_root: Path) -> dict:
+        config = LINT.load_config(project_root)
+        return LINT.run_checks(project_root, config)
+
+    def issue_for_category(self, results: dict, category: str) -> list[dict]:
+        return [issue for issue in results["issues"] if issue["category"] == category]
+
+    def make_workspace(self, root: Path, *, grounding: list | None = None) -> Path:
+        project = self.copy_fixture("minimal-project", root)
+        (project / "wiki" / "synthesis" / f"{self.SLUG}-answer.md").write_text(
+            "---\n"
+            + yaml.safe_dump(
+                {
+                    "type": "synthesis",
+                    "created": "2026-06-10",
+                    "updated": "2026-06-10",
+                    "source_ids": [self.SOURCE_ID],
+                    "summary": "Coverage-backed answer.",
+                },
+                sort_keys=False,
+            )
+            + "---\n\n# Coverage-backed answer\n",
+            encoding="utf-8",
+        )
+        question: dict = {
+            "type": "question",
+            "created": "2026-06-10",
+            "updated": "2026-06-10",
+            "status": "answered",
+            "priority": "high",
+            "origin": "parent_agent",
+            "source_ids": [self.SOURCE_ID],
+            "answer_page": f"../synthesis/{self.SLUG}-answer.md",
+            "coverage_required": True,
+            "answered_by": "answer-agent",
+            "verified_by": "verify-agent",
+            "question": "Which benchmarks matter?",
+        }
+        if grounding is not None:
+            question["grounding"] = grounding
+        (project / "wiki" / "questions" / f"{self.SLUG}.md").write_text(
+            "---\n" + yaml.safe_dump(question, sort_keys=False) + "---\n\n# Which benchmarks matter?\n",
+            encoding="utf-8",
+        )
+        coverage = project / "sources" / "coverage" / f"{self.SLUG}.yml"
+        coverage.parent.mkdir(parents=True, exist_ok=True)
+        coverage.write_text(
+            f"""schema_version: '1.0'
+question_slug: {self.SLUG}
+created_at: '2026-06-10T00:00:00Z'
+updated_at: '2026-06-10T00:00:00Z'
+coverage_profile: academic-method-existence
+coverage_verdict: pass
+required_facets:
+  - facet_id: required-identity
+    description: Required evidence facet.
+    required: true
+    evidence_path: academic_method_existence
+    source_policy: academic_indexed
+    freshness_policy: publication_identity
+    identity_policy: none
+    min_sources: 1
+    accepted_source_ids: ['{self.SOURCE_ID}']
+    blocking_request_ids: []
+    facet_verdict: pass
+optional_facets: []
+""",
+            encoding="utf-8",
+        )
+        return project
+
+    def test_anchor_only_question_passes_the_high_gate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.make_workspace(Path(tmpdir), grounding=[self.ANCHOR_ENTRY])
+
+            results = self.run_lint(project)
+
+        self.assertEqual([], self.issue_for_category(results, "question_grounding_missing"), results["issues"])
+        self.assertEqual(0, results["stats"]["grounding_entries_quote"])
+        self.assertEqual(1, results["stats"]["grounding_entries_anchor"])
+
+    def test_malformed_anchor_fails_the_high_gate_naming_both_forms(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.make_workspace(
+                Path(tmpdir),
+                grounding=[
+                    {
+                        "claim": self.ANCHOR_ENTRY["claim"],
+                        "source_id": self.SOURCE_ID,
+                        "anchor": {"pointer": "benchmarks/0/name"},
+                    }
+                ],
+            )
+
+            results = self.run_lint(project)
+
+        findings = self.issue_for_category(results, "question_grounding_missing")
+        self.assertEqual(1, len(findings), results["issues"])
+        self.assertEqual("HIGH", findings[0]["severity"])
+        self.assertEqual("grounding", findings[0]["field"])
+        # The remediation has to teach the form the workspace is migrating *to*, not
+        # only the one it already knows about.
+        self.assertIn("anchor", findings[0]["recommendation"])
+        self.assertIn("quote", findings[0]["recommendation"])
+        self.assertIn("anchor", findings[0]["expected"])
+        # A malformed block contributes to neither counter — nothing was parsed.
+        self.assertEqual(0, results["stats"]["grounding_entries_quote"])
+        self.assertEqual(0, results["stats"]["grounding_entries_anchor"])
+
+    def test_entry_carrying_both_forms_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.make_workspace(
+                Path(tmpdir),
+                grounding=[{**self.QUOTE_ENTRY, "anchor": {"pointer": "a", "expected": "b"}}],
+            )
+
+            results = self.run_lint(project)
+
+        self.assertEqual(1, len(self.issue_for_category(results, "question_grounding_missing")))
+
+    def test_mixed_workspace_counts_each_form(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.make_workspace(
+                Path(tmpdir),
+                grounding=[
+                    self.QUOTE_ENTRY,
+                    self.ANCHOR_ENTRY,
+                    {
+                        "claim": "The fixture source reports a second benchmark.",
+                        "source_id": self.SOURCE_ID,
+                        "anchor": {"pointer": "benchmarks/1/name", "expected": "Second Benchmark"},
+                    },
+                ],
+            )
+
+            results = self.run_lint(project)
+
+        self.assertEqual([], self.issue_for_category(results, "question_grounding_missing"), results["issues"])
+        self.assertEqual(1, results["stats"]["grounding_entries_quote"])
+        self.assertEqual(2, results["stats"]["grounding_entries_anchor"])
+        self.assertIn("quote=1 anchor=2", LINT.format_grounding_summary(results["stats"]))
+
+    def test_quote_only_workspace_behaves_exactly_as_before(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.make_workspace(Path(tmpdir), grounding=[self.QUOTE_ENTRY])
+
+            results = self.run_lint(project)
+
+        self.assertEqual([], self.issue_for_category(results, "question_grounding_missing"), results["issues"])
+        self.assertEqual(1, results["stats"]["grounding_entries_quote"])
+        self.assertEqual(0, results["stats"]["grounding_entries_anchor"])
+
+    def test_missing_grounding_still_fires_the_high_gate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.make_workspace(Path(tmpdir), grounding=None)
+
+            results = self.run_lint(project)
+
+        findings = self.issue_for_category(results, "question_grounding_missing")
+        self.assertEqual(1, len(findings), results["issues"])
+        self.assertEqual("missing", findings[0]["actual"])
+
+    def test_counters_are_zero_when_question_validation_is_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.make_workspace(Path(tmpdir), grounding=[self.ANCHOR_ENTRY])
+            config_path = project / "research.yml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    "  validate_claims: true", "  validate_claims: true\n  validate_questions: false"
+                ),
+                encoding="utf-8",
+            )
+
+            results = self.run_lint(project)
+
+        # Present, not absent: a missing key reads as "this workspace has no grounding"
+        # to anything consuming the report, which is a different claim entirely.
+        self.assertEqual(0, results["stats"]["grounding_entries_quote"])
+        self.assertEqual(0, results["stats"]["grounding_entries_anchor"])
+        self.assertNotIn("questions_checked", results["stats"])
+
+    def test_log_entry_reports_the_grounding_split(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.make_workspace(Path(tmpdir), grounding=[self.QUOTE_ENTRY, self.ANCHOR_ENTRY])
+
+            results = self.run_lint(project)
+
+        entry = LINT.render_log_entry(results, "2026-08-09T00:00:00Z", ["HIGH", "MEDIUM", "LOW"])
+        self.assertIn("- grounding: quote=1 anchor=1\n", entry)
+
+
+class OrphanedStructuredSidecarLintTests(unittest.TestCase):
+    """CR-7 T9: a structured-view sidecar with no record beside it is reported.
+
+    Every other consumer in the workspace globs `*.md`, so a sidecar whose record was
+    never written is a file nothing will ever open. LOW, because it is inert: it grounds
+    no claim and blocks no gate — it is just bytes that will rot.
+    """
+
+    CATEGORY = "normalized_orphan"
+
+    def copy_fixture(self, fixture_name: str, workspace: Path) -> Path:
+        source = FIXTURES / fixture_name
+        target = workspace / fixture_name
+        shutil.copytree(source, target)
+        return target
+
+    def run_lint(self, project_root: Path) -> dict:
+        config = LINT.load_config(project_root)
+        return LINT.run_checks(project_root, config)
+
+    def sidecar_findings(self, results: dict) -> list[dict]:
+        return [
+            issue
+            for issue in results["issues"]
+            if issue["category"] == self.CATEGORY and issue["field"] == "structured_view"
+        ]
+
+    def write_sidecar(self, project: Path, stem: str) -> Path:
+        path = project / "sources" / "normalized" / f"{stem}.structured.json"
+        path.write_bytes(json.dumps({"price": "23.99 EUR"}, indent=2, sort_keys=True).encode("utf-8") + b"\n")
+        return path
+
+    def test_sidecar_without_a_record_is_reported_and_named(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            self.write_sidecar(project, "data--keepa--b0abc123")
+
+            results = self.run_lint(project)
+
+        findings = self.sidecar_findings(results)
+        self.assertEqual(1, len(findings), results["issues"])
+        self.assertEqual("LOW", findings[0]["severity"])
+        self.assertEqual(
+            ["sources/normalized/data--keepa--b0abc123.structured.json"],
+            findings[0]["files"],
+        )
+        self.assertIn("data--keepa--b0abc123.structured.json", findings[0]["message"])
+        self.assertIn("data--keepa--b0abc123.md", findings[0]["expected"])
+
+    def test_sidecar_beside_its_record_is_not_reported(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+            # The fixture record's own sidecar: a sibling `.md` exists, so this is the
+            # contract's business (does the record declare it?), not an orphan.
+            self.write_sidecar(project, "paper--fixture-static")
+
+            results = self.run_lint(project)
+
+        self.assertEqual([], self.sidecar_findings(results), results["issues"])
+
+    def test_workspace_without_sidecars_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = self.copy_fixture("minimal-project", Path(tmpdir))
+
+            results = self.run_lint(project)
+
+        self.assertEqual([], results["issues"])
+
+
 if __name__ == "__main__":
     unittest.main()
