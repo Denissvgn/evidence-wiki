@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -999,6 +1000,71 @@ class PackageCliTests(unittest.TestCase):
         )
         checks = {check["id"]: check for check in payload["checks"]}
         self.assertEqual("pass", checks["policy_vocabularies"]["status"])
+
+    def test_pack_validate_reports_request_kinds_check(self):
+        output = self.run_cli("pack", "validate", "--path", "llm-research", "--format", "json")
+        payload = json.loads(output)
+
+        self.assertTrue(payload["ok"], payload)
+        checks = {check["id"]: check for check in payload["checks"]}
+        self.assertIn("request_kinds", checks)
+        self.assertEqual("pass", checks["request_kinds"]["status"])
+        self.assertEqual(["research.overlay.yml"], checks["request_kinds"]["files"])
+        # Shipped packs declare no request kinds; the check still reports on every pack.
+        self.assertEqual({}, payload["domain_pack"]["request_kinds"])
+
+    def test_pack_validate_reports_declared_request_kinds_and_refuses_bad_ones(self):
+        source_pack = REPO_ROOT / "domain-packs" / "llm-research"
+        declaration = {
+            "id": "pack:market-data/supplier_quote",
+            "label": "Supplier quote",
+            "description": "Live SKU price + shipping + MOQ from a named supplier.",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_path = Path(tmpdir) / "market-data"
+            shutil.copytree(source_pack, pack_path)
+            overlay_path = pack_path / "research.overlay.yml"
+            overlay = yaml.safe_load(overlay_path.read_text())
+            overlay["domain_pack"]["name"] = "market-data"
+            overlay["domain_pack"]["request_kinds"] = [declaration]
+            overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False))
+
+            code, stdout, stderr = self.run_cli_result(
+                "pack", "validate", "--path", str(pack_path), "--format", "json"
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(0, code, stderr)
+            checks = {check["id"]: check for check in payload["checks"]}
+            self.assertEqual("pass", checks["request_kinds"]["status"])
+            self.assertEqual(
+                "Domain pack declares 1 namespaced request kind(s).",
+                checks["request_kinds"]["message"],
+            )
+            self.assertEqual(
+                {
+                    "pack:market-data/supplier_quote": {
+                        "label": "Supplier quote",
+                        "description": declaration["description"],
+                    }
+                },
+                payload["domain_pack"]["request_kinds"],
+            )
+
+            # Dropping the reserved prefix must fail the pack, not silently narrow it.
+            overlay["domain_pack"]["request_kinds"] = [{**declaration, "id": "market-data/supplier_quote"}]
+            overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False))
+
+            bad_code, bad_stdout, bad_stderr = self.run_cli_result(
+                "pack", "validate", "--path", str(pack_path), "--format", "json"
+            )
+            bad_payload = json.loads(bad_stdout)
+
+        self.assertEqual(1, bad_code, bad_stderr)
+        self.assertFalse(bad_payload["ok"], bad_payload)
+        bad_checks = {check["id"]: check for check in bad_payload["checks"]}
+        self.assertEqual("fail", bad_checks["request_kinds"]["status"])
+        self.assertIn("market-data/supplier_quote", bad_checks["request_kinds"]["message"])
 
     def test_help_mentions_doctor(self):
         output = self.run_cli("--help")
