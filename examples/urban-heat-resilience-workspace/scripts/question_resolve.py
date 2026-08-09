@@ -792,10 +792,50 @@ def remove_frontmatter_field_block(lines: list[str], key: str) -> list[str]:
     return output
 
 
+_BARE_SCALAR_RE = re.compile(r"[A-Za-z0-9_./+@ -]+")
+
+
+def _reloads_bare(probe: str, expected: Any) -> bool:
+    """True when a bare rendering reloads as exactly the string it was written from.
+
+    Membership in a character class cannot decide whether YAML will hand a value back
+    unchanged: ``007`` reloads as an int, ``true``/``yes``/``on`` as a bool, ``null`` as
+    None, ``2026-08-09`` as a date, a padded value loses its spaces, and a leading ``-``
+    is a block-sequence indicator that makes the whole page unparseable. Rather than
+    enumerate those rules — they differ between YAML 1.1 and 1.2 and are the loader's to
+    change — ask the loader, in the same syntactic position the value will occupy.
+    """
+    try:
+        return yaml.safe_load(probe) == expected
+    except yaml.YAMLError:
+        return False
+
+
 def quote_scalar(value: str) -> str:
+    """Render a mapping value, quoting whenever a bare rendering would not survive reload."""
     if not value:
         return '""'
-    if re.fullmatch(r"[A-Za-z0-9_./+@ -]+", value):
+    if _BARE_SCALAR_RE.fullmatch(value) and _reloads_bare(f"probe: {value}", {"probe": value}):
+        return value
+    return json.dumps(value)
+
+
+def quote_sequence_item(value: str) -> str:
+    """Render a sequence item, quoting only when a bare rendering would not survive reload.
+
+    The probe differs from ``quote_scalar``'s because the context does: ``- web:vendor`` is
+    a plain string, while ``- has: colon space`` is a mapping and ``- - dash`` a nested
+    sequence. A value is only safe bare in the position it is actually written to.
+
+    Unlike ``quote_scalar`` this applies no character-class prefilter. Manifest ids carry
+    colons (``web:vendor-…``, ``pack:market-data/…``) and reload identically bare here, so
+    the class would quote them for nothing — rewriting the ``source_ids`` of every existing
+    workspace on the next resolution. Round-tripping is the property that matters; the class
+    was only ever a proxy for it, and in this position a poor one.
+    """
+    if not value:
+        return '""'
+    if _reloads_bare(f"probe:\n  - {value}", {"probe": [value]}):
         return value
     return json.dumps(value)
 
@@ -1060,7 +1100,7 @@ def render_frontmatter_value(
             return render_grounding_sequence(key, value)
         if all(isinstance(item, dict) for item in value):
             return render_mapping_sequence(key, value)
-        return [f"{key}:"] + [f"  - {item}" for item in value]
+        return [f"{key}:"] + [f"  - {quote_sequence_item(str(item))}" for item in value]
     if isinstance(value, bool):
         return [f"{key}: {'true' if value else 'false'}"]
     rendered = f'"{value}"' if quote else quote_scalar(value)
@@ -1824,12 +1864,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == GROUNDING_COMMAND
         else args.command
     )
+    # Bound before the `try` so the ClaimError handler below can name the class. The module
+    # loader is cached, so this is the same object the body uses.
+    question_claim = load_sibling_module("question_claim")
     try:
         if not agent_id:
             label = principal_flags.get(args.command, ("--agent-id",))[0]
             error_code = "REVIEWER_INVALID" if args.command in principal_flags else "AGENT_ID_INVALID"
             raise ResolveError(EXIT_INVALID, error_code, f"{label} must be a non-empty string")
-        question_claim = load_sibling_module("question_claim")
         question_status = load_sibling_module("question_status")
         config = question_status.load_config(project_root)
         page_path = question_claim.question_page_path(project_root, slug)
@@ -1860,6 +1902,21 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"refused ({error.error_code}): {error.message}", file=sys.stderr)
         return EXIT_INVALID
+    except question_claim.ClaimError as error:
+        # `question_page_path` refuses an unknown or malformed slug with a ClaimError, and
+        # every claim helper this script calls can raise one. Without this clause they reach
+        # a host as a traceback rather than the refusal envelope every other refusal uses —
+        # which for a host parsing stdout as JSON is indistinguishable from a crash.
+        if json_mode:
+            emit_error(
+                str(error),
+                json_mode=True,
+                error_code=error.error_code,
+                details={"action": action, "slug": slug, "agent_id": agent_id},
+            )
+        else:
+            print(f"refused ({error.error_code}): {error}", file=sys.stderr)
+        return error.exit_code
     except ResolveError as error:
         if json_mode:
             details = {"action": action, "slug": slug, "agent_id": agent_id}

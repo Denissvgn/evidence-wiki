@@ -359,6 +359,76 @@ class QuestionResolveTests(unittest.TestCase):
             self.assertEqual("agent-a", frontmatter["claimed_by"])
             self.assertIn("claimed_at", frontmatter)
 
+    def test_an_unknown_slug_is_refused_with_an_envelope_not_a_traceback(self):
+        """`question_page_path` raises ClaimError, which main() did not catch.
+
+        Every other refusal in this script reaches a host as a JSON envelope on stdout or
+        stderr. An unhandled ClaimError reached it as a traceback instead — which, for a
+        host parsing that stream as JSON, is indistinguishable from the process crashing.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+
+            code, payload, _ = self.run_resolve(
+                target,
+                "answer",
+                "--slug",
+                "no-such-question",
+                "--agent-id",
+                "agent-a",
+                "--answer-page",
+                "wiki/synthesis/example.md",
+                "--source-id",
+                "raw:whatever",
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual("SLUG_UNKNOWN", payload["error_code"])
+        self.assertEqual("answer", payload["details"]["action"])
+        self.assertEqual("no-such-question", payload["details"]["slug"])
+        self.assertEqual("agent-a", payload["details"]["agent_id"])
+
+    def test_a_slug_with_path_separators_is_refused_with_an_envelope(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+
+            code, payload, _ = self.run_resolve(
+                target,
+                "answer",
+                "--slug",
+                "../escape",
+                "--agent-id",
+                "agent-a",
+                "--answer-page",
+                "wiki/synthesis/example.md",
+                "--source-id",
+                "raw:whatever",
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual("SLUG_INVALID", payload["error_code"])
+
+    def test_every_verb_refuses_an_unknown_slug_with_an_envelope(self):
+        """The handler sits in main(), so it must cover every verb, nested one included."""
+        verbs = (
+            ("answer", "--answer-page", "wiki/synthesis/example.md", "--source-id", "raw:x"),
+            ("block", "--blocked-reason", "why"),
+            ("defer", "--reason", "why"),
+            ("reject", "--reason", "why"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            results = {}
+            for verb, *extra in verbs:
+                results[verb] = self.run_resolve(
+                    target, verb, "--slug", "no-such-question", "--agent-id", "agent-a", *extra
+                )
+
+        for verb, (code, payload, _) in results.items():
+            with self.subTest(verb=verb):
+                self.assertEqual(2, code)
+                self.assertEqual("SLUG_UNKNOWN", payload["error_code"])
+
     def test_answer_allow_uncited_succeeds_without_source_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
