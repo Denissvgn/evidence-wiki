@@ -2,6 +2,128 @@
 
 ## Unreleased
 
+- Ground a claim in a named field instead of a quoted line, and give hosts a
+  supported way to write grounding at all. Grounding was one shape — a verbatim
+  quote, checked by substring containment against a normalized record's Markdown
+  body. For prose that is the right check. For structured evidence it proves the
+  record exists and contains *a* sentence, not that the claim's value is in it, so
+  the path of least resistance was quoting any line of the cited section and
+  calling the answer grounded. A grounding entry now carries `claim`, `source_id`,
+  and **exactly one** form of evidence — the existing `quote` (with optional
+  `location_hint`), or a new `anchor`:
+
+  ```yaml
+  grounding:
+    - claim: "Current supplier price is 23.99 EUR"
+      source_id: data--keepa--b0abc123
+      anchor:
+        pointer: "supplier_quote/price"
+        expected: "23.99 EUR"
+  ```
+
+  `pointer` is an RFC 6901 JSON Pointer with the leading `/` optional, resolved
+  against the cited record's structured view, and `expected` is compared to the
+  field it reaches by canonical **equality — never containment**. Strings fold
+  through the codebase's one deterministic text normalization; numbers compare as
+  `Decimal`, so `23.99` and `"23.990"` agree while `"23.99 EUR"` against the number
+  `23.99` is an honest mismatch; booleans are checked before numbers, so `true`
+  never canonicalizes to `1`. A pointer that reaches a mapping or an array is
+  refused (`anchor_target_not_scalar`) rather than searched: an anchor cites a
+  field, not a subtree. Query languages were rejected for the same reason — an
+  anchor must be a *reference*, and a query that selects a matching value is
+  exactly the coincidental match the form exists to remove.
+
+  Anchors resolve against a **structured-view sidecar**,
+  `sources/normalized/<safe-source-id>.structured.json`: one JSON object holding the
+  complete, uncapped structured rendering of a source, written beside the record and
+  bound to it by `structured_view: {path, content_hash}` with a
+  `sha256:<64 hex>` digest over the sidecar bytes. The hash is what makes a cited
+  value the record's own rather than a neighbouring file's; bytes that no longer
+  match are `structured_view_corrupt` and refuse rather than read. Resolving there,
+  rather than against the raw payload, keeps pointers facet-shaped instead of
+  provider-payload-shaped and keeps the verifier format-free — it always reads
+  exactly one JSON object, whatever the source kind was. The sidecar is written
+  before the record that binds it, each through an atomic replace, so the worst
+  outcome of an interrupted write is an undeclared sidecar (inert, reported by the
+  contract check and by lint) rather than a record pointing at a file that never
+  existed. This is the fix the rendering-caps work named: `rendered_coverage` still
+  describes the capped body a quote is found in, and the sidecar is its uncapped
+  complement — a facet capped in the body is reachable verbatim through the sidecar.
+  Three producers write one: a normalizer adapter returning the new optional
+  `structured` key, the package's own CSV/TSV path, and any external normalizer that
+  writes the pair itself and passes `normalize_verify.py`, exactly as CR-2
+  legitimized foreign records.
+
+  Native tabular records emit the sidecar from the parse `normalize_sources.py`
+  already runs, which previously threw away everything but 20 sample rows with
+  80-character-ellipsized cells: `{"columns": [...], "rows": [{<column>: <cell>}]}`,
+  header-keyed so a pointer reads `rows/41/price`, every value a string with no type
+  inference (`"007"` stays `"007"`), cells verbatim and uncapped. Emission is
+  **fail-closed**: nothing is written if the read stopped at the 5 MB ceiling, if any
+  row is ragged, or if a header cell is empty or duplicated, and a `parse_warnings`
+  entry names which. One shape or none — never a partial one, and never a
+  synthesized `price_2` for a duplicated column, which would address a column the
+  source never had. Anything excluded degrades to exactly the previous behavior, so
+  the addition cannot weaken a gate. Making the package the second producer of the
+  sidecar it asks others to emit is the cheapest proof that the contract is not
+  adapter-shaped.
+
+  Grounding also stopped being something a host had to hand-edit. `question_resolve.py
+  grounding set --slug S --from-file F --agent-id A` replaces a question's whole
+  `grounding` block from a YAML (or JSON) file, under the same claim rules and the
+  same per-question lock every other mutation uses, in a canonical serialization the
+  docs publish as normative — fixed key order, fixed indentation, free-text fields
+  always JSON double-quoted so `expected: "23.99"` cannot reload as a float. It
+  **replaces** and never merges: grounding is authored as a set for one answer, and
+  merging two invites duplicate claims in an order nobody chose. Replacement drops
+  any `verified_by`/`grounding_verified_at` stamp in the same write, because the
+  entries those attested no longer exist. `grounding: []` clears grounding
+  explicitly; `grounding:` with nothing after it is refused as an unfinished edit.
+  It deliberately does **not** verify — `verify_quotes.py --slug S` already *is* that
+  seam, and a `--verify` flag would mean every future change to verification
+  semantics had to remember two doors — so its envelope reports
+  `verification: not_performed` and names the follow-up command. `answer
+  --grounding-file F` is the single-write alternative: the file's entries and the
+  resolution fields land in one atomic write under one lock, and with
+  `--require-grounding` it is the *file's* entries that must verify, not whatever the
+  page still holds from a previous cycle. A separate `grounding.py` script was
+  rejected — it would duplicate claim enforcement, lock and atomic-write plumbing,
+  and the frontmatter renderer, when question mutation already lives in exactly one
+  script.
+
+  Two new fatal codes join the stable set: `GROUNDING_ANCHOR_INVALID` when at least
+  one failed entry is anchor-form, and `GROUNDING_FILE_INVALID` for a grounding file
+  that is unreadable, not YAML, or neither accepted shape.
+  `GROUNDING_QUOTE_INVALID` keeps its exact old meaning — an all-quote-form failure
+  set — because hosts switch on it; both codes carry the full per-entry failure list,
+  so a mixed set is fully enumerated whichever one tops the envelope. Verification
+  reports gain five per-entry results (`structured_view_missing`,
+  `structured_view_corrupt`, `anchor_pointer_not_found`, `anchor_target_not_scalar`,
+  `anchor_value_mismatch`), a `form` and `policy` on every entry, and `by_form`
+  counts on each question and the report. `normalize_verify.py` reports a
+  `structured_view` summary per record and a `with_structured_view` count;
+  `NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID` names every way a record and its
+  sidecar can disagree, including a sidecar sitting beside a record that fails to
+  declare it. Lint counts the migration with `grounding_entries_quote` and
+  `grounding_entries_anchor` and a `- grounding: quote=N anchor=M` log line, and its
+  existing LOW `normalized_orphan` finding now also fires for a sidecar with no
+  record beside it — the `normalized_orphans` stat still counts orphaned records
+  only, so a host reading that number sees no change. Publication readiness renames
+  the grounding reason policy to
+  `retained_quote_evidence_or_structured_anchor_evidence`; both original names remain
+  verbatim substrings, so a host grepping for either still matches.
+
+  **Backward compatibility is the load-bearing part.** Quote-form grounding is
+  verified exactly as before, bit for bit, including its error code and per-entry
+  results. There is no new configuration anywhere — the feature is artifact-driven,
+  and a workspace whose sources emit no sidecars and whose questions carry no anchor
+  entries behaves exactly as it did before. Records that predate the field are
+  re-normalized once, and only those whose extraction method could carry a sidecar at
+  all: raising `NORMALIZER_VERSION` would have rewritten every record in the
+  workspace to reach the few that can hold one. Entailment stays out of scope —
+  anchors prove "this exact value in this exact record", deterministically; whether
+  the claim *follows* from the value remains a human and policy question. See
+  `docs/question-api.md` and `docs/normalized-source-format.md`.
 - Let a domain pack declare its own source-request kinds instead of being
   limited to the package's built-in set. A pack overlay lists kind
   declarations under `domain_pack.request_kinds` — a list of mappings with

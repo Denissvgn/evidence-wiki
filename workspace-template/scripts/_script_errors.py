@@ -170,9 +170,23 @@ _REMEDIATIONS = {
     "ANSWER_SOURCE_REQUIRED": "Pass at least one --source-id or use --allow-uncited for an explicit uncited answer.",
     "ANSWER_PAGE_INVALID": "Pass a workspace-relative answer page under the configured wiki root.",
     "ANSWER_PAGE_MISSING": "Create the answer page under the wiki root before resolving the question as answered.",
-    "GROUNDING_REQUIRED": "Add a grounding frontmatter list with claim, source_id, quote, and optional location_hint.",
-    "GROUNDING_INVALID": "Fix the grounding frontmatter so each entry has non-empty claim, source_id, and quote fields.",
+    "GROUNDING_REQUIRED": (
+        "Add a grounding frontmatter list whose entries each carry claim, source_id, and exactly one "
+        "form of evidence: quote (with optional location_hint) or anchor with pointer and expected."
+    ),
+    "GROUNDING_INVALID": (
+        "Fix the grounding frontmatter so each entry has a non-empty claim and source_id plus exactly "
+        "one form: a non-empty quote, or an anchor whose pointer and expected are both present."
+    ),
     "GROUNDING_QUOTE_INVALID": "Revise the grounding quote to match normalized source content, or normalize the cited source first.",
+    "GROUNDING_ANCHOR_INVALID": (
+        "Point each failed anchor at a field the cited record's structured view holds, and state that "
+        "field's value in expected; re-normalize the source if it carries no structured view yet."
+    ),
+    "GROUNDING_FILE_INVALID": (
+        "Write the grounding file as YAML or JSON carrying a top-level 'grounding:' list, or a bare "
+        "list of entry mappings; use 'grounding: []' to clear a question's grounding."
+    ),
     "GROUNDING_VERIFIER_REQUIRED": "Pass --verified-by AGENT_ID when writing quote-verification metadata.",
     "REQUEST_NOT_LINKED": "Link the source request to this question slug before using it to block the question.",
     "RESOLUTION_REASON_INVALID": "Pass a non-empty reason for blocked, deferred, or rejected outcomes.",

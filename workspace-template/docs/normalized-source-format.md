@@ -167,6 +167,9 @@ codebase_artifact_provenance:
     hooks_enabled: false
     network_access: false
 rendered_coverage:      # see "Rendered coverage"
+structured_view:        # see "Structured View Sidecar"
+  path: sources/normalized/data--keepa--b0abc123.structured.json
+  content_hash: sha256:...
 extraction_method: latex
 content_hash: sha256:...
 raw_fingerprint: sha256:...
@@ -220,6 +223,7 @@ Optional field meanings:
 | `standards` | Standards-registry metadata copied from `provenance.standards` when available. Typical fields include registry provider, standards body, designation, title, edition or year, status, registry URL, product category, legal act, OJEU reference, dataset license, and replacement-chain fields. |
 | `provenance` | Delivery provenance copied from the manifest record when a provenance sidecar was delivered with the raw source (see [source-delivery.md](source-delivery.md)). Carries `origin_url`, `license`, academic metadata, standards metadata, currentness metadata, OpenAlex enrichment diagnostics (`provider_license_slug`, `license_source`, `openalex_title_lag`, `openalex_identity_conflict`, reported OpenAlex title/authors/year, `openalex_identity_evidence`, and `doi_resolution`), `evidence_usability_override`, and optional source-delivery failure fields into exported citations. When a complete audited override clears a deterministic JavaScript-shell false positive, normalized frontmatter also records `evidence_usability_override_applied: true` inside this block. Valid failure codes are `tls_verification_failed`, `http_error`, `javascript_required`, `official_error_page`, `not_found`, `content_too_sparse`, `license_or_terms_unknown`, `robots_or_terms_blocked`, and `manual_review_required`. |
 | `rendered_coverage` | How much of a structured payload the record's body renders verbatim, and which facets lost content. Required for `extraction_method: adapter`, optional elsewhere but checked whenever declared. See "Rendered coverage" for the shape and the compliance floor. |
+| `structured_view` | Binds this record to its uncapped structured-view sidecar: `path` (workspace-relative, `sources/normalized/<safe-source-id>.structured.json`) and `content_hash` (`sha256:<64 lowercase hex>` over the sidecar bytes). `null` — or absent in records written before the field existed — for every record that has no structured view, which is most of them. Anchor-form grounding resolves pointers only against a sidecar this block binds. See "Structured View Sidecar". |
 | `needs_ocr` | `true` when PDF extraction ran successfully but produced near-empty text (likely a scanned or image-only PDF). See "Scanned PDFs and OCR". |
 | `language` | BCP-47 language tag when known. |
 | `confidence` | `high`, `medium`, or `low` extraction confidence. |
@@ -330,6 +334,8 @@ Manifest `table` records with `.csv`/`.tsv` extensions are normalized with `extr
 - ragged rows (column count differing from the header) produce a parse warning naming the first offending line.
 
 Files larger than 5 MB (`TABLE_MAX_BYTES`) are scanned only up to the cap, with a parse warning and the row count reported as a lower bound. Excel, Parquet, and Feather files remain classified-only: they get manifest records but no normalized record, because reading them would require new dependencies.
+
+A clean table also gets a **structured-view sidecar**, emitted from the same parse that renders the sample: every row, uncapped and uncollapsed, so a claim can anchor at `rows/41/price` instead of quoting a line that happened to survive the 20-row sample. Emission is fail-closed — a torn, ragged, or ambiguously-headed table gets no sidecar at all. See "Structured View Sidecar" for the shape and the exact skip conditions.
 
 `.json` and `.jsonl` are not tabular records. They classify as `structured_data`, a kind this package does not extract, so they are classified-only until a workspace configures a normalization adapter for the kind or an external normalizer writes the record directly. See "Writing Records From an External Normalizer" and [research-yml.md](research-yml.md).
 
@@ -465,6 +471,11 @@ you check conformance before the workspace has to.
 - Agreement with the manifest: the record lives at the path its `source_id` resolves
   to, lists every raw path the manifest records for that source, and — if it declares
   `raw_fingerprint` — matches the manifest's.
+- If the evidence is structured and you want anchor-form grounding to reach it, a
+  structured-view sidecar beside the record and a `structured_view` block binding it by
+  path and digest. Optional: a record with no sidecar is fully valid, and quote form still
+  works against its body. Write the sidecar before the record, and never leave one beside
+  a record that does not declare it. See "Structured View Sidecar".
 
 ### Which sources you may write records for
 
@@ -564,6 +575,10 @@ where they are captured into the record's parse warnings:
        "note": "capped to 90-day window; series collapsed to count beyond"}
     ]
   },
+  "structured": {
+    "supplier_quote": {"price": "23.99 EUR", "currency": "EUR"},
+    "price_history": [{"date": "2026-05-01", "price": "24.49 EUR"}]
+  },
   "warnings": ["price series capped to 90 days"]
 }
 ```
@@ -577,16 +592,17 @@ where they are captured into the record's parse warnings:
 | `title`, `abstract` | Optional strings. |
 | `outline` | Optional `[[level, text], …]`, rendered as the `Outline` section. |
 | `rendered_coverage` | **Required.** What the rendering kept — see "Rendered coverage". Checked against the returned body before anything is written, so an incoherent claim fails the action. |
+| `structured` | Optional single JSON object: the complete, uncapped structured rendering of the source. It becomes the record's structured-view sidecar and is bound into frontmatter by hash. **Absence means the source cannot be anchored, not a protocol breach** — quote form still works, and an adapter with no structured data in hand simply omits the key. Validated before anything is written: it must be one JSON object with string keys, nesting at most 64 levels, and be JSON-serializable. See "Structured View Sidecar". |
 | `warnings` | Optional list of strings, kept in `parse_warnings` and restated in the record body. |
 
 ### Rendered coverage
 
 A normalized body for structured evidence is a *rendering*, and a rendering has caps: a
-90-day price series becomes a few readings and a count, a long array collapses. Grounding
-is verified by containment against that body, so whatever the renderer dropped is
-citable but **not quotable** — and without a record of it, that loss is invisible. A
-record that rendered a tenth of its payload looks exactly like one that rendered all of
-it.
+90-day price series becomes a few readings and a count, a long array collapses.
+Quote-form grounding is verified by containment against that body, so whatever the
+renderer dropped is citable but **not quotable by quote form** — and without a record of
+it, that loss is invisible. A record that rendered a tenth of its payload looks exactly
+like one that rendered all of it.
 
 `rendered_coverage` is the renderer's own statement of what it kept:
 
@@ -632,8 +648,15 @@ capping rules, which is why the renderer states them. Whether every coverage fac
 section is prose above, not an automated check, because that needs the coverage manifest.
 
 Rendered coverage keeps the text path honest; it does not make capped content quotable.
-Anchoring a claim to a specific field, rather than to a line of rendered text, is what
-CR-7's structured grounding anchors are for.
+Citing a specific field, rather than a line of rendered text, is what the structured-view
+sidecar and anchor-form grounding do — and the two blocks are complements, not
+alternatives. `rendered_coverage` describes the **capped body** a human reads and a quote
+is found in; the sidecar is the **uncapped** structured rendering a pointer addresses. A
+`price_history` facet that `rendered_coverage` reports as capped, with a `note` saying the
+series collapsed beyond 90 days, is exactly the content an anchor can still reach
+verbatim through the sidecar. Declaring a sidecar does not raise a coverage ratio, and a
+low ratio no longer means a value is unreachable — it means it is unreachable *by quote*.
+See "Structured View Sidecar".
 
 ### When an adapter re-runs
 
@@ -662,11 +685,148 @@ An adapter run that cannot produce a fully understood result writes no record at
 the run reports a failed action naming the reason and exits non-zero. That covers a
 non-zero exit, a timeout, output that is not exactly one JSON document, an identity
 mismatch, a `failed` status, a missing body, a `##` heading in the body, a missing or
-incoherent `rendered_coverage`, and output beyond the size cap. A record that exists is
+incoherent `rendered_coverage`, a `structured` value that is not one addressable JSON
+object, and output beyond the size cap. A record that exists is
 treated as evidence by grounding, by the
 reopen gate, and by lint, so a partial or stub record would be worse than none. The
 package also re-checks its own rendering against this contract after writing, and
-removes the file if it does not conform.
+removes the file — together with any structured-view sidecar written for it — if it does
+not conform.
+
+## Structured View Sidecar
+
+A normalized record's body is a rendering, and a rendering caps. The **structured-view
+sidecar** is that body's uncapped complement: one JSON object holding the complete
+structured content of the source, written beside the record and bound to it, so a claim
+can cite a named field by pointer instead of quoting a line that happened to survive the
+rendering.
+
+```text
+sources/normalized/<safe-source-id>.md                 # the record
+sources/normalized/<safe-source-id>.structured.json    # its structured view
+```
+
+The sidecar name is derived from the same `<safe-source-id>` rule as the record's, so it
+is resolvable from a source id without opening anything. It holds exactly one JSON
+object; an array, a string, or a bare number is not a structured view.
+
+### The binding
+
+A sidecar is evidence only because its record attests to it:
+
+```yaml
+structured_view:
+  path: sources/normalized/data--keepa--b0abc123.structured.json
+  content_hash: sha256:8f14e45fceea167a5a36dedd4bea2543b1c2b0e6a1f6b3d0e0c9d1a2b3c4d5e6
+```
+
+- `path` is relative, POSIX-spelled, and free of `.`/`..` segments, and must name **this**
+  record's own sidecar: the filename must match, and the path must be a tail of the
+  sidecar's canonical location (the bare filename is the shortest valid form). A record
+  pointing at a neighbour's sidecar would otherwise borrow evidence it never produced.
+- `content_hash` is `sha256:<64 lowercase hex digits>` over the sidecar's exact bytes —
+  the same digest spelling `raw_fingerprint` and provenance checksums use.
+
+The hash is the whole point. Without it, a sidecar is an unattested file that happens to
+sit next to a record; with it, a value read out of the sidecar is a value the normalizer
+wrote. A sidecar whose bytes no longer hash to the declared digest is reported as
+corrupt, and anchor-form grounding refuses it rather than reading it.
+
+Both keys are required together, and no other key is allowed inside the block.
+
+### Atomicity: sidecar first, record second
+
+The sidecar is written before the record that binds it, each through a dot-prefixed
+temporary file and an atomic replace. That ordering is forced by the digest — the bytes
+must exist before frontmatter can hash them — and it also picks the better failure. The
+worst outcome of an interrupted write is an *undeclared* sidecar: inert bytes no consumer
+reads (every consumer enumerates `*.md`), reported by the contract check and by lint as
+LOW `normalized_orphan`. The reverse ordering would leave a record pointing at a file that
+was never written, which reads as evidence until someone tries to resolve it.
+
+Regeneration is symmetric: a record that stops declaring a structured view takes its now
+stale sidecar with it in the same pass.
+
+### Who writes one
+
+**This package**, from two paths:
+
+- **Normalizer adapters** — an adapter returns an optional `structured` key in its result
+  document. Absence means the source cannot be anchored, not a protocol breach. See
+  "Normalizer Adapters".
+- **Native tabular records** (`extraction_method: table_text`) — emitted from the CSV/TSV
+  parse the normalizer already runs. See "Native tabular shape" below.
+
+**A foreign normalizer**, directly. An external tool that writes its own record may write
+the sidecar and the `structured_view` block itself, and that record is first-class
+evidence on exactly the same terms as one this package produced — it passes
+`normalize_verify.py`, or it does not. This is the same rule the contract already applies
+to records themselves: nothing is trusted because of who wrote it. Write the sidecar
+first, bind it by digest, and check the pair with `normalize_verify.py --source-id ID
+--format json` before relying on it.
+
+### Native tabular shape
+
+For CSV/TSV records the sidecar is the table itself, header-keyed:
+
+```json
+{
+  "columns": ["date", "sku", "price"],
+  "rows": [
+    {"date": "2026-05-01", "sku": "007", "price": "24.49"},
+    {"date": "2026-05-02", "sku": "007", "price": "23.99"}
+  ]
+}
+```
+
+Rows are objects keyed by column name rather than positional arrays, so a pointer reads
+`rows/41/price` — facet-shaped addressing a human can also follow. Two properties are
+deliberate:
+
+- **All values are strings, with no type inference.** CSV is untyped, so `"007"` stays
+  `"007"` and canonical equality compares it as the string it is. A sidecar that guessed
+  `7` would let an anchor cite a value the file does not contain.
+- **Cells are verbatim and uncapped.** The body's whitespace collapse and 80-character
+  ellipsis are concessions to a Markdown table; applying them here would make an anchor's
+  `expected` match a truncation of the evidence rather than the evidence.
+
+Emission is **fail-closed**. Nothing is emitted, and a `parse_warnings` entry names the
+reason, when:
+
+- the row scan stopped at the 5 MB (`TABLE_MAX_BYTES`) read ceiling, so a sidecar would
+  cover only part of the table while looking complete;
+- any row's column count differs from the header's;
+- a header cell is empty after `strip()`, which gives a pointer nothing to say;
+- a header cell repeats, which makes `rows/41/price` ambiguous.
+
+There is one shape or none — never a partial or fallback shape, and never a synthesized
+`price_2` for a duplicated column, which would address a column the source never had. A
+skipped sidecar costs nothing a reader had: the record still renders its sample table, so
+the source degrades to exactly the quote-form behavior it had before sidecars existed.
+
+### Staleness: one shot, no churn
+
+A record whose `extraction_method` is `table_text` or `adapter` but which carries no
+`structured_view` key **at all** is stale exactly once. `structured_view` is now written
+unconditionally — `null` when there is nothing to bind — so a missing key means the record
+predates sidecars, and without this rule it would stay `skipped_existing` forever and
+never gain the structured view anchors resolve against. The rule is self-limiting: after
+one regeneration the key is present whatever its value, so it never fires for that record
+again.
+
+The two blunter instruments were rejected. Raising `NORMALIZER_VERSION` would rewrite
+every record in the workspace to reach the few that can carry a sidecar; raising the
+contract version would invalidate all of them at once. Neither is worth a field most
+records will never hold.
+
+### What reads it
+
+Anchor-form grounding, and only through the binding: `verify_quotes.py` loads the record,
+follows `structured_view`, checks the digest, resolves an RFC 6901 pointer to one scalar,
+and compares by canonical equality. The per-entry results it can report about a sidecar
+are `structured_view_missing`, `structured_view_corrupt`, `anchor_pointer_not_found`,
+`anchor_target_not_scalar`, and `anchor_value_mismatch`. See the grounding section of
+[question-api.md](question-api.md) for the pointer and equality rules.
 
 ## Verifying Records Against This Contract
 
@@ -719,6 +879,30 @@ that rendered nothing. Coverage is reported for invalid records too, since an op
 triaging one still needs to know how much of it is quotable. The `--format text` report
 states the same figures under each record.
 
+Each record entry also carries a `structured_view` summary, so a host can see whether a
+record can be anchored at all without opening it:
+
+```json
+"structured_view": {
+  "declared": true,
+  "path": "sources/normalized/data--keepa--b0abc123.structured.json",
+  "verified": true,
+  "bytes": 48213
+}
+```
+
+The field is `null` for a record that declares no block, which is every record that is not
+a rendering of structured evidence. `verified` is decided by the same contract check that
+produced the record's violations — the summary and the violation list can never tell a
+host two different stories — and additionally requires the sidecar to have been found, so
+a record too broken to resolve one reports an unverified binding rather than a silent
+pass. `counts.with_structured_view` totals the records that declare a block. The
+`--format text` report states the same facts under each record.
+
+`schema_version` deliberately stays `"1.0"`: `structured_view` and
+`with_structured_view` are additive keys, and this package bumps a schema version only for
+breaking shape changes. Pin the major version and ignore unknown keys.
+
 Lint can report thin renderings as well, but only when asked: set
 `lint.min_rendered_coverage_ratio` in `research.yml` and any record declaring a lower
 ratio emits LOW `normalized_low_rendered_coverage`. It is off by default and LOW when it
@@ -736,6 +920,7 @@ Violation codes:
 | `NORMALIZED_CONTRACT_MANIFEST_MISMATCH` | The record disagrees with the manifest about its path, source id, raw paths, or raw fingerprint. |
 | `NORMALIZED_CONTRACT_WARNINGS_INCONSISTENT` | A `parse_warnings` entry is not restated in the `Parse Warnings` section. |
 | `NORMALIZED_CONTRACT_RENDERED_COVERAGE_INVALID` | `rendered_coverage` is absent from an adapter-rendered record, or its counts, ratio, or section headings do not describe the body. |
+| `NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID` | The record and its structured-view sidecar disagree: a malformed `structured_view` block, a `path` that is not this record's own sidecar, a declared sidecar that is not there or cannot be read, bytes that do not hash to the declared `content_hash`, content that is not one JSON object, or a sidecar sitting beside the record that the record does not declare. |
 
 `evidence-wiki contract` reports the same code list under
 `normalized_source_format.violation_codes`, so a host can handle them without scraping

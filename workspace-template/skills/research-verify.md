@@ -20,7 +20,7 @@ Both fields are optional question frontmatter, validated by lint when present:
 - `confidence`: `high` | `medium` | `low` — how strongly the evidence supports the recorded answer.
 - `evidence_strength`: `corroborated` (two or more independent sources agree) | `single_source` (one source grounds the answer) | `contested` (sources disagree or a claim conflict exists).
 - `verified_by`: verifier agent id written by `scripts/verify_quotes.py --write --verified-by <agent-id>`.
-- `grounding_verified_at`: UTC timestamp written with `verified_by` when all grounding quotes verify.
+- `grounding_verified_at`: UTC timestamp written with `verified_by` when every grounding entry verifies, whichever form it carries.
 
 `export_answers.py` propagates confidence/evidence fields and per-claim grounding verification into the export record when present. For final high-stakes verification, `verified_by` must be a different agent id than `answered_by` (or a still-present `claimed_by`); same-agent final verification is a lint finding.
 
@@ -70,14 +70,16 @@ python3 scripts/export_answers.py --status answered --format json
 
    Unknown source ids or missing answer pages appear in the export `warnings[]`.
 
-4. Verify quote grounding from normalized records only. Grounding quotes must be copied from retrieved bytes or normalized source text, not from browsing summaries, upstream briefs, or paraphrases. Use a verifier `agent_id` distinct from the answering agent:
+4. Verify grounding from normalized records only. Grounding quotes must be copied from retrieved bytes or normalized source text, not from browsing summaries, upstream briefs, or paraphrases; an anchor's `expected` must be the value the cited field holds. Use a verifier `agent_id` distinct from the answering agent:
 
 ```bash
 python3 scripts/verify_quotes.py --slug <slug> --format json
 python3 scripts/verify_quotes.py --slug <slug> --write --verified-by verifier-agent
 ```
 
-   The command performs no network I/O. It reports `verified`, `quote_not_found`, or `source_not_normalized` per claim. Do not rubber-stamp the answering agent's self-assessment; if `verified_by` would equal `answered_by`, choose another verifier or leave the answer unverified.
+   The command performs no network I/O. Each entry reports its `form` (`quote` or `anchor`) and one result: `verified`, `source_not_normalized`, or a form-specific failure. Quote entries can report `quote_not_found`, `quote_ambiguous`, `anchor_not_found` (the `location_hint` did not resolve in the record body), or `quote_not_at_anchor`. Anchor entries can report `structured_view_missing`, `structured_view_corrupt`, `anchor_pointer_not_found`, `anchor_target_not_scalar`, or `anchor_value_mismatch`. The report's `counts.by_form` totals both forms. Do not rubber-stamp the answering agent's self-assessment; if `verified_by` would equal `answered_by`, choose another verifier or leave the answer unverified.
+
+   Read an anchor failure for what it is. `anchor_value_mismatch` means the record states a different value than the claim does — a real evidence problem, not a formatting one. `structured_view_missing` means the cited record carries no structured view at all: re-normalize the source with a normalizer that emits one, or ground that claim with a quote instead. Never repair a failure by loosening the claim to whatever the record happened to say.
 
 5. Set or review the verification fields on the question page frontmatter:
 
@@ -87,7 +89,7 @@ python3 scripts/verify_quotes.py --slug <slug> --write --verified-by verifier-ag
    - `evidence_strength`: `corroborated`, `single_source`, or `contested` per the findings above.
    - Bump the page's `updated` date.
 
-6. Downgrade or contest failed verification: when counter-evidence contradicts the answer, a citation does not resolve, a grounding quote fails, or the answer page no longer supports the conclusion, set the question back to `status: open` when the answer is wrong, record `evidence_strength: contested` when sources conflict but the answer remains useful, or file a structured discrepancy in the page body. Append a log entry:
+6. Downgrade or contest failed verification: when counter-evidence contradicts the answer, a citation does not resolve, a grounding quote or anchor fails, or the answer page no longer supports the conclusion, set the question back to `status: open` when the answer is wrong, record `evidence_strength: contested` when sources conflict but the answer remains useful, or file a structured discrepancy in the page body. Append a log entry:
 
 ```text
 ## [YYYY-MM-DD] verify | Verification failed
