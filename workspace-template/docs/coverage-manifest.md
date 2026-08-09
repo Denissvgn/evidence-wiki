@@ -181,6 +181,42 @@ Initial reusable templates:
 `sources/source-requests.jsonl` and, when the request record carries
 `question_slugs`, must reference the manifest question slug.
 
+### Blocking Request Scope Back-Fill
+
+`--blocking-request-id` records the link in two places, so the manifest and the
+request can never disagree about which facet a request unblocks. Besides adding
+the id to the facet's `blocking_request_ids`, the command writes
+`scope.facet_id: <facet-id>` into that request record in
+`sources/source-requests.jsonl` when the record carries no facet scope yet, and
+refreshes its `updated_at`. Any other scope keys the request already declares —
+`candidate`, for example — are kept verbatim. JSON results report the records
+that were written as `scope_backfilled_request_ids`.
+
+The command sequences the two writes so a refusal never leaves half a link:
+
+1. A read-only pre-check refuses a request that already declares a *different*
+   `scope.facet_id` with `FACET_SCOPE_CONFLICT`, naming the request id, the facet
+   it already claims, and the facet being linked. This happens before any write,
+   so the manifest is left exactly as it was.
+2. The facet is written.
+3. The back-fill runs afterwards, under the source-requests lock alone.
+
+A request already scoped to the same facet is accepted and its record is not
+rewritten, so re-running the same `set-facet` is a no-op. If only step 3 fails —
+a contended source-requests lock, for instance — the command exits non-zero with
+a message naming the request-scope back-fill as the failed step; the facet is
+already written, and re-running the same `set-facet` converges.
+
+`--clear-blocking-request-ids` is deliberately asymmetric: it removes the
+manifest link only and never clears `scope.facet_id` from the unlinked request
+records. The request still states what would satisfy it, whether or not this
+facet is still waiting on it. Clear a request's scope by editing the request
+itself.
+
+The back-fill is manifest bookkeeping rather than fulfilment, so it is not gated
+by delegated acquisition: it stays available outside a pending acquisition work
+order, unlike `source_requests.py fulfill` and `record-attempt-failure`.
+
 `evaluate` is deterministic: required facets pass only when they have at least
 `min_sources` accepted source IDs, no blocking request IDs, and no accepted
 source is marked unusable evidence by the local policy layer. Required facets
