@@ -92,6 +92,12 @@ WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
              "--allow-unclaimed", "--format", "json"),
             DOCUMENT,
         ),
+        Case(
+            (*ROOT, "grounding", "set", "--slug", "{grounding_slug}", "--from-file", "{grounding_file}",
+             "--agent-id", "purity", "--allow-unclaimed", "--format", "json"),
+            DOCUMENT,
+            "the one nested subcommand: it rewrites frontmatter and appends to log.md, and still emits one document",
+        ),
     ),
     "question_status.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
     "run_controller.py": (Case((*ROOT, "status", "--run-id", "{run}", "--format", "json"), DOCUMENT),),
@@ -194,12 +200,34 @@ class JsonStdoutPurityTests(unittest.TestCase):
         requests_file = cls.workspace / "sources" / "source-requests.jsonl"
         request_id = json.loads(requests_file.read_text(encoding="utf-8").splitlines()[0])["request_id"]
 
+        # `grounding set` writes onto its own question: the case above it resolves {slug} to a
+        # terminal status, which this command correctly refuses. The cited source id is read
+        # from the inventoried manifest rather than guessed, since it carries a content hash.
+        grounding_slug = "purity-grounding"
+        (cls.workspace / "wiki" / "questions" / f"{grounding_slug}.md").write_text(
+            "---\ntype: question\nslug: purity-grounding\nstatus: open\n"
+            "created: 2026-08-08\nupdated: 2026-08-08\n---\n\n# Purity grounding probe\n",
+            encoding="utf-8",
+        )
+        manifest = cls.workspace / "sources" / "manifest.jsonl"
+        source_id = json.loads(manifest.read_text(encoding="utf-8").splitlines()[0])["id"]
+        grounding_file = root / "grounding.yml"
+        grounding_file.write_text(
+            "grounding:\n"
+            '  - claim: "The probe link was inventoried."\n'
+            f'    source_id: "{source_id}"\n'
+            '    quote: "Machine-output purity conformance workspace."\n',
+            encoding="utf-8",
+        )
+
         cls.substitutions = {
             "{slug}": slug,
             "{batch}": str(batch),
             "{run}": run_id,
             "{orchestration}": orchestrations[0].name,
             "{request}": request_id,
+            "{grounding_slug}": grounding_slug,
+            "{grounding_file}": str(grounding_file),
         }
 
     @classmethod
