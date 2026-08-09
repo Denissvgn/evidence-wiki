@@ -46,9 +46,9 @@ class LoadedScripts:
 
 
 def _load_script(script_path: Path, module_name: str) -> ModuleType:
-    from .cli import _load_script as load_packaged_script
+    from ._script_host import _load_script as load_script
 
-    return load_packaged_script(script_path, module_name)
+    return load_script(script_path, module_name)
 
 
 def load_scripts(starter_root: Path) -> LoadedScripts:
