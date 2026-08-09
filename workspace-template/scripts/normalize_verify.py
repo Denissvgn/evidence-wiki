@@ -190,6 +190,7 @@ def verify_record(
         "normalizer": normalizer if isinstance(normalizer, dict) else None,
         "normalized_format": contract.effective_format_version(frontmatter) if frontmatter is not None else None,
         "rendered_coverage": coverage_summary(frontmatter),
+        "structured_view": structured_view_summary(frontmatter, path, normalized_root),
         "result": RESULT_VERIFIED if not violations else RESULT_INVALID,
         "violations": [violation.to_dict() for violation in violations],
     }
@@ -225,6 +226,51 @@ def coverage_summary(frontmatter: dict[str, Any] | None) -> dict[str, Any] | Non
         "total_values": block.get("total_values"),
         "rendered_values": block.get("rendered_values"),
         "capped_sections": capped,
+    }
+
+
+def structured_view_summary(
+    frontmatter: dict[str, Any] | None,
+    path: Path,
+    normalized_root: Path,
+) -> dict[str, Any] | None:
+    """Whether this record binds a structured-view sidecar, and whether it resolves.
+
+    `null` when the record declares nothing, which is every record that is not a
+    rendering of structured evidence: a paper or a web page has no structured view to
+    offer, and saying so is different from saying its sidecar is broken.
+
+    Unlike `coverage_summary`, which reports only what the frontmatter claims, this
+    reads the workspace. That departure is the point: a binding's whole value is whether
+    the file it names is really there and really hashes to what the record says, which
+    no amount of frontmatter can answer on its own. `verified` is decided by the same
+    contract check that produced this record's violations, so the summary and the
+    violation list can never tell a host two different stories — and it additionally
+    requires the sidecar to have been found, so a record too broken to resolve one
+    (a missing `source_id`, say) reports an unverified binding rather than a silent pass.
+    """
+    if not isinstance(frontmatter, dict):
+        return None
+    block = frontmatter.get("structured_view")
+    if not isinstance(block, dict):
+        return None
+
+    declared = block.get("path")
+    source_id = frontmatter.get("source_id")
+    sidecar: Path | None = None
+    if isinstance(source_id, str) and source_id.strip():
+        sidecar = contract.expected_structured_path(normalized_root, source_id.strip())
+    size: int | None = None
+    try:
+        if sidecar is not None and sidecar.is_file():
+            size = sidecar.stat().st_size
+    except OSError:
+        size = None
+    return {
+        "declared": True,
+        "path": declared if isinstance(declared, str) and declared.strip() else None,
+        "verified": size is not None and not contract.check_structured_view(path, frontmatter, normalized_root),
+        "bytes": size,
     }
 
 
@@ -277,6 +323,7 @@ def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]
             "invalid": len(invalid),
             "native": len([record for record in records if record["origin"] == ORIGIN_NATIVE]),
             "external": len([record for record in records if record["origin"] == ORIGIN_EXTERNAL]),
+            "with_structured_view": len([record for record in records if record["structured_view"]]),
             "violations": sum(len(record["violations"]) for record in records),
         },
         "warnings": warnings,
@@ -309,6 +356,14 @@ def render_text(report: dict[str, Any]) -> str:
             lines.append(
                 f"    rendered coverage: {coverage.get('ratio')} "
                 f"({coverage.get('rendered_values')}/{coverage.get('total_values')} values{detail})"
+            )
+        structured = record.get("structured_view")
+        if structured:
+            size = structured.get("bytes")
+            detail = f", {size} bytes" if isinstance(size, int) else ""
+            lines.append(
+                f"    structured view: {'verified' if structured.get('verified') else 'unverified'} "
+                f"({structured.get('path') or 'no path declared'}{detail})"
             )
         for violation in record.get("violations", []):
             field = violation.get("field")

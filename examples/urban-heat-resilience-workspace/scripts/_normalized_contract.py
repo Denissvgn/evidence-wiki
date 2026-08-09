@@ -21,10 +21,12 @@ a lenient contract check is a gap a wrong record can travel through.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
@@ -64,6 +66,7 @@ SECTIONS_INVALID = "NORMALIZED_CONTRACT_SECTIONS_INVALID"
 MANIFEST_MISMATCH = "NORMALIZED_CONTRACT_MANIFEST_MISMATCH"
 WARNINGS_INCONSISTENT = "NORMALIZED_CONTRACT_WARNINGS_INCONSISTENT"
 RENDERED_COVERAGE_INVALID = "NORMALIZED_CONTRACT_RENDERED_COVERAGE_INVALID"
+STRUCTURED_VIEW_INVALID = "NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID"
 
 VIOLATION_CODES = (
     FRONTMATTER_MISSING,
@@ -73,6 +76,7 @@ VIOLATION_CODES = (
     MANIFEST_MISMATCH,
     WARNINGS_INCONSISTENT,
     RENDERED_COVERAGE_INVALID,
+    STRUCTURED_VIEW_INVALID,
 )
 
 # A rendering that caps content is honest only if it says so. `extraction_method:
@@ -85,6 +89,20 @@ RENDERED_COVERAGE_SECTION_KEYS = frozenset({"heading", "total", "rendered", "not
 # Ratio is reported to a couple of decimal places, so compare with a tolerance rather
 # than demanding an exact float.
 RENDERED_COVERAGE_RATIO_TOLERANCE = 0.01
+
+# The structured view is the uncapped complement to the rendered body: where the body is
+# what a human reads and a quote can be found in, the sidecar is the complete structured
+# rendering a pointer can address. It is a separate file because it is uncapped, and it
+# is hash-bound because a value cited out of it must be the value the normalizer wrote.
+STRUCTURED_VIEW_KEYS = frozenset({"path", "content_hash"})
+STRUCTURED_VIEW_SUFFIX = ".structured.json"
+# Bounded so a pathological payload cannot exhaust the interpreter's stack inside the
+# pointer resolver that reads it. Deeper than any facet shape this package emits, and
+# deeper than a hand-authored addressing scheme stays usable at.
+STRUCTURED_VIEW_MAX_DEPTH = 64
+# Same `sha256:<hex>` spelling `raw_fingerprint` and provenance checksums already use, so
+# a reader learns one hash format for the whole workspace.
+_CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 CONTRACT_DOCUMENT = "docs/normalized-source-format.md"
 DEFAULT_REMEDIATION = f"Correct the normalized record so it matches {CONTRACT_DOCUMENT}."
@@ -131,6 +149,16 @@ def safe_source_id(source_id: str) -> str:
 def expected_record_path(normalized_root: Path, source_id: str) -> Path:
     """Where a record for ``source_id`` must live for tooling to resolve it by id."""
     return normalized_root / f"{safe_source_id(source_id)}.md"
+
+
+def expected_structured_path(normalized_root: Path, source_id: str) -> Path:
+    """Where the structured-view sidecar for ``source_id`` must live, beside its record.
+
+    Single-sourced here for the same reason ``expected_record_path`` is: a sidecar that
+    a writer and a reader name differently is a sidecar neither can find, and the whole
+    point of binding one to a record is that its location is not a matter of opinion.
+    """
+    return normalized_root / f"{safe_source_id(source_id)}{STRUCTURED_VIEW_SUFFIX}"
 
 
 def split_record(text: str) -> tuple[dict[str, Any] | None, str, str | None]:
@@ -721,6 +749,326 @@ def check_rendered_coverage(frontmatter: dict[str, Any], body: str) -> list[Viol
     return validate_rendered_coverage_block(block, body)
 
 
+def _structured_violation(
+    message: str,
+    *,
+    field: str,
+    expected: str,
+    actual: Any,
+    remediation: str | None = None,
+) -> Violation:
+    return Violation(
+        STRUCTURED_VIEW_INVALID,
+        message,
+        field=field,
+        expected=expected,
+        actual="absent" if actual is None else str(actual),
+        remediation=remediation
+        or (
+            "Correct the record's structured-view sidecar and its `structured_view` "
+            f"binding, as documented in {CONTRACT_DOCUMENT}."
+        ),
+    )
+
+
+def _payload_shape_problem(payload: Any, limit: int) -> str | None:
+    """First structural reason ``payload`` cannot be addressed by a pointer, if any.
+
+    Walked with an explicit stack rather than recursively, because the depth bound this
+    enforces exists precisely to protect a recursive reader — a checker that recurses to
+    find out whether recursion is safe fails on the input it is meant to refuse. A cyclic
+    structure has no bottom, so it grows past the bound and is reported the same way.
+    """
+    stack: list[tuple[Any, int]] = [(payload, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, dict):
+            if depth > limit:
+                return f"nests deeper than {limit} levels"
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    return f"has a non-string mapping key ({key!r})"
+                stack.append((item, depth + 1))
+        elif isinstance(value, list):
+            if depth > limit:
+                return f"nests deeper than {limit} levels"
+            for item in value:
+                stack.append((item, depth + 1))
+    return None
+
+
+def validate_structured_payload(payload: Any, *, field: str = "structured_view") -> list[Violation]:
+    """Check the structured content itself — the object that becomes the sidecar's bytes.
+
+    Pure and disk-free, so the normalizer can refuse a bad payload before writing
+    anything and the verifier can apply the identical rule to bytes already on disk. One
+    rule, two moments: a payload accepted at write time can never be refused at read
+    time for a reason the writer could have caught.
+
+    An anchor addresses a named field, so the payload is one JSON **object** — an array
+    or a bare scalar has no names to address and would make every pointer positional. It
+    must survive a JSON round trip unchanged, which rules out NaN and Infinity (not JSON
+    at all, and silently rewritten by permissive encoders) and non-string keys (coerced
+    to strings on the way out, so the value a pointer resolves would not be the value the
+    normalizer stored). And it is depth-bounded, so resolving a pointer against it is a
+    bounded walk rather than a stack overflow waiting for the right input.
+    """
+    if not isinstance(payload, dict):
+        return [
+            _structured_violation(
+                "A structured view must be a single JSON object.",
+                field=field,
+                expected="JSON object",
+                actual=type(payload).__name__,
+                remediation=(
+                    "Emit the structured view as one JSON object whose named fields an "
+                    "anchor pointer can address."
+                ),
+            )
+        ]
+
+    problem = _payload_shape_problem(payload, STRUCTURED_VIEW_MAX_DEPTH)
+    if problem is not None:
+        return [
+            _structured_violation(
+                f"The structured view {problem}.",
+                field=field,
+                expected=f"a JSON object with string keys nesting at most {STRUCTURED_VIEW_MAX_DEPTH} levels",
+                actual=problem,
+                remediation=(
+                    "Flatten the structured view so every field is addressable by a "
+                    f"pointer within {STRUCTURED_VIEW_MAX_DEPTH} levels, and key every mapping by a string."
+                ),
+            )
+        ]
+
+    try:
+        json.dumps(payload, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        return [
+            _structured_violation(
+                f"The structured view is not JSON-serializable: {exc}",
+                field=field,
+                expected="values expressible as JSON (no NaN, no Infinity)",
+                actual=str(exc),
+                remediation=(
+                    "Render every value as JSON — numbers finite, everything else a "
+                    "string, list, object, boolean, or null."
+                ),
+            )
+        ]
+    return []
+
+
+def validate_structured_view_block(block: Any, *, field: str = "structured_view") -> list[Violation]:
+    """Check the shape of a `structured_view` frontmatter block, and nothing else.
+
+    Pure and disk-free: whether the file it names exists is a separate question, asked
+    by ``check_structured_view`` against a workspace. Split so a writer can validate the
+    block it is about to stamp before the file it describes is on disk.
+    """
+    if not isinstance(block, dict):
+        return [
+            _structured_violation(
+                "`structured_view` must be a mapping binding a sidecar to this record.",
+                field=field,
+                expected="mapping with path and content_hash",
+                actual=type(block).__name__,
+            )
+        ]
+
+    violations: list[Violation] = []
+    unknown = _unknown_keys(block, STRUCTURED_VIEW_KEYS)
+    if unknown:
+        violations.append(
+            _structured_violation(
+                f"`structured_view` has unknown keys: {', '.join(unknown)}.",
+                field=field,
+                expected=", ".join(sorted(STRUCTURED_VIEW_KEYS)),
+                actual=", ".join(unknown),
+            )
+        )
+
+    declared_path = block.get("path")
+    if not isinstance(declared_path, str) or not declared_path.strip():
+        violations.append(
+            _structured_violation(
+                "`structured_view.path` must name the sidecar file.",
+                field=f"{field}.path",
+                expected="non-empty string",
+                actual=None if declared_path is None else repr(declared_path),
+            )
+        )
+
+    content_hash = block.get("content_hash")
+    if not isinstance(content_hash, str) or not _CONTENT_HASH_RE.match(content_hash.strip()):
+        violations.append(
+            _structured_violation(
+                "`structured_view.content_hash` must be a `sha256:<64 hex chars>` digest of the sidecar bytes.",
+                field=f"{field}.content_hash",
+                expected="sha256:<64 lowercase hex chars>",
+                actual=None if content_hash is None else repr(content_hash),
+            )
+        )
+    return violations
+
+
+def _declared_sidecar_path_problem(declared: str, expected: Path) -> str | None:
+    """Why a declared sidecar path is not this record's own, if it is not.
+
+    The declaration is workspace-relative and this module is handed the normalized
+    directory rather than the workspace root, so it cannot join the two itself. What it
+    can decide is the part the binding actually rests on: the declaration must name this
+    record's own sidecar file, in this record's own normalized directory. A record that
+    points at a neighbour's sidecar would otherwise borrow evidence it never produced.
+    """
+    text = declared.strip().replace("\\", "/")
+    candidate = PurePosixPath(text)
+    if candidate.is_absolute() or any(part in ("..", ".") for part in candidate.parts):
+        return "must be a workspace-relative path with no `.` or `..` segments"
+    if candidate.name != expected.name:
+        return f"names a different record's sidecar (expected `{expected.name}`)"
+    expected_parts = PurePosixPath(expected.as_posix()).parts
+    if candidate.parts != expected_parts[-len(candidate.parts) :]:
+        return "does not point into the normalized directory the record lives in"
+    return None
+
+
+def check_structured_view(
+    path: Path,
+    frontmatter: dict[str, Any],
+    normalized_root: Path,
+) -> list[Violation]:
+    """The record and its structured-view sidecar agree, in both directions.
+
+    A peer of ``check_rendered_coverage`` rather than a child of the manifest check: the
+    two values compared here are the record's frontmatter and a file on disk, not the
+    record and the manifest.
+
+    Silence is the default. A record that declares no `structured_view` and has no
+    sidecar beside it is every record that is not a rendering of structured evidence —
+    papers, PDFs, web links, codebases — and predates this field besides, so it passes
+    untouched. Only a disagreement between two things that are both present is a breach.
+
+    The undeclared-sidecar case is a breach in the other direction, and it is the one
+    that would otherwise be invisible: every consumer in this package enumerates records
+    by globbing `*.md`, so a sidecar nothing declares is a file no tool will ever look
+    at, aging beside a record it no longer describes.
+    """
+    block = frontmatter.get("structured_view")
+    source_id = frontmatter.get("source_id")
+    source_id = source_id.strip() if isinstance(source_id, str) else ""
+    # Without a usable source id the sidecar has no canonical location to check against;
+    # the frontmatter check already reports the id itself.
+    expected = expected_structured_path(normalized_root, source_id) if source_id else None
+
+    if block is None:
+        if expected is not None and expected.is_file():
+            return [
+                _structured_violation(
+                    "A structured-view sidecar sits beside this record but the record does not declare it.",
+                    field="structured_view",
+                    expected="a `structured_view` block binding the sidecar by path and content hash",
+                    actual=expected.name,
+                    remediation=(
+                        "Add a `structured_view` block binding the sidecar by path and "
+                        "content hash, or delete the orphaned sidecar — nothing reads a "
+                        "sidecar no record declares."
+                    ),
+                )
+            ]
+        return []
+
+    violations = validate_structured_view_block(block)
+    if violations or expected is None:
+        return violations
+
+    declared_path = block["path"]
+    problem = _declared_sidecar_path_problem(declared_path, expected)
+    if problem is not None:
+        return [
+            _structured_violation(
+                f"`structured_view.path` {problem}.",
+                field="structured_view.path",
+                expected=expected.name,
+                actual=declared_path,
+                remediation=(
+                    "Point `structured_view.path` at this record's own sidecar, named "
+                    "for its `source_id` and written beside the record."
+                ),
+            )
+        ]
+
+    return _check_sidecar_file(expected, block, declared_path, path)
+
+
+def _check_sidecar_file(
+    expected: Path,
+    block: dict[str, Any],
+    declared_path: str,
+    record_path: Path,
+) -> list[Violation]:
+    if not expected.is_file():
+        return [
+            _structured_violation(
+                "Record declares a structured-view sidecar that is not there.",
+                field="structured_view.path",
+                expected=declared_path,
+                actual="no file at that location",
+                remediation=(
+                    "Re-normalize the source so the sidecar is written beside "
+                    f"`{record_path.name}`, or remove the `structured_view` block."
+                ),
+            )
+        ]
+
+    try:
+        data = expected.read_bytes()
+    except OSError as exc:
+        return [
+            _structured_violation(
+                f"Structured-view sidecar cannot be read: {exc}",
+                field="structured_view.path",
+                expected="readable sidecar file",
+                actual=declared_path,
+                remediation="Restore the sidecar as a readable file, or re-normalize the source.",
+            )
+        ]
+
+    digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+    declared_hash = str(block["content_hash"]).strip()
+    if digest != declared_hash:
+        # Reported alone: once the bytes are not the bytes the record attested, nothing
+        # further read out of them describes this record, and an anchor resolved against
+        # them would be citing a file the normalizer never saw.
+        return [
+            _structured_violation(
+                "Structured-view sidecar does not hash to the digest the record binds it by.",
+                field="structured_view.content_hash",
+                expected=declared_hash,
+                actual=digest,
+                remediation=(
+                    "Re-normalize the source so record and sidecar are written together, "
+                    "or restore the sidecar bytes the record was written against."
+                ),
+            )
+        ]
+
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return [
+            _structured_violation(
+                f"Structured-view sidecar is not readable JSON: {exc}",
+                field="structured_view.path",
+                expected="one UTF-8 JSON object",
+                actual=declared_path,
+                remediation="Write the sidecar as one UTF-8 JSON object, then re-stamp its content hash.",
+            )
+        ]
+    return validate_structured_payload(payload)
+
+
 def check_manifest_agreement(
     path: Path,
     frontmatter: dict[str, Any],
@@ -841,6 +1189,7 @@ def validate_document(
     violations.extend(check_sections(body))
     violations.extend(check_parse_warnings(frontmatter, body))
     violations.extend(check_rendered_coverage(frontmatter, body))
+    violations.extend(check_structured_view(path, frontmatter, normalized_root))
     violations.extend(
         check_manifest_agreement(
             path,
