@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -30,6 +31,10 @@ INIT = load_script_module("research_run_report_init", "init_research_workspace.p
 QUESTION_STATUS = load_script_module("research_run_report_status", "question_status.py")
 REQUESTS = load_script_module("research_run_report_requests", "source_requests.py")
 RUN_CONTROLLER = load_script_module("research_run_report_controller", "run_controller.py")
+
+# CR-4: a domain pack may namespace its own request kinds. The run report carries the
+# id through verbatim; it never interprets it.
+PACK_REQUEST_KIND = "pack:market-data/supplier_quote"
 
 
 class RunReportTests(unittest.TestCase):
@@ -211,6 +216,127 @@ class RunReportTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+
+    def declare_pack_request_kind(self, target: Path) -> None:
+        """Give the workspace a domain pack that declares one namespaced request kind."""
+        config_path = target / "research.yml"
+        config = yaml.safe_load(config_path.read_text())
+        config["domain_pack"] = {
+            "name": "market-data",
+            "request_kinds": [
+                {
+                    "id": PACK_REQUEST_KIND,
+                    "label": "Supplier quote",
+                    "description": "Live SKU price from a named supplier.",
+                }
+            ],
+        }
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def write_extended_kind_requests(self, target: Path) -> list[dict]:
+        """Write open requests covering a pack kind, ``structured_data``, and a scope map.
+
+        Written as JSONL rather than through ``source_requests.py add`` so this unit
+        does not depend on that command's in-flight ``--kind`` validation.
+        """
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        records = [
+            {
+                "schema_version": "1.0",
+                "request_id": "req-pack-quote",
+                "kind": PACK_REQUEST_KIND,
+                "query_or_identifier": "acme-widget list price",
+                "rationale": "Blocks the pricing question.",
+                "priority": "high",
+                "question_slugs": ["needs-evidence"],
+                "status": "open",
+                "created_at": now,
+                "updated_at": now,
+                "source_id": None,
+                "scope": {"facet_id": "supplier_quote", "candidate": "acme-widget"},
+            },
+            {
+                "schema_version": "1.0",
+                "request_id": "req-structured",
+                "kind": "structured_data",
+                "query_or_identifier": "regional price index series",
+                "rationale": "Background series.",
+                "priority": "medium",
+                "question_slugs": [],
+                "status": "open",
+                "created_at": now,
+                "updated_at": now,
+                "source_id": None,
+            },
+        ]
+        path = target / "sources" / "source-requests.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        return records
+
+    def test_baseline_carries_pack_and_structured_data_kinds_verbatim(self):
+        """CR-4: the baseline snapshots whole request records, so kind and scope survive."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            self.declare_pack_request_kind(target)
+            self.write_extended_kind_requests(target)
+
+            baseline = root / "run-baseline.json"
+            code, _, stderr = self.capture_run_report_baseline(target, baseline)
+            self.assertEqual(0, code, stderr)
+
+            raw = baseline.read_text(encoding="utf-8")
+            document = json.loads(raw)
+
+        # Verbatim: the exact id round-trips, unprefixed and unmangled.
+        self.assertIn(PACK_REQUEST_KIND, raw)
+        self.assertIn("structured_data", raw)
+
+        snapshot = document["source_requests"]
+        self.assertEqual(2, snapshot["open_total"])
+        by_id = {record["request_id"]: record for record in snapshot["open"]}
+        self.assertEqual(PACK_REQUEST_KIND, by_id["req-pack-quote"]["kind"])
+        self.assertEqual("structured_data", by_id["req-structured"]["kind"])
+        # A scope mapping is an extra record field; the snapshot must carry it untouched.
+        self.assertEqual(
+            {"facet_id": "supplier_quote", "candidate": "acme-widget"},
+            by_id["req-pack-quote"]["scope"],
+        )
+
+    def test_report_counts_pack_and_structured_data_requests_as_opened(self):
+        """A namespaced kind must not fall out of the run window or the open tally."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            self.declare_pack_request_kind(target)
+
+            baseline = root / "run-baseline.json"
+            code, _, stderr = self.capture_run_report_baseline(target, baseline)
+            self.assertEqual(0, code, stderr)
+
+            self.write_extended_kind_requests(target)
+
+            code, stdout, stderr = self.run_report(target, baseline, "--format", "json")
+            self.assertEqual(0, code, stderr)
+            document = json.loads(stdout)
+            report_text = (target / document["report_path"]).read_text(encoding="utf-8")
+
+        requests = document["source_requests"]
+        self.assertEqual(["req-pack-quote", "req-structured"], requests["opened"])
+        self.assertEqual(2, requests["open_total"])
+
+        open_ids = {
+            entry["request_id"]
+            for entry in document["official_source_evaluation"]["open_requests"]
+        }
+        self.assertEqual({"req-pack-quote", "req-structured"}, open_ids)
+
+        self.assertIn("req-pack-quote", report_text)
+        self.assertIn("req-structured", report_text)
 
     def test_report_diffs_backlog_and_names_touched_questions(self):
         with tempfile.TemporaryDirectory() as tmpdir:

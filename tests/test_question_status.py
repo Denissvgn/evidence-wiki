@@ -24,6 +24,11 @@ def load_module():
 
 QSTATUS = load_module()
 
+# CR-4: a domain pack may namespace its own request kinds. question_status reports on
+# question frontmatter and links to requests only by id, so the kind vocabulary is
+# inert here — these tests hold that independence.
+PACK_REQUEST_KIND = "pack:market-data/supplier_quote"
+
 
 class QuestionStatusTests(unittest.TestCase):
     def build_workspace(self, root: Path) -> Path:
@@ -196,6 +201,114 @@ class QuestionStatusTests(unittest.TestCase):
                 now=datetime(2026, 8, 7, 9, 0, 0, tzinfo=timezone.utc),
             ),
         )
+
+    def write_blocked_on_request_question(self, root: Path) -> None:
+        (root / "wiki" / "questions" / "blocked-on-quote.md").write_text(
+            "---\ntype: question\nstatus: blocked\npriority: high\n"
+            "question: What does the supplier charge?\n"
+            "blocked_reason: Awaiting a live supplier quote.\n"
+            "blocking_request_ids:\n"
+            "  - req-pack-quote\n"
+            "  - req-structured\n"
+            "source_ids: []\n---\n# Q\n"
+        )
+
+    def write_extended_kind_requests(self, root: Path) -> None:
+        """Declare a pack kind and open requests using it, ``structured_data``, and a scope map.
+
+        Written as JSONL rather than through ``source_requests.py add`` so this unit
+        does not depend on that command's in-flight ``--kind`` validation.
+        """
+        config_path = root / "research.yml"
+        config_path.write_text(
+            config_path.read_text()
+            + "domain_pack:\n"
+            "  name: market-data\n"
+            "  request_kinds:\n"
+            f"    - id: {PACK_REQUEST_KIND}\n"
+            "      label: Supplier quote\n"
+            "      description: Live SKU price from a named supplier.\n"
+        )
+        requests = root / "sources" / "source-requests.jsonl"
+        requests.parent.mkdir(parents=True, exist_ok=True)
+        records = [
+            {
+                "schema_version": "1.0",
+                "request_id": "req-pack-quote",
+                "kind": PACK_REQUEST_KIND,
+                "query_or_identifier": "acme-widget list price",
+                "rationale": "Blocks the pricing question.",
+                "priority": "high",
+                "question_slugs": ["blocked-on-quote"],
+                "status": "open",
+                "source_id": None,
+                "scope": {"facet_id": "supplier_quote", "candidate": "acme-widget"},
+            },
+            {
+                "schema_version": "1.0",
+                "request_id": "req-structured",
+                "kind": "structured_data",
+                "query_or_identifier": "regional price index series",
+                "rationale": "Background series.",
+                "priority": "medium",
+                "question_slugs": [],
+                "status": "open",
+                "source_id": None,
+            },
+        ]
+        requests.write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+            encoding="utf-8",
+        )
+
+    def status_questions(self, root: Path) -> tuple[int, dict]:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = QSTATUS.main(["--project-root", str(root), "--format", "json"])
+        return code, json.loads(stdout.getvalue())
+
+    def test_blocked_question_carries_request_ids_for_pack_namespaced_kinds(self):
+        """CR-4: the detail view links to requests by id, so any kind flows through."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self.build_workspace(Path(tmpdir))
+            self.write_extended_kind_requests(root)
+            self.write_blocked_on_request_question(root)
+
+            code, payload = self.status_questions(root)
+
+        self.assertEqual(0, code)
+        record = next(item for item in payload["questions"] if item["slug"] == "blocked-on-quote")
+        self.assertEqual("blocked", record["status"])
+        self.assertEqual(["req-pack-quote", "req-structured"], record["blocking_request_ids"])
+        self.assertEqual(2, payload["by_status"]["blocked"])
+
+    def test_extended_request_kinds_do_not_change_the_question_report(self):
+        """The request store — pack kinds, ``structured_data``, scope maps — is inert here.
+
+        question_status reports on question frontmatter only, so adding those records
+        must leave the report byte-identical apart from its timestamp.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            without_dir = Path(tmpdir) / "without"
+            without_dir.mkdir()
+            without_root = self.build_workspace(without_dir)
+            self.write_blocked_on_request_question(without_root)
+            without_code, without_payload = self.status_questions(without_root)
+
+            with_dir = Path(tmpdir) / "with"
+            with_dir.mkdir()
+            with_root = self.build_workspace(with_dir)
+            self.write_extended_kind_requests(with_root)
+            self.write_blocked_on_request_question(with_root)
+            with_code, with_payload = self.status_questions(with_root)
+
+        self.assertEqual(0, without_code)
+        self.assertEqual(0, with_code)
+        without_payload.pop("generated_at")
+        with_payload.pop("generated_at")
+        self.assertEqual(without_payload, with_payload)
+        # Guard against the comparison passing because both reports are empty.
+        self.assertEqual(2, with_payload["by_status"]["blocked"])
 
     def test_missing_questions_directory_is_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
