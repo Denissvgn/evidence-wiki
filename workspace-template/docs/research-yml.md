@@ -333,6 +333,53 @@ Delegated-only keys under `acquisition: providers` are refused for the same reas
 state an intent the workspace will not act on. Omit a key to accept its default, or use an
 `x-` prefix for experimental keys.
 
+### `domain_pack`
+
+Optional. A domain pack's own configuration, merged into a workspace's `research.yml` from
+the pack overlay (`research.overlay.yml`) at `evidence-wiki init` through the generic
+deep-merge — declaring `request_kinds` needs no extra wiring beyond that merge. This section
+documents `request_kinds` only; `policy_vocabularies` and `coverage_templates` are documented
+in [evidence-policies.md](evidence-policies.md) and [coverage-manifest.md](coverage-manifest.md).
+
+`request_kinds` declares source-request kinds specific to the pack's domain, namespaced
+exactly like pack evidence policies so one pack can never define kinds in another's
+namespace:
+
+```yaml
+domain_pack:
+  name: market-data
+  request_kinds:
+    - id: pack:market-data/supplier_quote
+      label: Supplier quote
+      description: Live SKU price + shipping + MOQ from a named supplier, ≤ 48h old.
+```
+
+- A list of mappings, each requiring non-empty `id`, `label`, and `description` strings.
+- `id` must be namespaced `pack:<pack-name>/<kind-id>` — the same convention pack evidence
+  policies use — and the pack-name segment must equal this pack's own `domain_pack.name`. A
+  pack cannot declare kinds in another pack's namespace.
+- The built-in kinds (`paper`, `dataset`, `web`, `code`, `structured_data`, `other`) are
+  reserved and cannot be redeclared.
+- Declarations are validated in two places that read the same definition and can never
+  disagree: `evidence-wiki pack validate` checks a pack's `request_kinds` before it ships,
+  and `scripts/source_requests.py add --kind` validates against the merged workspace config
+  at request time.
+
+A workspace's valid kind set is always built-ins plus whatever its active pack declares. An
+operator opening a request against an undeclared or malformed kind sees one of two stable
+error codes:
+
+- `REQUEST_KIND_INVALID`: the kind id is malformed, or a pack kind was written without its
+  reserved `pack:` prefix. Writing the bare `<pack-name>/<kind-id>` form is a common first
+  mistake, so when that bare form matches a declared kind, the message names the exact
+  prefixed id to use instead.
+- `REQUEST_KIND_UNDECLARED`: the id is well-formed and namespaced correctly, but this
+  workspace's active pack does not declare it — declare it under `request_kinds`, or use a
+  built-in kind.
+
+See [source-delivery.md](source-delivery.md) for how a request's `kind` is recorded and
+carried through fulfilment.
+
 ### `lint`
 
 Defines validation behavior for future lint tooling.

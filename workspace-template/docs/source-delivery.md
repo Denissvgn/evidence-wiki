@@ -95,6 +95,9 @@ delivery_failure_remediation: Capture with an approved browser/manual path or re
 checksum: "sha256:<64 hex chars>"                # checksum of the delivered file
 request_id: req-1a2b3c4d5e                       # optional; required for delegated acquisition (see below)
 candidate_id: cand-official-product              # optional: selected discovery candidate being delivered
+scope:                                           # optional: what this delivery answers, matched against the request's scope
+  facet_id: supplier_quote
+  candidate: acme-widget
 terms_url: https://example.org/terms             # optional license/terms page for web captures
 terms_note: "Reuse terms reviewed on source page" # optional short terms/reuse note
 standards:                                      # optional standards-registry metadata
@@ -112,8 +115,18 @@ notes: optional free text
 
 All fields are optional strings (validated when present), except `license` may
 be explicit YAML `null` to record known uncertainty, `publication_year` may
-be an integer or four-digit string, `date_metadata` is a scalar mapping, and
-`supported_evidence_areas` is a list of non-empty strings. `evidence_usability_override`
+be an integer or four-digit string, `date_metadata` is a scalar mapping,
+`supported_evidence_areas` is a list of non-empty strings, and `scope` is a
+mapping of string keys to scalar values. Each `scope` key must match
+`^[a-z0-9_][a-z0-9._-]*$`; values are opaque and are compared as text. A
+non-string scalar is accepted and coerced — an unquoted `2026` matches a
+request scope of `"2026"` — but booleans, sequences, mappings, and empty
+values are dropped from the parsed scope rather than failing the sidecar, so
+quote any value whose YAML type is not obviously a string. The workspace
+stores and matches these keys — it never interprets them. `facet_id` is the
+convention `coverage_manifest.py` tooling uses to link a request to the facet
+it unblocks, not a schema this package knows; a pack or host may use any keys
+that make sense for its own pairing. `evidence_usability_override`
 must be a mapping with `usable: true`, non-empty `reviewed_by`, non-empty
 `reviewed_at`, and non-empty `reason`. It is an audited escape hatch for
 deterministic source-usability false positives after reviewer inspection; it
@@ -318,6 +331,7 @@ Evidence gaps flow out through `sources/source-requests.jsonl` (path configurabl
   "rationale": "Blocks the benchmark question.",
   "priority": "high",
   "question_slugs": ["which-benchmarks"],
+  "scope": {"facet_id": "supplier_quote", "candidate": "acme-widget"},
   "status": "open",
   "created_at": "2026-06-10T12:00:00Z",
   "updated_at": "2026-06-10T12:00:00Z",
@@ -327,9 +341,10 @@ Evidence gaps flow out through `sources/source-requests.jsonl` (path configurabl
 
 Field notes:
 
-- `kind`: one of `paper`, `dataset`, `web`, `code`, `other`.
+- `kind`: a built-in (`paper`, `dataset`, `web`, `code`, `structured_data`, `other`) or a domain-pack-declared kind namespaced `pack:<pack-name>/<kind-id>` (see `domain_pack.request_kinds` in [research-yml.md](research-yml.md)). `structured_data` is the built-in bucket for non-documentary payloads — API responses, sensor series, instrument output.
 - `query_or_identifier`: what to fetch — an arXiv ID, DOI, URL, or search query.
 - `question_slugs`: question pages this request unblocks; validated against the questions directory at `add` time, so a blocked question is discoverable from the request record.
+- `scope`: optional mapping (`add --scope key=value`, repeatable) stating what would satisfy this request — see "Scope Matching" below. Omitted entirely when no `--scope` was given, so scope-less requests stay byte-identical to records written before this field existed.
 - `status`: `open` or `fulfilled`. `fulfill` sets `source_id` to the manifest record that satisfied the request (validated against the manifest).
 
 Commands (workspace root):
@@ -343,6 +358,44 @@ python3 scripts/source_requests.py plan-fetch --request-id req-1a2b3c4d5e \
   --candidate-id cand-1a2b3c4d5e --format json
 python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id paper:2601.00001v1
 ```
+
+### Scope Matching
+
+When a request carries `scope`, fulfilment stops being positional convention
+and starts comparing declared scope against the delivered source's sidecar
+`scope` (read from the manifest record's merged `provenance.scope`; see
+"Provenance Sidecars" above). Matching is layered:
+
+1. **Contradiction check — always on, no flag.** For every key present on
+   *both* the request's scope and the source's provenance scope, the values
+   must agree; disagreement refuses the fulfil with `REQUEST_SCOPE_MISMATCH`,
+   naming each conflicting key and both values, and leaves the request
+   untouched. This check cannot fire unless both sides declared scope, so a
+   workspace with no scoped requests and no scoped deliveries never sees it —
+   existing deliveries are unaffected by construction.
+2. **`fulfill --match-scope key=value`** (repeatable): the caller asserts
+   scope keys at the command line. Each pair is checked against the
+   *request's* own scope (an assertion that contradicts what the request
+   already declared is refused) and against the source's metadata, the same
+   way declared scope is checked.
+3. **`fulfill --require-scope`** (opt-in strict mode): upgrades absence to
+   refusal. Every key the request's scope declares must be present *and*
+   equal in the source's provenance scope, or the fulfil is refused with
+   `REQUEST_SCOPE_MISSING`, naming each absent key.
+
+A key present on only one side is not a contradiction under layers 1–2 — the
+package's own language for this check is "contradicts," which is lenient by
+default. Absence is not treated as strictness because no existing delivery
+carries sidecar `scope`: were absence refused by default, every scoped
+request would become unfulfillable by any source delivered before this
+feature existed. `--require-scope` is how a host whose delivery pipeline reliably
+stamps `scope` opts into the fail-closed behavior instead.
+
+`reopen` (`question_resolve.py`) uses the same contradiction layer to pair
+each supplied request with the supplied source whose scope does not
+contradict it, instead of zipping the two `--request-id`/`--source-id` lists
+by argument order. Requests or sources without scope fall back to the
+previous positional behavior.
 
 ### Recorded acquisition attempts
 
@@ -397,7 +450,7 @@ acquisition work order rather than between actions; see
 [../skills/research-acquire-delegated.md](../skills/research-acquire-delegated.md) for the
 external acquirer's loop and [orchestration.md](orchestration.md) for the session shape.
 
-`plan-fetch` is read-only: it turns a request into candidate provider commands and records `network_io_executed: false`. Repeating `--candidate-id` limits `candidate_routes` to exactly those selected candidates; an unknown, non-selected, or differently linked ID is rejected. Managed acquisition must pass the work order's candidate IDs so another selected candidate on the same request is never emitted accidentally. Omitting the flag retains the request-wide operator workflow. A fetch agent's loop is: `list --status open --format json` → scoped `plan-fetch --request-id ... --candidate-id ... --format json` → deliver files with sidecars (set `request_id` and `candidate_id` in the sidecar) → run inventory and normalization → `fulfill` each delivered request. Use `skills/research-acquire.md` for the optional provider-backed version of this loop, including disabled-acquisition refusal, sidecar verification, blocked-question reopening, and final status reporting. `add` and `fulfill` append one `source-request` entry to `log.md`; `list` and `plan-fetch` do not mutate the request artifact or `log.md`.
+`plan-fetch` is read-only: it turns a request into candidate provider commands and records `network_io_executed: false`. Request-kind-based routing only special-cases `kind: paper`; every other kind — `dataset`, `web`, `code`, `other`, `structured_data`, and any pack-declared kind (`pack:<pack-name>/<kind-id>`) — has no provider-backed fetch plan and returns the same `unsupported` status and warning ("No provider-backed plan is available for this kind; use manual delivery."), with `network_io_executed: false` rather than an error. Repeating `--candidate-id` limits `candidate_routes` to exactly those selected candidates; an unknown, non-selected, or differently linked ID is rejected. Managed acquisition must pass the work order's candidate IDs so another selected candidate on the same request is never emitted accidentally. Omitting the flag retains the request-wide operator workflow. A fetch agent's loop is: `list --status open --format json` → scoped `plan-fetch --request-id ... --candidate-id ... --format json` → deliver files with sidecars (set `request_id` and `candidate_id` in the sidecar, and read the request's `scope` — if present, stamp the matching keys into the sidecar's `scope:` mapping so fulfilment can verify the delivery against the request instead of assuming it) → run inventory and normalization → `fulfill` each delivered request. Use `skills/research-acquire.md` for the optional provider-backed version of this loop, including disabled-acquisition refusal, sidecar verification, blocked-question reopening, and final status reporting. `add` and `fulfill` append one `source-request` entry to `log.md`; `list` and `plan-fetch` do not mutate the request artifact or `log.md`. When reopening a blocked question over multiple delivered sources, `reopen` pairs each request to a source by declared scope (see "Scope Matching" above) rather than by the order `--request-id`/`--source-id` were passed.
 
 ### Selected discovery candidates
 
