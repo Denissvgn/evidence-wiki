@@ -989,6 +989,93 @@ class CoverageManifestCliTests(unittest.TestCase):
             self.assertEqual(manifest_before, self.manifest_path(target).read_bytes())
             self.assertEqual(requests_before, self.requests_path(target).read_bytes())
 
+    def test_set_facet_refuses_when_a_duplicate_record_declares_another_facet(self):
+        """The pre-check must scan every record, not just the first per id.
+
+        The store is append-only and nothing rejects a duplicate id on read. If the
+        pre-check stopped at the first copy, a later copy declaring a different facet
+        would be caught only by the back-fill — after the manifest write, leaving the
+        half-applied state the §2.5 sequencing exists to prevent.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(
+                root,
+                [
+                    self.source_request_record(),
+                    self.source_request_record(scope={"facet_id": "implementation-scope"}),
+                ],
+            )
+            manifest_before = self.manifest_path(target).read_bytes()
+            requests_before = self.requests_path(target).read_bytes()
+
+            code, payload, _ = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--accepted-source-id",
+                "paper:bench-survey",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+
+            self.assertEqual(2, code)
+            self.assertEqual("FACET_SCOPE_CONFLICT", payload["error_code"])
+            self.assertIn("implementation-scope", payload["message"])
+            # Refused before the facet write, so neither file moved — the conflict is
+            # not reported as one discovered after a partial write.
+            self.assertNotIn("failed_step", payload.get("details", {}))
+            self.assertEqual(manifest_before, self.manifest_path(target).read_bytes())
+            self.assertEqual(requests_before, self.requests_path(target).read_bytes())
+
+    def test_set_facet_scopes_the_first_record_when_a_later_duplicate_is_scoped(self):
+        """A scoped duplicate must not excuse the record readers actually use.
+
+        `load_requests` preserves file order and the first match wins for readers like
+        `source_requests.run_fulfill`. If a later duplicate carrying the facet made the
+        id look already-scoped, the back-fill would be skipped and the *effective*
+        record left unscoped — with set-facet reporting success.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coverage, target = self.set_facet_workspace(
+                root,
+                [
+                    self.source_request_record(),
+                    self.source_request_record(scope={"facet_id": "paper-identity"}),
+                ],
+            )
+
+            code, payload, stderr = self.run_coverage_json(
+                coverage,
+                target,
+                "set-facet",
+                "--slug",
+                "which-benchmarks",
+                "--facet-id",
+                "paper-identity",
+                "--accepted-source-id",
+                "paper:bench-survey",
+                "--blocking-request-id",
+                "req-current-fee",
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(["req-current-fee"], payload["scope_backfilled_request_ids"])
+            records = [
+                json.loads(line)
+                for line in self.requests_path(target).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            # Every copy carries the facet, so no reader can see an unscoped one.
+            self.assertEqual(2, len(records))
+            for record in records:
+                self.assertEqual("paper-identity", record["scope"]["facet_id"])
+
     def test_set_facet_accepts_request_already_scoped_to_the_same_facet(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

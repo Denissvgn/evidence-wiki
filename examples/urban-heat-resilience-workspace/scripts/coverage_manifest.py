@@ -985,21 +985,34 @@ def facet_scope_backfill_targets(
     docs/CR/cr4-backlog.md §2.5, so a conflicting request is refused *before* the facet
     write and a refusal leaves the manifest untouched. Unknown request ids are left to
     ``validate_request_ids``, which runs first and refuses them with ``REQUEST_UNKNOWN``.
+
+    Every record is scanned rather than the first match per id, because the back-fill
+    scans every record too. A store holding duplicate ids whose *later* copy declared a
+    different facet would otherwise pass this check and be refused only after the facet
+    write — the half-applied state this sequencing exists to prevent. The store is
+    append-only and nothing rejects a duplicate id on read, so it stays reachable.
     """
     if not request_ids:
         return []
-    by_id = source_request_records_by_id(project_root, config)
-    pending: list[str] = []
-    for request_id in request_ids:
-        record = by_id.get(request_id)
-        if record is None:
+    wanted = set(request_ids)
+    unscoped: set[str] = set()
+    for record in all_source_request_records(project_root, config):
+        request_id = record.get("request_id") if isinstance(record, dict) else None
+        if not isinstance(request_id, str) or request_id not in wanted:
             continue
         declared = normalize_scope(record.get("scope")).get(FACET_SCOPE_KEY)
         if declared is None:
-            pending.append(request_id)
-        elif declared != facet_id:
+            # One record lacking the facet is enough to need the back-fill, even if a
+            # duplicate of the same id already declares it: ``backfill_facet_scope``
+            # writes into every record that lacks it, and readers take the *first*
+            # match. Treating the id as already scoped because some later duplicate
+            # carries the facet would leave the record readers actually use unscoped,
+            # with set-facet reporting success.
+            unscoped.add(request_id)
+            continue
+        if declared != facet_id:
             raise facet_scope_conflict(request_id, declared, facet_id, written=False)
-    return pending
+    return [request_id for request_id in request_ids if request_id in unscoped]
 
 
 def backfill_facet_scope(
@@ -1238,14 +1251,23 @@ def unique_blocking_request_ids(document: dict[str, Any]) -> list[str]:
     return request_ids
 
 
-def source_request_records_by_id(project_root: Path, config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def all_source_request_records(project_root: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every request record in store order, duplicates included.
+
+    Callers that must not miss a later duplicate of an id read this rather than the
+    first-wins mapping below.
+    """
     source_requests = load_sibling_module("source_requests")
     try:
-        records = source_requests.load_requests(source_requests.requests_path(project_root, config))
+        return source_requests.load_requests(source_requests.requests_path(project_root, config))
     except SystemExit:
-        return {}
+        return []
+
+
+def source_request_records_by_id(project_root: Path, config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map request id to its first record. First-wins is fine for display and linkage."""
     by_id: dict[str, dict[str, Any]] = {}
-    for record in records:
+    for record in all_source_request_records(project_root, config):
         request_id = record.get("request_id") if isinstance(record, dict) else None
         if isinstance(request_id, str) and request_id and request_id not in by_id:
             by_id[request_id] = record

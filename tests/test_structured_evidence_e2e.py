@@ -178,7 +178,13 @@ class StructuredEvidenceWorkspace:
         shutil.copy2(PAYLOAD, destination / PAYLOAD.name)
         sidecar = PAYLOAD.with_name(PAYLOAD.name + ".provenance.yml").read_text(encoding="utf-8")
         if scope:
-            sidecar += "scope:\n" + "".join(f"  {key}: {scope[key]}\n" for key in sorted(scope))
+            # The fixture ends with a newline today; guaranteeing the boundary means a
+            # future fixture that does not cannot glue `scope:` onto its last line. And
+            # safe_dump quotes a value containing ':', '#', or a leading '*' rather than
+            # letting YAML reparse it as something else — hand-rolled lines would not.
+            if not sidecar.endswith("\n"):
+                sidecar += "\n"
+            sidecar += yaml.safe_dump({"scope": scope}, sort_keys=True, allow_unicode=True)
         (destination / (PAYLOAD.name + ".provenance.yml")).write_text(sidecar, encoding="utf-8")
 
     def make_workspace(
@@ -856,6 +862,41 @@ class StructuredDataRequestKindTests(StructuredEvidenceWorkspace, unittest.TestC
         )
         self.run_inventory(workspace, "--report")
         return workspace, request_id, self.structured_record(workspace)["id"]
+
+    def test_delivered_sidecar_scope_survives_values_yaml_would_reinterpret(self):
+        """The helper writes a sidecar the workspace parses, not one that merely looks right.
+
+        Scope values are opaque strings the deliverer chooses, so they can carry ':',
+        '#', or a leading '*' — each of which YAML reads as structure when written bare.
+        A sidecar that silently parsed to a *different* scope than the test intended
+        would make every scope assertion in this module meaningless.
+        """
+        awkward = {
+            "facet_id": "price: current",
+            "candidate": "*acme #1",
+            "note": "yes",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.make_workspace(Path(tmpdir), scope=awkward)
+
+            written = (workspace / "raw" / "data" / (PAYLOAD.name + ".provenance.yml")).read_text(
+                encoding="utf-8"
+            )
+            document = yaml.safe_load(written)
+
+            self.assertEqual(awkward, document["scope"])
+            # "yes" must stay the string the deliverer wrote, not YAML 1.1's boolean.
+            self.assertIsInstance(document["scope"]["note"], str)
+            # The fixture's own fields are untouched, so a scoped delivery differs from
+            # an unscoped one only by the scope block.
+            original = yaml.safe_load(
+                PAYLOAD.with_name(PAYLOAD.name + ".provenance.yml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(original, {key: value for key, value in document.items() if key != "scope"})
+
+            # And the workspace agrees: inventory round-trips it onto the manifest record.
+            self.run_inventory(workspace, "--report")
+            self.assertEqual(awkward, self.structured_record(workspace)["provenance"]["scope"])
 
     def test_a_structured_data_request_survives_the_whole_delivery_loop(self):
         """blocked question -> scoped request -> delivery -> normalize -> fulfil -> reopen."""
