@@ -52,6 +52,10 @@ Use `docs/codebase-analysis.md` when repositories, source archives, or local imp
 Use `docs/acquisition.md` when optional literature acquisition is explicitly
 enabled. Acquisition is disabled by default; the doc defines the provider
 registry, terms links, raw-target requirements, and provenance sidecars. Use
+`docs/provider-registration.md` when a source family the built-in providers do
+not cover must become available inside the workspace: it defines the capability
+contract a pip-installed provider declares, what the package enforces from that
+declaration, and why registering a provider still never enables it. Use
 `skills/research-acquire.md` for the fetch-agent workflow that fulfills source
 requests and reopens blocked questions only after normalized evidence exists. Use
 `skills/research-discover.md` for the optional, disabled-by-default discovery stage

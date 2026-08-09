@@ -10,7 +10,7 @@ import os
 import re
 import socket
 import ssl
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from http.client import HTTPSConnection
 from typing import Any
@@ -33,6 +33,30 @@ _SECRET_ENV_NAMES = (
     "OPENALEX_API_KEY",
     "GITHUB_TOKEN",
 )
+# Credential names/values declared by a registered provider and resolved during this
+# command. Built-in providers know their secret env vars at import time
+# (_SECRET_ENV_NAMES above); a registered provider's are only known once its declaration
+# is read, so they are registered here and consulted by redact_diagnostic exactly like
+# the built-in names. Empty unless a registered provider resolved a credential, which
+# keeps every built-in diagnostic byte-identical.
+_REGISTERED_SECRET_ENV_NAMES: list[str] = []
+_REGISTERED_SECRET_VALUES: list[str] = []
+
+CREDENTIAL_PLACEHOLDER_RE = re.compile(r"\{\{credential:([A-Z][A-Z0-9_]*)\}\}")
+CREDENTIAL_PLACEHOLDER_PREFIX = "{{credential:"
+PLANNED_REQUEST_METHODS = ("GET", "POST")
+# A registered provider declares domains and credentials, not media types; the executor
+# accepts the API payload families acquisition already promotes and leaves narrowing to
+# the caller's expected_content_types argument.
+PLANNED_REQUEST_CONTENT_TYPES = ("application/*", "text/*")
+# Headers the transport owns. A plan that sets them could desynchronise the framing of
+# the request the package is executing on the provider's behalf.
+RESERVED_PLANNED_HEADER_NAMES = ("host", "content-length", "transfer-encoding")
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+# urlsplit silently drops tabs and newlines, so a planned URL carrying them would be
+# validated as one string and dialled as another. Refuse them at the shape check.
+_URL_FORBIDDEN_CHARACTERS = re.compile(r"[\x00-\x20\x7f]")
 
 
 class AcquisitionTransportError(Exception):
@@ -188,14 +212,48 @@ def redact_diagnostic(value: object, *, secrets: list[str] | tuple[str, ...] = (
     """Redact known secret values and credential-bearing URLs in diagnostics."""
     text = str(value)
     secret_values = list(secrets)
-    for name in _SECRET_ENV_NAMES:
+    for name in (*_SECRET_ENV_NAMES, *_REGISTERED_SECRET_ENV_NAMES):
         candidate = os.environ.get(name)
         if isinstance(candidate, str) and candidate:
             secret_values.append(candidate)
+    secret_values.extend(_REGISTERED_SECRET_VALUES)
     for secret in secret_values:
         if secret:
             text = text.replace(secret, "[REDACTED]")
     return _URL_IN_TEXT.sub(lambda match: redact_url(match.group(0)), text)
+
+
+def register_secret_value(value: str) -> None:
+    """Register a resolved secret so every later diagnostic redacts it."""
+    if isinstance(value, str) and value and value not in _REGISTERED_SECRET_VALUES:
+        _REGISTERED_SECRET_VALUES.append(value)
+
+
+def register_secret_env_name(name: str) -> None:
+    """Register a declared credential env-var name for env-sourced redaction."""
+    if (
+        isinstance(name, str)
+        and name
+        and name not in _SECRET_ENV_NAMES
+        and name not in _REGISTERED_SECRET_ENV_NAMES
+    ):
+        _REGISTERED_SECRET_ENV_NAMES.append(name)
+
+
+def registered_secret_values() -> tuple[str, ...]:
+    """Return the secrets registered for redaction during this command."""
+    return tuple(_REGISTERED_SECRET_VALUES)
+
+
+def registered_secret_env_names() -> tuple[str, ...]:
+    """Return the declared credential names registered during this command."""
+    return tuple(_REGISTERED_SECRET_ENV_NAMES)
+
+
+def reset_registered_secrets() -> None:
+    """Drop the per-command registry; the process ends the redaction lifetime."""
+    _REGISTERED_SECRET_ENV_NAMES.clear()
+    _REGISTERED_SECRET_VALUES.clear()
 
 
 def normalize_host(host: str | None) -> str:
@@ -618,6 +676,8 @@ def bounded_download(
     resolver: Resolver = socket.getaddrinfo,
     expected_content_types: tuple[str, ...] | list[str],
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    data: bytes | None = None,
+    method: str | None = None,
 ) -> DownloadResult:
     require_positive_limit(max_bytes)
     require_positive_timeout(timeout)
@@ -640,7 +700,14 @@ def bounded_download(
     )
     request_headers = {"User-Agent": DEFAULT_USER_AGENT}
     request_headers.update(headers or {})
-    request = Request(url, headers=request_headers)  # noqa: S310 - validated HTTPS URL plus domain policy
+    # data/method default to None, which is exactly what Request() assumes when they are
+    # omitted, so the built-in GET path is unchanged.
+    request = Request(  # noqa: S310 - validated HTTPS URL plus domain policy
+        url,
+        data=data,
+        headers=request_headers,
+        method=method,
+    )
     try:
         with opener_fn(request, timeout) as response:
             final_url = response_url(response, url)
@@ -715,4 +782,420 @@ def bounded_download(
             "ACQUISITION_NETWORK_ERROR",
             f"Acquisition request failed for {redact_url(url)}: {redact_diagnostic(exc)}",
             remediation="Retry later, check network access, or lower request volume.",
+        ) from None
+
+
+# --- Registered-provider transport executor ----------------------------------
+#
+# A registered provider plans HTTPS requests and interprets responses; this package
+# executes them. Every guarantee the built-in providers already carry -- DNS pinning,
+# public-address enforcement, redirect validation, size bounds, diagnostic redaction --
+# is inherited here rather than re-implemented, and the provider's declared
+# allowed_domains is checked with the same validate_https_url call arXiv uses. The
+# declaration, not convention, is the boundary.
+
+
+@dataclass(frozen=True)
+class ValidatedPlannedRequest:
+    """A provider plan whose shape has been checked before any network work."""
+
+    url: str
+    method: str
+    headers: tuple[tuple[str, str], ...]
+    body: bytes | None
+    timeout_hint: float | None
+
+
+def plan_invalid(message: str, *, remediation: str) -> AcquisitionTransportError:
+    """Build a PROVIDER_PLAN_INVALID error whose text is redacted before it escapes."""
+    return AcquisitionTransportError(
+        "PROVIDER_PLAN_INVALID",
+        redact_diagnostic(message),
+        remediation=remediation,
+    )
+
+
+def domain_not_declared(message: str, *, remediation: str) -> AcquisitionTransportError:
+    """Build an ACQUISITION_DOMAIN_NOT_DECLARED error with redacted text."""
+    return AcquisitionTransportError(
+        "ACQUISITION_DOMAIN_NOT_DECLARED",
+        redact_diagnostic(message),
+        remediation=remediation,
+    )
+
+
+def plan_attribute(planned: Any, name: str, default: Any) -> Any:
+    """Read one plan attribute; provider objects are untrusted, so a raising one refuses."""
+    try:
+        return getattr(planned, name, default)
+    except Exception:
+        # A descriptor that raises is an invalid plan, never a crashed command.
+        raise plan_invalid(
+            f"Planned request attribute {name!r} could not be read.",
+            remediation="Return a plain PlannedRequest whose fields are already computed.",
+        ) from None
+
+
+_HEADER_SHAPE_MESSAGE = "Planned request headers must be a sequence of (name, value) pairs."
+_HEADER_SHAPE_REMEDIATION = "Return headers as a tuple of (name, value) string pairs."
+
+
+def validated_header_pairs(headers: Any) -> tuple[tuple[str, str], ...]:
+    """Return planned headers as checked (name, value) pairs, or refuse the plan."""
+    if headers is None:
+        return ()
+    if isinstance(headers, (str, bytes, bytearray)):
+        raise plan_invalid(_HEADER_SHAPE_MESSAGE, remediation=_HEADER_SHAPE_REMEDIATION)
+    try:
+        items: Any = list(headers.items()) if hasattr(headers, "items") else list(headers)
+    except Exception:
+        raise plan_invalid(_HEADER_SHAPE_MESSAGE, remediation=_HEADER_SHAPE_REMEDIATION) from None
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, (str, bytes, bytearray)):
+            raise plan_invalid(_HEADER_SHAPE_MESSAGE, remediation=_HEADER_SHAPE_REMEDIATION)
+        try:
+            name, value = item
+        except Exception:
+            raise plan_invalid(_HEADER_SHAPE_MESSAGE, remediation=_HEADER_SHAPE_REMEDIATION) from None
+        if not isinstance(name, str) or not name.strip():
+            raise plan_invalid(
+                "Planned request header names must be non-empty strings.",
+                remediation="Drop the empty header or give it a name.",
+            )
+        if not isinstance(value, str) or not value.strip():
+            raise plan_invalid(
+                f"Planned request header {str(name).strip()!r} must have a non-empty string value.",
+                remediation="Drop the empty header or give it a value.",
+            )
+        name = name.strip()
+        value = value.strip()
+        if not _HEADER_NAME_RE.match(name):
+            raise plan_invalid(
+                f"Planned request header name is not a valid HTTP header token: {name!r}",
+                remediation="Use a header name made of HTTP token characters only.",
+            )
+        if _CONTROL_CHARACTERS.search(value):
+            raise plan_invalid(
+                f"Planned request header {name!r} value contains control characters.",
+                remediation="Remove control characters from the planned header value.",
+            )
+        lowered = name.lower()
+        if lowered in RESERVED_PLANNED_HEADER_NAMES:
+            raise plan_invalid(
+                f"Planned request header {name!r} is set by the package transport and cannot be planned.",
+                remediation=f"Remove {name} from the plan; the transport sets it.",
+            )
+        if lowered in seen:
+            raise plan_invalid(
+                f"Planned request repeats header {name!r}.",
+                remediation="Send each header name at most once per planned request.",
+            )
+        seen.add(lowered)
+        pairs.append((name, value))
+    return tuple(pairs)
+
+
+def validate_planned_request(planned: Any) -> ValidatedPlannedRequest:
+    """Shape-check a provider plan; nothing else runs until this passes."""
+    url = plan_attribute(planned, "url", None)
+    if not isinstance(url, str) or not url.strip():
+        raise plan_invalid(
+            "Planned request url must be a non-empty string.",
+            remediation="Return an absolute https:// URL from the provider plan.",
+        )
+    url = url.strip()
+    if _URL_FORBIDDEN_CHARACTERS.search(url):
+        raise plan_invalid(
+            "Planned request url must not contain whitespace or control characters.",
+            remediation="Percent-encode the URL before returning it from the provider plan.",
+        )
+    if CREDENTIAL_PLACEHOLDER_PREFIX in url:
+        raise plan_invalid(
+            "Planned request url must not embed a credential placeholder; credentials belong in header values.",
+            remediation="Move the credential into a request header value planned as {{credential:NAME}}.",
+        )
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        raise plan_invalid(
+            "Planned request url is not a parseable URL.",
+            remediation="Return an absolute https:// URL from the provider plan.",
+        ) from None
+    if parsed.scheme.lower() != "https" or not parsed.netloc or not hostname:
+        raise plan_invalid(
+            f"Planned request url must be an absolute https:// URL: {redact_url(url)}",
+            remediation="Return an absolute https:// URL from the provider plan.",
+        )
+    method_value = plan_attribute(planned, "method", "GET")
+    if not isinstance(method_value, str) or not method_value.strip():
+        raise plan_invalid(
+            "Planned request method must be a non-empty string.",
+            remediation=f"Plan one of: {', '.join(PLANNED_REQUEST_METHODS)}.",
+        )
+    method = method_value.strip().upper()
+    if method not in PLANNED_REQUEST_METHODS:
+        raise plan_invalid(
+            f"Planned request method {method_value.strip()!r} is not supported.",
+            remediation=f"Plan one of: {', '.join(PLANNED_REQUEST_METHODS)}.",
+        )
+    headers = validated_header_pairs(plan_attribute(planned, "headers", ()))
+    body = plan_attribute(planned, "body", None)
+    if body is not None:
+        if isinstance(body, bytearray):
+            body = bytes(body)
+        if not isinstance(body, bytes):
+            raise plan_invalid(
+                "Planned request body must be bytes.",
+                remediation="Encode the planned request body to bytes.",
+            )
+        if method != "POST":
+            raise plan_invalid(
+                f"Planned request body is only valid on POST, not {method}.",
+                remediation="Plan the request as POST or drop the body.",
+            )
+    timeout_hint = plan_attribute(planned, "timeout_hint", None)
+    if timeout_hint is not None:
+        if (
+            isinstance(timeout_hint, bool)
+            or not isinstance(timeout_hint, (int, float))
+            or not math.isfinite(float(timeout_hint))
+            or float(timeout_hint) <= 0
+        ):
+            raise plan_invalid(
+                "Planned request timeout_hint must be a positive finite number of seconds.",
+                remediation="Drop timeout_hint or set it to a positive number of seconds.",
+            )
+        timeout_hint = float(timeout_hint)
+    return ValidatedPlannedRequest(
+        url=url,
+        method=method,
+        headers=headers,
+        body=body,
+        timeout_hint=timeout_hint,
+    )
+
+
+def normalize_declared_domains(allowed_domains: Any) -> tuple[str, ...]:
+    """Return the provider's declaration; an absent or malformed one declares nothing."""
+    remediation = "Declare every reachable host in the provider's allowed_domains as a bare hostname."
+    if allowed_domains is None or isinstance(allowed_domains, (str, bytes, bytearray)):
+        raise domain_not_declared(
+            "The provider declared no allowed_domains, so every host is outside its declaration.",
+            remediation=remediation,
+        )
+    try:
+        entries = list(allowed_domains)
+    except TypeError:
+        raise domain_not_declared(
+            "The provider's allowed_domains declaration is not a sequence of hostnames.",
+            remediation=remediation,
+        ) from None
+    if not entries:
+        raise domain_not_declared(
+            "The provider declared no allowed_domains, so every host is outside its declaration.",
+            remediation=remediation,
+        )
+    normalized: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry.strip():
+            raise domain_not_declared(
+                "The provider's allowed_domains declaration contains an entry that is not a hostname.",
+                remediation=remediation,
+            )
+        candidate = entry.strip().lower()
+        if "://" in candidate or "/" in candidate or "\\" in candidate:
+            raise domain_not_declared(
+                f"The provider's allowed_domains entry must be a bare hostname, not a URL: {candidate!r}",
+                remediation=remediation,
+            )
+        normalized.append(candidate)
+    return tuple(normalized)
+
+
+def enforce_declared_domain(
+    url: str,
+    declared_domains: tuple[str, ...],
+    *,
+    resolve_hostnames: bool = True,
+    resolver: Resolver = socket.getaddrinfo,
+) -> str:
+    """Refuse a planned URL outside the declaration before any DNS or socket work."""
+    try:
+        return validate_https_url(
+            url,
+            allowed_domains=list(declared_domains),
+            resolve_hostnames=resolve_hostnames,
+            resolver=resolver,
+        )
+    except AcquisitionTransportError as exc:
+        if exc.error_code != "ACQUISITION_DOMAIN_NOT_ALLOWED":
+            raise
+        try:
+            host = normalize_host(urlsplit(url).hostname)
+        except (AcquisitionTransportError, ValueError):
+            host = "unknown"
+        raise domain_not_declared(
+            f"Planned request host {host!r} is outside the provider's declared allowed_domains "
+            f"({', '.join(declared_domains)}).",
+            remediation=(
+                "Plan requests only within the provider's declared allowed_domains, or install a provider "
+                "distribution whose declaration covers this host."
+            ),
+        ) from None
+
+
+def declared_credential_names(capabilities_credentials: Any) -> tuple[str, ...]:
+    """Return the declared credential env-var names, refusing a malformed declaration."""
+    if capabilities_credentials is None:
+        return ()
+    if isinstance(capabilities_credentials, (str, bytes, bytearray)):
+        raise plan_invalid(
+            "The provider's declared credentials must be a sequence of environment variable names.",
+            remediation="Declare credentials as a tuple of environment variable names.",
+        )
+    try:
+        entries = list(capabilities_credentials)
+    except TypeError:
+        raise plan_invalid(
+            "The provider's declared credentials must be a sequence of environment variable names.",
+            remediation="Declare credentials as a tuple of environment variable names.",
+        ) from None
+    names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry.strip():
+            raise plan_invalid(
+                "The provider's declared credentials must be non-empty environment variable names.",
+                remediation="Declare credentials as a tuple of environment variable names.",
+            )
+        names.append(entry.strip())
+    return tuple(names)
+
+
+def resolve_credential_placeholders(
+    headers: Any,
+    *,
+    capabilities_credentials: Any,
+    env: Mapping[str, str] | None,
+) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+    """Resolve {{credential:NAME}} header placeholders from declared env variables.
+
+    Returns the resolved headers plus the secret values. Values are also registered for
+    redaction here, so a refusal raised part-way through a header list cannot echo an
+    already-resolved secret; they are returned so the caller can register them with any
+    other diagnostic surface it owns.
+    """
+    declared = declared_credential_names(capabilities_credentials)
+    for name in declared:
+        register_secret_env_name(name)
+    environment: Mapping[str, str] = env if isinstance(env, Mapping) else {}
+    resolved: list[tuple[str, str]] = []
+    secrets: list[str] = []
+    for name, value in validated_header_pairs(headers):
+        rendered = value
+        for variable in dict.fromkeys(CREDENTIAL_PLACEHOLDER_RE.findall(value)):
+            if variable not in declared:
+                raise plan_invalid(
+                    f"Planned request header {name!r} references credential {variable!r}, "
+                    "which the provider did not declare.",
+                    remediation=(
+                        f"Declare {variable} in the provider's capability credentials, or plan a header that "
+                        "only references declared credentials."
+                    ),
+                )
+            raw = environment.get(variable)
+            if not isinstance(raw, str) or not raw.strip():
+                raise plan_invalid(
+                    f"Declared credential {variable!r} is not set in the environment.",
+                    remediation=f"Export {variable} before running acquisition through this provider.",
+                )
+            secret = raw.strip()
+            if _CONTROL_CHARACTERS.search(secret):
+                raise plan_invalid(
+                    f"Declared credential {variable!r} contains control characters and cannot be sent as a header.",
+                    remediation=f"Fix the value exported as {variable}.",
+                )
+            register_secret_value(secret)
+            if secret not in secrets:
+                secrets.append(secret)
+            rendered = rendered.replace(f"{CREDENTIAL_PLACEHOLDER_PREFIX}{variable}}}}}", secret)
+        if CREDENTIAL_PLACEHOLDER_PREFIX in rendered:
+            raise plan_invalid(
+                f"Planned request header {name!r} contains a malformed credential placeholder.",
+                remediation="Reference credentials as {{credential:NAME}} with an uppercase variable name.",
+            )
+        if _CONTROL_CHARACTERS.search(rendered):
+            raise plan_invalid(
+                f"Planned request header {name!r} value contains control characters after credential resolution.",
+                remediation="Fix the planned header or the exported credential value.",
+            )
+        resolved.append((name, rendered))
+    return tuple(resolved), tuple(secrets)
+
+
+def execute_planned_request(
+    planned: Any,
+    *,
+    allowed_domains: list[str] | tuple[str, ...] | None,
+    credentials: list[str] | tuple[str, ...] | None,
+    env: Mapping[str, str] | None,
+    timeout: float,
+    max_bytes: int,
+    opener: Callable[[Request, float], Any] | None = None,
+    resolve_hostnames: bool = True,
+    resolver: Resolver = socket.getaddrinfo,
+    expected_content_types: tuple[str, ...] | list[str] = PLANNED_REQUEST_CONTENT_TYPES,
+) -> DownloadResult:
+    """Execute one provider-planned request through the package's pinned transport.
+
+    The order is the contract: shape, then declaration, then credentials, then the
+    network. A host outside the declaration is refused with
+    ACQUISITION_DOMAIN_NOT_DECLARED before any DNS or socket work.
+    """
+    plan = validate_planned_request(planned)
+    require_positive_limit(max_bytes)
+    require_positive_timeout(timeout)
+    if plan.body is not None and len(plan.body) > max_bytes:
+        raise plan_invalid(
+            f"Planned request body ({len(plan.body)} bytes) exceeds the configured limit of {max_bytes} bytes.",
+            remediation="Plan a smaller request body or raise the reviewed byte cap.",
+        )
+    declared_domains = normalize_declared_domains(allowed_domains)
+    enforce_declared_domain(
+        plan.url,
+        declared_domains,
+        resolve_hostnames=resolve_hostnames,
+        resolver=resolver,
+    )
+    resolved_headers, _secrets = resolve_credential_placeholders(
+        plan.headers,
+        capabilities_credentials=credentials,
+        env=env,
+    )
+    # A plan may tighten the caller's timeout, never widen it.
+    effective_timeout = float(timeout) if plan.timeout_hint is None else min(float(timeout), plan.timeout_hint)
+    try:
+        return bounded_download(
+            plan.url,
+            allowed_domains=list(declared_domains),
+            max_bytes=max_bytes,
+            timeout=effective_timeout,
+            headers=dict(resolved_headers),
+            opener=opener,
+            resolve_hostnames=resolve_hostnames,
+            resolver=resolver,
+            expected_content_types=expected_content_types,
+            data=plan.body,
+            method=plan.method,
+        )
+    except AcquisitionTransportError as exc:
+        # Re-raise through the redaction pass rather than chaining: a resolved credential
+        # must not survive in the message, the remediation, or a chained traceback.
+        raise AcquisitionTransportError(
+            exc.error_code,
+            redact_diagnostic(exc.message),
+            remediation=redact_diagnostic(exc.remediation) if exc.remediation else None,
         ) from None
