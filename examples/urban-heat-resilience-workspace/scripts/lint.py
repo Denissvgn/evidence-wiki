@@ -100,6 +100,9 @@ workspace_lock = _workspace_locks.workspace_lock
 _source_failure_taxonomy = load_workspace_module(_SCRIPT_DIR, "source_failure_taxonomy")
 delivery_unusable_evidence_reasons = _source_failure_taxonomy.unusable_evidence_reasons
 coverage_manifest = load_workspace_module(_SCRIPT_DIR, "coverage_manifest")
+_request_scope = load_workspace_module(_SCRIPT_DIR, "_request_scope")
+FACET_SCOPE_KEY = _request_scope.FACET_SCOPE_KEY
+normalize_scope = _request_scope.normalize_scope
 _review_config = load_workspace_module(_SCRIPT_DIR, "_review_config")
 ESCALATION_SCOPE_QUESTION = _review_config.ESCALATION_SCOPE_QUESTION
 ReviewConfigError = _review_config.ReviewConfigError
@@ -2432,6 +2435,158 @@ def check_delegated_acquisition_records(
             )
 
 
+def question_blocking_request_ids(frontmatter: dict[str, Any]) -> list[str]:
+    """Read a blocked question's linked request ids, order preserved and de-duplicated."""
+    value = frontmatter.get("blocking_request_ids")
+    if not isinstance(value, list):
+        return []
+    ordered: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        request_id = item.strip()
+        if request_id and request_id not in ordered:
+            ordered.append(request_id)
+    return ordered
+
+
+def coverage_facets_by_blocking_request(
+    project_root: Path,
+    config: dict[str, Any],
+    slug: str,
+    frontmatter: dict[str, Any],
+) -> tuple[str, dict[str, list[str]], list[str]] | None:
+    """Read one question's manifest as (label, facets-per-request, declared facet ids).
+
+    Returns ``None`` when the question has no manifest this lint run can read: a
+    workspace that does not keep coverage manifests has nothing to disagree with, and a
+    malformed or misplaced one is already reported by the coverage checks. Facets are
+    read straight from the document rather than through ``validate_manifest`` for the
+    same reason — this check answers "is the request listed?", and it must keep
+    answering it while some unrelated field is being repaired.
+    """
+    raw_manifest = frontmatter.get("coverage_manifest")
+    manifest_value = raw_manifest.strip() if isinstance(raw_manifest, str) and raw_manifest.strip() else None
+    try:
+        path = coverage_manifest.selected_manifest_path(project_root, config, slug, manifest_value)
+    except coverage_manifest.CoverageManifestError:
+        return None
+    if not path.is_file():
+        return None
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    if not isinstance(document, dict):
+        return None
+
+    facets_by_request: dict[str, list[str]] = {}
+    facet_ids: list[str] = []
+    for section in ("required_facets", "optional_facets"):
+        facets = document.get(section)
+        if not isinstance(facets, list):
+            continue
+        for facet in facets:
+            if not isinstance(facet, dict):
+                continue
+            raw_facet_id = facet.get("facet_id")
+            if not isinstance(raw_facet_id, str) or not raw_facet_id.strip():
+                continue
+            facet_id = raw_facet_id.strip()
+            if facet_id not in facet_ids:
+                facet_ids.append(facet_id)
+            request_ids = facet.get("blocking_request_ids")
+            if not isinstance(request_ids, list):
+                continue
+            for item in request_ids:
+                if not isinstance(item, str) or not item.strip():
+                    continue
+                linked = facets_by_request.setdefault(item.strip(), [])
+                if facet_id not in linked:
+                    linked.append(facet_id)
+    # ``selected_manifest_path`` resolves symlinks; the project root as configured may not,
+    # so label against the resolved root or the finding names an absolute temp path.
+    return project_relative(project_root.resolve(), path), facets_by_request, facet_ids
+
+
+def check_request_scope_facet_links(
+    project_root: Path,
+    config: dict[str, Any],
+    requests_by_id: dict[str, dict[str, Any]],
+    path: Path,
+    frontmatter: dict[str, Any],
+    label: str,
+    results: dict[str, Any],
+) -> None:
+    """Report a blocked question whose request and coverage manifest name different facets.
+
+    A request's ``scope.facet_id`` states which coverage facet delivering it would
+    unblock; the manifest states the same fact from the other side, under a facet's
+    ``blocking_request_ids``. ``coverage_manifest.py set-facet`` writes both together, so
+    only workspaces recorded before that can disagree — and an unnoticed disagreement
+    reads as coverage that is being worked when in fact the facet nobody linked stays
+    blocked forever.
+
+    MEDIUM, deliberately: no evidence is wrong, only its bookkeeping, and a HIGH would
+    freeze a workspace over history that predates the rule.
+    """
+    blocking_ids = question_blocking_request_ids(frontmatter)
+    if not blocking_ids:
+        return
+    links = coverage_facets_by_blocking_request(project_root, config, path.stem, frontmatter)
+    if links is None:
+        return
+    manifest_label, facets_by_request, facet_ids = links
+
+    for request_id in blocking_ids:
+        record = requests_by_id.get(request_id)
+        if not isinstance(record, dict):
+            continue
+        claimed_facet = normalize_scope(record.get("scope")).get(FACET_SCOPE_KEY)
+        if not claimed_facet:
+            continue
+        linked_facets = facets_by_request.get(request_id, [])
+        if claimed_facet in linked_facets:
+            continue
+        link_command = (
+            f"scripts/coverage_manifest.py set-facet --slug {path.stem} "
+            f"--facet-id {claimed_facet} --blocking-request-id {request_id}"
+        )
+        if linked_facets:
+            disagreement = "the manifest lists it under " + ", ".join(f"`{facet}`" for facet in linked_facets)
+            actual = ", ".join(linked_facets)
+        else:
+            disagreement = "no facet in the manifest lists it under `blocking_request_ids`"
+            actual = "no facet lists this request"
+        if claimed_facet in facet_ids:
+            recommendation = (
+                f"Link the facet with {link_command}, or correct the request's scope so "
+                "scope.facet_id names the facet that actually blocks on it."
+            )
+        else:
+            # set-facet refuses a facet the manifest does not declare, so pointing an
+            # operator straight at it here would hand them COVERAGE_FACET_UNKNOWN.
+            disagreement += f", and the manifest declares no facet `{claimed_facet}`"
+            recommendation = (
+                f"Correct the request's scope so scope.facet_id names a facet {manifest_label} "
+                f"declares, or add facet `{claimed_facet}` to that manifest and link it with {link_command}."
+            )
+        issue(
+            results,
+            "MEDIUM",
+            "request_scope_facet_unlinked",
+            (
+                f"Blocked question {label} links source request {request_id}, which claims coverage facet "
+                f"`{claimed_facet}`, but {disagreement}: {manifest_label}"
+            ),
+            [label, manifest_label],
+            recommendation,
+            field="scope.facet_id",
+            expected=f"facet `{claimed_facet}` listing {request_id} under blocking_request_ids",
+            actual=actual,
+        )
+
+
 def check_source_requests(
     project_root: Path,
     requests_path: Path,
@@ -2443,6 +2598,11 @@ def check_source_requests(
     stats = results["stats"]
     requests = load_source_request_records(requests_path, project_root, results)
     requests_label = project_relative(project_root, requests_path)
+    requests_by_id = {
+        record["request_id"]: record
+        for record in requests
+        if isinstance(record.get("request_id"), str) and record["request_id"]
+    }
     manifest_ids = set(index_manifest_records(manifest_records))
     referenced_slugs: set[str] = set()
     status_counts = {"open": 0, "fulfilled": 0}
@@ -2477,9 +2637,13 @@ def check_source_requests(
         if frontmatter.get("type") != "question" or frontmatter.get("status") != "blocked":
             continue
         slug = path.stem
+        label = project_relative(project_root, path)
+        if config is not None:
+            check_request_scope_facet_links(
+                project_root, config, requests_by_id, path, frontmatter, label, results
+            )
         if slug in referenced_slugs:
             continue
-        label = project_relative(project_root, path)
         issue(
             results,
             "LOW",
@@ -3515,6 +3679,11 @@ def generate_recommendations(results: dict[str, Any]) -> None:
         recommendations.append(
             "Repair the source-request artifact: link blocked questions to requests and "
             "keep fulfilled requests pointing at existing manifest sources."
+        )
+    if "request_scope_facet_unlinked" in categories:
+        recommendations.append(
+            "Reconcile request scope with coverage manifests: link each scoped request to the "
+            "facet it names via coverage_manifest.py set-facet, or correct the request's scope."
         )
     if not recommendations:
         recommendations.append("Wiki health checks passed for the enabled lint rules.")
