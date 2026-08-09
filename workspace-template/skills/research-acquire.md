@@ -226,7 +226,8 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    a matching request instead of editing the sidecar to force a match. Pass
    `--match-scope key=value` to assert additional scope keys when fulfilling,
    or `--require-scope` to also refuse a delivery that omits a key the request
-   declares (`REQUEST_SCOPE_MISSING`).
+   declares *or* that `--match-scope` asserts (`REQUEST_SCOPE_MISSING`) — an
+   asserted key an unstamped delivery never states is unverified, not verified.
 
 9. Reopen linked blocked questions only when evidence is ready. Use the
    deterministic `reopen` verb (do not hand-edit question frontmatter) for each

@@ -89,21 +89,6 @@ REQUEST_SCOPE = load_script_module("e2e_structured_request_scope", "_request_sco
 FACET_KEY = REQUEST_SCOPE.FACET_SCOPE_KEY
 
 
-def cli_accepts(subcommand: str, option: str) -> bool:
-    """True when `source_requests.py <subcommand>` already declares `option`.
-
-    CR-4's scope flags arrive in sibling tasks (`add --scope`, `fulfill --match-scope`)
-    while the record schema and the match semantics they drive are already shipped. This
-    suite proves the scenario either way: it asks the parser what exists rather than
-    pinning a revision, builds the same record state directly while a flag is missing,
-    and starts exercising the real CLI path the moment the flag lands — with no edit here.
-    """
-    captured = io.StringIO()
-    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(io.StringIO()):
-        with contextlib.suppress(SystemExit):
-            REQUESTS.main([subcommand, "--help"])
-    return option in captured.getvalue()
-
 
 @contextlib.contextmanager
 def stub_environment(**values: str):
@@ -256,11 +241,9 @@ class StructuredEvidenceWorkspace:
                     ]
                 ),
             )
-        scope_argv: list[str] = []
-        if scope and cli_accepts("add", "--scope"):
-            scope_argv = [
-                argument for key in sorted(scope) for argument in ("--scope", f"{key}={scope[key]}")
-            ]
+        scope_argv = [
+            argument for key in sorted(scope or {}) for argument in ("--scope", f"{key}={scope[key]}")
+        ]
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
             code = REQUESTS.main(
@@ -274,8 +257,6 @@ class StructuredEvidenceWorkspace:
             )
         self.assertEqual(0, code, stdout.getvalue())
         request_id = json.loads(stdout.getvalue())["request"]["request_id"]
-        if scope and not scope_argv:
-            self.stamp_request_scope(workspace, request_id, scope)
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = RESOLVE.main(
@@ -289,24 +270,6 @@ class StructuredEvidenceWorkspace:
             )
         self.assertEqual(0, code)
         return request_id
-
-    def stamp_request_scope(self, workspace: Path, request_id: str, scope: dict[str, str]) -> None:
-        """Write CR-4's optional `scope` object onto an existing request record.
-
-        The stand-in for `add --scope` until that flag exists. It writes through the
-        shipped path resolver and loader, so it lands where the command will land and
-        exercises the promise that makes the field additive: `load_requests` carries
-        fields it was never taught about.
-        """
-        config = REQUESTS.load_config(workspace)
-        path = REQUESTS.requests_path(workspace, config)
-        records = REQUESTS.load_requests(path)
-        matched = [record for record in records if record.get("request_id") == request_id]
-        self.assertEqual(1, len(matched), f"no request {request_id} in {path}")
-        matched[0]["scope"] = dict(scope)
-        path.write_text(
-            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
-        )
 
     def request_record(self, workspace: Path, request_id: str) -> dict:
         """Read one request back from the store, as a consumer of the CLI would."""
@@ -987,12 +950,6 @@ class StructuredDataRequestKindTests(StructuredEvidenceWorkspace, unittest.TestC
         Normalization is deliberately absent — fulfilment gates on manifest membership,
         so leaving it out proves the refusal is the scope check and not a missing record.
         """
-        if not cli_accepts("fulfill", "--match-scope"):
-            self.skipTest(
-                "fulfill does not check request scope on this revision (CR-4 T5); the "
-                "contradiction it must refuse is asserted independently by "
-                "test_a_delivery_for_another_facet_contradicts_the_request_it_would_close"
-            )
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace, request_id, source_id = self.scoped_workspace(
                 Path(tmpdir), delivered_facet=DELIVERED_OTHER_FACET
