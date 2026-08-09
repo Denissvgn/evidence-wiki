@@ -323,7 +323,7 @@ Discovery routes may append candidate metadata, and candidate lifecycle commands
 may review or select those records, but no discovery command downloads, scrapes,
 clones, or ingests candidate contents as evidence.
 
-Eight bounded subcommands cover discovery providers, strategies, and
+Nine bounded subcommands cover discovery providers, strategies, and
 read-only jurisdiction inspection:
 
 ```bash
@@ -334,11 +334,13 @@ python3 scripts/discover_sources.py github     --query TEXT --max-results N
 python3 scripts/discover_sources.py authors    --source-id SOURCE_ID [--discover-publications] [--run-id RUN_ID] --max-results N
 python3 scripts/discover_sources.py companions --source-id SOURCE_ID [--request-id ID] [--no-github] [--no-search] --max-results N
 python3 scripts/discover_sources.py standards  iso-open-data | eu-product-requirements | uk-geospatial-register | nist [provider flags] --max-results N
+python3 scripts/discover_sources.py registered search --id PROVIDER_ID --request-file PATH
 python3 scripts/discover_sources.py jurisdictions  validate | list | show --jurisdiction ID
 ```
 
-The `academic`, `search`, `github`, and `standards` routes use concrete provider
-permissions. `legal`, `authors`, and `companions` are strategies: legal execution
+The `academic`, `search`, `github`, `standards`, and `registered` routes use
+concrete provider permissions. `legal`, `authors`, and `companions` are
+strategies: legal execution
 requires `search`, author publication expansion requires `openalex`, and companion
 network phases run only when `github` and/or `search` is enabled. The legacy
 strategy IDs remain readable for one compatibility release but never authorize
@@ -402,7 +404,11 @@ composes inline links, GitHub, and search into companion-artifact candidates (se
 `standards` subcommand proposes fixture-backed standards registry, product
 requirement, and harmonised-standard candidates for ISO Open Data, EU product
 requirements, UK geospatial register entries, and NIST publication references.
-When discovery is disabled, provider-backed routes refuse with
+The `registered` subcommand runs a discovery provider supplied by an installed
+third-party distribution (see [Registered Discovery
+Providers](#registered-discovery-providers) below), executing that provider's
+planned searches through the package's own transport. When discovery is
+disabled, provider-backed routes refuse with
 `DISCOVERY_DISABLED` before any network access. In all cases the candidate a
 command would propose is never fetched during discovery.
 
@@ -418,7 +424,10 @@ Fatal error codes for this command surface are `DEPENDENCY_MISSING`,
 `DISCOVERY_RUN_ID_REQUIRED`, `ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED`,
 `ACADEMIC_PROVIDER_ACCOUNTING_INVALID`, `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID`,
 `ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED`,
-`ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED`, and `WORKSPACE_UNREADABLE`.
+`ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED`, `PROVIDER_NOT_REGISTERED`,
+`PROVIDER_REGISTRATION_INVALID`, `PROVIDER_REQUEST_INVALID`,
+`PROVIDER_PLAN_INVALID`, `ACQUISITION_DOMAIN_NOT_DECLARED`,
+`ACQUISITION_PROVIDER_RATE_LIMITED`, and `WORKSPACE_UNREADABLE`.
 
 ## Request-Backed Academic Discovery
 
@@ -617,6 +626,55 @@ Error codes specific to search are `SEARCH_PROVIDER_DISABLED` (no provider
 configured) and `SEARCH_PROVIDER_FAILED` (the configured command or fixture could
 not produce results); malformed backend output uses `DISCOVERY_RESPONSE_INVALID`
 and HTTP transport failures use `DISCOVERY_NETWORK_ERROR`.
+
+## Registered Discovery Providers
+
+The `search` backend above is provider-neutral but *config*-declared: a
+workspace points it at a fixture, a local command, or an HTTP endpoint. A
+**registered** discovery provider is *code*-declared instead — supplied by an
+installed Python distribution through an `evidence_wiki.discovery_providers`
+entry point, carrying a machine-checked declaration of the hosts it may reach,
+the credentials it needs by name, and the rate limit it accepts. The full
+authoring contract is [provider-registration.md](provider-registration.md); this
+section states how such a provider enters the candidate pipeline.
+
+```bash
+python3 scripts/discover_sources.py --format json registered search \
+  --id keepa \
+  --request-file request.json
+```
+
+The subcommand word is `registered` and the ID flag is `--id`. The request
+document is provider-defined; the provider's own `validate_request` refuses what
+it does not understand, and its reason is carried in the
+`PROVIDER_REQUEST_INVALID` envelope.
+
+Everything the rest of this document says about discovery applies unchanged:
+
+- **Installation does not authorize anything.** The provider ID must appear in
+  `integrations.discovery.providers` exactly like `arxiv` or `search`, and
+  discovery must be enabled. An unlisted registered ID refuses with
+  `DISCOVERY_PROVIDER_DISABLED`; an authorized ID with no installed
+  distribution is a smoke failure carrying `PROVIDER_NOT_REGISTERED`.
+- **The provider plans; the package searches.** `plan_search` returns planned
+  HTTPS requests and the package's own transport executes them, checked against
+  the provider's declared `allowed_domains` before any socket work
+  (`ACQUISITION_DOMAIN_NOT_DECLARED` on refusal) and accounted against its
+  declared rate limit (`ACQUISITION_PROVIDER_RATE_LIMITED`).
+- **Discovery is still read-only.** `registered search` proposes candidates and
+  never fetches evidence. It writes nothing outside the configured candidate
+  store, and the candidate it proposes is fetched later, explicitly, through
+  [acquisition.md](acquisition.md).
+- **Candidates get no trust privileges for being registered.** The provider's
+  `interpret_candidates` output passes through the same shape validation,
+  classification, and trust-rejection path a `search` result does. Malformed
+  results are refused per result with the same warnings, and a provider's own
+  claim about its trust tier or license is a hint, never a promotion.
+- **Provenance records the registration.** Each candidate carries the
+  registering distribution, version, entry-point name, and the declared
+  capability summary — the same identity a registered acquisition writes into
+  its sidecar — so an auditor can tell which installed code proposed a candidate
+  before deciding whether to fetch it.
 
 ## Jurisdiction Profiles
 
@@ -1264,6 +1322,9 @@ request-level `routes` is empty. This prevents an unscoped command without
 
 - [acquisition.md](acquisition.md) — optional provider registry, safety model,
   and provenance requirements for fetching a selected candidate.
+- [provider-registration.md](provider-registration.md) — the contract a
+  third-party distribution satisfies to supply a discovery or acquisition
+  provider, and what the package enforces rather than records.
 - [source-delivery.md](source-delivery.md) — target roots, atomic delivery,
   provenance sidecars, and source requests that close the discovery loop.
 - [orchestrator-handoff.md](orchestrator-handoff.md) — where discovery sits in
