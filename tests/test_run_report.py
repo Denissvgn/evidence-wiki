@@ -329,11 +329,22 @@ class RunReportTests(unittest.TestCase):
         self.assertEqual(["req-pack-quote", "req-structured"], requests["opened"])
         self.assertEqual(2, requests["open_total"])
 
-        open_ids = {
-            entry["request_id"]
+        by_id = {
+            entry["request_id"]: entry
             for entry in document["official_source_evaluation"]["open_requests"]
         }
-        self.assertEqual({"req-pack-quote", "req-structured"}, open_ids)
+        self.assertEqual({"req-pack-quote", "req-structured"}, set(by_id))
+        # CR-4 names run reports as a surface that must carry the kind through: a report
+        # that projects the request without it renders every non-documentary request
+        # indistinguishable, which is the "wall of other" the change request objected to.
+        self.assertEqual(PACK_REQUEST_KIND, by_id["req-pack-quote"]["kind"])
+        self.assertEqual("structured_data", by_id["req-structured"]["kind"])
+        # Scope rides along when declared, and is absent when it is not.
+        self.assertEqual(
+            {"facet_id": "supplier_quote", "candidate": "acme-widget"},
+            by_id["req-pack-quote"]["scope"],
+        )
+        self.assertNotIn("scope", by_id["req-structured"])
 
         self.assertIn("req-pack-quote", report_text)
         self.assertIn("req-structured", report_text)
