@@ -213,6 +213,38 @@ class PackageCliTests(unittest.TestCase):
             payload["compatible_research_yml_contract"],
         )
 
+    def test_contract_command_publishes_the_library_api_negotiation_block(self):
+        # An embedding host negotiates the in-process API the same way it already
+        # negotiates artifact schema versions, so the declaration ships in the same
+        # document the CLI prints. ``evidence_wiki.contract()`` returning the same
+        # payload is covered in tests/test_library_contract.py.
+        payload = json.loads(self.run_cli("contract"))
+
+        library_api = payload["library_api"]
+        self.assertEqual("1", library_api["version"])
+        surface = library_api["surface"]
+        self.assertIsInstance(surface, list)
+        for operation in (
+            "workspace.open",
+            "workspace.close",
+            "workspace.versions",
+            "workspace.status",
+            "workspace.export_answers",
+            "workspace.doctor",
+            "coverage.evaluate",
+            "grounding.verify",
+            "normalize.verify",
+            "questions.claim",
+            "questions.add_batch",
+            "orchestrate.start",
+            "orchestrate.session.next",
+            "orchestrate.session.submit",
+            "orchestrate.session.status",
+            "fleet_status",
+            "contract",
+        ):
+            self.assertIn(operation, surface)
+
     def test_doctor_command_reports_environment_as_json(self):
         output = self.run_cli("doctor", "--format", "json")
         payload = json.loads(output)

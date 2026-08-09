@@ -10,6 +10,13 @@ from types import ModuleType
 
 from . import __version__
 
+# The capability payload now lives in ``_contract`` so the library API can return
+# it without spawning this CLI. The names it used to own stay reachable here:
+# in-tree callers and the contract test suite reach for ``cli._contract_payload``
+# and ``cli.CONTRACT_SCHEMA_VERSION``.
+from ._contract import CONTRACT_SCHEMA_VERSION  # noqa: F401
+from ._contract import contract as _contract_payload
+
 # The script loader and its caches now live in ``_script_host`` so the library
 # API can share them without importing this argparse-shaped module. They stay
 # reachable under their original ``cli`` names: in-tree callers and the CLI test
@@ -20,9 +27,7 @@ from ._script_host import (
     _load_script,
     _load_workspace_loader,  # noqa: F401
 )
-from .resources import ORCHESTRATOR_SKILL, STARTER_DIR, assets_root, orchestrator_skill_path, required_asset_manifest
-
-CONTRACT_SCHEMA_VERSION = "1.0"
+from .resources import ORCHESTRATOR_SKILL, STARTER_DIR, assets_root, orchestrator_skill_path
 
 
 def _load_initializer(starter_root: Path) -> ModuleType:
@@ -30,35 +35,6 @@ def _load_initializer(starter_root: Path) -> ModuleType:
         starter_root / "scripts" / "init_research_workspace.py",
         "evidence_wiki_initializer",
     )
-
-
-def _pack_policy_vocabularies(root: Path, coverage_module: ModuleType, yaml_module: ModuleType) -> dict[str, dict[str, dict[str, str]]]:
-    domain_packs_root = root / "domain-packs"
-    result: dict[str, dict[str, dict[str, str]]] = {}
-    if not domain_packs_root.is_dir():
-        return result
-    for overlay_path in sorted(domain_packs_root.glob("*/research.overlay.yml")):
-        try:
-            document = yaml_module.safe_load(overlay_path.read_text(encoding="utf-8")) or {}
-        except OSError:
-            continue
-        except yaml_module.YAMLError:
-            continue
-        if not isinstance(document, dict):
-            continue
-        domain_pack = document.get("domain_pack")
-        if not isinstance(domain_pack, dict):
-            continue
-        name = domain_pack.get("name")
-        if not isinstance(name, str) or not name.strip():
-            continue
-        try:
-            vocabularies = coverage_module.domain_pack_policy_vocabularies({"domain_pack": domain_pack})
-        except coverage_module.CoverageManifestError:
-            continue
-        if any(vocabularies.values()):
-            result[name.strip()] = vocabularies
-    return result
 
 
 def _has_starter_root(args: list[str]) -> bool:
@@ -129,174 +105,6 @@ def _run_upgrader(forwarded_args: list[str]) -> int:
             if not isinstance(exc.code, str):
                 raise
             return int(initializer.emit_initializer_error(exc.code, operation="upgrade"))
-
-
-def _contract_payload() -> dict:
-    import yaml
-
-    from . import orchestration
-    from .orchestration_schemas import public_orchestration_schema_documents
-
-    with assets_root() as root:
-        starter_root = root / STARTER_DIR
-        metadata = yaml.safe_load((starter_root / "workspace-system.yml").read_text()) or {}
-        workspace_system = metadata.get("workspace_system") if isinstance(metadata, dict) else {}
-        if not isinstance(workspace_system, dict):
-            workspace_system = {}
-        initializer = _load_initializer(starter_root)
-        status_module = _load_script(
-            starter_root / "scripts" / "workspace_status.py",
-            "evidence_wiki_workspace_status",
-        )
-        intake_module = _load_script(
-            starter_root / "scripts" / "intake_questions.py",
-            "evidence_wiki_intake_questions",
-        )
-        export_module = _load_script(
-            starter_root / "scripts" / "export_answers.py",
-            "evidence_wiki_export_answers",
-        )
-        source_requests_module = _load_script(
-            starter_root / "scripts" / "source_requests.py",
-            "evidence_wiki_source_requests",
-        )
-        fetch_sources_module = _load_script(
-            starter_root / "scripts" / "fetch_sources.py",
-            "evidence_wiki_fetch_sources",
-        )
-        verify_citations_module = _load_script(
-            starter_root / "scripts" / "verify_citations.py",
-            "evidence_wiki_verify_citations",
-        )
-        verify_quotes_module = _load_script(
-            starter_root / "scripts" / "verify_quotes.py",
-            "evidence_wiki_verify_quotes",
-        )
-        discover_sources_module = _load_script(
-            starter_root / "scripts" / "discover_sources.py",
-            "evidence_wiki_discover_sources",
-        )
-        normalized_contract_module = _load_script(
-            starter_root / "scripts" / "_normalized_contract.py",
-            "evidence_wiki_normalized_contract",
-        )
-        normalize_sources_module = _load_script(
-            starter_root / "scripts" / "normalize_sources.py",
-            "evidence_wiki_normalize_sources",
-        )
-        mcp_module = _load_script(
-            starter_root / "scripts" / "serve_mcp.py",
-            "evidence_wiki_serve_mcp",
-        )
-        script_errors_module = _load_script(
-            starter_root / "scripts" / "_script_errors.py",
-            "evidence_wiki_script_errors",
-        )
-        provider_registry_module = _load_script(
-            starter_root / "scripts" / "_provider_registry.py",
-            "evidence_wiki_provider_registry",
-        )
-        question_claim_module = _load_script(
-            starter_root / "scripts" / "question_claim.py",
-            "evidence_wiki_question_claim",
-        )
-        question_resolve_module = _load_script(
-            starter_root / "scripts" / "question_resolve.py",
-            "evidence_wiki_question_resolve",
-        )
-        run_report_module = _load_script(
-            starter_root / "scripts" / "run_report.py",
-            "evidence_wiki_run_report",
-        )
-        coverage_manifest_module = _load_script(
-            starter_root / "scripts" / "coverage_manifest.py",
-            "evidence_wiki_coverage_manifest",
-        )
-        publication_readiness_module = _load_script(
-            starter_root / "scripts" / "publication_readiness.py",
-            "evidence_wiki_publication_readiness",
-        )
-        fleet_status_module = _load_script(
-            starter_root / "scripts" / "fleet_status.py",
-            "evidence_wiki_fleet_status",
-        )
-        base_policy_definitions = coverage_manifest_module.base_policy_vocabularies()
-        installed_pack_policy_definitions = _pack_policy_vocabularies(root, coverage_manifest_module, yaml)
-        merged_policy_definitions = coverage_manifest_module.base_policy_vocabularies()
-        for pack_vocabularies in installed_pack_policy_definitions.values():
-            for field, definitions in pack_vocabularies.items():
-                merged_policy_definitions.setdefault(field, {}).update(definitions)
-        policy_vocabularies = {
-            field: sorted(definitions)
-            for field, definitions in merged_policy_definitions.items()
-        }
-        policy_vocabularies["artifact_kinds"] = sorted(coverage_manifest_module.ALLOWED_ARTIFACT_KINDS)
-        return {
-            "schema_version": CONTRACT_SCHEMA_VERSION,
-            "package": "evidence-wiki",
-            "package_version": __version__,
-            "starter_version": workspace_system.get("starter_version"),
-            "starter_schema_version": workspace_system.get("schema_version"),
-            "compatible_research_yml_contract": workspace_system.get("compatible_research_yml_contract"),
-            "profile_schema_versions": [initializer.PROFILE_SCHEMA_VERSION],
-            "upgrade_compatibility": {
-                "workspace_schema_versions": list(initializer.SUPPORTED_WORKSPACE_SCHEMA_VERSIONS),
-                "research_yml_contract_versions": list(initializer.SUPPORTED_RESEARCH_YML_CONTRACTS),
-            },
-            "orchestration_capabilities": {
-                "managed_runner_ids": list(orchestration.managed_runner_names()),
-                "external_protocol_commands": ["start", "next", "submit", "status"],
-                "canonical_instruction_file": "AGENTS.md",
-            },
-            "required_asset_manifest": required_asset_manifest(),
-            "source_providers": {
-                "discovery": list(provider_registry_module.DISCOVERY_PROVIDER_IDS),
-                "acquisition": list(provider_registry_module.ACQUISITION_PROVIDER_IDS),
-                "legacy_discovery_strategy_aliases": list(
-                    provider_registry_module.LEGACY_DISCOVERY_STRATEGY_IDS
-                ),
-            },
-            "artifact_schemas": {
-                "workspace_status": status_module.SCHEMA_VERSION,
-                "question_intake": intake_module.SCHEMA_VERSION,
-                "answer_export": export_module.SCHEMA_VERSION,
-                "source_requests": source_requests_module.SCHEMA_VERSION,
-                "fetch_sources": fetch_sources_module.SCHEMA_VERSION,
-                "citation_verification": verify_citations_module.SCHEMA_VERSION,
-                "quote_verification": verify_quotes_module.SCHEMA_VERSION,
-                "discover_sources": discover_sources_module.SCHEMA_VERSION,
-                "mcp_server": mcp_module.SCHEMA_VERSION,
-                "question_claim": question_claim_module.SCHEMA_VERSION,
-                "question_resolve": question_resolve_module.SCHEMA_VERSION,
-                "run_state": "1.0",
-                "orchestration_session": orchestration.ORCHESTRATION_SESSION_SCHEMA_VERSION,
-                "orchestration_work_order": orchestration.ORCHESTRATION_WORK_ORDER_SCHEMA_VERSION,
-                "orchestration_result": orchestration.ORCHESTRATION_RESULT_SCHEMA_VERSION,
-                "orchestration_attempt": orchestration.ORCHESTRATION_ATTEMPT_SCHEMA_VERSION,
-                "run_report": run_report_module.SCHEMA_VERSION,
-                "coverage_manifest": coverage_manifest_module.SCHEMA_VERSION,
-                "publication_readiness": publication_readiness_module.SCHEMA_VERSION,
-                "fleet_status": fleet_status_module.SCHEMA_VERSION,
-                "error_envelope": script_errors_module.SCHEMA_VERSION,
-            },
-            "normalized_source_format": {
-                "version": normalized_contract_module.NORMALIZED_FORMAT_VERSION,
-                "accepted_versions": sorted(normalized_contract_module.ACCEPTED_NORMALIZED_FORMATS),
-                "violation_codes": list(normalized_contract_module.VIOLATION_CODES),
-                "normalizer": {
-                    "name": normalize_sources_module.NORMALIZER_NAME,
-                    "version": normalize_sources_module.NORMALIZER_VERSION,
-                },
-                "contract_document": normalized_contract_module.CONTRACT_DOCUMENT,
-            },
-            "artifact_schema_documents": public_orchestration_schema_documents(),
-            "policy_vocabularies": policy_vocabularies,
-            "policy_vocabulary_definitions": {
-                "base": base_policy_definitions,
-                "installed_domain_packs": installed_pack_policy_definitions,
-                "merged": merged_policy_definitions,
-            },
-        }
 
 
 def _run_contract() -> int:
