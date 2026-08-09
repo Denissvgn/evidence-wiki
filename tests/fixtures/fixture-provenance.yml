@@ -103,6 +103,15 @@ fixtures:
     shipped_paths:
       - tests/fixtures/normalizer-adapter/**
   - <<: *synthetic_defaults
+    stable_id: provider-plugins
+    source_work: Synthetic third-party provider distributions (module plus .dist-info) for entry-point registration tests
+    created_at: 2026-08-09
+    transformations: >-
+      Wholly synthetic provider declarations, packaging metadata, and reserved .invalid
+      hostnames; no third-party code, service response, or trademark is included.
+    shipped_paths:
+      - tests/fixtures/provider-plugins/**
+  - <<: *synthetic_defaults
     stable_id: mutation-fault-recovery
     source_work: Synthetic deterministic mutation-boundary fault matrix
     transformations: Wholly synthetic fault points, error classes, lifecycle states, and external-lane declarations.

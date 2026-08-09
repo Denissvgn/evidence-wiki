@@ -1,0 +1,2 @@
+[evidence_wiki.acquisition_providers]
+keepa-broken-fixture = keepa_broken_fixture:BrokenDeclarationAcquisitionProvider

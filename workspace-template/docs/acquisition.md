@@ -14,8 +14,11 @@ as a local-files-only system unless a profile or maintainer explicitly enables
 - Acquisition is disabled by default. No command may touch the network unless
   `integrations.acquisition.enabled: true` is present in `research.yml`.
 - Enabled acquisition must use an explicit provider allow-list in
-  `integrations.acquisition.providers`. Supported provider IDs are `arxiv`,
-  `openalex`, `github`, and `web`.
+  `integrations.acquisition.providers`. Built-in provider IDs are `arxiv`,
+  `openalex`, `github`, and `web`. A workspace may also allow-list the ID of a
+  provider supplied by an installed third-party distribution; installing that
+  distribution makes the ID *available*, and only this allow-list *enables* it
+  (see [Registered Providers](#registered-providers)).
 - No secrets in `research.yml`. The rule is: no secrets in `research.yml`.
   OpenAlex commands read `OPENALEX_API_KEY` and GitHub commands read
   `GITHUB_TOKEN` from the process environment only; workspaces must not store
@@ -109,6 +112,79 @@ personal access tokens scoped only to the repositories being inspected.
 | `openalex` | [OpenAlex Authentication & Pricing](https://developers.openalex.org/api-reference/authentication), [OpenAlex Works Fields](https://developers.openalex.org/api-reference/works), [OpenAlex Licenses](https://developers.openalex.org/api-reference/licenses) | OpenAlex exposes usage budgets and rate-limit headers, returns 429 on exceeded limits, and recommends smaller selected fields plus backoff on rate limits. Use `select=` and bounded result pages for acquisition workflows. | OpenAlex metadata is open, and OpenAlex asks research users to cite its paper. Work license values are assigned to individual open-access locations; agents must record the OpenAlex work URL, downloaded URL, and any location license surfaced by metadata. | `openalex resolve`, `openalex get`, `openalex download-pdf` | Yes when an open-access location includes `license` or `license_id`; otherwise unknown and the sidecar must surface that uncertainty. |
 | `github` | [GitHub Terms of Service](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service), [REST API Rate Limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api), [REST API Authentication](https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api), [Licensing a Repository](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository) | The GitHub REST API limits unauthenticated requests to roughly 60 per hour per source IP and authenticated requests to roughly 5,000 per hour, returns 403/429 with `Retry-After` and `X-RateLimit-*` headers on exceeded limits, and forbids scraping or bulk cloning. Use bounded queries and small result pages; prefer authenticated requests via `GITHUB_TOKEN` for higher limits. | Repository contents stay under each repository's own license. GitHub's license detection is heuristic and frequently absent, so agents must record the detected SPDX license key when present and surface license uncertainty otherwise. Stars and forks are weak popularity signals, never trust or license proof. | `github repo-metadata`, `github release-metadata`, `github download-archive` | Partial. The API surfaces a detected `license` SPDX key for many repositories, but many repositories report no license; agents must not assume a permissive license when detection is absent. |
 | `web` | Per-origin terms; record the reviewed origin terms in the sidecar with `terms_url` or `terms_note`. | Web acquisition is allow-list only. Configure `integrations.acquisition.web.allowed_domains`, keep `max_download_bytes` small, and fetch only explicit selected candidate URLs or user-provided URLs. `allowed_domains` is a transport allowlist, not a trust signal. | Generic web capture cannot infer a license. Sidecars write `license: null`, capture URL, retrieval metadata, checksum, byte count, TLS status, optional currentness flags, and optional publisher/jurisdiction/evidence areas. | `web get` | None. The operator must review and record license or terms status before reusable publication output depends on the source. |
+
+The four rows above are the providers this repository ships. Their terms,
+rate-limit guidance, and license-inference capability are maintained here by
+hand because the repository owns them. A registered third-party provider
+declares the same three facts about itself in code, and the workspace records
+that declaration in provenance rather than in this table.
+
+## Registered Providers
+
+A third-party Python distribution can supply an additional acquisition provider
+through an `evidence_wiki.acquisition_providers` entry point. The full authoring
+contract — entry-point groups, the class shape, every declared capability and
+whether it is enforced or merely recorded, credential custody, and the v1
+limits — is [provider-registration.md](provider-registration.md). What matters
+for the acquisition safety model is this:
+
+- **Installing a distribution never enables anything.** Registration makes a
+  provider ID *available*; `integrations.acquisition.providers` is still the
+  only authorization, and an unauthorized registered ID refuses with
+  `ACQUISITION_PROVIDER_DISABLED`, the same envelope a disabled built-in
+  produces. With no provider entry points installed, the built-in IDs are the
+  whole universe and behavior is unchanged.
+- **The provider plans; the package fetches.** A registered provider returns
+  planned HTTPS requests and interprets the responses. Every request is executed
+  by the same pinned transport the built-in adapters use, checked against the
+  provider's own declared `allowed_domains` before any socket work, and bounded
+  by the same download-size limits. A host outside the declaration refuses with
+  `ACQUISITION_DOMAIN_NOT_DECLARED`.
+- **The package writes.** Artifact bytes and the `.provenance.yml` sidecar are
+  written by the same writer the built-ins use, with the same sidecar-before-
+  artifact ordering and the same quarantine behavior on an interrupted
+  acquisition. A registered acquisition adds two sidecar blocks,
+  `provider_registration` and `provider_capabilities`, recording which installed
+  distribution produced the artifact and what it declared it could reach.
+- **Credentials stay with the package.** A provider declares environment
+  variable *names*; the package resolves the values at execution, substitutes
+  them into header values only, and registers them for redaction. The rules in
+  [Provider Secrets And Rotation](#provider-secrets-and-rotation) apply to a
+  declared credential exactly as they apply to `OPENALEX_API_KEY`.
+- **Declared rate limits tighten the budget, never loosen it.** A provider's
+  declared `rate_limit` is enforced against a durable per-run ledger, and
+  `max_downloads_per_run` continues to bound total artifacts.
+
+Registered acquisition runs through one generic subcommand rather than a
+hand-written per-provider tree:
+
+```bash
+python3 scripts/fetch_sources.py --format json registered get \
+  --id keepa \
+  --request-file request.json \
+  [--target-root raw/data]
+```
+
+The request document is provider-defined and its shape is the provider's own
+business; the package owns the envelope, the budgets, and the outcomes. The ID
+flag is `--id`, not `--provider`, because the built-in provider subcommand tree
+already stores the subcommand name in `provider`. `--target-root` defaults to
+`raw/data` and must stay under `raw/` like every other acquisition target.
+
+Six error codes belong to this path: `PROVIDER_NOT_REGISTERED`,
+`PROVIDER_REGISTRATION_INVALID`, `PROVIDER_REQUEST_INVALID`,
+`PROVIDER_PLAN_INVALID`, `ACQUISITION_DOMAIN_NOT_DECLARED`, and
+`ACQUISITION_PROVIDER_RATE_LIMITED`. Each is defined with its remediation in
+[orchestrator-handoff.md](orchestrator-handoff.md) and explained for an operator
+in [provider-registration.md](provider-registration.md). A `research.yml` that
+authorizes a provider whose distribution is not installed is a **smoke
+validation failure** carrying `PROVIDER_NOT_REGISTERED`, not a warning: an
+authorization the environment cannot satisfy is drift on an authorization
+boundary. The fix is `pip install` or removing the authorization.
+
+`scripts/doctor.py` lists every registered provider with its distribution,
+version, declared capabilities, and whether `research.yml` authorizes it, and
+lists every invalid registration with the reason it was refused.
 
 ## arXiv Adapter
 
@@ -598,17 +674,32 @@ and `github`. Tests compare the registry keys with this document so adding a
 provider to code requires a matching provider-registry row and terms/license
 note here. The same provider IDs back the `ACQUISITION_ALLOWED_PROVIDERS`
 allow-lists in `init_research_workspace.py` and `smoke_validate_workspace.py`,
-so initialization and smoke validation accept exactly the registered providers.
+so initialization and smoke validation accept exactly the built-in providers
+plus whatever valid third-party registrations the environment supplies.
 
 The registry should remain metadata-only: provider ID, terms URLs, supported
 commands, and license-inference capability. Runtime behavior belongs in the
 provider command implementations, which must still enforce the acquisition
 config gate before any network operation.
 
+`PROVIDER_REGISTRY` is the repository's own table and never gains third-party
+entries. A registered provider carries the same three facts — terms URLs,
+license inference, and the commands it serves — in its own
+`ProviderCapabilities` declaration, which is validated when the registration
+loads and recorded in every sidecar it produces; see
+[provider-registration.md](provider-registration.md). The two are kept apart
+deliberately: this table is reviewed by the people who maintain this
+repository, and a declaration is reviewed by the operator who chose to install
+the distribution.
+
 ## Related Documents
 
 - [research-yml.md](research-yml.md) documents the `integrations.acquisition`
   configuration block and validation rules.
+- [provider-registration.md](provider-registration.md) defines the contract a
+  third-party distribution satisfies to supply an additional acquisition or
+  discovery provider, and which of its declared capabilities the package
+  enforces rather than merely records.
 - [source-delivery.md](source-delivery.md) defines target roots, atomic
   delivery, provenance sidecars, source requests, and post-delivery commands.
 - [source-discovery.md](source-discovery.md) defines the upstream

@@ -1,0 +1,10 @@
+Metadata-Version: 2.1
+Name: keepa-rival-fixture
+Version: 0.2.0
+Summary: Synthetic provider distribution that claims the keepa-fixture provider id.
+Author: EvidenceWiki contributors
+License: MIT
+Requires-Python: >=3.10
+
+Exists to prove the duplicate-id rule: two installed distributions claiming one provider
+id invalidate both registrations rather than resolving by installation order.
