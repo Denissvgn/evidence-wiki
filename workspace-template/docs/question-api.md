@@ -296,6 +296,71 @@ de-duplicated stable order. A blocked question with no linked open request is
 blocked question with no linked open request is `attention_required`. Deferred
 and rejected questions store `resolution_reason`.
 
+### Reopening a Blocked Question
+
+```bash
+python3 scripts/question_resolve.py reopen --slug heat-exposure --agent-id fetch-agent \
+  --source-id raw:shade-cover-survey --source-id raw:heat-index-readings \
+  --request-id req-heat-index --request-id req-shade-cover --format json
+```
+
+`reopen` moves a `blocked` question back to `open` once every supplied
+`--source-id` is in the manifest and has a normalized record. It clears
+`blocked_reason` and `blocking_request_ids`, and merges the delivered source IDs
+into the question's `source_ids`.
+
+Both flags are repeatable, and the resolver does **not** zip them by position.
+When a supplied request carries a structured `scope` (see
+[source-delivery.md](source-delivery.md)), each scoped request is paired with the
+supplied source whose `.provenance.yml` scope agrees with it, and the result is
+reported as `pairs`:
+
+| Field | Meaning |
+|-------|---------|
+| `pairs[]` | `{"request_id": ..., "source_id": ...}` per scoped request, in the order the requests were supplied. Always present on `reopen`; empty when nothing declared a scope. |
+
+```json
+{
+  "action": "reopen",
+  "status": "open",
+  "source_ids": ["raw:shade-cover-survey", "raw:heat-index-readings"],
+  "request_ids": ["req-heat-index", "req-shade-cover"],
+  "pairs": [
+    {"request_id": "req-heat-index", "source_id": "raw:heat-index-readings"},
+    {"request_id": "req-shade-cover", "source_id": "raw:shade-cover-survey"}
+  ]
+}
+```
+
+Pairing applies the contradiction layer only: a key both the request and the
+delivered source declare must agree, while a key only one side states is
+compatible. Absence is not a refusal here — `fulfill --require-scope` is where a
+host opts into strictness, and it has no equivalent on `reopen`. A source that
+positively corroborates more of a request's scope is preferred over one that
+merely fails to contradict it, so the reported pairing is deterministic.
+Requests without a scope are left unpaired, exactly as before, and contribute no
+`pairs` entries.
+
+| Error code | Cause |
+|------------|-------|
+| `STATUS_NOT_REOPENABLE` | The question is not `blocked`. |
+| `SOURCE_UNKNOWN` | A supplied `--source-id` is not in the manifest. |
+| `SOURCE_NOT_NORMALIZED` | A supplied source has no normalized record yet. |
+| `REQUEST_SCOPE_MISMATCH` | A scoped request matches no supplied source, or two scoped requests can only be satisfied by the same source. |
+
+`REQUEST_SCOPE_MISMATCH` is refused before the question page is written, so a
+failed reopen leaves the question `blocked` and the page byte-identical. Its
+`details` carry the machine-readable form: `reason` is `no_matching_source`
+(with `request_id`, `request_scope`, and `rejected_sources[].conflicts` naming
+each disagreeing key and both values) or `ambiguous_assignment` (with the
+contested `request_ids`, `source_ids`, and each request's
+`candidate_source_ids`).
+
+`reopen` never writes to `sources/source-requests.jsonl`. Pairs are computed,
+verified, and reported; recording fulfilment stays with
+`scripts/source_requests.py fulfill`, which remains the single writer of request
+records.
+
 ## Answer Export
 
 ```bash

@@ -33,6 +33,11 @@ research runs:
   fulfilled source id(s) so ``research-answer`` can pick the question up. It is
   the deterministic counterpart to ``block`` and the only verb that operates on a
   terminal status; it requires no claim because a blocked question is unclaimed.
+  When a supplied ``--request-id`` carries a structured ``scope``, reopen pairs it
+  with the supplied source whose provenance scope agrees, and reports the result
+  as ``pairs`` — so a host stops zipping the two repeatable flags by position.
+  Reopen never writes to the request records: pairing is computed and verified,
+  and fulfilment stays with ``source_requests.py fulfill``.
 
 By default, the other verbs require the question to be claimed by the same agent
 id. ``--allow-unclaimed`` lets an orchestrator or single-agent workflow resolve
@@ -55,6 +60,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
@@ -77,6 +83,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _delegation_gate import DelegationGateError, require_sanctioned_mutation
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
+from _request_scope import conflict_details, format_scope, normalize_scope, scope_match
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError
 from _workspace_module_loader import load_workspace_module
@@ -500,13 +507,24 @@ def load_source_requests(project_root: Path, config: dict[str, Any]) -> tuple[li
     return source_requests.load_requests(path), workspace_label(project_root, path)
 
 
-def validate_request_ids(project_root: Path, config: dict[str, Any], slug: str, request_ids: list[str]) -> list[str]:
+def validate_request_records(
+    project_root: Path,
+    config: dict[str, Any],
+    slug: str,
+    request_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Validate supplied request ids and return their records in the supplied order.
+
+    Callers that only need the ids use ``validate_request_ids``; reopen needs the
+    records themselves because the optional ``scope`` mapping lives on them.
+    """
     requests, label = load_source_requests(project_root, config)
     by_id = {
         record.get("request_id"): record
         for record in requests
         if isinstance(record.get("request_id"), str) and record.get("request_id")
     }
+    records: list[dict[str, Any]] = []
     for request_id in request_ids:
         record = by_id.get(request_id)
         if record is None:
@@ -518,7 +536,177 @@ def validate_request_ids(project_root: Path, config: dict[str, Any], slug: str, 
                 "REQUEST_NOT_LINKED",
                 f"source request {request_id} does not reference question slug {slug}",
             )
+        records.append(record)
+    return records
+
+
+def validate_request_ids(project_root: Path, config: dict[str, Any], slug: str, request_ids: list[str]) -> list[str]:
+    validate_request_records(project_root, config, slug, request_ids)
     return request_ids
+
+
+def source_scope_resolver(project_root: Path, config: dict[str, Any]) -> Callable[[str], dict[str, str]]:
+    """Return a memoized reader of a delivered source's declared provenance scope.
+
+    Lazy on purpose. Each lookup scans the manifest, so resolving eagerly would make
+    every reopen pay for pairing even in a workspace where no request declares a
+    scope. Pairing asks only for the sources it actually examines, and asks once.
+    """
+    source_requests = load_sibling_module("source_requests")
+    cache: dict[str, dict[str, str]] = {}
+
+    def resolve(source_id: str) -> dict[str, str]:
+        if source_id not in cache:
+            cache[source_id] = source_requests.source_provenance_scope(project_root, config, source_id)
+        return cache[source_id]
+
+    return resolve
+
+
+def _no_matching_source_error(
+    request_id: str,
+    request_scope: dict[str, str],
+    rejected: list[tuple[str, list[str]]],
+    source_scope: Callable[[str], dict[str, str]],
+) -> ResolveError:
+    rejected_details = [
+        {
+            "source_id": source_id,
+            "conflicts": conflict_details(request_scope, source_scope(source_id), keys),
+        }
+        for source_id, keys in rejected
+    ]
+    rendered = "; ".join(
+        "{source_id} disagrees on {keys}".format(
+            source_id=entry["source_id"],
+            keys=", ".join(
+                f"{item['key']} (request {item['request_value']!r}, source {item['source_value']!r})"
+                for item in entry["conflicts"]
+            ),
+        )
+        for entry in rejected_details
+    ) or "no source was supplied to pair it with"
+    return ResolveError(
+        EXIT_INVALID,
+        "REQUEST_SCOPE_MISMATCH",
+        (
+            f"source request {request_id} declares scope {format_scope(request_scope)} and no supplied "
+            f"source agrees with it: {rendered}"
+        ),
+        details={
+            "reason": "no_matching_source",
+            "request_id": request_id,
+            "request_scope": dict(request_scope),
+            "rejected_sources": rejected_details,
+        },
+    )
+
+
+def _ambiguous_assignment_error(
+    request_ids: list[str],
+    source_ids: list[str],
+    scoped: list[tuple[str, dict[str, str]]],
+    candidates: dict[str, list[str]],
+) -> ResolveError:
+    scope_by_id = dict(scoped)
+    return ResolveError(
+        EXIT_INVALID,
+        "REQUEST_SCOPE_MISMATCH",
+        (
+            f"scoped source requests {', '.join(request_ids)} cannot each be paired with a distinct "
+            f"supplied source; they compete for {', '.join(source_ids)}. Supply one delivered source per "
+            "scoped request, or stamp each delivery's provenance scope so the pairing is unambiguous"
+        ),
+        details={
+            "reason": "ambiguous_assignment",
+            "request_ids": request_ids,
+            "source_ids": source_ids,
+            "requests": [
+                {
+                    "request_id": request_id,
+                    "request_scope": dict(scope_by_id.get(request_id, {})),
+                    "candidate_source_ids": candidates.get(request_id, []),
+                }
+                for request_id in request_ids
+            ],
+        },
+    )
+
+
+def compute_request_source_pairs(
+    request_records: list[dict[str, Any]],
+    source_ids: list[str],
+    source_scope: Callable[[str], dict[str, str]],
+) -> list[dict[str, str]]:
+    """Pair each scoped request with the supplied source that answers it.
+
+    Only the contradiction layer applies here (see ``_request_scope``): a key both
+    sides declare must agree, while a key only one side declares is compatible.
+    Strictness about absence is a fulfil-time concern (``fulfill --require-scope``)
+    and deliberately has no equivalent on reopen — reopen reports a pairing, it does
+    not record fulfilment.
+
+    Requests without a scope are left unpaired, which is exactly today's behaviour;
+    a workspace where nothing declares scope therefore gets an empty list and no new
+    refusals. Refusals are raised before the caller writes anything.
+    """
+    scoped: list[tuple[str, dict[str, str]]] = []
+    for record in request_records:
+        request_scope = normalize_scope(record.get("scope"))
+        if request_scope:
+            scoped.append((str(record["request_id"]), request_scope))
+    if not scoped:
+        return []
+
+    candidates: dict[str, list[str]] = {}
+    for request_id, request_scope in scoped:
+        ranked: list[tuple[int, int, str]] = []
+        rejected: list[tuple[str, list[str]]] = []
+        for index, source_id in enumerate(source_ids):
+            declared = source_scope(source_id)
+            conflicts, _ = scope_match(request_scope, declared)
+            if conflicts:
+                rejected.append((source_id, conflicts))
+                continue
+            # Prefer a source that positively corroborates more of the request's scope
+            # over one that merely fails to contradict it; ties keep the supplied order,
+            # so the reported pairing is deterministic.
+            agreeing = sum(1 for key in request_scope if key in declared)
+            ranked.append((-agreeing, index, source_id))
+        if not ranked:
+            raise _no_matching_source_error(request_id, request_scope, rejected, source_scope)
+        candidates[request_id] = [source_id for _, _, source_id in sorted(ranked)]
+
+    # One source answers at most one scoped request, so a valid reopen needs a perfect
+    # matching over the scoped requests. Augmenting paths (Kuhn's algorithm) find one if
+    # it exists; failing to extend the matching means two scoped requests can only be
+    # satisfied by the same source, which is precisely the mis-pairing this refuses.
+    # Recursion depth is bounded by the number of scoped --request-id values in one
+    # invocation, which is a handful in every real reopen.
+    assigned_to: dict[str, str] = {}
+
+    def augment(request_id: str, visited: set[str]) -> bool:
+        for source_id in candidates[request_id]:
+            if source_id in visited:
+                continue
+            visited.add(source_id)
+            holder = assigned_to.get(source_id)
+            if holder is None or augment(holder, visited):
+                assigned_to[source_id] = request_id
+                return True
+        return False
+
+    for request_id, _ in scoped:
+        visited: set[str] = set()
+        if not augment(request_id, visited):
+            contested_sources = sorted(visited)
+            contested_requests = sorted(
+                {request_id, *(assigned_to[source_id] for source_id in visited if source_id in assigned_to)}
+            )
+            raise _ambiguous_assignment_error(contested_requests, contested_sources, scoped, candidates)
+
+    paired = {request_id: source_id for source_id, request_id in assigned_to.items()}
+    return [{"request_id": request_id, "source_id": paired[request_id]} for request_id, _ in scoped]
 
 
 def is_top_level_field(line: str) -> bool:
@@ -878,7 +1066,19 @@ def transition_reopen(
                     "SOURCE_NOT_NORMALIZED",
                     f"source {source_id} has no normalized record yet; normalize the delivered source before reopening",
                 )
-        request_ids = validate_request_ids(project_root, config, slug, unique_nonempty(args.request_id, "--request-id"))
+        request_records = validate_request_records(
+            project_root, config, slug, unique_nonempty(args.request_id, "--request-id")
+        )
+        request_ids = [str(record["request_id"]) for record in request_records]
+        # Structured pairing runs last among the refusals: the cheaper, more fundamental
+        # checks above (delegation, manifest membership, normalization) fail first, and this
+        # still fails closed before the page is written. It is orthogonal to delegation and
+        # runs in both modes.
+        pairs = compute_request_source_pairs(
+            request_records,
+            source_ids,
+            source_scope_resolver(project_root, config),
+        )
         merged = existing_source_ids(frontmatter)
         for source_id in source_ids:
             if source_id not in merged:
@@ -895,6 +1095,7 @@ def transition_reopen(
             "answer_page": None,
             "source_ids": merged,
             "request_ids": request_ids,
+            "pairs": pairs,
         }
 
 
@@ -1097,6 +1298,9 @@ def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) ->
     ]
     if action == "reopen" and result.get("source_ids"):
         lines.append(f"- Reopened with sources: {', '.join(result['source_ids'])}.")
+    if action == "reopen" and result.get("pairs"):
+        rendered = ", ".join(f"{pair['request_id']} -> {pair['source_id']}" for pair in result["pairs"])
+        lines.append(f"- Paired by declared scope: {rendered}.")
     if action in {"approve", "review"}:
         lines.append(f"- Reviewer: {result.get('reviewer')}.")
         if result.get("reviewed_policies"):
@@ -1132,6 +1336,10 @@ def build_report(action: str, slug: str, agent_id: str, page_path: Path, project
         "request_ids": result.get("request_ids", []),
         "previous_holder": result.get("previous_holder"),
     }
+    if action == "reopen":
+        # Always present on reopen, empty when nothing declared a scope, so a host can
+        # read `pairs` unconditionally instead of zipping the two repeatable flags.
+        report["pairs"] = result.get("pairs", [])
     if result.get("reviewer"):
         report["reviewer"] = result["reviewer"]
     if result.get("approved_at"):
