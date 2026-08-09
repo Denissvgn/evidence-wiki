@@ -62,6 +62,26 @@ _REMEDIATIONS = {
     "ATTEMPT_FAILURE_CODE_INVALID": (
         "Use an acquisition-attempt failure code documented in docs/source-delivery.md."
     ),
+    "REQUEST_KIND_INVALID": (
+        "Use a built-in request kind, or a pack kind namespaced like pack:<pack-name>/<kind-id>."
+    ),
+    "REQUEST_KIND_UNDECLARED": (
+        "Declare the kind under domain_pack.request_kinds in the active domain pack, or use a built-in kind."
+    ),
+    "REQUEST_SCOPE_INVALID": (
+        "Pass scope pairs as key=value with a lowercase key, as documented in docs/source-delivery.md."
+    ),
+    "REQUEST_SCOPE_MISMATCH": (
+        "Fulfil the request with a source whose provenance scope agrees with it, or open a request "
+        "whose scope matches the delivered evidence."
+    ),
+    "REQUEST_SCOPE_MISSING": (
+        "Stamp the delivered source's provenance sidecar with the request's scope keys, or rerun "
+        "without --require-scope."
+    ),
+    "FACET_SCOPE_CONFLICT": (
+        "Link a request whose scope facet_id matches this facet, or open a new request for it."
+    ),
     "SOURCE_REQUEST_FULFILL_DELEGATED": (
         "Fulfil or record an attempt against this request while executing the delegated acquisition work "
         "order that scopes it, or finish the active session first."

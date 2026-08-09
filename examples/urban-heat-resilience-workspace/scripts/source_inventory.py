@@ -127,6 +127,7 @@ PROVENANCE_FIELDS = (
     "checksum",
     "request_id",
     "candidate_id",
+    "scope",
     "acquisition_run_id",
     "terms_url",
     "terms_note",
@@ -175,6 +176,7 @@ ACQUISITION_LOCK_RELATIVE = ("raw", ".locks", "acquisition.lock")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _request_scope import normalize_scope
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import (
@@ -1479,6 +1481,18 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
                 continue
             data[field] = {"review_required": True}
             warnings.append(f"{relative_path}: provenance standards must be a mapping")
+            continue
+        if field == "scope":
+            # What this delivery claims to answer, matched against the fulfilled request's
+            # own scope. Non-conforming entries are dropped rather than failing the
+            # sidecar: an unusable scope key must not cost the workspace the whole record.
+            parsed_scope = normalize_scope(value)
+            if not parsed_scope:
+                warnings.append(
+                    f"{relative_path}: provenance scope must be a mapping of non-empty scalar values"
+                )
+                continue
+            data[field] = parsed_scope
             continue
         if field == "evidence_usability_override":
             parsed_override, warning = parse_evidence_usability_override(value)

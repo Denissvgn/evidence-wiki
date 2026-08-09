@@ -476,6 +476,12 @@ Stable error codes:
 | `QUESTION_UNKNOWN` | Referenced question slug does not exist. | Use an existing `wiki/questions/` slug. |
 | `REQUEST_UNKNOWN` | Referenced source-request id is unknown. | List requests and choose an existing id. |
 | `REQUEST_NOT_OPEN` | Discovery was requested for a source request that is no longer open. | Select an open request or reopen the request deliberately before discovery. |
+| `REQUEST_KIND_INVALID` | A source-request kind id is malformed, or a pack kind was written without its reserved `pack:` prefix. | Use a built-in kind, or a pack kind namespaced like `pack:<pack-name>/<kind-id>`. |
+| `REQUEST_KIND_UNDECLARED` | A well-formed namespaced kind is not declared by the workspace's active domain pack. | Declare the kind under `domain_pack.request_kinds`, or use a built-in kind. |
+| `REQUEST_SCOPE_INVALID` | A `--scope` or `--match-scope` value is not `key=value`, has a malformed key, or repeats a key. | Pass scope pairs as `key=value` with a lowercase key. |
+| `REQUEST_SCOPE_MISMATCH` | A request and the delivered source declare the same scope key with different values. | Fulfil with a source whose provenance scope agrees, or open a request matching the delivered evidence. |
+| `REQUEST_SCOPE_MISSING` | Under `fulfill --require-scope`, the delivered source declares no value for a scope key the request carries. | Stamp the sidecar with the request's scope keys, or rerun without `--require-scope`. |
+| `FACET_SCOPE_CONFLICT` | `set-facet --blocking-request-id` named a request whose scope `facet_id` is a different facet. | Link a request whose scope `facet_id` matches this facet, or open a new request for it. |
 | `CANDIDATE_UNKNOWN` | Referenced discovery candidate id is unknown. | List candidates with `discover_sources.py candidates list` and choose an existing id. |
 | `SOURCE_UNKNOWN` | Referenced manifest source id is unknown. | Inventory sources and choose an existing source id. |
 | `TOOLING_MISSING` | A packaged or sibling script is missing. | Restore or upgrade workspace scripts. |

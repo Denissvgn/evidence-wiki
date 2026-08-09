@@ -81,7 +81,6 @@ ATTEMPT_EVENT_REQUIRED_FIELDS = (
     "failure_code",
     "recorded_at",
 )
-REQUEST_KINDS = ("paper", "dataset", "web", "code", "other")
 REQUEST_PRIORITIES = ("high", "medium", "low")
 REQUEST_STATUSES = ("open", "fulfilled")
 EXIT_OK = 0
@@ -97,9 +96,16 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _delegation_gate import DelegationGateError, require_sanctioned_mutation
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
+from _request_kinds import BUILTIN_REQUEST_KINDS
+from _request_scope import normalize_scope
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import ATTEMPT_FAILURE_CODES, is_attempt_failure_code
+
+# The kind vocabulary moved to _request_kinds so `pack validate` and this command
+# validate against one definition. Kept as a module attribute because other scripts
+# and tests read source_requests.REQUEST_KINDS.
+REQUEST_KINDS = BUILTIN_REQUEST_KINDS
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -353,13 +359,17 @@ def validate_question_slugs(project_root: Path, config: dict[str, Any], slugs: l
     return cleaned
 
 
-def manifest_source_ids(project_root: Path, config: dict[str, Any]) -> set[str]:
+def manifest_path(project_root: Path, config: dict[str, Any]) -> Path:
     sources_config = config.get("sources") if isinstance(config.get("sources"), dict) else {}
     manifest_value = sources_config.get("manifest_path", "sources/manifest.jsonl")
-    manifest = project_root / validate_generated_sources_path(manifest_value, "sources.manifest_path")
-    ids: set[str] = set()
+    return project_root / validate_generated_sources_path(manifest_value, "sources.manifest_path")
+
+
+def iter_manifest_records(project_root: Path, config: dict[str, Any]):
+    """Yield every well-formed manifest record. Malformed lines are skipped, not fatal."""
+    manifest = manifest_path(project_root, config)
     if not manifest.is_file():
-        return ids
+        return
     for line in manifest.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -368,8 +378,35 @@ def manifest_source_ids(project_root: Path, config: dict[str, Any]) -> set[str]:
         except json.JSONDecodeError:
             continue
         if isinstance(record, dict) and isinstance(record.get("id"), str):
-            ids.add(record["id"])
-    return ids
+            yield record
+
+
+def manifest_source_ids(project_root: Path, config: dict[str, Any]) -> set[str]:
+    return {record["id"] for record in iter_manifest_records(project_root, config)}
+
+
+def manifest_record_by_id(project_root: Path, config: dict[str, Any], source_id: str) -> dict[str, Any] | None:
+    """Return one full manifest record, including its merged ``provenance`` object.
+
+    Sidecar fields reach consumers through the manifest record that
+    ``source_inventory.py`` builds, so scope matching never re-reads a
+    ``.provenance.yml`` from disk and never disagrees with the inventoried view.
+    """
+    for record in iter_manifest_records(project_root, config):
+        if record["id"] == source_id:
+            return record
+    return None
+
+
+def source_provenance_scope(project_root: Path, config: dict[str, Any], source_id: str) -> dict[str, str]:
+    """Return the scope a delivered source declares, or an empty mapping when unstamped."""
+    record = manifest_record_by_id(project_root, config, source_id)
+    if record is None:
+        return {}
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        return {}
+    return normalize_scope(provenance.get("scope"))
 
 
 def render_request_line(record: dict[str, Any]) -> str:
