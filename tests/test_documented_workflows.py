@@ -211,6 +211,17 @@ class DocumentedWorkflowTests(unittest.TestCase):
         )
         return answer
 
+    def documented_yaml_block(self, document: str, needle: str) -> str:
+        """The documented ``grounding:`` block, taken from the fence that contains ``needle``.
+
+        Sliced from the fence rather than restated here: a copy in the test would let the
+        published bytes drift while the assertion kept passing.
+        """
+        for block in re.findall(r"```yaml\n(.*?)```", document, re.DOTALL):
+            if needle in block:
+                return block[block.index("grounding:") :].rstrip("\n")
+        raise AssertionError(f"no documented yaml block contains {needle!r}")
+
     def test_documented_validation_sequence_writes_manifest_before_normalization_dry_run(self):
         readme = README.read_text()
         readiness = READINESS.read_text()
@@ -309,7 +320,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
             self.assertIn(expected, handoff)
         for expected in (
             "--require-grounding",
-            "`claim`, `source_id`, `quote`",
+            "`claim`, `source_id`, and exactly **one** form",
             "retrieved bytes",
             "GROUNDING_QUOTE_INVALID",
         ):
@@ -322,6 +333,140 @@ class DocumentedWorkflowTests(unittest.TestCase):
             "source_not_normalized",
         ):
             self.assertIn(expected, verify_skill)
+
+    def test_structured_anchor_grounding_contract_is_documented(self):
+        """Anchor form is only usable if its rules are published where authors look."""
+        question_api = QUESTION_API_DOC.read_text()
+        answer_skill = ANSWER_SKILL.read_text()
+        verify_skill = VERIFY_SKILL.read_text()
+        record_format = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
+        research_yml = RESEARCH_YML_DOC.read_text()
+
+        # Prose assertions run against a whitespace-collapsed copy: where a sentence happens
+        # to wrap is an editing accident, and a test that fails on a reflow trains people to
+        # stop reading it.
+        question_api_prose = " ".join(question_api.split())
+        for expected in (
+            "hosts must stop editing `grounding` by hand",
+            "is checked by **equality**",
+        ):
+            self.assertIn(expected, question_api_prose)
+        self.assertIn('`"007"` stays `"007"`', " ".join(record_format.split()))
+
+        for expected in (
+            # The form itself, and the two write paths that replace hand-editing.
+            "`anchor`",
+            "`pointer`",
+            "`expected`",
+            "RFC 6901",
+            "equality, never containment",
+            "grounding set",
+            "--grounding-file",
+            "verification: not_performed",
+            "`grounding: []`",
+            # The stable machine surfaces a host switches on.
+            "GROUNDING_ANCHOR_INVALID",
+            "GROUNDING_FILE_INVALID",
+            "structured_view_missing",
+            "structured_view_corrupt",
+            "anchor_pointer_not_found",
+            "anchor_target_not_scalar",
+            "anchor_value_mismatch",
+            "structured_anchor_evidence",
+            "retained_quote_evidence_or_structured_anchor_evidence",
+            "by_form",
+            "grounding_entries_quote",
+            "grounding_entries_anchor",
+        ):
+            self.assertIn(expected, question_api)
+        for expected in ("`anchor`", "grounding set", "GROUNDING_ANCHOR_INVALID"):
+            self.assertIn(expected, answer_skill)
+        for expected in ("anchor_value_mismatch", "structured_view_missing"):
+            self.assertIn(expected, verify_skill)
+        for expected in (
+            "## Structured View Sidecar",
+            ".structured.json",
+            "content_hash",
+            "NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID",
+            "with_structured_view",
+            # The native tabular emission and its fail-closed rule.
+            '"columns"',
+            "rows/41/price",
+            "fail-closed",
+        ):
+            self.assertIn(expected, record_format)
+        # CR-7 adds no configuration; say so where an operator would go looking for a knob.
+        self.assertIn("Structured-view sidecars need no configuration.", research_yml)
+
+    def test_documented_grounding_write_path_produces_the_documented_bytes(self):
+        """The canonical serialization in question-api.md is what the shipped writer emits.
+
+        Documentation about byte-exact output is only true if it is executed: this runs the
+        documented `grounding set` command over the documented file shape and diffs the
+        resulting frontmatter block against the block the doc publishes as normative.
+        """
+        question_api = QUESTION_API_DOC.read_text()
+        canonical = self.documented_yaml_block(question_api, "grounding:\n  - claim: ")
+        documented_command = (
+            "python3 scripts/question_resolve.py --project-root ROOT grounding set \\\n"
+            "  --slug SLUG --from-file grounding.yml --agent-id agent-a --format json"
+        )
+        self.assertIn(documented_command, question_api)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(
+                root,
+                [{"id": "supplier-price", "question": "What is the supplier price?", "priority": "high"}],
+            )
+            anchor_source = "data--keepa--b0abc123"
+            quote_source = "web:vendor-official-product-spec"
+            self.seed_manifest_source(target, anchor_source)
+            manifest = target / "sources" / "manifest.jsonl"
+            with manifest.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "id": quote_source,
+                            "kind": "markdown",
+                            "raw_paths": ["raw/papers/bench-survey.md"],
+                            "status": "normalized",
+                            "detected_at": "2026-06-19T00:00:00Z",
+                        }
+                    )
+                    + "\n"
+                )
+
+            grounding_file = root / "grounding.yml"
+            grounding_file.write_text(canonical + "\n", encoding="utf-8")
+
+            code, payload, stderr = self.run_json_script(
+                QUESTION_RESOLVE,
+                [
+                    "--project-root",
+                    str(target),
+                    "grounding",
+                    "set",
+                    "--slug",
+                    "supplier-price",
+                    "--from-file",
+                    str(grounding_file),
+                    "--agent-id",
+                    "agent-a",
+                    "--allow-unclaimed",
+                    "--format",
+                    "json",
+                ],
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("grounding set", payload["action"])
+            self.assertEqual(2, payload["grounding_count"])
+            self.assertEqual({"quote": 1, "anchor": 1}, payload["by_form"])
+            # The doc states the envelope says it verified nothing; the envelope must.
+            self.assertEqual("not_performed", payload["verification"])
+
+            page = (target / "wiki" / "questions" / "supplier-price.md").read_text(encoding="utf-8")
+            self.assertIn(canonical, page)
 
     def test_coverage_status_lint_and_export_contracts_are_documented(self):
         coverage = COVERAGE_DOC.read_text()
