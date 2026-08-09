@@ -379,9 +379,13 @@ and starts comparing declared scope against the delivered source's sidecar
    already declared is refused) and against the source's metadata, the same
    way declared scope is checked.
 3. **`fulfill --require-scope`** (opt-in strict mode): upgrades absence to
-   refusal. Every key the request's scope declares must be present *and*
-   equal in the source's provenance scope, or the fulfil is refused with
-   `REQUEST_SCOPE_MISSING`, naming each absent key.
+   refusal. Every key the request's scope declares **and** every key
+   `--match-scope` asserts must be present *and* equal in the source's
+   provenance scope, or the fulfil is refused with `REQUEST_SCOPE_MISSING`,
+   naming each absent key. Asserted keys are covered because layer 2 can only
+   catch a delivery that *disagrees* with an assertion: without this, an
+   explicit `--match-scope` claim against an unstamped source would be
+   accepted with nothing verified, and no flag could ask otherwise.
 
 A key present on only one side is not a contradiction under layers 1–2 — the
 package's own language for this check is "contradicts," which is lenient by

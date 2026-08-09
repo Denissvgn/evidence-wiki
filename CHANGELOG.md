@@ -40,9 +40,10 @@
   being recorded as fulfilling a request for facet X. `fulfill --match-scope
   key=value` lets the caller assert scope keys when fulfilling, checked the
   same way. `fulfill --require-scope` upgrades absence to a refusal: every key
-  the request declares must be present and equal in the delivered scope, or
-  the fulfilment is refused with `REQUEST_SCOPE_MISSING` — the fail-closed
-  mode for a delivery pipeline that can guarantee it stamps scope. Malformed
+  the request declares, and every key `--match-scope` asserts, must be present
+  and equal in the delivered scope, or the fulfilment is refused with
+  `REQUEST_SCOPE_MISSING` — the fail-closed mode for a delivery pipeline that
+  can guarantee it stamps scope. Malformed
   `--scope`/`--match-scope` input (missing `=`, a malformed key, a repeated
   key) is refused with `REQUEST_SCOPE_INVALID`. None of this is required: a
   request that declares no scope, or a delivery whose sidecar declares none,

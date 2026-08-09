@@ -45,8 +45,9 @@ Inputs:
   cannot satisfy the request it was fetched for.
 - Stamp a request's `scope` mapping into the same sidecar's `scope:` field, key for key,
   whenever the request declares one. `fulfill --require-scope` (step 5) makes that stamp
-  load-bearing: it refuses a delivery that omits a scope key the request declares, closing
-  the gap where an unstamped delivery would otherwise slip past every check.
+  load-bearing: it refuses a delivery that omits a scope key the request declares, or one
+  `--match-scope` asserts, closing the gap where an unstamped delivery would otherwise slip
+  past every check.
 - Do all of this **while the order is pending**. Fulfilling or reopening between actions is
   refused, because no work order accounts for it.
 - Never write below `runs/orchestrations/`, and never invoke `evidence-wiki orchestrate`
