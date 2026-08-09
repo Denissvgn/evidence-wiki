@@ -108,6 +108,20 @@ ESCALATION_SCOPE_QUESTION = _review_config.ESCALATION_SCOPE_QUESTION
 ReviewConfigError = _review_config.ReviewConfigError
 review_config = _review_config.review_config
 _normalized_contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract")
+_verify_quotes = load_workspace_module(_SCRIPT_DIR, "verify_quotes")
+
+# `sources/normalized/<safe id>.structured.json`, borrowed rather than spelled again so a
+# sidecar the normalizer writes and lint looks for can never be two different filenames.
+STRUCTURED_SIDECAR_SUFFIX = _normalized_contract.STRUCTURED_VIEW_SUFFIX
+# One migration counter per grounding form, derived from the forms verify_quotes defines so
+# the stat block cannot describe a set of forms the validator no longer recognises.
+GROUNDING_FORM_STATS = {
+    form: f"grounding_entries_{form}" for form in _verify_quotes.GROUNDING_FORMS
+}
+# `grounding_entries` names the offending question in the error it raises; lint discards
+# that error and reports its own finding against the page path, so the slug is a label for
+# an exception that never escapes.
+GROUNDING_ENTRY_SLUG = "<lint>"
 
 # Half of the controller's MAX_SCOPE_GUARD_BYTES bounded read. Past that guard the
 # controller refuses to verify a delegated acquisition at all, so the warning has to arrive
@@ -1101,6 +1115,35 @@ def index_normalized_sources(
         else:
             unknown_paths.append(path)
     return indexed, manual_ids, unknown_paths, failed_paths
+
+
+def structured_sidecar_record_path(sidecar_path: Path) -> Path:
+    """The normalized record a structured-view sidecar must sit beside."""
+    stem = sidecar_path.name[: -len(STRUCTURED_SIDECAR_SUFFIX)]
+    return sidecar_path.with_name(f"{stem}.md")
+
+
+def orphaned_structured_sidecars(normalized_root: Path) -> list[Path]:
+    """Structured-view sidecars with no normalized record beside them at all.
+
+    A peer pass to ``index_normalized_sources``, which globs ``*.md`` — as does every
+    other consumer in the workspace. That is what makes this file reachable by nothing:
+    an anchor resolves a sidecar only through the record that binds it, so a sidecar
+    whose record was never written, or was deleted out from under it, is inert bytes no
+    tool will ever open. The record contract already reports the neighbouring case (a
+    sidecar beside a record that fails to *declare* it); this is the case where there is
+    no record to declare anything.
+    """
+    if not normalized_root.is_dir():
+        return []
+    sidecars = sorted(
+        normalized_root.rglob(f"*{STRUCTURED_SIDECAR_SUFFIX}"),
+        key=lambda value: value.as_posix(),
+    )
+    if not sidecars:
+        return []
+    records = {path.as_posix() for path in normalized_root.rglob("*.md")}
+    return [path for path in sidecars if structured_sidecar_record_path(path).as_posix() not in records]
 
 
 def min_rendered_coverage_ratio(config: dict[str, Any]) -> float | None:
@@ -2871,20 +2914,30 @@ def check_answered_question_coverage(
         )
 
 
-def valid_grounding_entries(value: Any) -> bool:
+def parse_grounding_entries(value: Any) -> list[dict[str, Any]] | None:
+    """The workspace's grounding entries, form-tagged, or ``None`` if the block is invalid.
+
+    The entry contract lives in ``verify_quotes`` and is borrowed rather than restated:
+    lint once carried its own stricter-in-one-way, laxer-in-another copy, which is exactly
+    how it came to reject every anchor-form entry the verifier accepts. One owner, one
+    answer to "is this entry well formed?".
+
+    ``grounding_entries`` raises on a bad shape because its callers are gates. Lint is not
+    a gate — it reports findings and must survive whatever a workspace happens to contain —
+    so the refusal is translated into ``None`` here and nowhere else.
+    """
+    # An empty list is a block that grounds nothing; verify_quotes reads it as "no
+    # grounding to check", which for an answered page is precisely the defect.
     if not isinstance(value, list) or not value:
-        return False
-    for item in value:
-        if not isinstance(item, dict):
-            return False
-        for field in ("claim", "source_id", "quote"):
-            field_value = item.get(field)
-            if not isinstance(field_value, str) or not field_value.strip():
-                return False
-        location_hint = item.get("location_hint")
-        if location_hint is not None and not isinstance(location_hint, str):
-            return False
-    return True
+        return None
+    try:
+        return _verify_quotes.grounding_entries({"grounding": value}, GROUNDING_ENTRY_SLUG)
+    except _verify_quotes.VerifyQuotesError:
+        return None
+
+
+def valid_grounding_entries(value: Any) -> bool:
+    return parse_grounding_entries(value) is not None
 
 
 def check_answered_question_grounding(
@@ -2894,18 +2947,32 @@ def check_answered_question_grounding(
     results: dict[str, Any],
 ) -> None:
     label = project_relative(project_root, path)
-    if frontmatter.get("coverage_required") is True and not valid_grounding_entries(frontmatter.get("grounding")):
+    entries = parse_grounding_entries(frontmatter.get("grounding"))
+    if frontmatter.get("coverage_required") is True and entries is None:
         issue(
             results,
             "HIGH",
             "question_grounding_missing",
-            f"Answered coverage-required question is missing valid grounding quotes: {label}",
+            f"Answered coverage-required question is missing valid grounding evidence: {label}",
             [label],
-            "Add `grounding` entries with claim, source_id, quote, and optional location_hint before marking the answer publishable.",
+            "Add `grounding` entries with claim, source_id, and exactly one form of evidence — "
+            "a `quote` (with optional location_hint) found in the normalized record, or an "
+            "`anchor` naming the record's structured-view `pointer` and `expected` value — "
+            "before marking the answer publishable.",
             field="grounding",
-            expected="non-empty grounding entries with claim/source_id/quote",
+            expected="non-empty grounding entries with claim/source_id and either quote or anchor",
             actual=actual_type(frontmatter.get("grounding")) if "grounding" in frontmatter else "missing",
         )
+    # Counted on every answered question, not only the coverage-required ones: the
+    # migration from quoted prose to structured anchors is a property of the whole
+    # workspace, and a question that never had to be grounded still moved when it moved.
+    if entries:
+        stats = results["stats"]
+        # count_by_form only ever reports the forms GROUNDING_FORM_STATS was built from,
+        # so an unmapped form here would mean the two had silently diverged.
+        for form, count in _verify_quotes.count_by_form(entries).items():
+            stat = GROUNDING_FORM_STATS[form]
+            stats[stat] = int(stats.get(stat, 0) or 0) + count
     answered_by = frontmatter.get("answered_by")
     if not isinstance(answered_by, str) or not answered_by.strip():
         answered_by = frontmatter.get("claimed_by")
@@ -3259,6 +3326,21 @@ def check_source_coverage(
             "Add source_id frontmatter or remove the stale normalized record.",
             field="source_id",
             expected="source_id frontmatter or expected normalized filename",
+            actual="missing",
+        )
+
+    for path in orphaned_structured_sidecars(normalized_root):
+        label = project_relative(project_root, path)
+        issue(
+            results,
+            "LOW",
+            "normalized_orphan",
+            f"Structured-view sidecar has no normalized record beside it: {label}",
+            [label],
+            "Re-run normalization so the record that declares this sidecar is written "
+            "beside it, or remove the stale sidecar — nothing reads a sidecar no record binds.",
+            field="structured_view",
+            expected=f"a normalized record at {structured_sidecar_record_path(path).name}",
             actual="missing",
         )
 
@@ -3725,6 +3807,10 @@ def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
             "academic_metadata_missing": 0,
             "openalex_identity_conflict": 0,
             **{stat: 0 for stat in CURATION_STATS},
+            # Declared here rather than only in check_questions: question validation is
+            # optional, and a migration counter that disappears when questions are
+            # disabled cannot be read as "no anchors yet" by anything downstream.
+            **{stat: 0 for stat in GROUNDING_FORM_STATS.values()},
         },
         "issues": [],
         "recommendations": [],
@@ -3985,6 +4071,15 @@ def format_source_coverage_summary(stats: dict[str, Any]) -> str:
     )
 
 
+def format_grounding_summary(stats: dict[str, Any]) -> str:
+    """How much of this workspace's grounding is anchor-based versus quote-based.
+
+    Unlike the source-coverage summary there is no ``disabled`` case: the counters carry
+    zero defaults, so the line reads the same shape whether or not questions were checked.
+    """
+    return " ".join(f"{form}={stats.get(stat, 0)}" for form, stat in GROUNDING_FORM_STATS.items())
+
+
 def format_log_recommendations(results: dict[str, Any]) -> list[str]:
     recommendations = results.get("recommendations")
     if not isinstance(recommendations, list):
@@ -4002,6 +4097,7 @@ def render_log_entry(results: dict[str, Any], timestamp: str, levels: list[str])
         f"- manifest_records: {stats.get('manifest_records', 0)}\n"
         f"- issues: {format_issue_summary(stats, levels)}\n"
         f"- source_coverage: {format_source_coverage_summary(stats)}\n"
+        f"- grounding: {format_grounding_summary(stats)}\n"
         f"- recommendations: {len(recommendations)}\n"
     ]
     lines.extend(f"- recommendation: {recommendation}\n" for recommendation in recommendations)
