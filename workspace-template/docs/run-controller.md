@@ -224,10 +224,15 @@ lease attempt and replays the same action ID instead of creating another child
 run.
 
 Only one package-managed host may drive a parent session at a time; a second
-returns `ORCHESTRATION_ALREADY_RUNNING` without launching a worker. External
-protocol hosts must coordinate the same single-driver rule and must not
-interleave `next` or `submit` with an active managed host. These parent-session
-rules do not change the child run state machine.
+returns `ORCHESTRATION_ALREADY_RUNNING` without launching a worker. That lock
+is window-scoped; alongside it the parent controller enforces the
+single-driver rule per invocation, refusing a second concurrent `start`,
+`next`, or `submit` with `ORCHESTRATION_DRIVER_BUSY` and exit code `5` rather
+than queueing behind it. `--driver-wait-seconds SECONDS` restores a bounded
+wait for a host that wants one, and `status` stays lock-free. External protocol
+hosts must still not interleave `next` or `submit` with an active managed host:
+a per-invocation lock cannot see the gap between the managed host's own calls.
+These parent-session rules do not change the child run state machine.
 
 Discovery and candidate-review child phases also retain an immutable evidence
 boundary. Their parent work orders snapshot configured raw roots with a bounded
