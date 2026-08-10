@@ -485,24 +485,38 @@ class NoSystemExitEscapesTests(WorkspaceFixture):
         # rather than refusing it, which is the reason to run it at all.
         self.assertIn("verdict", handle.doctor())
 
-    def test_normalize_verify_propagates_the_scripts_yaml_error_exactly_as_the_cli_does(self):
-        # Known upstream gap, pinned rather than papered over: unlike its
-        # siblings, ``normalize_verify.load_config`` calls ``yaml.safe_load``
-        # outside the ``SystemExit``/``NormalizeVerifyError`` funnel, so a
-        # malformed ``research.yml`` escapes as a raw ``YAMLError``. The CLI
-        # tracebacks on the same input, so the API is *faithful* here; the fix
-        # belongs in the script, which this unit does not own. If a later unit
-        # funnels it, this test flips to a typed ConfigError and should be
-        # updated -- that is the point of pinning it.
+    def test_normalize_verify_refuses_a_malformed_research_yml_like_its_siblings(self):
+        # This test used to pin the opposite: ``normalize_verify.load_config``
+        # called ``yaml.safe_load`` outside its refusal funnel, so a malformed
+        # ``research.yml`` escaped as a raw ``YAMLError`` -- a traceback from the
+        # CLI and an untyped third-party exception for a host, where every
+        # sibling turned the identical input into ``CONFIG_INVALID``. The script
+        # now guards it the way ``workspace_status`` and ``export_answers``
+        # already did, so the assertion is inverted rather than deleted: the
+        # inversion is the record that the gap was closed deliberately.
         import yaml
 
         target = self.broken_workspace("yaml-parity-probe")
-        with self.assertRaises(yaml.YAMLError):
+        with self.assertRaises(errors.ConfigError) as caught:
             self.open_workspace(target).normalize.verify()
-        # ... and the CLI does the same thing, which is what makes this parity
-        # rather than a regression introduced by the facade.
-        with self.assertRaises(yaml.YAMLError):
-            cli.main(["normalize", "verify", "--target", str(target), "--format", "json"])
+        self.assertEqual("CONFIG_INVALID", caught.exception.error_code)
+        # Not a SystemExit either: inside an ASGI worker that would end the
+        # process rather than the request.
+        self.assertNotIsInstance(caught.exception, SystemExit)
+        # And nothing raw escapes -- the point of the funnel is that the host
+        # never sees PyYAML's exception type.
+        self.assertNotIsInstance(caught.exception, yaml.YAMLError)
+
+        # The CLI refuses the same input the same way: an error envelope on
+        # stderr carrying the same code, which is what makes API and CLI one
+        # behavior rather than two that happen to agree today.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            exit_code = cli.main(["normalize", "verify", "--target", str(target), "--format", "json"])
+        envelope = json.loads(stderr.getvalue())
+        self.assertEqual("CONFIG_INVALID", envelope["error_code"])
+        self.assertEqual(caught.exception.error_code, envelope["error_code"])
+        self.assertEqual(2, exit_code)
 
     def test_a_missing_packaged_script_is_a_config_error_not_a_system_exit(self):
         # ``_script_host`` reports an unloadable script by raising SystemExit(str),

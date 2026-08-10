@@ -106,7 +106,15 @@ def load_config(project_root: Path) -> dict[str, Any]:
     path = project_root / "research.yml"
     if not path.is_file():
         raise SystemExit(f"Missing config: {path}")
-    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        # Same message and funnel as workspace_status and export_answers use for
+        # this file. Unguarded, a malformed research.yml escaped as a raw
+        # yaml.parser.ParserError: a traceback from the CLI, and an untyped
+        # third-party exception for a library caller, where every sibling turns
+        # the identical input into a CONFIG_INVALID envelope.
+        raise SystemExit(f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(document, dict):
         raise SystemExit(f"Invalid config: {path}")
     return document
