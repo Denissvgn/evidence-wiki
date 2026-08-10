@@ -1,0 +1,7 @@
+{
+  "supplier_quote": {
+    "currency": "EUR",
+    "sku": "B0ABC12345",
+    "unit_price_eur": "23.99"
+  }
+}

@@ -1,0 +1,11 @@
+# Same delivery in every respect except its age: 50 hours puts it past the pack's
+# `max_age: 48h` bound, which is what makes the stale half of the suite a fixture fact
+# rather than a mutation a test performs. See the fresh sidecar for `retrieved_at_hours_ago`.
+retrieved_at_hours_ago: 50
+origin_url: https://api.supplier.test/product/B0ABC12345
+license: CC-BY-4.0
+retrieved_by: fixture-agent/aliexpress-ds
+provider_registration:
+  id: aliexpress-ds
+  display_name: AliExpress Dropshipping Feed
+  registered_by: fixture-operator

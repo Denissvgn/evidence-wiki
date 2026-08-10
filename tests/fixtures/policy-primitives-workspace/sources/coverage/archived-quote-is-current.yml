@@ -1,0 +1,23 @@
+# Identical policies to quote-is-current.yml, pointed at the 50-hour delivery. The
+# freshness rule is the only thing that differs between the two facets, so a blocked
+# verdict here can only be the `max_age: 48h` bound doing its job.
+schema_version: "1.0"
+question_slug: archived-quote-is-current
+created_at: "2026-08-11T00:00:00Z"
+updated_at: "2026-08-11T00:00:00Z"
+coverage_profile: supplier-quote
+coverage_verdict: pending
+required_facets:
+  - facet_id: supplier-quote
+    description: A current supplier quote for the candidate SKU.
+    required: true
+    evidence_path: vendor_product_spec
+    source_policy: pack:market-data/quote-provider
+    freshness_policy: pack:market-data/quote-48h
+    identity_policy: pack:market-data/sku-matches-candidate
+    min_sources: 1
+    accepted_source_ids:
+      - quote:supplier-archived
+    blocking_request_ids: []
+    facet_verdict: pending
+optional_facets: []
