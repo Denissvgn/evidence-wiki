@@ -358,6 +358,227 @@ class DomainPackValidationTests(unittest.TestCase):
             "domain_pack.request_kinds must be a list of kind declarations",
         )
 
+    QUOTE_POLICY = "pack:market-data/quote-48h"
+    QUOTE_VOCABULARY = {"freshness_policy": {QUOTE_POLICY: "A supplier quote must be at most 48 hours old."}}
+    QUOTE_RULE = {"all_of": [{"max_age": {"field": "provenance/retrieved_at", "hours": 48}}]}
+
+    def validate_pack_declaring_policy_rules(
+        self,
+        pack_name: str,
+        policy_vocabularies,
+        policy_rules,
+        required_facet: dict | None = None,
+    ) -> tuple[int, dict]:
+        """Validate a throwaway copy of a shipped pack whose overlay declares ``policy_rules``.
+
+        Shipped packs deliberately declare no policy rules, so every declaration case is
+        exercised against a temporary copy instead of inventing placeholder rules.
+        ``required_facet`` additionally writes and registers a coverage template carrying
+        that facet, which is what puts a declared policy in front of the autonomy gate.
+        """
+        source_pack = REPO_ROOT / "domain-packs" / "llm-research"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_path = Path(tmpdir) / pack_name
+            shutil.copytree(source_pack, pack_path)
+            overlay_path = pack_path / "research.overlay.yml"
+            overlay = yaml.safe_load(overlay_path.read_text())
+            overlay["domain_pack"]["name"] = pack_name
+            overlay["domain_pack"]["policy_vocabularies"] = policy_vocabularies
+            if policy_rules is not None:
+                overlay["domain_pack"]["policy_rules"] = policy_rules
+            if required_facet is not None:
+                template_path = pack_path / "coverage-templates" / "rule-backed.yml"
+                template_path.parent.mkdir(parents=True, exist_ok=True)
+                template_path.write_text(
+                    yaml.safe_dump(
+                        {
+                            "coverage_profile": "rule-backed",
+                            "required_facets": [required_facet],
+                            "optional_facets": [],
+                        },
+                        sort_keys=False,
+                    )
+                )
+                overlay["domain_pack"]["coverage_templates"] = {"rule-backed": "coverage-templates/rule-backed.yml"}
+            overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False))
+
+            code, stdout, stderr = self.run_validator("--path", str(pack_path))
+
+        self.assertEqual("", stderr)
+        return code, json.loads(stdout)
+
+    def rule_backed_required_facet(self, freshness_policy: str) -> dict:
+        return {
+            "facet_id": "quote-freshness",
+            "description": "A supplier quote must be at most 48 hours old.",
+            "evidence_path": "vendor_product_spec",
+            "source_policy": "official_vendor",
+            "freshness_policy": freshness_policy,
+            "identity_policy": "none",
+            "min_sources": 1,
+        }
+
+    def assert_policy_rules_failure(self, payload: dict, *offending: str) -> None:
+        checks = {check["id"]: check for check in payload["checks"]}
+        policy_rules = checks["policy_rules"]
+        self.assertEqual("fail", policy_rules["status"], policy_rules)
+        self.assertEqual(["research.overlay.yml"], policy_rules["files"])
+        self.assertEqual({}, payload["domain_pack"]["policy_rules"])
+        for fragment in offending:
+            self.assertIn(fragment, policy_rules["message"])
+
+    def test_policy_rules_pass_when_pack_declares_none(self):
+        code, stdout, stderr = self.run_validator("--path", "llm-research")
+        payload = json.loads(stdout)
+
+        self.assertEqual(0, code, stderr)
+        checks = {check["id"]: check for check in payload["checks"]}
+        self.assertEqual("pass", checks["policy_rules"]["status"])
+        self.assertEqual("No domain-pack policy rules declared.", checks["policy_rules"]["message"])
+        self.assertEqual({}, payload["domain_pack"]["policy_rules"])
+
+    def test_policy_rules_accept_valid_deterministic_declaration(self):
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            {
+                "freshness_policy": {self.QUOTE_POLICY: "A supplier quote must be at most 48 hours old."},
+                "identity_policy": {"pack:market-data/sku-matches": "The quoted SKU must match the candidate."},
+            },
+            {
+                self.QUOTE_POLICY: self.QUOTE_RULE,
+                "pack:market-data/sku-matches": {
+                    "manual_review_required": True,
+                    "any_of": [
+                        {"equals": {"field": "record/supplier_quote/sku", "question_field": "metadata/candidate_sku"}},
+                        {"one_of_provenance": {"providers": ["partner-catalog"]}},
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(0, code, payload)
+        self.assertTrue(payload["ok"], payload)
+        checks = {check["id"]: check for check in payload["checks"]}
+        self.assertEqual("pass", checks["policy_rules"]["status"])
+        self.assertEqual(
+            "Domain pack declares 2 deterministic policy rule(s).",
+            checks["policy_rules"]["message"],
+        )
+        self.assertEqual(
+            {
+                self.QUOTE_POLICY: {
+                    "primitives": ["all_of", "max_age"],
+                    "manual_review_required": False,
+                },
+                "pack:market-data/sku-matches": {
+                    "primitives": ["any_of", "equals", "one_of_provenance"],
+                    "manual_review_required": True,
+                },
+            },
+            payload["domain_pack"]["policy_rules"],
+        )
+
+    def test_policy_rules_reject_unknown_primitive(self):
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            self.QUOTE_VOCABULARY,
+            {self.QUOTE_POLICY: {"all_of": [{"no_such_primitive": {}}]}},
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_policy_rules_failure(
+            payload,
+            f"domain_pack.policy_rules[{self.QUOTE_POLICY}]",
+            "'no_such_primitive'",
+            "max_age",
+        )
+
+    def test_policy_rules_reject_policy_absent_from_vocabularies(self):
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            {"freshness_policy": {"pack:market-data/some-other-policy": "A different declared policy."}},
+            {self.QUOTE_POLICY: self.QUOTE_RULE},
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_policy_rules_failure(
+            payload,
+            f"domain_pack.policy_rules[{self.QUOTE_POLICY}]",
+            "not declared under domain_pack.policy_vocabularies",
+        )
+
+    def test_policy_rules_reject_foreign_namespace(self):
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            self.QUOTE_VOCABULARY,
+            {"pack:other-pack/quote-48h": self.QUOTE_RULE},
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assert_policy_rules_failure(
+            payload,
+            "domain_pack.policy_rules[pack:other-pack/quote-48h]",
+            "'other-pack'",
+            "'market-data'",
+        )
+
+    def test_rule_backed_policy_clears_a_required_facet_for_autonomous_validation(self):
+        """A pack policy carrying a deterministic rule is no longer manual-only.
+
+        The paired ``..._without_a_rule`` test removes only the rule, so together they
+        show the autonomy gate turns on the rule rather than on anything else here.
+        """
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            self.QUOTE_VOCABULARY,
+            {self.QUOTE_POLICY: self.QUOTE_RULE},
+            required_facet=self.rule_backed_required_facet(self.QUOTE_POLICY),
+        )
+
+        self.assertEqual(0, code, payload)
+        self.assertTrue(payload["ok"], payload)
+        self.assertFalse(payload["domain_pack"]["human_gated"])
+        checks = {check["id"]: check for check in payload["checks"]}
+        self.assertEqual("pass", checks["policy_rules"]["status"])
+        self.assertEqual("pass", checks["autonomous_required_facets"]["status"], checks["autonomous_required_facets"])
+
+    def test_required_facet_policy_without_a_rule_stays_manual_only(self):
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            self.QUOTE_VOCABULARY,
+            None,
+            required_facet=self.rule_backed_required_facet(self.QUOTE_POLICY),
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        self.assertEqual({}, payload["domain_pack"]["policy_rules"])
+        checks = {check["id"]: check for check in payload["checks"]}
+        autonomy = checks["autonomous_required_facets"]
+        self.assertEqual("fail", autonomy["status"], autonomy)
+        self.assertIn(self.QUOTE_POLICY, autonomy["message"])
+        self.assertIn("use a deterministic policy", autonomy["message"])
+
+    def test_rule_requiring_manual_review_keeps_a_required_facet_manual_only(self):
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            self.QUOTE_VOCABULARY,
+            {self.QUOTE_POLICY: {"manual_review_required": True, **self.QUOTE_RULE}},
+            required_facet=self.rule_backed_required_facet(self.QUOTE_POLICY),
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"], payload)
+        checks = {check["id"]: check for check in payload["checks"]}
+        self.assertEqual("pass", checks["policy_rules"]["status"])
+        self.assertTrue(payload["domain_pack"]["policy_rules"][self.QUOTE_POLICY]["manual_review_required"])
+        autonomy = checks["autonomous_required_facets"]
+        self.assertEqual("fail", autonomy["status"], autonomy)
+        self.assertIn(self.QUOTE_POLICY, autonomy["message"])
+
     def test_recommended_acquisition_rejects_unknown_provider(self):
         source_pack = REPO_ROOT / "domain-packs" / "llm-research"
         with tempfile.TemporaryDirectory() as tmpdir:

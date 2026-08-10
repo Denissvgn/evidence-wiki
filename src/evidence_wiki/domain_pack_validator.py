@@ -43,6 +43,7 @@ class LoadedScripts:
     errors: ModuleType
     evidence: ModuleType
     request_kinds: ModuleType
+    policy_primitives: ModuleType
 
 
 def _load_script(script_path: Path, module_name: str) -> ModuleType:
@@ -60,6 +61,9 @@ def load_scripts(starter_root: Path) -> LoadedScripts:
         errors=_load_script(scripts_dir / "_script_errors.py", "domain_pack_validator_errors"),
         evidence=_load_script(scripts_dir / "_evidence_policies.py", "domain_pack_validator_evidence"),
         request_kinds=_load_script(scripts_dir / "_request_kinds.py", "domain_pack_validator_request_kinds"),
+        policy_primitives=_load_script(
+            scripts_dir / "_policy_primitives.py", "domain_pack_validator_policy_primitives"
+        ),
     )
 
 
@@ -432,6 +436,60 @@ def request_kinds_check(scripts: LoadedScripts, domain_pack: Any) -> tuple[dict[
     )
 
 
+def _rule_primitive_names(primitive: Any) -> set[str]:
+    """Collect every primitive name one parsed rule tree uses, compositions included."""
+    names = {primitive.name}
+    for child in primitive.children:
+        names |= _rule_primitive_names(child)
+    return names
+
+
+def policy_rules_check(scripts: LoadedScripts, domain_pack: Any) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Validate ``domain_pack.policy_rules`` before the pack can ship.
+
+    The findings come from the workspace's own ``_policy_primitives.declaration_errors``
+    rather than a second implementation here, so this gate and the runtime refusal in
+    ``pack_policy_rules`` can never disagree about what a pack declared.
+    """
+    if not isinstance(domain_pack, dict):
+        return {}, check(
+            "policy_rules",
+            "pass",
+            "No domain-pack policy rules declared.",
+            ["research.overlay.yml"],
+        )
+    errors = scripts.policy_primitives.declaration_errors(domain_pack)
+    if errors:
+        return {}, check("policy_rules", "fail", "; ".join(errors), ["research.overlay.yml"])
+    try:
+        rules = scripts.policy_primitives.pack_policy_rules({"domain_pack": domain_pack})
+    except scripts.policy_primitives.PolicyRuleError as exc:  # pragma: no cover - guarded by declaration_errors
+        return {}, check("policy_rules", "fail", str(exc), ["research.overlay.yml"])
+    # Summarized rather than carried through as dataclasses: this payload is handed to
+    # ``json.dumps`` in ``main``, and the report answers "what does this pack decide
+    # itself", not "how is each rule spelled" -- the overlay is the text for that.
+    declared = {
+        policy_id: {
+            "primitives": sorted(_rule_primitive_names(rule.composition)),
+            "manual_review_required": rule.manual_review_required,
+        }
+        for policy_id, rule in rules.items()
+    }
+    if not declared:
+        return declared, check(
+            "policy_rules",
+            "pass",
+            "No domain-pack policy rules declared.",
+            ["research.overlay.yml"],
+        )
+    return declared, check(
+        "policy_rules",
+        "pass",
+        f"Domain pack declares {len(declared)} deterministic policy rule(s).",
+        ["research.overlay.yml"],
+    )
+
+
 def coverage_templates_check(
     scripts: LoadedScripts,
     pack_path: Path,
@@ -504,15 +562,32 @@ def coverage_templates_check(
 def manual_only_policies_by_field(
     scripts: LoadedScripts,
     pack_policy_vocabularies: dict[str, dict[str, str]] | None,
+    pack_policy_rules: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, set[str]]:
+    """Name the policies a required facet cannot use without a human, per facet field.
+
+    A pack-declared policy is manual-only because a pack had no vocabulary in which to
+    say how to decide it. A ``policy_rules`` declaration is that vocabulary, so a
+    rule-backed id is deterministic and leaves the set -- otherwise the gate would keep
+    refusing exactly the automation the declaration exists to supply. An id whose rule
+    sets ``manual_review_required`` stays: the pack asked for the human on purpose.
+
+    ``pack_policy_rules`` is the summary :func:`policy_rules_check` returns, and is
+    empty whenever that check failed, so a malformed declaration excludes nothing.
+    """
     pack_policy_vocabularies = pack_policy_vocabularies or {}
+    deterministic = {
+        policy_id
+        for policy_id, summary in (pack_policy_rules or {}).items()
+        if not summary.get("manual_review_required", False)
+    }
     return {
         "source_policy": set(getattr(scripts.evidence, "MANUAL_ONLY_SOURCE_POLICIES", ()))
-        | set(pack_policy_vocabularies.get("source_policy", {})),
+        | (set(pack_policy_vocabularies.get("source_policy", {})) - deterministic),
         "freshness_policy": set(getattr(scripts.evidence, "MANUAL_ONLY_FRESHNESS_POLICIES", ()))
-        | set(pack_policy_vocabularies.get("freshness_policy", {})),
+        | (set(pack_policy_vocabularies.get("freshness_policy", {})) - deterministic),
         "identity_policy": set(getattr(scripts.evidence, "MANUAL_ONLY_IDENTITY_POLICIES", ()))
-        | set(pack_policy_vocabularies.get("identity_policy", {})),
+        | (set(pack_policy_vocabularies.get("identity_policy", {})) - deterministic),
     }
 
 
@@ -525,6 +600,7 @@ def autonomous_required_facets_check(
     pack_policy_vocabularies: dict[str, dict[str, str]] | None,
     merged_policy_vocabularies: dict[str, dict[str, str]] | None,
     templates_valid: bool,
+    pack_policy_rules: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not coverage_templates:
         return check(
@@ -548,7 +624,7 @@ def autonomous_required_facets_check(
             ["research.overlay.yml", *coverage_templates.values()],
         )
 
-    manual_by_field = manual_only_policies_by_field(scripts, pack_policy_vocabularies)
+    manual_by_field = manual_only_policies_by_field(scripts, pack_policy_vocabularies, pack_policy_rules)
     errors: list[str] = []
     files = ["research.overlay.yml"]
     for _slug, relative in sorted(coverage_templates.items()):
@@ -772,6 +848,7 @@ def unsafe_pack_payload(pack_path: Path, tree_safety: dict[str, Any]) -> dict[st
             "coverage_templates": {},
             "human_gated": False,
             "policy_vocabularies": {},
+            "policy_rules": {},
             "request_kinds": {},
         },
         "checks": [
@@ -893,6 +970,9 @@ def validate_domain_pack(selection: str, *, root: Path | None = None) -> dict[st
     policy_vocabularies, vocabulary_check = policy_vocabularies_check(scripts, domain_pack)
     domain_pack_info["policy_vocabularies"] = policy_vocabularies
     checks.append(vocabulary_check)
+    policy_rules, policy_rules_result = policy_rules_check(scripts, domain_pack)
+    domain_pack_info["policy_rules"] = policy_rules
+    checks.append(policy_rules_result)
     merged_policy_vocabularies = None
     if isinstance(domain_pack, dict) and vocabulary_check["status"] == "pass":
         merged_policy_vocabularies = scripts.coverage.merged_policy_vocabularies({"domain_pack": domain_pack})
@@ -916,6 +996,7 @@ def validate_domain_pack(selection: str, *, root: Path | None = None) -> dict[st
             pack_policy_vocabularies=policy_vocabularies,
             merged_policy_vocabularies=merged_policy_vocabularies,
             templates_valid=templates_check["status"] == "pass",
+            pack_policy_rules=policy_rules,
         )
     )
     checks.append(referenced_files_check(pack_path, domain_pack))
