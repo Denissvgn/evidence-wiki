@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.2.4"
+__version__ = "0.3.0"
 
 if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
     # Spelled as redundant aliases: ``__all__`` is derived from the table below

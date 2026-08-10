@@ -408,7 +408,7 @@ beside what is deployed:
 
 ```python
 ws.versions()
-# {'package': '0.2.4',
+# {'package': '0.3.0',
 #  'workspace': {'starter_version': '0.5.5',
 #                'schema_version': '0.1',
 #                'compatible_research_yml_contract': '0.1'}}

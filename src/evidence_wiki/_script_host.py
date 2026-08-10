@@ -158,8 +158,12 @@ def shared_assets_root() -> Path:
     a full asset extraction per handle and every extraction would seed a
     disjoint family of cached script modules, since the module cache is keyed by
     the resolved script directory. Entering exactly once bounds both the
-    extraction cost and the cache. The CLI deliberately keeps its per-command
-    ``with assets_root() as root:`` entry; this function is for the API.
+    extraction cost and the cache. The CLI's API-backed commands reach this same
+    root, so the module the shell renders is the module whose seam produced the
+    document; only the commands that are not operations on an open handle
+    (``init``/``deploy``, ``upgrade``, ``pack validate``, ``serve-mcp``,
+    ``orchestrator-guide``) still keep their own per-command
+    ``with assets_root() as root:`` entry.
     """
     global _SHARED_ASSETS_STACK, _SHARED_ASSETS_ROOT
 

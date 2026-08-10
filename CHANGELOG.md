@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-10
+
 - Drive a workspace from Python without spawning a process per operation. Every
   interaction previously cost a `subprocess` spawn plus JSON-envelope parsing,
   including hot-path ones — `orchestrate next`/`submit`, coverage evaluation,
