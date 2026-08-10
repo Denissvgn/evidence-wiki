@@ -11,12 +11,18 @@ If no lock can be acquired, mutation refuses with ``LOCK_UNAVAILABLE``.
 
 ``EVIDENCE_WIKI_SINGLE_WRITER=1`` is a development-only escape hatch for
 operator-controlled single-writer runs on filesystems where no lock primitive is
-available. It bypasses refusal but reports an unlocked handle to callers.
+available. It bypasses refusal but reports an unlocked handle to callers. It
+also forfeits **driver detection**: because it swallows contention as well as
+backend absence, a second concurrent writer is neither refused nor recorded (no
+holder sidecar is written on that path), so callers that translate contention
+into a refusal — such as the orchestration controller's driver-busy check — can
+never fire under it.
 """
 
 from __future__ import annotations
 
 import errno
+import json
 import os
 import secrets
 import threading
@@ -46,6 +52,14 @@ LOCK_REMEDIATION = (
 LOCK_BACKENDS = ("fcntl", "msvcrt", "exclusive")
 _CONTENDED_ERRNOS = {errno.EACCES, errno.EAGAIN}
 
+# Optional holder metadata is published beside the lock file rather than inside
+# it. The native backends cannot portably carry a payload in the locked file
+# (msvcrt locks a byte range over a sentinel byte), and the exclusive fallback's
+# own payload is load-bearing for stale recovery, so neither may grow a
+# diagnostic field. A sidecar keeps holder reporting backend-agnostic and keeps
+# the lock files themselves byte-identical for callers that pass no holder.
+LOCK_HOLDER_SUFFIX = ".holder.json"
+
 # The exclusive-create backend is the last resort, used only when neither
 # fcntl nor msvcrt is available (for example, some network filesystems). It
 # has no OS-level owner-death notification, so a holder that crashes leaves
@@ -59,7 +73,25 @@ DEFAULT_STALE_EXCLUSIVE_LOCK_SECONDS = 900.0
 
 
 class LockUnavailableError(RuntimeError):
-    """Raised when a workspace mutation lock cannot be established."""
+    """Raised when a workspace mutation lock cannot be established.
+
+    ``contended`` separates the two situations this one exception reports.
+    ``True`` means a backend worked and someone else holds the lock: the caller
+    lost a race with a live writer and retrying can succeed. ``False`` means no
+    backend could be established at all (or the raiser did not know), so the
+    filesystem, not a peer, is the problem and retrying is pointless.
+
+    It is a keyword-only flag on the existing class rather than a subclass on
+    purpose. Workspace scripts load sibling modules by file path, so several
+    copies of this module — and therefore several distinct ``LockUnavailableError``
+    classes — coexist in one interpreter; ``fetch_sources`` already recognises a
+    sibling's refusal by shape (``error_code``) instead of by class identity. A
+    subclass would be invisible to those ``isinstance`` checks across copies,
+    while an attribute survives them: consumers read ``getattr(exc, "contended",
+    False)``, which also degrades safely (to "not contended") against an older
+    vendored copy of this module. Every existing ``except LockUnavailableError``
+    site keeps catching exactly what it caught before.
+    """
 
     def __init__(
         self,
@@ -67,11 +99,13 @@ class LockUnavailableError(RuntimeError):
         *,
         details: dict[str, object] | None = None,
         remediation: str = LOCK_REMEDIATION,
+        contended: bool = False,
     ) -> None:
         super().__init__(message)
         self.error_code = LOCK_UNAVAILABLE
         self.details = details or {}
         self.remediation = remediation
+        self.contended = contended
 
 
 @dataclass(frozen=True)
@@ -159,6 +193,94 @@ def multiprocess_lock_supported() -> bool:
     return bool(lock_capability()["native_backends"])
 
 
+def lock_holder_path(lock_path: Path) -> Path:
+    """Return the sidecar path that carries optional holder metadata."""
+    normalized = Path(lock_path)
+    return normalized.with_name(f"{normalized.name}{LOCK_HOLDER_SUFFIX}")
+
+
+def _write_lock_holder(lock_path: Path, holder: dict[str, object]) -> None:
+    """Publish holder metadata beside a lock this process already holds.
+
+    The holder block is opaque to this module: it is serialized as given, with
+    no required keys, so callers can evolve their own shape without changing
+    the lock. Serialization happens before any filesystem effect, so a caller
+    that passes a non-JSON-serializable holder fails loudly and deterministically
+    instead of leaving a half-written or misleading sidecar.
+
+    The write is temp-file + ``replace`` under a unique temp name so a
+    concurrent writer — a stale-recovery attempt, or a successor that acquired
+    the lock after a crash — cannot steal this writer's temp file. A failed
+    write removes the sidecar rather than leaving whatever was there before:
+    reporting *no* holder is honest, while leaving a predecessor's block would
+    attribute this lock to a process that no longer owns it. The lock itself is
+    already held at this point, so no I/O failure here is allowed to turn a
+    successful acquisition into a refusal.
+    """
+    holder_path = lock_holder_path(lock_path)
+    payload = json.dumps(holder, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    tmp_path = holder_path.with_name(f".{holder_path.name}.{secrets.token_hex(16)}.tmp")
+    try:
+        try:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                try:
+                    os.fsync(handle.fileno())
+                except OSError:  # pragma: no cover - fsync can be unavailable on unusual filesystems
+                    pass
+            tmp_path.replace(holder_path)
+        except OSError:  # pragma: no cover - best effort advisory metadata
+            _unlink_lock_holder(lock_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:  # pragma: no cover - best effort cleanup
+                pass
+
+
+def _unlink_lock_holder(lock_path: Path) -> None:
+    """Remove the holder sidecar, tolerating a filesystem that refuses."""
+    try:
+        lock_holder_path(lock_path).unlink(missing_ok=True)
+    except OSError:  # pragma: no cover - best effort cleanup
+        pass
+
+
+def read_lock_holder(lock_path: Path) -> dict[str, object] | None:
+    """Return the holder block published beside ``lock_path``, if any.
+
+    Advisory and best-effort by construction: this never raises, and ``None``
+    means "no holder could be read", not "no holder exists". A missing file, an
+    unreadable or truncated one, a partially written one from a crashed writer,
+    and JSON that is valid but not an object all report ``None`` so that a
+    caller rendering a refusal can fall back to an "unrecorded holder" message
+    instead of failing while it explains a failure.
+
+    A holder read after a *successful* acquisition would be meaningless, because
+    a lock this process holds carries this process's own sidecar. Callers
+    consult it only after losing the lock, and even then the answer is a hint:
+    the winner writes its sidecar just after acquiring, so a loser that is
+    refused inside that window legitimately sees nothing.
+    """
+    try:
+        # ValueError subsumes both ways a path can fail here: UnicodeError from
+        # bytes that are not valid UTF-8, and a lock path with no filename
+        # component, which ``with_name`` rejects. Neither may reach the caller.
+        raw = lock_holder_path(lock_path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, RecursionError):
+        # ValueError covers JSONDecodeError; RecursionError covers a deeply
+        # nested document written by a buggy or hostile peer. Neither may
+        # escape into a caller's refusal path.
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _deadline(timeout_seconds: float) -> float:
     return time.monotonic() + max(timeout_seconds, 0.0)
 
@@ -182,12 +304,18 @@ def _acquire_fcntl(lock_path: Path, deadline: float, poll_interval_seconds: floa
                 return _AcquiredBackend("fcntl", handle=handle, path=lock_path)
             except BlockingIOError as exc:
                 if time.monotonic() >= deadline:
-                    raise LockUnavailableError(f"Timed out acquiring workspace lock for {lock_path}") from exc
+                    raise LockUnavailableError(
+                        f"Timed out acquiring workspace lock for {lock_path}",
+                        contended=True,
+                    ) from exc
                 _sleep_until(deadline, poll_interval_seconds)
             except OSError as exc:
                 if exc.errno in _CONTENDED_ERRNOS:
                     if time.monotonic() >= deadline:
-                        raise LockUnavailableError(f"Timed out acquiring workspace lock for {lock_path}") from exc
+                        raise LockUnavailableError(
+                            f"Timed out acquiring workspace lock for {lock_path}",
+                            contended=True,
+                        ) from exc
                     _sleep_until(deadline, poll_interval_seconds)
                     continue
                 raise _BackendUnsupported(str(exc)) from exc
@@ -231,7 +359,15 @@ def _acquire_msvcrt(lock_path: Path, deadline: float, poll_interval_seconds: flo
                 return _AcquiredBackend("msvcrt", handle=handle, path=lock_path)
             except OSError as exc:
                 if time.monotonic() >= deadline:
-                    raise LockUnavailableError(f"Timed out acquiring workspace lock for {lock_path}") from exc
+                    # Both failures this loop retries are peer-induced: a byte-range
+                    # lock refusal, and the transient sharing violation a concurrent
+                    # initializer causes. Exhausting the deadline on either one means
+                    # another writer was there, so this is contention rather than an
+                    # absent backend.
+                    raise LockUnavailableError(
+                        f"Timed out acquiring workspace lock for {lock_path}",
+                        contended=True,
+                    ) from exc
                 _sleep_until(deadline, poll_interval_seconds)
     except Exception:
         handle.close()
@@ -485,7 +621,10 @@ def _acquire_exclusive(
             )
         except FileExistsError as exc:
             if time.monotonic() >= deadline:
-                raise LockUnavailableError(f"Timed out acquiring workspace lock for {lock_path}") from exc
+                raise LockUnavailableError(
+                    f"Timed out acquiring workspace lock for {lock_path}",
+                    contended=True,
+                ) from exc
             if not already_attempted_stale_recovery:
                 observation = _stale_exclusive_lock_observation(path, stale_after_seconds)
                 if observation is not None:
@@ -547,9 +686,14 @@ def _acquire_backend(
         except _BackendUnsupported as exc:
             unsupported.append(f"{backend}: {exc}")
             continue
+    # Not contention: every configured backend refused to work at all, so there
+    # is no peer to name and no retry that would help. A backend that *did*
+    # work and lost the race raises with contended=True from inside its own
+    # acquire loop, which propagates past this loop untouched.
     raise LockUnavailableError(
         f"No workspace lock backend is available for {lock_path}",
         details={"unsupported_backends": unsupported},
+        contended=False,
     )
 
 
@@ -570,6 +714,7 @@ def workspace_lock(
     poll_interval_seconds: float = 0.05,
     purpose: str = "workspace mutation",
     stale_exclusive_after_seconds: float = DEFAULT_STALE_EXCLUSIVE_LOCK_SECONDS,
+    holder: dict[str, object] | None = None,
 ) -> Iterator[WorkspaceLockHandle]:
     """Acquire an exclusive workspace mutation lock.
 
@@ -577,6 +722,28 @@ def workspace_lock(
     escape hatch was used. Callers that emit machine JSON may include that fact
     in warnings. ``stale_exclusive_after_seconds`` only affects the last-resort
     exclusive-create backend; see its module-level default for rationale.
+
+    ``holder`` is optional, opaque, JSON-serializable metadata describing who is
+    taking the lock. When given, it is published to
+    ``<lock_path>.holder.json`` after acquisition so that a peer refused by
+    contention can name the holder instead of reporting an anonymous timeout.
+    Passing no holder leaves every artifact this function touches
+    byte-identical to before: no sidecar is written, read, or removed.
+
+    Two ordering guarantees make the sidecar useful rather than misleading:
+
+    * It is written only *after* the lock is held, so a published holder always
+      described a real owner at the moment it was written.
+    * It is removed *before* the backend is released, so the window in which a
+      reader can see a released holder's leftovers is the release itself rather
+      than the whole time between release and the next acquisition.
+
+    A holder that crashes leaves its sidecar behind; this is accepted rather
+    than defended against, because the next successful acquirer overwrites it
+    and readers consult it only after failing to acquire — that is, only while
+    *someone* holds the lock. Under ``EVIDENCE_WIKI_SINGLE_WRITER=1`` no sidecar
+    is written at all: that path yields without holding anything, so it has no
+    ownership to publish.
     """
     normalized = Path(lock_path)
     acquired: _AcquiredBackend | None = None
@@ -600,6 +767,14 @@ def workspace_lock(
         raise
 
     try:
+        if holder is not None:
+            _write_lock_holder(normalized, holder)
         yield WorkspaceLockHandle(path=normalized, purpose=purpose, backend=acquired.name)
     finally:
-        _release_backend(acquired)
+        # Nested so that nothing on the sidecar path — including a caller error
+        # that made the holder unserializable — can leave the backend held.
+        try:
+            if holder is not None:
+                _unlink_lock_holder(normalized)
+        finally:
+            _release_backend(acquired)
