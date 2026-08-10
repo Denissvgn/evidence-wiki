@@ -55,6 +55,48 @@ domain_pack:
       description: Live SKU price + shipping + MOQ from a named supplier, ≤ 48h old.
 ```
 
+## Policy Rules
+
+Pack overlays may also declare optional `domain_pack.policy_rules`, which say how
+the pack's own evidence policies are decided instead of falling to
+`manual_review`. Declare the vocabulary definition text first — the sentence a
+reviewer would act on — then add a rule only for the part of that sentence a
+machine can settle from data the workspace already holds: the source's
+structured-view sidecar, its delivery provenance, or the question's frontmatter.
+A rule is data, never code. A pack names primitives from a closed set —
+`max_age`, `equals`, `numeric_range`, `regex`, and `one_of_provenance`, composed
+with `all_of` and `any_of` — and the package evaluates them.
+
+```yaml
+domain_pack:
+  name: market-data
+  policy_vocabularies:
+    freshness_policy:
+      pack:market-data/quote-48h: A supplier quote must be at most 48 hours old.
+  policy_rules:
+    pack:market-data/quote-48h:
+      all_of:
+        - max_age: {field: provenance/retrieved_at, hours: 48}
+```
+
+Keep judgement calls manual. `pack:general-science/study-recency` asks a reviewer
+to confirm that study dates, dataset releases, and follow-up literature are recent
+enough *for the scientific question*, and no threshold is right across studies.
+It ships with no rule, and it should stay that way: writing one would replace a
+reviewer's judgement with a number nobody agreed on. The same applies to any
+definition asking whether evidence is adequate, appropriate, comparable, or
+representative. Where a policy is partly mechanical, add the rule and set
+`manual_review_required: true` — the checks run and the answer still routes to a
+human, which narrows what the reviewer must inspect without pretending the
+judgement was made.
+
+`evidence-wiki pack validate` reports a `policy_rules` check before the pack
+ships, and a rule-backed policy that does not set `manual_review_required` counts
+as deterministic, so a required coverage facet may use it without the pack
+declaring `domain_pack.human_gated: true`. Rule syntax, field references, and
+verdicts are documented in
+`workspace-template/docs/evidence-policies.md`.
+
 ## Reference Packs
 
 - `llm-research`: guidance for LLM systems, autonomous research agents,
@@ -94,6 +136,6 @@ stderr and return exit code `2`.
 Validation checks that `research.overlay.yml` parses, declares required
 `domain_pack` metadata, references existing pack-local docs and scaffolds,
 uses valid `recommended_discovery` and `recommended_acquisition` providers when present, validates declared
-`coverage_templates`, matches the starter `research.yml` contract, deep-merges
-with the starter configuration, and smoke-validates after initialization in a
-temporary workspace under `/tmp`.
+`coverage_templates` and `policy_rules`, matches the starter `research.yml`
+contract, deep-merges with the starter configuration, and smoke-validates after
+initialization in a temporary workspace under `/tmp`.
