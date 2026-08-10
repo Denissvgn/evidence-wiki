@@ -367,13 +367,21 @@ class FacadeErrorTranslationTests(WorkspaceBuilder, unittest.TestCase):
         self.assertIn("integrity guard", str(caught.exception))
         self.assertNotIsInstance(caught.exception, orchestration.OrchestrationHostError)
 
-    def test_the_per_session_driver_lock_surfaces_as_a_typed_lock_error(self):
+    def test_the_per_session_driver_lock_surfaces_as_a_typed_driver_busy_error(self):
         """Two drivers, one session: the second is refused, not silently queued.
 
         The lock is the workspace's own per-session mutation lock, taken by the
-        deployed controller around ``next``. Holding it past the controller's
-        bounded wait is what a second concurrent driver looks like from inside
-        the first one's window.
+        deployed controller around ``next``. Holding it while a second driver
+        calls is what concurrent drivers look like from inside the first one's
+        window.
+
+        CR-8 made that refusal specific. It used to arrive as the generic
+        ``LOCK_UNAVAILABLE`` -- the same code a workspace with no usable lock
+        backend at all reports -- so a host could not tell "retry in a moment"
+        from "this filesystem will never support locking". ``ORCHESTRATION_DRIVER_BUSY``
+        names contention and nothing else, and carries the holder that caused it.
+        ``LOCK_UNAVAILABLE`` still means what it always meant; it just no longer
+        means two things.
         """
         target = self.init_workspace(self.tmp)
         lock_path = target / "runs" / "orchestrations" / ORCHESTRATION_ID / ".locks" / "session.lock"
@@ -384,7 +392,11 @@ class FacadeErrorTranslationTests(WorkspaceBuilder, unittest.TestCase):
             held, release = threading.Event(), threading.Event()
 
             def hold_the_session_lock():
-                with LOCKS.workspace_lock(lock_path, purpose="competing driver"):
+                with LOCKS.workspace_lock(
+                    lock_path,
+                    purpose="competing driver",
+                    holder={"agent_id": "competing-driver", "pid": 4242},
+                ):
                     held.set()
                     release.wait(120)
 
@@ -394,12 +406,22 @@ class FacadeErrorTranslationTests(WorkspaceBuilder, unittest.TestCase):
             self.addCleanup(release.set)
             self.assertTrue(held.wait(30), "the competing driver never acquired the session lock")
 
-            with self.assertRaises(errors.LockError) as caught:
+            with self.assertRaises(errors.OrchestrationError) as caught:
                 session.next()
 
-        self.assertEqual("LOCK_UNAVAILABLE", caught.exception.error_code)
+        self.assertEqual("ORCHESTRATION_DRIVER_BUSY", caught.exception.error_code)
         self.assertTrue(caught.exception.recoverable)
+        # Classification comes from the envelope, not the child's exit status: the
+        # controller's own ``EXIT_DRIVER_BUSY`` (5) is asserted where processes are
+        # observable, in the controller suite. Here the point is that a non-zero exit
+        # the facade has never seen before does not divert this into a host error.
         self.assertNotIsInstance(caught.exception, orchestration.OrchestrationHostError)
+        # The holder block survives the JSON envelope the subprocess boundary
+        # forces it through, so a host can report *who* is busy, not just that
+        # someone is.
+        self.assertEqual("competing-driver", caught.exception.details["holder"]["agent_id"])
+        self.assertEqual(4242, caught.exception.details["holder"]["pid"])
+        self.assertEqual(ORCHESTRATION_ID, caught.exception.details["orchestration_id"])
 
     def test_a_controller_that_died_without_an_envelope_still_yields_a_typed_error(self):
         """No envelope is an absence, not a second failure to report."""
