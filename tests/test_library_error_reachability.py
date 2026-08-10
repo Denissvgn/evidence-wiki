@@ -907,29 +907,23 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
         because "an unknown status changes nothing" is worth nothing if the status
         under test was 2 the whole time.
 
-        **The reported ``exit_code`` is 2, and by the documented contract it
-        should be 5.** ``docs/library-api.md`` defines the attribute as "the
-        status the CLI would have exited with", and both shells exit 5 here: the
-        controller directly, and ``evidence-wiki orchestrate next``, which returns
-        the controller's status through ``orchestration._passthrough_controller``.
-        The exception says 2 because *no* error envelope in this package carries an
-        ``exit_code`` key -- ``_script_errors.error_envelope`` never emits one --
-        so ``errors.error_from_envelope`` reconstructs the status from the static
-        ``errors._EXIT_CODE_OVERRIDES`` table, which knows only ``CLAIM_HELD`` and
-        ``CLAIM_NOT_STALE`` at 3. ``ORCHESTRATION_DRIVER_BUSY`` is the first
-        refusal in the workspace scripts to exit with anything that table has not
-        already been told about. (The controller's other non-zero statuses, 3
-        ``EXIT_BLOCKED`` and 4 ``EXIT_PAUSED``, are not refusals at all: they
-        accompany a *session document* on stdout and are returned rather than
-        raised, so no exception ever carried them -- see
-        ``test_library_orchestrate.py::
-        test_a_terminal_or_paused_session_is_returned_on_a_non_zero_exit``.)
+        **The reported ``exit_code`` is 5, matching both shells.** That agreement
+        is not automatic. No error envelope in this package carries an ``exit_code``
+        key -- ``_script_errors.error_envelope`` never emits one -- so
+        ``errors.error_from_envelope`` reconstructs the status from the static
+        ``errors._EXIT_CODE_OVERRIDES`` table. ``ORCHESTRATION_DRIVER_BUSY`` was the
+        first refusal in the workspace scripts to exit with a status that table had
+        not been told about, and until it was added there the exception reported 2
+        while the controller exited 5 -- breaking ``docs/library-api.md``'s promise
+        that the attribute is "the status the CLI would have exited with". This case
+        is what keeps the entry honest: delete it from ``_EXIT_CODE_OVERRIDES`` and
+        the equality below fails.
 
-        The 2 is therefore pinned as a **record of a known divergence, not as a
-        guarantee**. Fixing it is a production edit to ``errors.py``, which this
-        unit does not own. When it lands, the assertion below is the one that must
-        change -- and ``ReachabilityAsserts.agrees_with_the_cli``, which asserts
-        exactly the equality this case cannot yet make, becomes usable here.
+        (The controller's other non-zero statuses, 3 ``EXIT_BLOCKED`` and 4
+        ``EXIT_PAUSED``, need no entry: they are not refusals at all. They accompany
+        a *session document* on stdout and are returned rather than raised, so no
+        exception ever carried them -- see ``test_library_orchestrate.py::
+        test_a_terminal_or_paused_session_is_returned_on_a_non_zero_exit``.)
         """
         contended = self.contended_session("driver-busy-exit-status")
 
@@ -953,12 +947,10 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
             raised.error_code,
             {orchestrate_facade.HOST_ERROR_CODE, orchestrate_facade.EXITED_ERROR_CODE},
         )
-        self.assertEqual(
-            errors.EXIT_INVALID,
-            raised.exit_code,
-            "the exit-status divergence this case records has been fixed; assert the CLI's own "
-            "status instead and move this case onto agrees_with_the_cli",
-        )
+        # ... including the status itself, which is the point of the override entry:
+        # a host that branches on ``exit_code`` sees what a shell would see.
+        self.assertEqual(returncode, raised.exit_code)
+        self.assertEqual(errors.EXIT_DRIVER_BUSY, raised.exit_code)
 
 
 class MatrixTests(unittest.TestCase):

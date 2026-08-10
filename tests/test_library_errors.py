@@ -253,15 +253,18 @@ class ExitStatusReconstructionTests(unittest.TestCase):
 
     CR-8 supplied the first miss. ``ORCHESTRATION_DRIVER_BUSY`` exits the
     controller with ``EXIT_DRIVER_BUSY`` (5), the first refusal in the workspace
-    scripts to exit with anything the table has not been told about; every earlier
-    one exits 2, or the 3 the two claim codes already occupy. At the library
-    boundary it therefore arrives as 2 while both shells report 5.
+    scripts to exit with anything the table had not been told about; every earlier
+    one exits 2, or the 3 the two claim codes already occupy. Until the table
+    learned it, the library reported 2 while both shells reported 5.
 
-    Both halves are pinned here -- the mechanism, and the divergence *as a record
-    rather than as an endorsement*. The end-to-end demonstration lives in
+    Both halves are pinned here: the mechanism, and the agreement the table entry
+    buys. The cross-check below reads the controller's own ``EXIT_DRIVER_BUSY``
+    out of the packaged asset rather than trusting a literal, so the two sides
+    cannot drift apart silently -- moving the constant without updating the table
+    fails here, which is the failure the hand-maintained table exists to invite.
+    The end-to-end demonstration lives in
     ``tests/test_library_error_reachability.py``; this is the fast structural
-    statement of why it comes out that way, so the day the table learns the code,
-    the tests that must change say what they were recording.
+    statement of why it comes out that way.
     """
 
     @classmethod
@@ -287,17 +290,23 @@ class ExitStatusReconstructionTests(unittest.TestCase):
         self.assertIs(errors.OrchestrationError, errors.error_class_for("ORCHESTRATION_DRIVER_BUSY"))
         self.assertTrue(errors.default_recoverable("ORCHESTRATION_DRIVER_BUSY"))
 
-    def test_the_driver_busy_exit_status_is_the_default_rather_than_the_controllers(self):
-        """The third attribute, which is *not* reconstructed correctly. See the class docstring."""
+    def test_the_driver_busy_exit_status_matches_the_controllers_own_constant(self):
+        """The third attribute, and the hand-maintained table that has to earn it.
+
+        Read from the packaged controller rather than asserted as a literal: the
+        point is that the two sides *agree*, so changing ``EXIT_DRIVER_BUSY``
+        without teaching ``_EXIT_CODE_OVERRIDES`` fails here rather than silently
+        making a library caller's ``exit_code`` disagree with its own shell.
+        """
         controller = (self.assets_root / "workspace-template" / "scripts" / "orchestration_controller.py").read_text(
             encoding="utf-8"
         )
         declared = re.search(r"^EXIT_DRIVER_BUSY = (\d+)$", controller, re.MULTILINE)
         self.assertIsNotNone(declared, "the controller no longer declares EXIT_DRIVER_BUSY")
-        self.assertEqual(5, int(declared.group(1)), "EXIT_DRIVER_BUSY moved; this record needs rereading")
         self.assertEqual(
-            errors.EXIT_INVALID,
+            int(declared.group(1)),
             errors.default_exit_code("ORCHESTRATION_DRIVER_BUSY"),
-            "the override table has learned this code; drop this record and assert the controller's "
-            "own status here and in tests/test_library_error_reachability.py",
+            "the controller's EXIT_DRIVER_BUSY and errors._EXIT_CODE_OVERRIDES disagree; a library "
+            "caller's exit_code would no longer match the status its own CLI exits with",
         )
+        self.assertEqual(errors.EXIT_DRIVER_BUSY, errors.default_exit_code("ORCHESTRATION_DRIVER_BUSY"))

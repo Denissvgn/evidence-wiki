@@ -190,7 +190,7 @@ carries the whole error envelope:
 | `recoverable` | Whether a retry is meaningful. `False` for `CLAIM_HELD` and `CLAIM_NOT_STALE`. |
 | `remediation` | What an operator should do. Surface it. |
 | `details` | Structured context, possibly empty. |
-| `exit_code` | The status the CLI would have exited with: `2` for a fatal caller-fixable error, `3` for a conflict. Derived from `error_code` when the envelope omits it, which is why `ORCHESTRATION_DRIVER_BUSY` reports `2` here even though the controller process exits `5`. Dispatch on `error_code`, not on this, when the distinction matters. |
+| `exit_code` | The status the CLI would have exited with: `2` for a fatal caller-fixable error, `3` for a conflict, `5` for `ORCHESTRATION_DRIVER_BUSY`. Envelopes carry no status, so it is reconstructed from `error_code`; a code whose script exits with something other than `2` must be registered in `errors._EXIT_CODE_OVERRIDES` for the two doors to agree. Dispatch on `error_code` when you need a specific condition — this attribute groups several. |
 
 Thirteen families sit under the base class. The family is selected from the code
 by prefix, with exact codes winning over prefixes and longer prefixes over
@@ -306,9 +306,9 @@ What remains the host's job:
 > **immediately** with `OrchestrationError` / `ORCHESTRATION_DRIVER_BUSY`
 > (`recoverable=True`), whose `details["holder"]` names the holder's `agent_id`
 > (or `None`), `pid`, `hostname`, `command`, and `acquired_at`. Branch on
-> `error_code`: the controller *process* exits `5` for this refusal, but the
-> envelope carries no exit status, so the typed exception's `exit_code` is the
-> generic `2`. A refused call writes nothing. This is `LOCK_UNAVAILABLE`'s
+> `error_code`, which is the stable contract; `exit_code` agrees with it here
+> (`5`, the status the controller process exits with) because the code is
+> registered in the reconstruction table. A refused call writes nothing. This is `LOCK_UNAVAILABLE`'s
 > replacement for *contention only*: that code kept its older, narrower meaning
 > — no lock backend could be established on this filesystem at all — and the two
 > stay distinct because retrying fixes one and never fixes the other.
@@ -582,8 +582,9 @@ def http_error(exc: errors.EvidenceWikiError) -> tuple[int, dict[str, Any]]:
         status = 409
     elif exc.error_code == "ORCHESTRATION_DRIVER_BUSY":
         status = 503               # another driver holds the session right now;
-                                   # details["holder"] says who. By code, not by
-                                   # exit_code: the envelope carries no status.
+                                   # details["holder"] says who. Matched by code
+                                   # rather than exit_code (5) so this stays
+                                   # distinct from any future code sharing it.
     elif isinstance(exc, errors.LockError):
         status = 503               # contended, and worth retrying
     elif exc.recoverable:

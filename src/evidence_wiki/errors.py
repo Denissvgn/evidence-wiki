@@ -38,14 +38,27 @@ EXIT_INVALID = 2
 #: Process exit status a workspace script uses when another agent holds the resource.
 EXIT_CONFLICT = 3
 
+#: Process exit status the orchestration controller uses when another driver holds
+#: the session lock. Distinct from ``EXIT_CONFLICT`` because a shell-only caller must
+#: be able to tell "retry in a moment" from a question claim held by another agent.
+EXIT_DRIVER_BUSY = 5
+
 # Mirrors ``_script_errors.default_recoverable``: a held or fresh claim is not a
 # thing the caller can retry its way out of, every other condition is.
 _NON_RECOVERABLE_CODES = frozenset({"CLAIM_HELD", "CLAIM_NOT_STALE"})
 
 # Codes whose emitting script exits with something other than ``EXIT_INVALID``.
+#
+# This table is the only place the reconstruction can learn a non-default status:
+# no error envelope in this package carries an ``exit_code`` key, so a code absent
+# here reports ``EXIT_INVALID`` regardless of what its script actually exited with.
+# ``docs/library-api.md`` promises ``exit_code`` is "the status the CLI would have
+# exited with", so every workspace-script refusal that exits with something else
+# belongs here — omitting one makes the two doors disagree about the same failure.
 _EXIT_CODE_OVERRIDES: dict[str, int] = {
     "CLAIM_HELD": EXIT_CONFLICT,
     "CLAIM_NOT_STALE": EXIT_CONFLICT,
+    "ORCHESTRATION_DRIVER_BUSY": EXIT_DRIVER_BUSY,
 }
 
 

@@ -18,7 +18,12 @@
   its older, narrower meaning — no lock backend could be established on this
   filesystem at all — which is what finally lets a host tell "another driver
   owns this session, retry" from "this filesystem cannot lock, retrying will
-  never help".
+  never help". The library reports the same status a shell would: because no
+  error envelope carries an exit status, `exit_code` is reconstructed from
+  `error_code`, so this is the first refusal needing an entry in
+  `errors._EXIT_CODE_OVERRIDES` — without it the typed exception would have said
+  `2` while the process exited `5`, breaking the documented promise that the
+  attribute is the status the CLI would have exited with.
 
   This changes default behavior, and that is the point. A single-driver host
   sees nothing new, because its lock is never contended; a host that was
