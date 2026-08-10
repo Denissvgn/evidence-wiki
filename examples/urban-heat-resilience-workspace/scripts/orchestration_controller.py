@@ -111,7 +111,22 @@ TRUSTED_STATIC_FILE_PATHS = (
     ".gitignore",
 )
 TRUSTED_STATIC_TREE_PATHS = ("scripts", "skills", "docs")
-TRUSTED_STATIC_EXCLUDED_SUBTREES: frozenset[str] = frozenset()
+#: Subtrees under the trusted trees that are inspected for unsafe entries but not
+#: fingerprinted.
+#:
+#: ``scripts/__pycache__`` holds bytecode CPython generates from the very ``.py``
+#: files this fingerprint already covers, so it carries no trust of its own -- and
+#: treating it as a trusted input made the documented workflow refuse itself. A
+#: work order tells an agent to run ``scripts/*.py`` directly; doing so writes
+#: ``.pyc`` files; the following ``submit`` then reported the workspace as tampered
+#: and listed the bytecode as the evidence. Only this controller passed ``-B``, so
+#: only this controller was exempt.
+#:
+#: Excluded is not uninspected: ``validate_trusted_static_carveouts`` still walks
+#: this path and refuses a symlink, a special file, or a multiply-linked entry
+#: inside it. What changes is that its contents do not move the fingerprint, so a
+#: genuine edit to any ``scripts/*.py`` is still detected exactly as before.
+TRUSTED_STATIC_EXCLUDED_SUBTREES: frozenset[str] = frozenset({"scripts/__pycache__"})
 
 RECOVERY_NONE = "none"
 RECOVERY_RECONCILE = "reconcile_required"

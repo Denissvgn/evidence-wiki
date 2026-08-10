@@ -190,7 +190,7 @@ BUDGET_COUNTER_FIELDS = (
 )
 from _handoff_signature import project_handoff_verification
 from _intake_limits import recent_intake_summary
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, is_refusal, json_mode_requested
 
 
 def parse_non_negative_int(value: str) -> int:
@@ -2672,12 +2672,92 @@ def cached_status_document(
     return document
 
 
+def resolved_project_root(value: str | Path) -> Path:
+    """Resolve a caller-supplied project root the way this command always has."""
+    return Path(value).expanduser().resolve()
+
+
+def run_status_report(
+    project_root: str | Path,
+    *,
+    no_cache: bool = False,
+    questions_processed_this_run: int | None = None,
+    source_requests_opened_this_run: int | None = None,
+    releases_this_run: int | None = None,
+    discovery_results_this_run: int | None = None,
+    acquisition_downloads_this_run: int | None = None,
+    github_archive_bytes_this_run: int | None = None,
+    academic_provider_requests_this_run: int | None = None,
+    web_downloads_this_run: int | None = None,
+    manual_url_deliveries_this_run: int | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Return exactly the status document ``main`` prints under ``--format json``.
+
+    This is the library seam: a long-lived host can call it in-process instead of
+    shelling out to this script, and gets the same document the CLI would have
+    printed. Keyword arguments mirror the CLI flags one for one.
+
+    Refusals are raised as ``ScriptRefusal`` rather than printed, so the caller
+    decides how to render them. ``main`` renders them as the same error envelope
+    on stderr it always did; ``tests/test_seam_conformance.py`` holds the two
+    renderings to each other permanently.
+
+    ``--append-log`` has no counterpart here on purpose. Appending to ``log.md``
+    is a side effect the CLI performs *after* the document is printed, not part
+    of producing the document, so it stays in ``main``; an embedding host that
+    wants a log entry writes one itself.
+    """
+    root = resolved_project_root(project_root)
+    try:
+        return cached_status_document(
+            root,
+            no_cache=no_cache,
+            questions_processed_this_run=questions_processed_this_run,
+            source_requests_opened_this_run=source_requests_opened_this_run,
+            releases_this_run=releases_this_run,
+            discovery_results_this_run=discovery_results_this_run,
+            acquisition_downloads_this_run=acquisition_downloads_this_run,
+            github_archive_bytes_this_run=github_archive_bytes_this_run,
+            academic_provider_requests_this_run=academic_provider_requests_this_run,
+            web_downloads_this_run=web_downloads_this_run,
+            manual_url_deliveries_this_run=manual_url_deliveries_this_run,
+            run_id=run_id,
+        )
+    except (Exception, SystemExit) as exc:
+        if is_refusal(exc):
+            # Already refused in the shared shape, so pass it on untouched: re-wrapping
+            # would keep the envelope and lose the `text_line` each refusal carries.
+            #
+            # Recognized by shape rather than by `except ScriptRefusal`. The module
+            # loader isolates every sibling stem, `_script_errors` included, so a
+            # refusal raised inside `coverage_manifest` is an instance of *its*
+            # ScriptRefusal, not this module's -- an `except` naming the class would
+            # match this script's own refusals and silently miss every sibling's,
+            # which is the case the pass-through exists for.
+            raise
+        if isinstance(exc, SystemExit):
+            # A workspace this command cannot read reaches here as SystemExit(str);
+            # from_system_exit re-raises anything else untouched.
+            raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_WORKSPACE_UNREADABLE) from exc
+        if is_run_controller_error(exc):
+            raise ScriptRefusal(
+                exc.error_code,
+                str(exc),
+                exit_code=int(exc.exit_code),
+                recoverable=getattr(exc, "recoverable", None),
+                remediation=getattr(exc, "remediation", None),
+                details=getattr(exc, "details", None),
+            ) from exc
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=args.format == "json")
-    project_root = Path(args.project_root).expanduser().resolve()
+    project_root = resolved_project_root(args.project_root)
     try:
-        document = cached_status_document(
+        document = run_status_report(
             project_root,
             no_cache=args.no_cache or args.append_log,
             questions_processed_this_run=args.questions_processed_this_run,
@@ -2691,23 +2771,8 @@ def main(argv: list[str] | None = None) -> int:
             manual_url_deliveries_this_run=args.manual_url_deliveries_this_run,
             run_id=args.run_id,
         )
-    except Exception as exc:
-        if is_run_controller_error(exc):
-            if json_mode:
-                emit_error(
-                    str(exc),
-                    json_mode=True,
-                    error_code=exc.error_code,
-                    recoverable=getattr(exc, "recoverable", None),
-                    remediation=getattr(exc, "remediation", None),
-                    details=getattr(exc, "details", None),
-                )
-            else:
-                print(f"refused ({exc.error_code}): {exc}", file=sys.stderr)
-            return int(exc.exit_code)
-        raise
-    except SystemExit as exc:
-        return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_WORKSPACE_UNREADABLE)
+    except ScriptRefusal as refusal:
+        return emit_refusal(refusal, json_mode=json_mode)
 
     if args.format == "json":
         print(json.dumps(document, indent=2, sort_keys=False))
@@ -2718,20 +2783,22 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(workspace_health, dict) and not workspace_health.get("materially_valid", False):
         return EXIT_WORKSPACE_UNREADABLE
 
+    # The log append runs after the document is printed and is therefore outside the
+    # seam (see run_status_report); its lock refusal is rendered the same way all the
+    # same, so the CLI has exactly one refusal shape.
     if args.append_log:
         try:
             append_log_entry(project_root / "log.md", render_log_entry(document))
         except LockUnavailableError as error:
-            if json_mode:
-                emit_error(
+            return emit_refusal(
+                ScriptRefusal(
+                    error.error_code,
                     str(error),
-                    json_mode=True,
-                    error_code=error.error_code,
+                    exit_code=EXIT_WORKSPACE_UNREADABLE,
                     details=error.details,
-                )
-            else:
-                print(f"refused ({error.error_code}): {error}", file=sys.stderr)
-            return EXIT_WORKSPACE_UNREADABLE
+                ),
+                json_mode=json_mode,
+            )
 
     if args.check_complete:
         return CHECK_COMPLETE_EXIT_CODES[document["readiness"]["verdict"]]

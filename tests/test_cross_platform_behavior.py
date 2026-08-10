@@ -2,16 +2,38 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The library-API cases below import ``evidence_wiki`` itself, not just the
+# packaged scripts, so this checkout's ``src`` has to win over any installed copy.
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from evidence_wiki import cli, orchestration  # noqa: E402
+from evidence_wiki.workspace import Workspace  # noqa: E402
+
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 GIT_ATTRIBUTES = REPO_ROOT / ".gitattributes"
+
+READ_BACK = "import pathlib, sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))"
+
+
+def descriptor_is_open(descriptor: int) -> bool:
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        return False
+    return True
 
 
 def load_script_module(name: str, filename: str):
@@ -109,6 +131,70 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
                 with self.subTest(value=value, validator=validator.__module__):
                     with self.assertRaises(SystemExit):
                         validator(value, "wiki.root")
+
+    def test_orchestration_result_files_are_closed_before_the_controller_child_reads_them(self):
+        """``ws.orchestrate`` must not still hold the result file it hands over.
+
+        On Windows a file the parent keeps open cannot be reopened by the child
+        process, so a submission staged through ``NamedTemporaryFile(delete=True)``
+        -- whose whole design is to hold the handle for the object's lifetime --
+        would leave the controller unable to read the very result it was given.
+        POSIX would never notice: the read succeeds either way. So the closure
+        is asserted directly, on both platforms, rather than inferred from a
+        successful read.
+        """
+        descriptors: list[int] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            descriptor, name = real_mkstemp(*args, **kwargs)
+            descriptors.append(descriptor)
+            return descriptor, name
+
+        observed: dict[str, object] = {}
+        session = {"artifact_type": "orchestration_session", "orchestration_id": "orch-cross-platform"}
+
+        def fake_invoke(root, command, arguments):
+            result_file = Path(arguments[arguments.index("--result-file") + 1])
+            # Read the descriptor's state first: spawning the child below opens
+            # pipes, and a recycled descriptor number would make a still-open
+            # handle look closed.
+            observed["still_open"] = descriptor_is_open(descriptors[-1])
+            observed["child"] = subprocess.run(  # noqa: S603 - this interpreter, fixed inline program
+                [sys.executable, "-c", READ_BACK, str(result_file)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            observed["result_file"] = result_file
+            return subprocess.CompletedProcess(
+                args=["controller"], returncode=0, stdout=json.dumps(session), stderr=""
+            )
+
+        result = {
+            "schema_version": "1.0",
+            "action_id": "action-0001",
+            "outcome": "completed",
+            "summary": "Cross-platform submission.",
+            "artifacts": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            (workspace / "research.yml").write_text("project:\n  name: cross-platform\n", encoding="utf-8")
+            with mock.patch.object(tempfile, "mkstemp", side_effect=recording_mkstemp), mock.patch.object(
+                orchestration, "_invoke_controller", side_effect=fake_invoke
+            ), Workspace.open(workspace) as ws:
+                returned = ws.orchestrate.session("orch-cross-platform").submit("action-0001", result)
+
+        child = observed["child"]
+        self.assertEqual(session, returned)
+        self.assertEqual(1, len(descriptors))
+        self.assertFalse(observed["still_open"], "the result descriptor was still open when the child ran")
+        self.assertEqual(0, child.returncode, child.stderr)
+        self.assertEqual(result, json.loads(child.stdout))
+        self.assertFalse(observed["result_file"].exists(), "the result file outlived the submission")
+        self.assertNotIn(workspace.resolve(), observed["result_file"].resolve().parents)
 
     def test_crlf_config_log_links_and_question_pages_are_parsed_consistently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -223,6 +309,135 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
                 for index in python_commands:
                     self.assertLess(index + 1, len(lines))
                     self.assertEqual(failure_guard, lines[index + 1])
+
+    # -- the library API path ------------------------------------------
+    #
+    # Everything above drives the workspace scripts. Since CR-6 a host can drive
+    # the same operations in-process through ``evidence_wiki.Workspace``, and the
+    # platform differences that lane meets are not the same ones: it resolves
+    # paths through ``pathlib`` rather than argparse, and it arbitrates a claim
+    # with whichever file-locking backend the platform offers -- ``fcntl`` on
+    # POSIX, ``msvcrt`` on Windows. Both are checked here rather than in the
+    # library suites, so the native Windows and macOS CI lanes run them.
+
+    def api_workspace(self, root: Path) -> Path:
+        """Initialize a real workspace with one question, through the package CLI."""
+        target = root / "api-workspace"
+        completed = subprocess.run(  # noqa: S603
+            [
+                sys.executable, "-m", "evidence_wiki.cli", "init",
+                "--target", str(target),
+                "--project-name", "cross-platform-api",
+                "--project-description", "library API cross-platform probe",
+            ],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        batch = root / "batch.yaml"
+        batch.write_text(
+            'schema_version: "1.0"\nquestions:\n'
+            "  - question: Which platform is this?\n    id: platform\n    priority: high\n",
+            encoding="utf-8",
+        )
+        completed = subprocess.run(  # noqa: S603
+            [
+                sys.executable, str(SCRIPTS / "intake_questions.py"),
+                "--project-root", str(target),
+                "--from-file", str(batch),
+                "--format", "json",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        return target
+
+    def test_api_status_reports_the_same_project_root_the_cli_does(self):
+        """The handle is native; the document it returns is POSIX, on every platform.
+
+        Two different things, and an earlier version of this test conflated them --
+        passing on POSIX only because ``str()`` and ``as_posix()`` are the same
+        string there, and failing on Windows where they are not.
+
+        ``ws.root`` is a ``Path``, so it is spelled the platform's way: a drive
+        letter and backslashes on Windows. ``workspace_health.project_root`` is a
+        field in a machine-readable document, and ``_workspace_health`` has always
+        written it with ``as_posix()`` precisely so a host parsing that document
+        reads one separator style regardless of the machine that produced it.
+
+        What actually matters for the library API is neither spelling in isolation
+        but that both doors report the identical value, so a host cannot tell from
+        the document which one produced it.
+        """
+        from evidence_wiki.workspace import Workspace
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.api_workspace(Path(tmpdir))
+            with Workspace.open(target) as ws:
+                document = ws.status()
+                self.assertEqual(target.resolve().as_posix(), document["workspace_health"]["project_root"])
+                # The handle keeps the platform's own spelling, and resolving is
+                # what makes it independent of how the caller spelled the path.
+                self.assertEqual(str(target.resolve()), str(ws.root))
+                self.assertTrue(ws.root.is_absolute())
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = cli.main(["status", "--target", str(target), "--format", "json"])
+            self.assertEqual(0, exit_code)
+            self.assertEqual(
+                document["workspace_health"]["project_root"],
+                json.loads(stdout.getvalue())["workspace_health"]["project_root"],
+                "the API and the CLI must name the workspace identically",
+            )
+
+    def test_api_accepts_a_path_spelled_the_other_way_round(self):
+        from evidence_wiki.workspace import Workspace
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.api_workspace(Path(tmpdir))
+            # ``as_posix`` is the wrong separator on Windows and the right one
+            # elsewhere; pathlib normalizes both, so the handle must open either.
+            with Workspace.open(target.as_posix()) as ws:
+                self.assertEqual(target.resolve(), ws.root)
+                self.assertIn("schema_version", ws.status())
+
+    def test_api_claim_contention_refuses_with_claim_held_on_every_platform(self):
+        from evidence_wiki import errors
+        from evidence_wiki.workspace import Workspace
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.api_workspace(Path(tmpdir))
+            # The first claimant is a separate process, so the arbitration under
+            # test is the platform's real cross-process file locking: fcntl on
+            # POSIX, msvcrt on Windows. Both must end at the same typed refusal.
+            completed = subprocess.run(  # noqa: S603
+                [
+                    sys.executable, str(SCRIPTS / "question_claim.py"),
+                    "--project-root", str(target),
+                    "claim", "--slug", "platform", "--agent-id", "agent-first", "--format", "json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
+            with Workspace.open(target) as ws:
+                with self.assertRaises(errors.ClaimError) as caught:
+                    ws.questions.claim(slug="platform", agent_id="agent-second")
+
+            self.assertEqual("CLAIM_HELD", caught.exception.error_code)
+            self.assertEqual(3, caught.exception.exit_code)
+            self.assertFalse(caught.exception.recoverable)
+            page = (target / "wiki" / "questions" / "platform.md").read_text(encoding="utf-8")
+            self.assertIn("agent-first", page)
+            self.assertNotIn("agent-second", page)
 
 
 if __name__ == "__main__":

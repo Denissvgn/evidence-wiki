@@ -274,11 +274,24 @@ ORCHESTRATION_ATTEMPT_SCHEMA: dict[str, Any] = {
 
 
 class OrchestrationHostError(Exception):
-    """A safe, user-facing host orchestration error."""
+    """A safe, user-facing host orchestration error.
 
-    def __init__(self, message: str, *, exit_code: int = EXIT_INVALID) -> None:
+    ``envelope`` carries the controller's own schema-1.0 error envelope when the
+    failure came from the child and its stderr held one. It exists so an
+    in-process caller can recover the stable ``error_code`` without re-parsing
+    :attr:`args`; the CLI ignores it and prints the message exactly as before.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        exit_code: int = EXIT_INVALID,
+        envelope: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.exit_code = exit_code
+        self.envelope = envelope
 
 
 @dataclass(frozen=True)
@@ -830,17 +843,43 @@ def _invoke_controller(root: Path, command: str, arguments: list[str]) -> subpro
     )
 
 
+def _error_envelope(detail: str) -> dict[str, Any] | None:
+    """Return the schema-1.0 error envelope ``detail`` holds, or ``None``.
+
+    ``detail`` is the *already redacted* child output, so an envelope recovered
+    here carries no credential value the raw text did not already have stripped.
+    A controller that died before its own error handler ran writes a traceback
+    rather than an envelope; that is not a failure to report, just an absence,
+    and the caller falls back to the message.
+    """
+    if not detail.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(detail)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("error_code"), str):
+        return None
+    return parsed
+
+
+def _controller_failure(command: str, completed: subprocess.CompletedProcess[str]) -> OrchestrationHostError:
+    """Compose the refusal for a non-zero controller exit, envelope included."""
+    detail = _redact((completed.stderr or completed.stdout).strip())
+    return OrchestrationHostError(
+        detail or f"Workspace orchestration controller {command!r} failed.",
+        exit_code=int(completed.returncode),
+        envelope=_error_envelope(detail),
+    )
+
+
 def _controller_json(root: Path, command: str, arguments: list[str]) -> dict[str, Any]:
     completed = _invoke_controller(root, command, [*arguments, "--format", "json"])
     try:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         if completed.returncode != 0:
-            detail = _redact((completed.stderr or completed.stdout).strip())
-            raise OrchestrationHostError(
-                detail or f"Workspace orchestration controller {command!r} failed.",
-                exit_code=int(completed.returncode),
-            ) from exc
+            raise _controller_failure(command, completed) from exc
         raise OrchestrationHostError(
             f"Workspace orchestration controller returned invalid JSON for {command}: {exc.msg}."
         ) from exc
@@ -851,12 +890,117 @@ def _controller_json(root: Path, command: str, arguments: list[str]) -> dict[str
         status = payload.get("status")
         if artifact_type == "orchestration_session" and status in TERMINAL_STATUSES | PAUSED_STATUSES:
             return payload
-        detail = _redact((completed.stderr or completed.stdout).strip())
-        raise OrchestrationHostError(
-            detail or f"Workspace orchestration controller {command!r} failed.",
-            exit_code=int(completed.returncode),
-        )
+        raise _controller_failure(command, completed)
     return payload
+
+
+# -- protocol seams -----------------------------------------------------------
+#
+# One function per `orchestrate start/next/submit/status` verb, shared by the
+# managed runner in this module and by ``ws.orchestrate`` in
+# :mod:`evidence_wiki._facades.orchestrate`.
+#
+# **Each one spawns the workspace's own deployed controller and must keep doing
+# so.** Loading `<workspace>/scripts/orchestration_controller.py` in-process, or
+# substituting the copy packaged with this distribution, would let an installed
+# library version mutate run state owned by a *different* workspace version. The
+# deployed controller is authoritative for run-state mutation precisely because
+# it is version-matched to the session state it owns -- the same reason managed
+# orchestration is absent from the MCP server. The subprocess here is the
+# version boundary, not an unoptimized call.
+#
+# These are seams, not a second protocol: they build argv and return whatever
+# :func:`_controller_json` returns, including the terminal-or-paused session it
+# deliberately returns on a non-zero exit. They deliberately do not validate
+# ``root`` (the caller already holds a workspace) and do not validate the
+# returned work order, so the managed runner and the facade keep composing their
+# own checks on top rather than inheriting a hidden one.
+
+
+def _identifier_arguments(**options: Any) -> list[str]:
+    """Render ``name=value`` options as ``--name value``, skipping ``None``."""
+    arguments: list[str] = []
+    for name, value in options.items():
+        if value is not None:
+            arguments.extend([f"--{name.replace('_', '-')}", str(value)])
+    return arguments
+
+
+def protocol_start(
+    root: Path,
+    agent_id: str,
+    *,
+    orchestration_id: str | None = None,
+    max_actions: int | None = None,
+    action_timeout_seconds: int | None = None,
+    total_timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Create a parent orchestration session and return its session document.
+
+    Every limit left as ``None`` is omitted from argv so the deployed
+    controller applies its own default rather than this package imposing one.
+    """
+    return _controller_json(
+        root,
+        "start",
+        _identifier_arguments(
+            agent_id=agent_id,
+            orchestration_id=orchestration_id,
+            max_actions=max_actions,
+            action_timeout_seconds=action_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
+        ),
+    )
+
+
+def protocol_next(
+    root: Path,
+    orchestration_id: str,
+    *,
+    agent_id: str | None = None,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Issue or replay the next work order.
+
+    Returns the controller payload unchanged: a work order while the session
+    can still make progress, or the session document once it cannot. A session
+    that ended is an answer, so a terminal or paused session comes back as a
+    result even though the controller exits non-zero for it.
+    """
+    arguments = _identifier_arguments(orchestration_id=orchestration_id, agent_id=agent_id)
+    if resume:
+        arguments.append("--resume")
+    return _controller_json(root, "next", arguments)
+
+
+def protocol_submit(
+    root: Path,
+    orchestration_id: str,
+    action_id: str,
+    result_file: str | Path,
+    *,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Submit one structured agent result read from ``result_file``.
+
+    The controller re-verifies the workspace artifacts the result claims;
+    ``result_file`` is the claim, not the evidence.
+    """
+    return _controller_json(
+        root,
+        "submit",
+        _identifier_arguments(
+            orchestration_id=orchestration_id,
+            action_id=action_id,
+            result_file=str(result_file),
+            agent_id=agent_id,
+        ),
+    )
+
+
+def protocol_status(root: Path, *, orchestration_id: str | None = None) -> dict[str, Any]:
+    """Read one parent orchestration session, or the workspace's sessions."""
+    return _controller_json(root, "status", _identifier_arguments(orchestration_id=orchestration_id))
 
 
 def _passthrough_controller(root: Path, command: str, arguments: list[str]) -> int:
@@ -3960,20 +4104,7 @@ def _submit_result(root: Path, orchestration_id: str, agent_id: str, result: dic
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-submit-") as tmpdir:
         path = Path(tmpdir) / "result.json"
         path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-        return _controller_json(
-            root,
-            "submit",
-            [
-                "--orchestration-id",
-                orchestration_id,
-                "--action-id",
-                result["action_id"],
-                "--result-file",
-                str(path),
-                "--agent-id",
-                agent_id,
-            ],
-        )
+        return protocol_submit(root, orchestration_id, result["action_id"], path, agent_id=agent_id)
 
 
 @contextlib.contextmanager
@@ -4114,7 +4245,7 @@ def _drive_session_unlocked(
     if resume:
         _control_repair_gate(root, orchestration_id, acknowledge=acknowledge_control_repair)
     if agent_id is None:
-        existing = _controller_json(root, "status", ["--orchestration-id", orchestration_id])
+        existing = protocol_status(root, orchestration_id=orchestration_id)
         session = _session_document(existing)
         persisted_agent_id = session.get("agent_id")
         agent_id = (
@@ -4124,19 +4255,16 @@ def _drive_session_unlocked(
         )
     resume_pending = resume
     while True:
-        status = _controller_json(root, "status", ["--orchestration-id", orchestration_id])
+        status = protocol_status(root, orchestration_id=orchestration_id)
         _reconcile_accepted_staged_results(root, orchestration_id)
         current_status = _session_status(status)
         if current_status in TERMINAL_STATUSES or (current_status in PAUSED_STATUSES and not resume_pending):
             return status
-        next_arguments = ["--orchestration-id", orchestration_id, "--agent-id", agent_id]
-        if resume_pending:
-            next_arguments.append("--resume")
-        next_payload = _controller_json(root, "next", next_arguments)
+        next_payload = protocol_next(root, orchestration_id, agent_id=agent_id, resume=resume_pending)
         resume_pending = False
         work_order = _work_order_from_next(next_payload)
         if work_order is None:
-            return _controller_json(root, "status", ["--orchestration-id", orchestration_id])
+            return protocol_status(root, orchestration_id=orchestration_id)
         work_order = _validate_work_order(work_order)
         if work_order["orchestration_id"] != orchestration_id:
             raise OrchestrationHostError("Controller work order does not belong to the active orchestration.")
@@ -4507,19 +4635,14 @@ def main(argv: list[str] | None = None) -> int:
             runner_runtime_read_paths = prepared_runner.runtime_read_paths
             capability_checked = True
             agent_id = args.agent_id or f"{runner}-runner"
-            start_arguments = [
-                "--agent-id",
+            started = protocol_start(
+                root,
                 agent_id,
-                "--max-actions",
-                str(args.max_actions),
-                "--action-timeout-seconds",
-                str(args.action_timeout_seconds),
-                "--total-timeout-seconds",
-                str(args.total_timeout_seconds),
-            ]
-            if args.orchestration_id:
-                start_arguments.extend(["--orchestration-id", args.orchestration_id])
-            started = _controller_json(root, "start", start_arguments)
+                orchestration_id=args.orchestration_id or None,
+                max_actions=args.max_actions,
+                action_timeout_seconds=args.action_timeout_seconds,
+                total_timeout_seconds=args.total_timeout_seconds,
+            )
             orchestration_id = _session_id(started)
         else:
             orchestration_id = args.orchestration_id

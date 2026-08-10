@@ -29,7 +29,7 @@ import json
 import re
 import sys
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -56,7 +56,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, is_refusal, json_mode_requested
 from _workspace_module_loader import load_workspace_module
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
@@ -128,8 +128,28 @@ ANCHOR_REMEDIATION_FALLBACK = (
 )
 
 
-class VerifyQuotesError(Exception):
-    """Fatal grounding verifier error with a stable machine code."""
+class VerifyQuotesError(ScriptRefusal):
+    """Fatal grounding verifier error with a stable machine code.
+
+    This is the refusal type ``question_resolve`` and ``export_answers`` already
+    catch by name, so it keeps its name and its ``(error_code, message, *,
+    details)`` constructor. Since CR-6 it is also a :class:`ScriptRefusal`, which
+    is what lets ``run_verify`` raise it straight at an embedding host and lets
+    ``main`` render it with the one shared catch arm.
+
+    Everything the base type adds is defaulted to what ``main`` used to supply from
+    the outside, so no envelope byte and no exit code moves:
+
+    - ``exit_code`` defaults to ``EXIT_INVALID``, which ``main`` hardcoded for every
+      ``VerifyQuotesError`` it caught.
+    - ``recoverable`` and ``remediation`` default to ``None``, which is how the
+      envelope was already built: the shared table answers both from the code.
+    - ``text_line`` is fixed to the bare message, and is the one base-class option
+      this type does not take. Coded refusals here reached ``emit_error``, which
+      prints the message alone under ``--format text``; the base type's
+      ``refused (CODE): message`` default would be a new line of output for a
+      caller that reads text.
+    """
 
     def __init__(
         self,
@@ -137,10 +157,19 @@ class VerifyQuotesError(Exception):
         message: str,
         *,
         details: dict[str, Any] | None = None,
+        exit_code: int = EXIT_INVALID,
+        recoverable: bool | None = None,
+        remediation: str | None = None,
     ) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.details = details or {}
+        super().__init__(
+            error_code,
+            message,
+            exit_code=exit_code,
+            recoverable=recoverable,
+            remediation=remediation,
+            details=details or {},
+            text_line=message,
+        )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -745,21 +774,27 @@ def verify_question(
     }
 
 
-def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+def build_grounding_report(project_root: Path, slugs: Sequence[str] | None) -> dict[str, Any]:
+    """Verify every named question and return the document this command reports.
+
+    Takes the slugs themselves rather than a parsed namespace, because both callers
+    that matter — ``main`` through :func:`build_report`, and the ``run_verify`` seam —
+    have slugs and only one of them has ever had an ``argparse.Namespace``.
+    """
     config = load_config(project_root)
     seen: set[str] = set()
-    slugs: list[str] = []
-    for value in args.slug or []:
+    resolved: list[str] = []
+    for value in slugs or []:
         slug = value.strip()
         if slug and slug not in seen:
             seen.add(slug)
-            slugs.append(slug)
-    if not slugs:
+            resolved.append(slug)
+    if not resolved:
         raise VerifyQuotesError("SLUG_INVALID", "At least one --slug value is required.")
     # Shared across every question in the report: several questions commonly cite the
     # same record, and the controller verifies the whole workspace in one call.
     cache = EvidenceCache()
-    questions = [verify_question(project_root, config, slug, cache=cache) for slug in slugs]
+    questions = [verify_question(project_root, config, slug, cache=cache) for slug in resolved]
     total_entries = sum(int(question.get("grounding_count", 0) or 0) for question in questions)
     all_results = report_results(questions)
     failed_entries = failed_results(all_results)
@@ -781,6 +816,15 @@ def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]
         },
         "overall_result": RESULT_VERIFIED if questions and not failed_entries and not missing_grounding else "not_verified",
     }
+
+
+def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    """Namespace-shaped entry point kept for callers that already hold parsed args.
+
+    ``orchestration_controller`` recomputes quote verification through this exact
+    signature when it re-derives a run's verification bundle, so it stays.
+    """
+    return build_grounding_report(project_root, args.slug)
 
 
 def is_top_level_field(line: str) -> bool:
@@ -832,8 +876,14 @@ def stamp_question_verification(project_root: Path, config: dict[str, Any], slug
         return report
 
 
-def write_verification_metadata(project_root: Path, args: argparse.Namespace, report: dict[str, Any]) -> None:
-    verified_by = args.verified_by.strip() if isinstance(args.verified_by, str) else ""
+def write_verification_metadata(project_root: Path, verified_by: str | None, report: dict[str, Any]) -> None:
+    """Stamp verifier metadata onto every question in a fully verified report.
+
+    Takes the verifier id rather than the parsed namespace: the ``--write`` audit
+    trail belongs to the operation, so the seam performs it too, and the seam has
+    no ``argparse.Namespace``.
+    """
+    verified_by = verified_by.strip() if isinstance(verified_by, str) else ""
     if not verified_by:
         raise VerifyQuotesError(
             "GROUNDING_VERIFIER_REQUIRED",
@@ -871,19 +921,75 @@ def render_report(report: dict[str, Any], output_format: str) -> str:
     return render_text(report)
 
 
+def resolved_project_root(value: str | Path) -> Path:
+    """Resolve a caller-supplied project root the way this command always has."""
+    return Path(value).expanduser().resolve()
+
+
+def run_verify(
+    project_root: str | Path,
+    slugs: Sequence[str],
+    *,
+    write: bool = False,
+    verified_by: str | None = None,
+) -> dict[str, Any]:
+    """Return exactly the grounding report ``main`` prints under ``--format json``.
+
+    This is the library seam: an embedding host calls it in-process instead of
+    shelling out, and gets the document the CLI would have printed. ``write`` and
+    ``verified_by`` mirror ``--write`` and ``--verified-by``, and the stamping they
+    request happens here — a host that asks to verify-and-stamp must leave the same
+    audit trail on the question pages as the CLI does, not a report about one.
+
+    **A failed verification is not a refusal.** When the run completes and some
+    claim does not verify, this returns the report saying so, exactly as the CLI
+    prints it and then exits ``EXIT_NOT_VERIFIED``. Which claim failed, against
+    which record, and what would fix it are the whole point of the document, and a
+    host cannot read any of that off an exception. Only a genuine refusal —
+    malformed grounding, an unknown slug, an unreadable workspace, or a ``--write``
+    the verifier will not perform — raises ``ScriptRefusal``.
+
+    ``--format`` and ``--output`` have no counterpart here: rendering a document
+    and choosing where to put it belong to the CLI, not to producing it.
+    """
+    root = resolved_project_root(project_root)
+    try:
+        report = build_grounding_report(root, slugs)
+        if write:
+            write_verification_metadata(root, verified_by, report)
+    except (Exception, SystemExit) as exc:
+        if is_refusal(exc):
+            # Already the shared refusal — VerifyQuotesError is one, and a sibling
+            # seam may raise its own. Pass it on rather than re-wrapping, which
+            # would keep the envelope and lose the `text_line` each one carries.
+            #
+            # Recognized by shape, not by `except ScriptRefusal`. Sibling isolation
+            # gives each loaded script its own ScriptRefusal class, so naming the
+            # class here would match this script's refusals and miss `question_claim`'s
+            # entirely -- and a dual-inherited one would then fall to the SystemExit
+            # branch below and be reclassified from its message text, discarding the
+            # very error_code it arrived with.
+            raise
+        if isinstance(exc, SystemExit):
+            # An unreadable workspace or a missing sibling script reaches here as
+            # SystemExit(str); from_system_exit re-raises anything else untouched.
+            raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
+        raise
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=args.format == "json")
-    project_root = Path(args.project_root).expanduser().resolve()
     try:
-        report = build_report(project_root, args)
-        if args.write:
-            write_verification_metadata(project_root, args, report)
-    except VerifyQuotesError as exc:
-        emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
-        return EXIT_INVALID
-    except SystemExit as exc:
-        return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
+        report = run_verify(
+            args.project_root,
+            args.slug,
+            write=args.write,
+            verified_by=args.verified_by,
+        )
+    except ScriptRefusal as refusal:
+        return emit_refusal(refusal, json_mode=json_mode)
     rendered = render_report(report, args.format)
     if args.output:
         Path(args.output).expanduser().resolve().write_text(rendered, encoding="utf-8")

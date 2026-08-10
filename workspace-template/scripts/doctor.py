@@ -39,7 +39,7 @@ from _provider_plugins import (
     require_registration,
 )
 from _provider_registry import ACQUISITION_PROVIDER_IDS, DISCOVERY_ACCEPTED_IDS
-from _script_errors import handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
 from _workspace_health import evaluate_workspace_health
 
 REGISTERED_PROVIDERS_CHECK_ID = "registered_providers"
@@ -1201,13 +1201,43 @@ def render_text(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def run_doctor(
+    project_root: str | Path,
+    *,
+    env: DoctorEnvironment | None = None,
+) -> dict[str, Any]:
+    """Return exactly the diagnosis ``main`` prints under ``--format json``.
+
+    This is the library seam: a long-lived host calls it in-process instead of
+    shelling out, and gets the document the CLI would have printed. ``env`` is the
+    same environment-probing seam ``main`` accepts — the one way this command's
+    callers reach ``import_yaml``, ``which``, ``command_version`` and
+    ``write_probe`` without touching the real environment — so it is threaded
+    through rather than reinvented; ``None`` means the real environment.
+
+    **Almost nothing refuses here, by design.** Contract breaches are report
+    content: every domain error (``NormalizationConfigError``,
+    ``OrchestrationConfigError``, ``ProviderPluginError``) is caught inside the
+    ``*_check`` helper that provoked it and folded into a ``check_item``, and a
+    workspace the doctor cannot read at all is a ``missing`` verdict with a full
+    report — the diagnosis of a broken workspace is the reason to run this command,
+    not a reason to withhold it. The ``SystemExit`` conversion below is the
+    defensive funnel ``main`` has always carried, preserved so that a host gets a
+    ``ScriptRefusal`` rather than a bare ``SystemExit`` if one ever arrives.
+    """
+    try:
+        return build_report(Path(project_root), env=env)
+    except SystemExit as exc:
+        raise ScriptRefusal.from_system_exit(exc, exit_code=1) from exc
+
+
 def main(argv: list[str] | None = None, env: DoctorEnvironment | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=args.format == "json")
     try:
-        report = build_report(Path(args.project_root), env=env)
-    except SystemExit as exc:
-        return handle_system_exit(exc, json_mode=json_mode, default_exit_code=1)
+        report = run_doctor(args.project_root, env=env)
+    except ScriptRefusal as refusal:
+        return emit_refusal(refusal, json_mode=json_mode)
     if args.format == "json":
         print(json.dumps(report, indent=2, sort_keys=False))
     else:

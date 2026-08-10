@@ -88,15 +88,49 @@ from _intake_limits import (
     recent_intake_summary,
     timestamp_utc,
 )
-from _script_errors import handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, is_refusal, json_mode_requested
 from _workspace_module_loader import load_workspace_module
 
 
-class IntakeValidationError(SystemExit):
+class IntakeValidationError(ScriptRefusal, SystemExit):
+    """A coded intake refusal, raised from inside the batch builder.
+
+    The two bases are deliberate, and both are load-bearing.
+
+    ``ScriptRefusal`` is what the CR-6 library seam needs: a host that calls
+    ``run_intake`` in-process catches the one refusal type every seam raises and
+    reads ``to_envelope()`` off it, instead of parsing a stderr envelope.
+
+    ``SystemExit`` is what this class has always been, and dropping it would
+    change behavior in files this unit must not touch. ``serve_mcp.py`` calls
+    ``run_intake_document`` directly and sorts the result with ``except
+    SystemExit`` *before* ``except Exception``; a refusal that stopped being a
+    ``SystemExit`` would fall through to that generic arm, which reports
+    ``str(exc)`` and drops ``error_code`` and ``details`` from the tool error.
+    Keeping both bases leaves every existing caller on the arm it already took,
+    while the seam gets the type it now needs. This is the only class in the
+    package with a base list like this, for that reason.
+
+    ``exit_code`` is ``EXIT_INVALID`` because that is the code ``main``
+    hardcoded for this class, and ``text_line`` is the bare message because
+    ``handle_system_exit`` printed the bare message in text mode -- with no
+    ``refused (CODE):`` prefix -- and that byte must not move.
+    """
+
     def __init__(self, message: str, *, error_code: str, details: dict[str, Any]) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.details = details
+        super().__init__(
+            error_code,
+            message,
+            exit_code=EXIT_INVALID,
+            details=details,
+            text_line=message,
+        )
+        # ``serve_mcp.system_exit_message`` reads ``SystemExit.code``. The MRO
+        # already sets it -- ``Exception`` defines no ``__init__``, so
+        # ``ScriptRefusal``'s ``super().__init__(message)`` lands on
+        # ``SystemExit.__init__`` -- but that is far too subtle to depend on
+        # silently, so the attribute is also set outright here.
+        self.code = message
 
 
 class IntakeLimitExceeded(IntakeValidationError):
@@ -654,33 +688,70 @@ def run_intake_document(
     )
 
 
-def run_intake(args: argparse.Namespace) -> dict[str, Any]:
-    project_root = Path(args.project_root)
-    batch = read_batch_document(args.from_file)
-    batch_label = "stdin" if args.from_file == "-" else Path(args.from_file).name
-    return run_intake_document(
-        project_root,
-        batch,
-        dry_run=args.dry_run,
-        from_file_label=batch_label,
-    )
+def run_intake(
+    project_root: str | Path,
+    *,
+    from_file: str = "-",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Return exactly the intake report ``main`` prints under ``--format json``.
+
+    This is the library seam: a long-lived host can call it in-process instead
+    of shelling out to this script and gets the document the CLI would have
+    printed. Keyword arguments mirror the CLI flags one for one, ``from_file``
+    included -- ``"-"`` reads the batch from stdin, exactly as ``--from-file -``
+    does.
+
+    Refusals are raised as ``ScriptRefusal`` rather than printed, so the caller
+    decides how to render them. ``main`` renders them as the same stderr error
+    envelope it always did, and ``tests/test_seam_conformance.py`` holds the two
+    renderings to each other permanently.
+
+    Unlike ``workspace_status``, this seam is *not* read-only, and that is on
+    purpose. Writing the question pages, updating ``index.md`` and appending the
+    ``intake`` entry to ``log.md`` all happen inside ``run_intake_document``,
+    before the report is built -- and the report states whether each of them
+    happened (``index_updated``, ``log_appended``, ``created``). The side
+    effects and the document are one operation, so pulling them apart would give
+    an API caller a different audit trail from the CLI's. ``--dry-run`` is the
+    supported way to get the report without the writes.
+    """
+    try:
+        batch = read_batch_document(from_file)
+        batch_label = "stdin" if from_file == "-" else Path(from_file).name
+        return run_intake_document(
+            Path(project_root),
+            batch,
+            dry_run=dry_run,
+            from_file_label=batch_label,
+        )
+    except (Exception, SystemExit) as exc:
+        if is_refusal(exc):
+            # Already the shared shape, carrying its own code, details and text
+            # rendering; ``IntakeValidationError`` arrives here. Re-wrapping it
+            # below would reclassify it from its message and lose ``details``.
+            #
+            # Sorted on shape rather than caught as ``ScriptRefusal``: that name
+            # binds this module's own class, and sibling isolation gives every
+            # other loaded script a different one -- so a refusal from a sibling
+            # would slip past the name and be reclassified by the branch below,
+            # which is the exact outcome this arm exists to prevent.
+            raise
+        if isinstance(exc, SystemExit):
+            # Every schema and workspace rejection in this file is still a plain
+            # SystemExit(str); from_system_exit classifies it exactly as
+            # handle_system_exit did, and re-raises anything else untouched.
+            raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=args.dry_run or args.format == "json")
     try:
-        report = run_intake(args)
-    except IntakeValidationError as exc:
-        return handle_system_exit(
-            exc,
-            json_mode=json_mode,
-            default_exit_code=EXIT_INVALID,
-            error_code=exc.error_code,
-            details=exc.details,
-        )
-    except SystemExit as exc:
-        return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
+        report = run_intake(args.project_root, from_file=args.from_file, dry_run=args.dry_run)
+    except ScriptRefusal as refusal:
+        return emit_refusal(refusal, json_mode=json_mode)
     if args.dry_run or args.format == "json":
         print(json.dumps(report, indent=2, sort_keys=False))
     else:

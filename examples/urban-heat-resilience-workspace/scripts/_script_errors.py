@@ -352,6 +352,87 @@ def error_envelope(
     return envelope
 
 
+class ScriptRefusal(Exception):
+    """A refused operation, raised by a script's ``run_<op>`` library seam.
+
+    Every wrapped script has two callers. ``main`` renders a refusal as the JSON
+    error envelope on stderr plus a process exit code; an embedding host calls
+    the ``run_<op>`` seam in-process and wants the same refusal as an exception
+    it can catch. This is the one refusal type both callers share, so a seam
+    never prints and ``main`` never has to reinvent what a refusal means.
+
+    ``to_envelope`` delegates to :func:`error_envelope`, so the envelope a host
+    reads off this exception and the envelope the CLI writes to stderr are built
+    by exactly one code path and cannot drift apart.
+    """
+
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        *,
+        exit_code: int,
+        recoverable: bool | None = None,
+        remediation: str | None = None,
+        details: dict[str, Any] | None = None,
+        text_line: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.exit_code = int(exit_code)
+        self.recoverable = recoverable
+        self.remediation = remediation
+        self.details = details
+        # Text mode is not JSON: there a refusal is one human-readable stderr line.
+        # `refused (CODE): message` is the form every coded refusal in this package
+        # already prints, so it is the default. A refusal recovered from a
+        # ``SystemExit`` message prints the bare message instead, because that is
+        # what ``handle_system_exit`` has always printed and the seam rewrite must
+        # not change a single byte of it.
+        self.text_line = text_line if text_line is not None else f"refused ({error_code}): {message}"
+
+    @classmethod
+    def from_system_exit(
+        cls,
+        exc: SystemExit,
+        *,
+        exit_code: int,
+        error_code: str | None = None,
+        recoverable: bool | None = None,
+        remediation: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> ScriptRefusal:
+        """Convert a ``SystemExit(str)`` funnel into this refusal, as ``handle_system_exit`` would.
+
+        A ``SystemExit`` that carries no message is process control rather than a
+        refusal, and is re-raised untouched — the same choice ``handle_system_exit``
+        makes, kept here so a seam gets it right without repeating the check.
+        """
+        if not isinstance(exc.code, str):
+            raise exc
+        message = exc.code
+        return cls(
+            error_code or classify_error_code(message),
+            message,
+            exit_code=exit_code,
+            recoverable=recoverable,
+            remediation=remediation,
+            details=details,
+            text_line=message,
+        )
+
+    def to_envelope(self) -> dict[str, Any]:
+        """Return the fatal-error envelope for this refusal."""
+        return error_envelope(
+            self.error_code,
+            self.message,
+            recoverable=self.recoverable,
+            remediation=self.remediation,
+            details=self.details,
+        )
+
+
 def emit_error(
     message: str,
     *,
@@ -379,6 +460,57 @@ def emit_error(
         )
     else:
         print(message, file=sys.stderr)
+
+
+def is_refusal(exc: object) -> bool:
+    """Recognize a :class:`ScriptRefusal` by shape rather than by class identity.
+
+    ``_workspace_module_loader`` isolates every sibling stem on each load,
+    ``_script_errors`` included, so each workspace script gets its *own*
+    ``ScriptRefusal`` class object::
+
+        cov = load_workspace_module(d, "coverage_manifest")
+        exp = load_workspace_module(d, "export_answers")
+        cov._script_errors.ScriptRefusal is exp.ScriptRefusal   # False
+
+    A refusal raised inside one script is therefore not an ``isinstance`` of the
+    ``ScriptRefusal`` another script imported, and ``except ScriptRefusal`` across
+    that boundary would catch nothing while reading as though it handled the case.
+
+    ``except ScriptRefusal`` stays correct for refusals a module raises *itself* --
+    which is what every seam and every ``main`` catches, and why this is a latent
+    hazard rather than a live bug. At a cross-script boundary use either the
+    sibling's own attribute (``except sibling.SomeError``, which names the class
+    object that actually exists on the other side) or this predicate, which does
+    not depend on class identity at all.
+    """
+    return callable(getattr(exc, "to_envelope", None)) and isinstance(getattr(exc, "error_code", None), str)
+
+
+def emit_refusal(refusal: ScriptRefusal, *, json_mode: bool) -> int:
+    """Render one refusal exactly as ``main`` always rendered it and return its exit code.
+
+    This is the whole catch arm a wrapped ``main`` needs::
+
+        except ScriptRefusal as refusal:
+            return emit_refusal(refusal, json_mode=json_mode)
+
+    Any object :func:`is_refusal` accepts renders here too: the attributes read
+    below are the shape that predicate tests for, so a refusal that crossed a
+    module-isolation boundary needs no conversion to be emitted.
+    """
+    if json_mode:
+        emit_error(
+            refusal.message,
+            json_mode=True,
+            error_code=refusal.error_code,
+            recoverable=refusal.recoverable,
+            remediation=refusal.remediation,
+            details=refusal.details,
+        )
+    else:
+        print(refusal.text_line, file=sys.stderr)
+    return refusal.exit_code
 
 
 def handle_system_exit(

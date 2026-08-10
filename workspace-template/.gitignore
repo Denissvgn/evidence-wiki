@@ -1,1 +1,7 @@
 .research-handoff-secret
+
+# Bytecode CPython generates from scripts/. Not part of the workspace record:
+# the orchestration controller ignores it when fingerprinting trusted inputs,
+# for the same reason it does not belong in version control.
+__pycache__/
+*.py[cod]

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -44,7 +45,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import _normalized_contract as contract
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
 from _workspace_module_loader import load_workspace_module
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
@@ -105,7 +106,15 @@ def load_config(project_root: Path) -> dict[str, Any]:
     path = project_root / "research.yml"
     if not path.is_file():
         raise SystemExit(f"Missing config: {path}")
-    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        # Same message and funnel as workspace_status and export_answers use for
+        # this file. Unguarded, a malformed research.yml escaped as a raw
+        # yaml.parser.ParserError: a traceback from the CLI, and an untyped
+        # third-party exception for a library caller, where every sibling turns
+        # the identical input into a CONFIG_INVALID envelope.
+        raise SystemExit(f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(document, dict):
         raise SystemExit(f"Invalid config: {path}")
     return document
@@ -129,12 +138,12 @@ def unique_values(values: list[str]) -> list[str]:
 
 
 def selected_paths(
-    args: argparse.Namespace,
+    source_ids: Sequence[str] | None,
     normalized_root: Path,
     manifest_by_id: dict[str, dict[str, Any]],
 ) -> list[Path]:
     """Records to verify: the requested ids, or every record that exists."""
-    requested = unique_values([value.strip() for value in (args.source_id or [])])
+    requested = unique_values([value.strip() for value in (source_ids or [])])
     if not requested:
         if not normalized_root.is_dir():
             return []
@@ -281,7 +290,8 @@ def structured_view_summary(
     }
 
 
-def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+def build_report(project_root: Path, *, source_ids: Sequence[str] | None = None) -> dict[str, Any]:
+    """Verify the selected records. ``source_ids`` empty or None is ``--all``, the default."""
     normalize = load_sibling_module("normalize_sources")
     config = load_config(project_root)
     manifest_rel, normalized_rel = normalize.source_paths(config)
@@ -295,7 +305,7 @@ def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]
         if isinstance(source_id, str) and source_id and source_id not in manifest_by_id:
             manifest_by_id[source_id] = record
 
-    paths = selected_paths(args, normalized_root, manifest_by_id)
+    paths = selected_paths(source_ids, normalized_root, manifest_by_id)
     records = [
         verify_record(
             project_root,
@@ -390,17 +400,55 @@ def render_report(report: dict[str, Any], output_format: str) -> str:
     return render_text(report)
 
 
+def run_verify(
+    project_root: str | Path,
+    *,
+    source_ids: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Return exactly the report ``main`` prints under ``--format json``.
+
+    This is the library seam: a long-lived host calls it in-process instead of
+    shelling out, and gets the document the CLI would have printed. ``source_ids``
+    mirrors repeated ``--source-id``; empty or ``None`` is ``--all``, the default.
+    ``--format`` and ``--output`` have no counterpart because they choose how the
+    document is rendered and where it is written, not what it says.
+
+    **A failed verification is a return value, not a refusal.** When a record
+    breaches the contract this returns the report with ``overall_result:
+    not_verified`` — the CLI prints that same report and exits ``EXIT_NOT_VERIFIED``,
+    which is a verdict, not an error. Raising here instead would throw away the
+    per-record violation list that is the entire point of asking. Only a workspace
+    the verifier cannot read at all refuses: an unknown ``--source-id``, or a
+    manifest or ``research.yml`` it cannot load.
+    """
+    root = Path(project_root).expanduser().resolve()
+    try:
+        return build_report(root, source_ids=source_ids)
+    except NormalizeVerifyError as exc:
+        raise ScriptRefusal(
+            exc.error_code,
+            str(exc),
+            exit_code=EXIT_INVALID,
+            details=exc.details,
+            # ``main`` has always printed this one through ``emit_error``, which in text
+            # mode writes the bare message rather than the coded ``refused (CODE): ...``
+            # line. Pinned here so the rewrite does not move a byte of text output.
+            text_line=str(exc),
+        ) from exc
+    except SystemExit as exc:
+        # A workspace this command cannot read reaches here as SystemExit(str);
+        # from_system_exit re-raises anything else untouched.
+        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=args.format == "json")
     project_root = Path(args.project_root).expanduser().resolve()
     try:
-        report = build_report(project_root, args)
-    except NormalizeVerifyError as exc:
-        emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
-        return EXIT_INVALID
-    except SystemExit as exc:
-        return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
+        report = run_verify(project_root, source_ids=args.source_id)
+    except ScriptRefusal as refusal:
+        return emit_refusal(refusal, json_mode=json_mode)
 
     rendered = render_report(report, args.format)
     if args.output:

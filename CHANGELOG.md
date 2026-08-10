@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-10
+
+- Drive a workspace from Python without spawning a process per operation. Every
+  interaction previously cost a `subprocess` spawn plus JSON-envelope parsing,
+  including hot-path ones — `orchestrate next`/`submit`, coverage evaluation,
+  quote verification — which is the wrong shape for a host that embeds this
+  package inside a long-lived ASGI service. `evidence_wiki.Workspace` is the
+  embeddable handle:
+
+  ```python
+  from evidence_wiki import Workspace
+
+  with Workspace.open("/path/to/workspace") as ws:
+      report = ws.coverage.evaluate("electrolyte-conductivity")
+  ```
+
+  The subprocess boundary is not removed and not deprecated; the CLI remains the
+  supported way to drive a workspace from a shell. What is new is the *choice*.
+  Twenty-six operations hang off the handle in namespaces — `ws.coverage`,
+  `ws.grounding`, `ws.normalize`, `ws.questions`, `ws.orchestrate` — plus
+  `evidence_wiki.fleet_status` and `evidence_wiki.contract`, which no single
+  handle owns. Each returns exactly the document the matching `--format json`
+  command prints, and `evidence_wiki.contract()["library_api"]["surface"]`
+  publishes the list so a host negotiates against it rather than hard-coding a
+  version comparison.
+
+  The two doors cannot disagree, because each operation has one implementation.
+  Every workspace script grew a `run_<op>(...) -> dict` seam; the CLI prints what
+  it returns or renders the refusal's envelope, and the API returns the same dict
+  or raises the typed exception built from that same envelope.
+  `tests/test_seam_conformance.py` runs the CLI as a real subprocess against the
+  seam over identical inputs and requires agreement on the success document, the
+  refusal envelope, and the exit code, for every enrolled script.
+
+  Refusals arrive as `evidence_wiki.errors.EvidenceWikiError` carrying
+  `error_code`, `message`, `recoverable`, `remediation`, `details`, and
+  `exit_code`, sorted into thirteen families by code prefix so a host can catch
+  `CoverageError` or dispatch on the exact code. A code this version has never
+  seen degrades to the base class with the code preserved, so a newer workspace
+  does not break an older host — which is also why `except EvidenceWikiError`
+  belongs as the outermost arm.
+
+  Two design decisions are deliberate and load-bearing. Read, evaluate, and
+  resolve operations run the *packaged* scripts in-process, so the installed
+  library version is the behavior version, exactly as for `evidence-wiki status`
+  today. Orchestration `start`/`next`/`submit`/`status` keeps a subprocess to
+  `<workspace>/scripts/orchestration_controller.py`, because that controller is
+  version-matched to the session state it owns and an in-process shortcut would
+  let one library version mutate run state belonging to a different workspace
+  version — the same reason managed orchestration is absent from the MCP server.
+  Relatedly, `Workspace.open` has no version gate: adding one would make the API
+  refuse workspaces the CLI serves. Skew surfaces as the scripts' own typed
+  refusals, and `ws.versions()` and `ws.doctor()` are the visibility counterparts.
+
+  Concurrency is as safe as concurrent CLI processes and no safer: the filesystem
+  arbitrates through lock files, contention surfaces as `CLAIM_HELD` or
+  `LOCK_UNAVAILABLE` rather than corruption, and the API introduces no
+  process-global mutation — notably it never redirects `sys.stdout`, which is
+  what makes it usable from a multithreaded server at all. Packaged assets are
+  held by one process-wide shared root so N handles do not cost N asset
+  extractions; `Workspace.close()` invalidates its own handle and leaves that
+  root alone. Serializing `next`/`submit` per session remains the host's job.
+
+  Some CLI options have no counterpart on purpose. `--format` and `--output`
+  choose a rendering and a destination, not a document; `status --append-log`
+  appends to `log.md` after the document is produced; `doctor`'s `env` injection
+  point names a type defined in a packaged script asset that a host cannot
+  construct. Programmatic `init` and `upgrade` are out of scope — `Workspace.open`
+  validates and never creates. The package ships no HTTP server and will not;
+  hosts build their own on this API. See `docs/library-api.md`.
+
 - Add a source family the package has never heard of, without forking it.
   Provider ids were validated against closed tuples — `arxiv`, `openalex`,
   `github`, `web` for acquisition — so an embedder whose evidence is market
