@@ -18,7 +18,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from evidence_wiki import orchestration  # noqa: E402
+from evidence_wiki import cli, orchestration  # noqa: E402
 from evidence_wiki.workspace import Workspace  # noqa: E402
 
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -357,20 +357,44 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         return target
 
-    def test_api_status_reports_the_native_project_root(self):
+    def test_api_status_reports_the_same_project_root_the_cli_does(self):
+        """The handle is native; the document it returns is POSIX, on every platform.
+
+        Two different things, and an earlier version of this test conflated them --
+        passing on POSIX only because ``str()`` and ``as_posix()`` are the same
+        string there, and failing on Windows where they are not.
+
+        ``ws.root`` is a ``Path``, so it is spelled the platform's way: a drive
+        letter and backslashes on Windows. ``workspace_health.project_root`` is a
+        field in a machine-readable document, and ``_workspace_health`` has always
+        written it with ``as_posix()`` precisely so a host parsing that document
+        reads one separator style regardless of the machine that produced it.
+
+        What actually matters for the library API is neither spelling in isolation
+        but that both doors report the identical value, so a host cannot tell from
+        the document which one produced it.
+        """
         from evidence_wiki.workspace import Workspace
 
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.api_workspace(Path(tmpdir))
             with Workspace.open(target) as ws:
                 document = ws.status()
-                # ``open`` resolves the path with pathlib, so the document names
-                # the workspace in the platform's own spelling -- a drive letter
-                # and backslashes on Windows, a POSIX path elsewhere -- and not
-                # whatever separator style the caller happened to pass.
-                self.assertEqual(str(target.resolve()), document["workspace_health"]["project_root"])
+                self.assertEqual(target.resolve().as_posix(), document["workspace_health"]["project_root"])
+                # The handle keeps the platform's own spelling, and resolving is
+                # what makes it independent of how the caller spelled the path.
                 self.assertEqual(str(target.resolve()), str(ws.root))
                 self.assertTrue(ws.root.is_absolute())
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = cli.main(["status", "--target", str(target), "--format", "json"])
+            self.assertEqual(0, exit_code)
+            self.assertEqual(
+                document["workspace_health"]["project_root"],
+                json.loads(stdout.getvalue())["workspace_health"]["project_root"],
+                "the API and the CLI must name the workspace identically",
+            )
 
     def test_api_accepts_a_path_spelled_the_other_way_round(self):
         from evidence_wiki.workspace import Workspace
