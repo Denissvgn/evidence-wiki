@@ -31,6 +31,18 @@ from _workspace_module_loader import load_workspace_module
 _source_failure_taxonomy = load_workspace_module(_SCRIPT_DIR, "source_failure_taxonomy")
 delivery_unusable_evidence_reasons = _source_failure_taxonomy.unusable_evidence_reasons
 
+# Neither module imports this one, so both bind at import time. `_policy_primitives`
+# decides a domain pack's declarative policy rules and performs no filesystem I/O of its
+# own; `_structured_view` is how this module loads the sidecar those rules resolve
+# `record/...` pointers against, because assembling that context is the caller's job.
+_policy_primitives = load_workspace_module(_SCRIPT_DIR, "_policy_primitives")
+_structured_view = load_workspace_module(_SCRIPT_DIR, "_structured_view")
+# Re-exported because `load_policy_inputs` raises it and sibling isolation gives every
+# loaded copy of `_policy_primitives` its own class object: a caller that imported the
+# primitives itself would catch nothing. `except policies.PolicyRuleError` catches the
+# class this module actually raises.
+PolicyRuleError = _policy_primitives.PolicyRuleError
+
 VERDICT_OK = "pass"
 VERDICT_FAIL = "fail"
 VERDICT_MANUAL_REVIEW = "manual_review"
@@ -161,6 +173,39 @@ class PolicyInputs:
     jurisdiction_profiles: dict[str, dict[str, Any]]
     coverage_manifests: dict[str, dict[str, Any]]
     warnings: list[str] = field(default_factory=list)
+    policy_rules: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    structured_view_loads: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    question_frontmatters: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # Parsed once here rather than per policy, and eagerly rather than lazily: a
+        # malformed declaration must refuse the whole evaluation instead of quietly
+        # demoting the pack's automation back to the review queue it exists to drain.
+        # Same fail-closed posture as `_request_kinds.declared_pack_kinds`.
+        self.policy_rules = _policy_primitives.pack_policy_rules(self.config)
+
+    def structured_view_for(self, source_id: str) -> Any:
+        """This source's structured-view sidecar load, read at most once per inputs object.
+
+        Lazy on purpose: most workspaces declare no rules at all, and one that does still
+        only needs the sidecars of the sources a ``record/...`` pointer actually names, so
+        eager loading would read a file per source for every evaluation that never asks.
+        """
+        if source_id not in self.structured_view_loads:
+            normalized_root = self.project_root / normalized_dir_text(self.config)
+            self.structured_view_loads[source_id] = _structured_view.load_sidecar(
+                self.normalized_records.get(source_id, {}),
+                _structured_view.sidecar_path(normalized_root, source_id),
+            )
+        return self.structured_view_loads[source_id]
+
+    def question_frontmatter_for(self, slug: str) -> dict[str, Any]:
+        """This question page's frontmatter mapping, read at most once per slug."""
+        if slug not in self.question_frontmatters:
+            self.question_frontmatters[slug] = read_frontmatter(
+                self.project_root / "wiki" / "questions" / f"{slug}.md"
+            )
+        return self.question_frontmatters[slug]
 
 
 @dataclass
@@ -1386,6 +1431,153 @@ def pack_policy_manual_result(policy: str, source_ids: list[str], definition: st
     )
 
 
+def rule_provider_ids(inputs: PolicyInputs, source_id: str) -> tuple[str, ...]:
+    """The provider identities a ``one_of_provenance`` rule may match, in a stable order.
+
+    Exactly three delivery fields carry a provider identity. ``retrieved_by`` is
+    deliberately not among them: it names the *agent* that performed the fetch and holds
+    path-shaped values such as ``fetch_sources.py/arxiv``, so admitting it would let a
+    rule match on the fetcher rather than on where the evidence came from.
+    """
+    provenance = inputs.provenance_by_source_id.get(source_id, {})
+    registration = provenance.get("provider_registration")
+    standards = standards_metadata(inputs, source_id)
+    values = [
+        mapping_string(registration, "id") if isinstance(registration, dict) else None,
+        mapping_string(provenance, "academic_provider"),
+        standards_provider(standards) if standards else None,
+    ]
+    return tuple(unique_strings([value for value in values if value]))
+
+
+def rule_context(
+    inputs: PolicyInputs,
+    source_id: str,
+    *,
+    question_slug: str | None,
+    now: datetime | None,
+) -> Any:
+    """Assemble everything one source contributes to one rule evaluation.
+
+    A slug that was never threaded means there is no question document to resolve a
+    ``question_field`` against, which is passed on as "no frontmatter" so such a rule
+    fails closed with a named reason instead of silently skipping the comparison.
+    """
+    load = inputs.structured_view_for(source_id)
+    return _policy_primitives.RuleContext(
+        source_id=source_id,
+        structured_view=load.document if load.ok else None,
+        structured_view_error=None if load.ok else (load.result, load.detail),
+        provenance=inputs.provenance_by_source_id.get(source_id, {}),
+        question_frontmatter=inputs.question_frontmatter_for(question_slug) if question_slug else None,
+        origin_host=host_from_url(origin_url(inputs, source_id)),
+        provider_ids=rule_provider_ids(inputs, source_id),
+        now=now if now is not None else datetime.now(timezone.utc),
+        domain_matches=domain_matches,
+    )
+
+
+def pack_rule_fail_remediation(policy: str) -> str:
+    return (
+        f"Correct or redeliver the evidence so it satisfies domain_pack.policy_rules[{policy}]: "
+        "each reason names the source and the structured-view, provenance, or question-frontmatter "
+        "field the failing check read. Change the declaration only if the policy itself is misstated."
+    )
+
+
+def pack_policy_rule_result(
+    policy: str,
+    rule: Any,
+    definition: str,
+    ids: list[str],
+    present: list[str],
+    missing: list[str],
+    inputs: PolicyInputs,
+    *,
+    question_slug: str | None,
+    now: datetime | None,
+) -> PolicyResult:
+    """Decide a pack policy that carries a rule, over every source the facet accepted.
+
+    Every present source must satisfy the rule: a facet accepts its sources jointly, so
+    one stale quote among two is the facet's problem however fresh the other is. Failing
+    leaves from every source are reported together rather than only the first, so one
+    evaluation names the whole list of artifacts to fix.
+    """
+    # One clock for the whole policy, so two sources cannot be aged against two instants
+    # and report ages that do not add up in the same list of reasons.
+    moment = now if now is not None else datetime.now(timezone.utc)
+    pass_reasons: list[str] = []
+    fail_reasons: list[str] = []
+    for source_id in present:
+        evaluation = _policy_primitives.evaluate_rule(
+            rule, rule_context(inputs, source_id, question_slug=question_slug, now=moment)
+        )
+        if evaluation.passed:
+            pass_reasons.extend(evaluation.reasons)
+        else:
+            fail_reasons.extend(evaluation.reasons)
+    if fail_reasons:
+        return result(policy, VERDICT_FAIL, ids, fail_reasons, pack_rule_fail_remediation(policy))
+    if missing:
+        pass_reasons.append(f"Ignored missing non-qualifying source id(s): {', '.join(missing)}.")
+    if rule.manual_review_required:
+        # The mechanical half is settled and says so; the pack still asked for a human, so
+        # the verdict stays manual_review rather than passing on the rule alone.
+        return manual_result(
+            policy,
+            ids,
+            [
+                f"Domain-pack policy {policy} satisfied every declared rule check, but its "
+                f"definition still requires a recorded domain review: {definition}",
+                *pass_reasons,
+            ],
+        )
+    return result(policy, VERDICT_OK, ids, pass_reasons)
+
+
+def pack_policy_result(
+    policy: str,
+    field: str,
+    ids: list[str],
+    present: list[str],
+    missing: list[str],
+    inputs: PolicyInputs,
+    *,
+    question_slug: str | None,
+    now: datetime | None,
+) -> PolicyResult | None:
+    """Decide a policy this pack declares, or ``None`` when the pack declares no such policy.
+
+    A declared rule takes precedence over the recorded-review fallback — that precedence is
+    the whole point of the rules block. The rule is looked up only once the *field's own*
+    vocabulary is known to declare the policy, so a rule written for an identity policy can
+    never decide a freshness field that merely reused the id.
+    """
+    definition = pack_policy_definition(inputs, field, policy)
+    if definition is None:
+        return None
+    rule = inputs.policy_rules.get(policy)
+    if rule is None:
+        return pack_policy_manual_result(policy, ids, definition)
+    if not present:
+        # Each evaluator already refuses an all-missing set before reaching here. Restated
+        # anyway because a rule decided over no source at all would pass on an empty list
+        # of reasons, which is the one way this fail-closed path could report a pass.
+        return missing_result(policy, ids, missing or ["<none>"])
+    return pack_policy_rule_result(
+        policy,
+        rule,
+        definition,
+        ids,
+        present,
+        missing,
+        inputs,
+        question_slug=question_slug,
+        now=now,
+    )
+
+
 def undeclared_pack_policy_result(policy: str, source_ids: list[str], field: str) -> PolicyResult | None:
     if PACK_POLICY_ID_RE.fullmatch(policy) is None:
         return None
@@ -1638,6 +1830,9 @@ def evaluate_source_policy(
     source_ids: list[str] | tuple[str, ...],
     inputs: PolicyInputs,
     accepted_artifact_kinds: tuple[str, ...] = DEFAULT_REPOSITORY_ARTIFACT_KINDS,
+    *,
+    question_slug: str | None = None,
+    now: datetime | None = None,
 ) -> PolicyResult:
     ids = normalize_source_ids(source_ids)
     present, missing = present_and_missing(ids, inputs)
@@ -1652,9 +1847,11 @@ def evaluate_source_policy(
         return manual_result(policy, ids, ["Source policy requires manual review and cannot pass automatically."])
     if policy == "domain_pack_allowed":
         return manual_result(policy, ids, ["Domain-pack-specific source policy requires a recorded domain review."])
-    pack_definition = pack_policy_definition(inputs, "source_policy", policy)
-    if pack_definition is not None:
-        return pack_policy_manual_result(policy, ids, pack_definition)
+    declared = pack_policy_result(
+        policy, "source_policy", ids, present, missing, inputs, question_slug=question_slug, now=now
+    )
+    if declared is not None:
+        return declared
     undeclared = undeclared_pack_policy_result(policy, ids, "source_policy")
     if undeclared is not None:
         return undeclared
@@ -1747,6 +1944,9 @@ def evaluate_freshness_policy(
     source_ids: list[str] | tuple[str, ...],
     inputs: PolicyInputs,
     accepted_artifact_kinds: tuple[str, ...] = DEFAULT_REPOSITORY_ARTIFACT_KINDS,
+    *,
+    question_slug: str | None = None,
+    now: datetime | None = None,
 ) -> PolicyResult:
     ids = normalize_source_ids(source_ids)
     present, missing = present_and_missing(ids, inputs)
@@ -1763,9 +1963,11 @@ def evaluate_freshness_policy(
             ids,
             [f"Freshness policy {policy} requires currentness review and cannot pass from local metadata alone."],
         )
-    pack_definition = pack_policy_definition(inputs, "freshness_policy", policy)
-    if pack_definition is not None:
-        return pack_policy_manual_result(policy, ids, pack_definition)
+    declared = pack_policy_result(
+        policy, "freshness_policy", ids, present, missing, inputs, question_slug=question_slug, now=now
+    )
+    if declared is not None:
+        return declared
     undeclared = undeclared_pack_policy_result(policy, ids, "freshness_policy")
     if undeclared is not None:
         return undeclared
@@ -1825,6 +2027,9 @@ def evaluate_identity_policy(
     inputs: PolicyInputs,
     accepted_artifact_kinds: tuple[str, ...] = DEFAULT_REPOSITORY_ARTIFACT_KINDS,
     facet: dict[str, Any] | None = None,
+    *,
+    question_slug: str | None = None,
+    now: datetime | None = None,
 ) -> PolicyResult:
     ids = normalize_source_ids(source_ids)
     present, missing = present_and_missing(ids, inputs)
@@ -1837,9 +2042,11 @@ def evaluate_identity_policy(
         return unusable
     if policy == "none":
         return result(policy, VERDICT_OK, ids, ["No additional identity check is required for this facet."])
-    pack_definition = pack_policy_definition(inputs, "identity_policy", policy)
-    if pack_definition is not None:
-        return pack_policy_manual_result(policy, ids, pack_definition)
+    declared = pack_policy_result(
+        policy, "identity_policy", ids, present, missing, inputs, question_slug=question_slug, now=now
+    )
+    if declared is not None:
+        return declared
     undeclared = undeclared_pack_policy_result(policy, ids, "identity_policy")
     if undeclared is not None:
         return undeclared
@@ -1918,17 +2125,56 @@ def evaluate_identity_policy(
     return manual_result(policy, ids, review_reasons)
 
 
-def evaluate_facet_policies(facet: dict[str, Any], inputs: PolicyInputs) -> list[PolicyResult]:
+def evaluate_facet_policies(
+    facet: dict[str, Any],
+    inputs: PolicyInputs,
+    *,
+    question_slug: str | None = None,
+    now: datetime | None = None,
+) -> list[PolicyResult]:
+    """Evaluate one facet's three policies.
+
+    ``question_slug`` names the question whose frontmatter a ``question_field`` rule
+    resolves against, and ``now`` fixes the clock a ``max_age`` rule subtracts from. Both
+    default so every caller predating declarative rules keeps working unchanged; a caller
+    that omits the slug gets a named ``rule_field_unresolved`` failure rather than a crash.
+    """
     source_ids = normalize_source_ids(facet.get("accepted_source_ids"))
     artifact_kinds = accepted_repository_artifact_kinds(facet.get("accepted_artifact_kinds"))
+    # Resolved once so all three policies of one facet are decided against one instant.
+    moment = now if now is not None else datetime.now(timezone.utc)
     return [
-        evaluate_source_policy(str(facet.get("source_policy", "")), source_ids, inputs, artifact_kinds),
-        evaluate_freshness_policy(str(facet.get("freshness_policy", "")), source_ids, inputs, artifact_kinds),
-        evaluate_identity_policy(str(facet.get("identity_policy", "")), source_ids, inputs, artifact_kinds, facet),
+        evaluate_source_policy(
+            str(facet.get("source_policy", "")),
+            source_ids,
+            inputs,
+            artifact_kinds,
+            question_slug=question_slug,
+            now=moment,
+        ),
+        evaluate_freshness_policy(
+            str(facet.get("freshness_policy", "")),
+            source_ids,
+            inputs,
+            artifact_kinds,
+            question_slug=question_slug,
+            now=moment,
+        ),
+        evaluate_identity_policy(
+            str(facet.get("identity_policy", "")),
+            source_ids,
+            inputs,
+            artifact_kinds,
+            facet,
+            question_slug=question_slug,
+            now=moment,
+        ),
     ]
 
 
 def evaluate_coverage_manifest_policies(manifest: dict[str, Any], inputs: PolicyInputs) -> dict[str, Any]:
+    slug = manifest.get("question_slug")
+    question_slug = slug.strip() if isinstance(slug, str) and slug.strip() else None
     facets: list[dict[str, Any]] = []
     for section in ("required_facets", "optional_facets"):
         raw_facets = manifest.get(section)
@@ -1942,7 +2188,10 @@ def evaluate_coverage_manifest_policies(manifest: dict[str, Any], inputs: Policy
                     "facet_id": facet.get("facet_id"),
                     "required": facet.get("required"),
                     "evidence_path": facet.get("evidence_path"),
-                    "policy_results": [policy_result.to_dict() for policy_result in evaluate_facet_policies(facet, inputs)],
+                    "policy_results": [
+                        policy_result.to_dict()
+                        for policy_result in evaluate_facet_policies(facet, inputs, question_slug=question_slug)
+                    ],
                 }
             )
     return {

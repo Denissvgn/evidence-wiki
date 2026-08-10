@@ -1199,7 +1199,21 @@ def evaluate_policy_results_for_manifest(
     document: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     helper = load_sibling_module("_evidence_policies")
+    primitives = load_sibling_module("_policy_primitives")
+    try:
+        # Parsed here as well as inside the evaluator because sibling isolation gives every
+        # loaded copy its own PolicyRuleError class: this is the only copy whose refusal
+        # this command can catch, and turning it into CONFIG_INVALID is what makes a
+        # workspace with a malformed rule refuse to evaluate instead of silently treating
+        # the policy as manual review.
+        primitives.pack_policy_rules(config)
+    except primitives.PolicyRuleError as exc:
+        raise CoverageManifestError(
+            "CONFIG_INVALID", exc.message, remediation=exc.remediation, details=exc.details
+        ) from exc
     inputs = helper.load_policy_inputs(project_root, config)
+    slug = document.get("question_slug")
+    question_slug = slug.strip() if isinstance(slug, str) and slug.strip() else None
     facets: list[dict[str, Any]] = []
     by_facet: dict[str, list[dict[str, Any]]] = {}
     for facet in all_facets(document):
@@ -1207,7 +1221,10 @@ def evaluate_policy_results_for_manifest(
         accepted_source_ids = facet.get("accepted_source_ids")
         policy_results: list[dict[str, Any]] = []
         if isinstance(facet_id, str) and isinstance(accepted_source_ids, list) and accepted_source_ids:
-            policy_results = [result.to_dict() for result in helper.evaluate_facet_policies(facet, inputs)]
+            policy_results = [
+                result.to_dict()
+                for result in helper.evaluate_facet_policies(facet, inputs, question_slug=question_slug)
+            ]
             by_facet[facet_id] = policy_results
         facets.append(
             {
