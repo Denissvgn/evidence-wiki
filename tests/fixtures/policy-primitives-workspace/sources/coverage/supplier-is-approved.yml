@@ -1,0 +1,23 @@
+# The same delivery judged by the two policies that still want a person: one whose rules
+# all pass but which sets manual_review_required, and one the pack never gave a rule at
+# all. Both must resolve to manual_review, and both must be named for review.
+schema_version: "1.0"
+question_slug: supplier-is-approved
+created_at: "2026-08-11T00:00:00Z"
+updated_at: "2026-08-11T00:00:00Z"
+coverage_profile: supplier-approval
+coverage_verdict: pending
+required_facets:
+  - facet_id: supplier-provenance
+    description: The quoting supplier is registered and under a supply contract.
+    required: true
+    evidence_path: vendor_product_spec
+    source_policy: pack:market-data/reviewed-quote-provider
+    freshness_policy: pack:market-data/quote-48h
+    identity_policy: pack:market-data/supplier-contract-in-force
+    min_sources: 1
+    accepted_source_ids:
+      - quote:supplier-fresh
+    blocking_request_ids: []
+    facet_verdict: pending
+optional_facets: []

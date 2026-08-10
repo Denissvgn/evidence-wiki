@@ -1,0 +1,2 @@
+{"id": "quote:supplier-fresh", "kind": "structured_data", "raw_paths": ["raw/data/supplier-quote-fresh.json"], "status": "normalized", "title": "Supplier quote for B0ABC12345"}
+{"id": "quote:supplier-archived", "kind": "structured_data", "raw_paths": ["raw/data/supplier-quote-archived.json"], "status": "normalized", "title": "Archived supplier quote for B0ABC12345"}
