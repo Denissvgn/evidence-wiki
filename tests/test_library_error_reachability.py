@@ -37,7 +37,10 @@ fast registry check pay the slow suite's cost for no gain in either.
 own bounded wait is what a second writer actually experiences, and there is no
 supported knob to shorten it (``EVIDENCE_WIKI_SINGLE_WRITER`` bypasses the refusal
 rather than hurrying it). ``OrchestrationReachabilityTests`` spawns the deployed
-controller a few times, ~4s. Everything else is sub-second.
+controller a few times, ~4s -- its two contended-driver cases cost about a second
+between them and wait for nothing, because CR-8 made a contended *session* lock
+refuse immediately instead of queueing. The ten seconds above belongs to the
+question lock and to nothing else. Everything else is sub-second.
 """
 
 from __future__ import annotations
@@ -47,7 +50,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -56,7 +61,7 @@ import unittest
 import unittest.mock
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -66,6 +71,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from evidence_wiki import _script_host, errors  # noqa: E402
+from evidence_wiki._facades import orchestrate as orchestrate_facade  # noqa: E402
 from evidence_wiki.workspace import Workspace  # noqa: E402
 
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -100,6 +106,7 @@ EXPECTED_FAMILY: dict[str, type[errors.EvidenceWikiError]] = {
     "GROUNDING_ANCHOR_INVALID": errors.GroundingError,
     "INTAKE_TOTAL_CAP_EXCEEDED": errors.IntakeError,
     "ORCHESTRATION_WORKSPACE_UNSAFE": errors.OrchestrationError,
+    "ORCHESTRATION_DRIVER_BUSY": errors.OrchestrationError,
 }
 
 
@@ -113,6 +120,19 @@ def load_script_module(name: str, filename: str):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+#: Wall-clock stamp the competing driver publishes in its holder block. Frozen
+#: rather than generated so the block a case published and the block that came
+#: back out of the JSON envelope can be compared whole.
+HOLDER_ACQUIRED_AT = "2026-08-10T09:15:00Z"
+
+
+class ContendedSession(NamedTuple):
+    """A live orchestration session with a second driver holding its lock."""
+
+    root: Path
+    session: Any
 
 
 def question_batch(*slugs: str) -> str:
@@ -630,11 +650,14 @@ class LockReachabilityTests(PreparedWorkspace, unittest.TestCase):
     second writer gave up sooner would see a different failure. There is no
     supported way to shorten it -- ``EVIDENCE_WIKI_SINGLE_WRITER`` bypasses the
     refusal rather than hurrying it, and shortening it by patching the lock would
-    replace the thing being tested. The per-session *driver* lock is the same code
-    with a different lock file and is already covered by
-    ``tests/test_library_orchestrate.py::FacadeErrorTranslationTests::
-    test_the_per_session_driver_lock_surfaces_as_a_typed_lock_error``; this suite
-    does not pay that ten seconds twice.
+    replace the thing being tested.
+
+    The ten seconds is this lock's alone. The per-session *driver* lock runs the
+    same module against a different file, but since CR-8 it is acquired with
+    ``timeout_seconds=0`` and refuses the moment it finds a holder, so its cases
+    in ``OrchestrationReachabilityTests`` below cost nothing and report
+    ``ORCHESTRATION_DRIVER_BUSY`` rather than the ``LOCK_UNAVAILABLE`` reached
+    here. Two locks, two codes, two very different waits.
     """
 
     @classmethod
@@ -668,29 +691,38 @@ class LockReachabilityTests(PreparedWorkspace, unittest.TestCase):
 
 
 class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
-    """``ORCHESTRATION_WORKSPACE_UNSAFE`` through ``ws.orchestrate``.
+    """``ORCHESTRATION_WORKSPACE_UNSAFE`` and ``ORCHESTRATION_DRIVER_BUSY`` through ``ws.orchestrate``.
 
     Needs a workspace created by ``init``: the orchestrate facade drives the
     workspace's *deployed* controller at ``<root>/scripts/``, which no fixture
     tree carries.
 
-    The condition is the controller's runtime guard -- "workspace health or HIGH
-    validation findings changed after the work order was issued" -- reached by
-    making the workspace need operator attention while an action is pending. A
-    question parked for human review is the cheapest way to move
-    ``readiness.verdict`` to ``attention_required``, which is the same gate a HIGH
-    lint finding trips; see :meth:`test_a_workspace_needing_attention_before_the_route_is_chosen_is_an_answer`
-    for why the *timing* rather than the finding is what makes it a refusal.
+    ``ORCHESTRATION_WORKSPACE_UNSAFE`` is the controller's runtime guard --
+    "workspace health or HIGH validation findings changed after the work order was
+    issued" -- reached by making the workspace need operator attention while an
+    action is pending. A question parked for human review is the cheapest way to
+    move ``readiness.verdict`` to ``attention_required``, which is the same gate a
+    HIGH lint finding trips; see
+    :meth:`test_a_workspace_needing_attention_before_the_route_is_chosen_is_an_answer`
+    for why the *timing* rather than the finding is what makes it a refusal. This
+    is a different code path from ``tests/test_library_orchestrate.py``'s
+    symlinked-question case, which reaches the same code through the question-file
+    integrity guard.
 
-    This is a different code path from
-    ``tests/test_library_orchestrate.py``'s symlinked-question case, which reaches
-    the same code through the question-file integrity guard.
+    ``ORCHESTRATION_DRIVER_BUSY`` is CR-8's refusal of a second driver on one
+    session, and it is here rather than in ``LockReachabilityTests`` because the
+    interesting part is not the lock. It is that a refusal invented in the
+    *workspace's* controller, carried out of a subprocess as JSON, and never
+    mentioned in this package's own remediation table, still arrives as a typed
+    ``OrchestrationError`` with its holder block intact -- and that the brand-new
+    process exit status the controller pairs it with changes none of that.
     """
 
     @classmethod
     def setUpClass(cls):
         cls.init = load_script_module("library_reachability_init", "init_research_workspace.py")
         cls.intake = load_script_module("library_reachability_intake", "intake_questions.py")
+        cls.locks = load_script_module("library_reachability_driver_locks", "_workspace_locks.py")
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -766,6 +798,167 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
 
         self.assertEqual("orchestration_session", finished["artifact_type"])
         self.assertEqual("no_ship", finished["status"])
+
+    def competing_holder(self) -> dict[str, Any]:
+        """The holder block a second driver publishes beside the session lock.
+
+        The shape CR-8 settled on: who is holding (``agent_id``), which OS process
+        is holding (``pid``, ``hostname``), what it is doing (``command``) and
+        since when (``acquired_at``). Every field is here because a host that has
+        just been refused wants to report the holder to an operator, and a block
+        that arrives half-empty is a worse answer than no block at all.
+        """
+        return {
+            "agent_id": OTHER,
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "command": "next",
+            "acquired_at": HOLDER_ACQUIRED_AT,
+        }
+
+    def hold_the_session_lock(self, target: Path, orchestration_id: str) -> None:
+        """Leave a competing driver holding this session's lock for the rest of the case.
+
+        A thread, and that is enough. The call being refused runs inside the
+        *deployed controller's* subprocess, so the advisory lock this thread holds
+        is held by a different process as far as the refusing code can tell --
+        which is the whole reason the refusal happens at all. Spawning a second
+        interpreter to own a file descriptor would cost a second and prove the
+        same thing.
+
+        The lock is the workspace's own ``.locks/session.lock``, the file the
+        controller takes around ``start``, ``next`` and ``submit``, acquired
+        through the packaged ``workspace_lock`` with a holder block exactly as a
+        real driver acquires it. Nothing here stands in for the contention.
+        """
+        lock_path = target / "runs" / "orchestrations" / orchestration_id / ".locks" / "session.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        held, release = threading.Event(), threading.Event()
+
+        def hold_it():
+            with self.locks.workspace_lock(
+                lock_path, purpose="competing driver", holder=self.competing_holder()
+            ):
+                held.set()
+                release.wait(120)
+
+        driver = threading.Thread(target=hold_it, daemon=True)
+        driver.start()
+        # Cleanups run last-in first-out, so the release is signalled before the
+        # join waits on it; the other order would block for the full 120s.
+        self.addCleanup(driver.join, 30)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(30), "the competing driver never acquired the session lock")
+
+    def contended_session(self, name: str) -> ContendedSession:
+        """A started session whose lock a second driver already holds."""
+        target = self.workspace(name)
+        handle = Workspace.open(target)
+        self.addCleanup(handle.close)
+        session = handle.orchestrate.start(AGENT, orchestration_id=f"orch-{name}")
+        self.hold_the_session_lock(target, session.orchestration_id)
+        return ContendedSession(target, session)
+
+    def test_orchestration_driver_busy_is_reached_by_next_while_a_second_driver_holds_the_session(self):
+        """CR-8's contention refusal, reached through the library rather than a shell.
+
+        The code exists nowhere in this package: it is minted by the workspace's
+        deployed controller, absent from ``_script_errors._REMEDIATIONS``, and
+        reaches a host only because ``error_class_for`` maps the
+        ``ORCHESTRATION_`` prefix. That is precisely the arrangement this module
+        exists to distrust -- a mapping that is right on paper proves nothing
+        about a code that never survives the seam -- so the condition is provoked
+        for real and the exception is judged on what arrives.
+        """
+        contended = self.contended_session("driver-busy")
+
+        raised = self.reached("ORCHESTRATION_DRIVER_BUSY", contended.session.next)
+
+        # Contention is the one orchestration refusal a host is *supposed* to
+        # retry. ``ORCHESTRATION_WORKSPACE_UNSAFE`` above is the one it must not,
+        # and before CR-8 both arrived under codes that could not tell them apart.
+        self.assertTrue(raised.recoverable)
+        # The holder block survives the JSON envelope the subprocess boundary
+        # forces it through. Compared whole rather than key by key: a field that
+        # goes missing, or a pid that comes back as a string, is a narrowing of
+        # what a host can report about the driver blocking it, and would pass a
+        # per-key check written against the fields someone happened to think of.
+        self.assertEqual(self.competing_holder(), raised.details.get("holder"))
+        self.assertEqual(contended.session.orchestration_id, raised.details.get("orchestration_id"))
+        # The message names the holder too, so an operator reading one log line
+        # learns who is busy without reaching into ``details``.
+        self.assertIn(OTHER, str(raised))
+
+    def test_the_controllers_new_exit_status_classifies_nothing_and_does_not_reach_the_exception(self):
+        """Exit 5 is invisible to the facade: on purpose in one direction, by accident in the other.
+
+        CR-8 gave contention its own process exit status -- ``EXIT_DRIVER_BUSY``,
+        5 -- the first status this package's orchestration path had ever seen from
+        the controller. Two questions follow, with different answers.
+
+        **Classification.** The exit status must not decide *what happened*.
+        ``orchestration._controller_json`` raises an ``OrchestrationHostError``
+        carrying whatever envelope the child printed, and the facade's
+        ``_typed_error`` returns ``error_from_envelope(envelope)`` whenever there
+        is one, falling back to ``ORCHESTRATION_HOST_FAILED`` only when there is
+        not and to ``ORCHESTRATION_HOST_EXITED`` only for a ``SystemExit``. So an
+        unrecognized status cannot demote a coded refusal into a host error. This
+        case asserts that against the status actually observed from a shell, 5,
+        because "an unknown status changes nothing" is worth nothing if the status
+        under test was 2 the whole time.
+
+        **The reported ``exit_code`` is 2, and by the documented contract it
+        should be 5.** ``docs/library-api.md`` defines the attribute as "the
+        status the CLI would have exited with", and both shells exit 5 here: the
+        controller directly, and ``evidence-wiki orchestrate next``, which returns
+        the controller's status through ``orchestration._passthrough_controller``.
+        The exception says 2 because *no* error envelope in this package carries an
+        ``exit_code`` key -- ``_script_errors.error_envelope`` never emits one --
+        so ``errors.error_from_envelope`` reconstructs the status from the static
+        ``errors._EXIT_CODE_OVERRIDES`` table, which knows only ``CLAIM_HELD`` and
+        ``CLAIM_NOT_STALE`` at 3. ``ORCHESTRATION_DRIVER_BUSY`` is the first
+        refusal in the workspace scripts to exit with anything that table has not
+        already been told about. (The controller's other non-zero statuses, 3
+        ``EXIT_BLOCKED`` and 4 ``EXIT_PAUSED``, are not refusals at all: they
+        accompany a *session document* on stdout and are returned rather than
+        raised, so no exception ever carried them -- see
+        ``test_library_orchestrate.py::
+        test_a_terminal_or_paused_session_is_returned_on_a_non_zero_exit``.)
+
+        The 2 is therefore pinned as a **record of a known divergence, not as a
+        guarantee**. Fixing it is a production edit to ``errors.py``, which this
+        unit does not own. When it lands, the assertion below is the one that must
+        change -- and ``ReachabilityAsserts.agrees_with_the_cli``, which asserts
+        exactly the equality this case cannot yet make, becomes usable here.
+        """
+        contended = self.contended_session("driver-busy-exit-status")
+
+        raised = self.reached("ORCHESTRATION_DRIVER_BUSY", contended.session.next)
+        envelope, returncode = self.cli_refusal(
+            "orchestration_controller.py",
+            contended.root,
+            ("next", "--orchestration-id", contended.session.orchestration_id, "--format", "json"),
+        )
+
+        self.assertEqual(
+            5, returncode, "the controller no longer exits EXIT_DRIVER_BUSY for a contended session"
+        )
+        # Everything a host branches on agrees across the two doors ...
+        self.assertEqual(envelope["error_code"], raised.error_code)
+        self.assertEqual(envelope["recoverable"], raised.recoverable)
+        self.assertEqual(envelope["remediation"], raised.remediation)
+        # ... and the status nothing has a branch for did not divert the
+        # controller's own coded refusal into either of the facade's host codes.
+        self.assertNotIn(
+            raised.error_code,
+            {orchestrate_facade.HOST_ERROR_CODE, orchestrate_facade.EXITED_ERROR_CODE},
+        )
+        self.assertEqual(
+            errors.EXIT_INVALID,
+            raised.exit_code,
+            "the exit-status divergence this case records has been fixed; assert the CLI's own "
+            "status instead and move this case onto agrees_with_the_cli",
+        )
 
 
 class MatrixTests(unittest.TestCase):

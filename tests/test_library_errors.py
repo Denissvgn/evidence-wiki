@@ -237,3 +237,67 @@ class EmittedCodeFamilyTests(unittest.TestCase):
         for code, reason in self.NOT_ERROR_CODES.items():
             with self.subTest(code=code):
                 self.assertTrue(reason.strip(), f"{code} is excluded without a reason")
+
+
+class ExitStatusReconstructionTests(unittest.TestCase):
+    """Where a typed exception's ``exit_code`` comes from, and what it costs.
+
+    ``docs/library-api.md`` documents the attribute as "the status the CLI would
+    have exited with". No envelope carries it: ``_script_errors.error_envelope``
+    emits ``schema_version``, ``error_code``, ``message``, ``recoverable``,
+    ``remediation`` and an optional ``details``, and never an exit status. So
+    ``errors.error_from_envelope`` *reconstructs* the number from
+    ``errors._EXIT_CODE_OVERRIDES``, a table this package maintains by hand
+    against the scripts' own ``EXIT_*`` constants -- and that is only ever as
+    good as the table.
+
+    CR-8 supplied the first miss. ``ORCHESTRATION_DRIVER_BUSY`` exits the
+    controller with ``EXIT_DRIVER_BUSY`` (5), the first refusal in the workspace
+    scripts to exit with anything the table has not been told about; every earlier
+    one exits 2, or the 3 the two claim codes already occupy. At the library
+    boundary it therefore arrives as 2 while both shells report 5.
+
+    Both halves are pinned here -- the mechanism, and the divergence *as a record
+    rather than as an endorsement*. The end-to-end demonstration lives in
+    ``tests/test_library_error_reachability.py``; this is the fast structural
+    statement of why it comes out that way, so the day the table learns the code,
+    the tests that must change say what they were recording.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.assets_root = shared_assets_root()
+        cls.script_errors = load_packaged_script(cls.assets_root, "_script_errors")
+
+    def test_no_error_envelope_carries_an_exit_status(self):
+        """The root of it: the number cannot survive the seam, because it is never sent."""
+        for code in sorted(self.script_errors._REMEDIATIONS):
+            with self.subTest(error_code=code):
+                envelope = self.script_errors.error_envelope(code, "x", details={"holder": None})
+                self.assertNotIn("exit_code", envelope)
+
+    def test_the_driver_busy_code_is_retryable_and_lands_in_the_orchestration_family(self):
+        """The two attributes a host reconstructs correctly without an envelope.
+
+        A host that builds the error itself -- from a logged code, or from a
+        refusal it forwarded -- gets the same recoverability and the same family
+        the controller sends, which is what makes ``except OrchestrationError``
+        plus a retry on ``recoverable`` a complete handler for contention.
+        """
+        self.assertIs(errors.OrchestrationError, errors.error_class_for("ORCHESTRATION_DRIVER_BUSY"))
+        self.assertTrue(errors.default_recoverable("ORCHESTRATION_DRIVER_BUSY"))
+
+    def test_the_driver_busy_exit_status_is_the_default_rather_than_the_controllers(self):
+        """The third attribute, which is *not* reconstructed correctly. See the class docstring."""
+        controller = (self.assets_root / "workspace-template" / "scripts" / "orchestration_controller.py").read_text(
+            encoding="utf-8"
+        )
+        declared = re.search(r"^EXIT_DRIVER_BUSY = (\d+)$", controller, re.MULTILINE)
+        self.assertIsNotNone(declared, "the controller no longer declares EXIT_DRIVER_BUSY")
+        self.assertEqual(5, int(declared.group(1)), "EXIT_DRIVER_BUSY moved; this record needs rereading")
+        self.assertEqual(
+            errors.EXIT_INVALID,
+            errors.default_exit_code("ORCHESTRATION_DRIVER_BUSY"),
+            "the override table has learned this code; drop this record and assert the controller's "
+            "own status here and in tests/test_library_error_reachability.py",
+        )
