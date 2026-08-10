@@ -192,9 +192,9 @@ class PackageCliTests(unittest.TestCase):
             payload["policy_vocabularies"],
         )
         definitions = payload["policy_vocabulary_definitions"]
-        self.assertIn("base", definitions)
-        self.assertIn("installed_domain_packs", definitions)
-        self.assertIn("merged", definitions)
+        # CR-9 T6 adds `policy_rules` beside this block without touching it: pin the
+        # existing key set exactly so a future change to either surface is visible here.
+        self.assertEqual({"base", "installed_domain_packs", "merged"}, set(definitions))
         self.assertIn(
             "pack:general-science/study-recency",
             definitions["installed_domain_packs"]["general-science"]["freshness_policy"],
@@ -203,6 +203,11 @@ class PackageCliTests(unittest.TestCase):
             "Require a reviewer",
             definitions["merged"]["freshness_policy"]["pack:general-science/study-recency"],
         )
+        # No shipped pack declares a deterministic `policy_rules` block today, so the
+        # new additive surface is present and empty on a stock checkout -- both facts
+        # matter: the key existing at all, and it not yet carrying anything.
+        self.assertIn("policy_rules", payload)
+        self.assertEqual({}, payload["policy_rules"])
 
         with resources.assets_root() as root:
             metadata = yaml.safe_load((root / "workspace-template" / "workspace-system.yml").read_text())
