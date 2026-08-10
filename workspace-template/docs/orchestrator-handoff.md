@@ -232,7 +232,7 @@ The output is JSON. This abridged example omits the large
 {
   "schema_version": "1.0",
   "package": "evidence-wiki",
-  "package_version": "0.2.4",
+  "package_version": "0.3.0",
   "starter_version": "0.5.5",
   "starter_schema_version": "0.1",
   "compatible_research_yml_contract": "0.1",
