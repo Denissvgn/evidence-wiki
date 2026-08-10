@@ -20,6 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
     # that these names are deliberate re-exports and not dead imports.
     from . import errors as errors
     from ._contract import contract as contract
+    from ._facades.diagnostics import fleet_status as fleet_status
     from .workspace import Workspace as Workspace
 
 # Attribute name -> (submodule to import, attribute on it, or ``None`` for the
@@ -38,6 +39,9 @@ _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "Workspace": (".workspace", "Workspace"),
     "contract": ("._contract", "contract"),
     "errors": (".errors", None),
+    # Module-level rather than a handle method: it aggregates across many
+    # workspaces, so no single handle owns it.
+    "fleet_status": ("._facades.diagnostics", "fleet_status"),
 }
 
 __all__ = ["__version__", *sorted(_LAZY_ATTRS)]
