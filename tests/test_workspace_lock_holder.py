@@ -224,7 +224,14 @@ class LockHolderSidecarTests(unittest.TestCase):
                 pass
             baseline = lock_path.read_bytes()
             with locks.workspace_lock(lock_path, holder={"pid": os.getpid()}, purpose="with holder"):
-                self.assertEqual(baseline, lock_path.read_bytes())
+                if os.name == "posix":
+                    # Only read the lock file while it is held where that is
+                    # allowed: the msvcrt backend locks byte zero, so on Windows
+                    # this read is refused by the OS rather than by anything the
+                    # sidecar did. The comparison after release below is the
+                    # portable half and is the actual claim -- publishing a holder
+                    # leaves the lock file itself untouched.
+                    self.assertEqual(baseline, lock_path.read_bytes())
 
             self.assertEqual(baseline, lock_path.read_bytes())
 

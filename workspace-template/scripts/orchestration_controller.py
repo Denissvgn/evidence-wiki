@@ -546,13 +546,22 @@ def bounded_holder_details(holder: dict[str, Any] | None) -> dict[str, Any] | No
         if key not in holder:
             continue
         value = holder[key]
-        if value is None or isinstance(value, bool) or isinstance(value, int):
-            bounded[key] = value
+        if value is None:
+            # The peer recorded the field as absent, which is itself a report --
+            # ``agent_id`` is documented ``str | null`` for exactly this.
+            bounded[key] = None
+        elif key == "pid":
+            # ``bool`` is a subclass of ``int``, so it has to be excluded
+            # explicitly or a peer writing ``pid: true`` would satisfy the type a
+            # host branches on.
+            if isinstance(value, int) and not isinstance(value, bool):
+                bounded[key] = value
         elif isinstance(value, str):
             bounded[key] = rendered_holder_field(holder, key, "")
-        # Everything else -- dict, list, float, arbitrary object -- is omitted
-        # rather than coerced, so a host reading this block never has to guess
-        # whether a value came from the peer or from this renderer.
+        # Everything else -- a bool, a number where a string belongs, a nested
+        # structure -- is omitted rather than coerced. A host reading this block
+        # should never have to guess whether a value came from the peer or from
+        # this renderer, and an omitted key says "not reported" honestly.
     return bounded
 
 

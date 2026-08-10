@@ -412,7 +412,7 @@ class FacadeErrorTranslationTests(WorkspaceBuilder, unittest.TestCase):
         self.assertEqual("ORCHESTRATION_DRIVER_BUSY", caught.exception.error_code)
         self.assertTrue(caught.exception.recoverable)
         # Classification comes from the envelope, not the child's exit status: the
-        # controller's own ``EXIT_DRIVER_BUSY`` (5) is asserted where processes are
+        # controller's own ``EXIT_DRIVER_BUSY`` (6) is asserted where processes are
         # observable, in the controller suite. Here the point is that a non-zero exit
         # the facade has never seen before does not divert this into a host error.
         self.assertNotIsInstance(caught.exception, orchestration.OrchestrationHostError)

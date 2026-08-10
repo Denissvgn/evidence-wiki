@@ -3348,10 +3348,16 @@ class OrchestrationHostTests(unittest.TestCase):
         session depends on -- none of which is the transient runtime state the
         exclusion exists to tolerate.
         """
-        for label, tamper in (
-            ("mode_changed", lambda locks: locks.chmod(0o777)),
-            ("removed", lambda locks: locks.rmdir()),
-        ):
+        tampers = [("removed", lambda locks: locks.rmdir())]
+        if os.name == "posix":
+            # Windows does not carry POSIX permission bits, so ``chmod(0o777)``
+            # leaves ``stat.S_IMODE`` unchanged there and the case would assert a
+            # difference the filesystem never made. The guarantee under test --
+            # the directory entry is still in the snapshot -- is covered on every
+            # platform by the ``removed`` case.
+            tampers.insert(0, ("mode_changed", lambda locks: locks.chmod(0o777)))
+
+        for label, tamper in tampers:
             with self.subTest(tamper=label), tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)
                 parent = control_workspace(root)

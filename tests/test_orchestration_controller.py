@@ -4,7 +4,6 @@ import importlib.util
 import io
 import json
 import os
-import signal
 import stat
 import subprocess
 import sys
@@ -2174,7 +2173,7 @@ class OrchestrationControllerTests(unittest.TestCase):
         )
 
     def test_a_second_driver_process_is_refused_and_names_the_winner(self):
-        """Two OS processes, one session: the loser exits 5 and says whose pid won.
+        """Two OS processes, one session: the loser exits 6 and says whose pid won.
 
         This is CR-8's whole point stated as an experiment. Before it, the second
         process waited ten seconds and then proceeded, interleaving its writes
@@ -2221,11 +2220,18 @@ class OrchestrationControllerTests(unittest.TestCase):
             root = Path(tmpdir)
             target = self.init_workspace(root)
             self.start(target)
-            self.spawn_holding_driver(target, root)
+            holder, _, release = self.spawn_holding_driver(target, root)
 
             started = time.monotonic()
             polled = self.run_controller_process(target, "status", "--orchestration-id", "orch-test")
             elapsed = time.monotonic() - started
+
+            # Released inside the temporary directory rather than by the
+            # registered cleanup, which runs after it: Windows cannot delete a
+            # file another process still holds open, so a holder outliving the
+            # tree fails the teardown rather than the assertion.
+            release.touch()
+            holder.wait(60)
 
         self.assertEqual(0, polled.returncode, polled.stderr)
         self.assertEqual("orch-test", json.loads(polled.stdout)["orchestration_id"])
@@ -2247,9 +2253,12 @@ class OrchestrationControllerTests(unittest.TestCase):
             root = Path(tmpdir)
             target = self.init_workspace(root, question=True)
             self.start(target)
-            holder, holder_pid, _ = self.spawn_holding_driver(target, root)
+            holder, _, _ = self.spawn_holding_driver(target, root)
 
-            os.kill(holder_pid, signal.SIGKILL)
+            # ``Popen.kill`` rather than ``os.kill(pid, SIGKILL)``: Windows has no
+            # SIGKILL, and this is the portable spelling of the same
+            # uncatchable-termination the test is about (TerminateProcess there).
+            holder.kill()
             holder.wait(60)
             # The crashed driver's sidecar is still on disk; a successor must not
             # mistake that leftover for a live owner.

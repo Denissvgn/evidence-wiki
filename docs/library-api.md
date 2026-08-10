@@ -307,7 +307,7 @@ What remains the host's job:
 > (`recoverable=True`), whose `details["holder"]` names the holder's `agent_id`
 > (or `None`), `pid`, `hostname`, `command`, and `acquired_at`. Branch on
 > `error_code`, which is the stable contract; `exit_code` agrees with it here
-> (`5`, the status the controller process exits with) because the code is
+> (`6`, the status the controller process exits with) because the code is
 > registered in the reconstruction table. A refused call writes nothing. This is `LOCK_UNAVAILABLE`'s
 > replacement for *contention only*: that code kept its older, narrower meaning
 > — no lock backend could be established on this filesystem at all — and the two
@@ -588,7 +588,7 @@ def http_error(exc: errors.EvidenceWikiError) -> tuple[int, dict[str, Any]]:
     elif exc.error_code == "ORCHESTRATION_DRIVER_BUSY":
         status = 503               # another driver holds the session right now;
                                    # details["holder"] says who. Matched by code
-                                   # rather than exit_code (5) so this stays
+                                   # rather than exit_code (6) so this stays
                                    # distinct from any future code sharing it.
     elif isinstance(exc, errors.LockError):
         status = 503               # contended, and worth retrying
