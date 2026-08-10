@@ -199,7 +199,49 @@ ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     "EVENT_": RunError,
     "FINAL_VERDICT_REQUIRED": RunError,
     # Orchestrations.
+    #
+    # The controller emits a second group of codes that carry no ``ORCHESTRATION_``
+    # prefix. They are the protocol's own refusals -- a submitted result that does
+    # not validate, a work order that does not, an action id that names nothing --
+    # and a host driving the session catches them in the same place it catches
+    # everything else about that session. Without these entries they fell through
+    # to the base class, so ``except OrchestrationError`` around ``session.submit``
+    # missed ``RESULT_INVALID``, which is the most common refusal that call has.
     "ORCHESTRATION_": OrchestrationError,
+    "ACTION_ID_INVALID": OrchestrationError,
+    "ACTION_NOT_PENDING": OrchestrationError,
+    "ARTIFACT_PATH_INVALID": OrchestrationError,
+    "CANDIDATE_STORE_INVALID": OrchestrationError,
+    "CONTROL_ARTIFACT_TAMPERED": OrchestrationError,
+    "RESULT_CONFLICT": OrchestrationError,
+    "RESULT_INVALID": OrchestrationError,
+    "RESULT_UNREADABLE": OrchestrationError,
+    "WORK_ORDER_INVALID": OrchestrationError,
+    # Workspace health, reported by the shared health check rather than by one
+    # script: the workspace itself is unusable, which is the ConfigError story.
+    "REQUIRED_DEPENDENCY_MISSING": ConfigError,
+    "RESEARCH_CONFIG_INCOMPLETE": ConfigError,
+    "RESEARCH_CONFIG_INVALID": ConfigError,
+    "WORKSPACE_CONFIGURED_DIRECTORY_MISSING": ConfigError,
+    "WORKSPACE_REQUIRED_DIRECTORY_MISSING": ConfigError,
+    "WORKSPACE_REQUIRED_FILE_MISSING": ConfigError,
+    "WORKSPACE_ROOT_MISSING": ConfigError,
+    # The normalized-record contract (CR-2). A record that breaches it is a
+    # statement about a source, not about the workspace.
+    "NORMALIZED_CONTRACT_": SourceError,
+    "SIDECAR_INVALID": SourceError,
+    "SIDECAR_MISSING": SourceError,
+    # Discovery candidates and the provider budgets discovery spends.
+    "ACADEMIC_PROVIDER_": ProviderError,
+    "SEARCH_PROVIDER_": ProviderError,
+    "CANDIDATE_": ProviderError,
+    "JURISDICTION_": ProviderError,
+    # Run execution: budgets the run controller enforces, and how a runner ended.
+    "BUDGET_": RunError,
+    "RUNNER_": RunError,
+    # Per-policy human review (CR-1), recorded against a question.
+    "REVIEWER_INVALID": QuestionError,
+    "REVIEW_": QuestionError,
     # Argument-level refusals, raised before any workspace state is consulted.
     # ``NOT_IMPLEMENTED`` belongs here rather than with the providers: it means
     # the operation the caller named does not exist in this build, not that a

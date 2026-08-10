@@ -181,3 +181,59 @@ class ErrorEnvelopeToleranceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmittedCodeFamilyTests(unittest.TestCase):
+    """Every code a workspace script can emit must land in a family, not the base class.
+
+    ``test_every_documented_code_maps_to_a_family`` above walks
+    ``_script_errors._REMEDIATIONS``, which is the *documented* registry. Scripts
+    emit codes that are absent from it -- the orchestration controller alone
+    raises ``RESULT_INVALID``, ``WORK_ORDER_INVALID`` and seven more with no
+    ``ORCHESTRATION_`` prefix -- and those reached a host as the bare base class.
+    A host writing ``except OrchestrationError`` around ``session.submit`` caught
+    nothing, for the refusal that call makes most often.
+
+    Scanning the sources rather than the remediation table is what notices the
+    next one. The exclusion set below is the honest cost: a screaming-snake string
+    literal is not proof of an error code, so genuine non-codes are named
+    individually with a reason instead of being filtered by a pattern that would
+    also hide real gaps.
+    """
+
+    #: Screaming-snake literals that are demonstrably not error codes.
+    NOT_ERROR_CODES = {
+        "O_BINARY": "os.open flag",
+        "O_NOFOLLOW": "os.open flag",
+        "EVIDENCE_WIKI_HANDOFF_SECRET": "environment variable name",
+        "EVIDENCE_WIKI_SINGLE_WRITER": "environment variable name",
+        "QUERY_INDEX_FALLBACK": "retrieval mode name, not a refusal",
+    }
+
+    CODE_SHAPED = re.compile(r'"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,})"')
+
+    def test_every_code_a_script_can_emit_maps_to_a_family(self):
+        emitted: dict[str, set[str]] = {}
+        scripts = REPO_ROOT / "workspace-template" / "scripts"
+        for path in sorted(scripts.glob("*.py")):
+            for code in self.CODE_SHAPED.findall(path.read_text(encoding="utf-8")):
+                if code not in self.NOT_ERROR_CODES:
+                    emitted.setdefault(code, set()).add(path.name)
+
+        unmapped = {
+            code: sorted(files)
+            for code, files in emitted.items()
+            if errors.error_class_for(code) is errors.EvidenceWikiError
+        }
+        self.assertEqual(
+            {},
+            unmapped,
+            "these codes reach a host as the base class, so a family-scoped `except` misses them; "
+            "add each to ERROR_FAMILIES, or to NOT_ERROR_CODES with the reason it is not a code",
+        )
+
+    def test_the_exclusion_set_only_holds_things_that_are_not_codes(self):
+        """An exclusion must be justified, so the set cannot become a silencer."""
+        for code, reason in self.NOT_ERROR_CODES.items():
+            with self.subTest(code=code):
+                self.assertTrue(reason.strip(), f"{code} is excluded without a reason")
