@@ -183,6 +183,27 @@ evidence-wiki serve-mcp --target /path/to/workspace
 See the [MCP server contract][mcp-server] for its tool list and read/append-only
 boundary.
 
+## Drive It From Python
+
+A host that embeds EvidenceWiki — an ASGI service, a scheduler, a batch worker —
+can call the package in-process instead of spawning the CLI per operation:
+
+```python
+from evidence_wiki import Workspace
+
+with Workspace.open("/path/to/workspace") as ws:
+    report = ws.coverage.evaluate("electrolyte-conductivity")
+```
+
+Twenty-six operations return the same documents the matching `--format json`
+commands print, and refuse with typed exceptions carrying the same stable error
+codes. Both doors render from one seam per operation, so they cannot disagree.
+Orchestration keeps a subprocess to the workspace's own deployed controller,
+which is version-matched to the session state it owns. The package ships no HTTP
+server; hosts build their own. See the [library API][library-api] for the full
+surface, the error families, thread-safety guarantees, and a worked embedding
+example.
+
 ## Requirements and Diagnostics
 
 Required:
@@ -340,8 +361,9 @@ when it conforms.
   verification][citation-verification].
 - **Agents and integrations:** [parent orchestration][orchestration],
   [orchestrator handoff][orchestrator-handoff], [workspace
-  status][workspace-status], [run controller][run-controller], [MCP
-  server][mcp-server], and [orchestrator playbooks][orchestrator-readme].
+  status][workspace-status], [run controller][run-controller], [library
+  API][library-api], [MCP server][mcp-server], and [orchestrator
+  playbooks][orchestrator-readme].
 - **Safety and operations:** [prompt-injection hardening][prompt-injection],
   [human editing and snapshots][human-editing], [codebase
   analysis][codebase-analysis], [production readiness][production-readiness],
@@ -381,6 +403,7 @@ EvidenceWiki is available under the [MIT License][license].
 [orchestrator-handoff]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/orchestrator-handoff.md
 [workspace-status]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-status.md
 [run-controller]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/run-controller.md
+[library-api]: https://github.com/Denissvgn/evidence-wiki/blob/main/docs/library-api.md
 [mcp-server]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/mcp-server.md
 [prompt-injection]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/prompt-injection-hardening.md
 [human-editing]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/human-editing.md
