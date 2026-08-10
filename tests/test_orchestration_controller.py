@@ -8,6 +8,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,6 +48,40 @@ NORMALIZE = load_script_module("orchestration_normalize_sources", SCRIPTS / "nor
 COVERAGE = load_script_module("orchestration_coverage_manifest", SCRIPTS / "coverage_manifest.py")
 VERIFY_QUOTES = load_script_module("orchestration_verify_quotes", SCRIPTS / "verify_quotes.py")
 READINESS = load_script_module("orchestration_publication_readiness", SCRIPTS / "publication_readiness.py")
+LOCKS = load_script_module("orchestration_workspace_locks", SCRIPTS / "_workspace_locks.py")
+
+#: A *real* second driver, in its own OS process, holding the session lock the way
+#: the controller holds it.
+#:
+#: Deliberately not "the test process takes the lock": that would exercise the
+#: refusal but not the thing the refusal reports. Here the holder block in the
+#: sidecar is published by the controller's own ``driver_session_lock``, so the
+#: pid a refused peer reads back is a pid that really owns the lock, written by
+#: the code under test rather than by the test.
+HOLDING_DRIVER = """
+import importlib.util, os, sys, time
+from pathlib import Path
+
+scripts, project_root, orchestration_id, ready, release, agent_id = sys.argv[1:7]
+spec = importlib.util.spec_from_file_location(
+    "held_driver_controller", str(Path(scripts) / "orchestration_controller.py")
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+with module.driver_session_lock(
+    Path(project_root),
+    orchestration_id,
+    command="next",
+    agent_id=(agent_id or None),
+    wait_seconds=0.0,
+):
+    Path(ready).write_text(str(os.getpid()), encoding="utf-8")
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and not Path(release).exists():
+        time.sleep(0.02)
+"""
 
 ACADEMIC_DOI = "10.5555/orchestration-solid-electrolyte"
 ARXIV_PAYLOAD = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -1813,6 +1849,482 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
             self.assertEqual("LOCK_UNAVAILABLE", error["error_code"])
             self.assertFalse((target / "runs" / "orchestrations" / "orch-test" / "session.json").exists())
+
+    def test_contention_is_read_off_the_error_by_shape_not_by_class(self):
+        """The one check that decides between the two refusals reads an attribute.
+
+        ``contended`` is a flag on the existing class rather than a subclass
+        because workspace scripts load siblings by file path: several copies of
+        ``_workspace_locks``, and therefore several distinct
+        ``LockUnavailableError`` classes, coexist in one interpreter, and a
+        subclass check across copies compiles, reads naturally, and never fires.
+
+        The consequence worth pinning is the degradation: an error object that
+        predates the flag -- what an older vendored copy of the lock module
+        raises -- must fall back to "not contended" and take the pre-existing
+        ``LOCK_UNAVAILABLE`` path, never crash on a missing attribute and never
+        be guessed into the new one. Both directions are asserted here, so a
+        refactor to ``exc.contended`` or to ``isinstance`` fails loudly.
+        """
+        legacy = CONTROLLER.LockUnavailableError("no backend is available")
+        del legacy.contended
+        self.assertFalse(hasattr(legacy, "contended"))
+        contended = CONTROLLER.LockUnavailableError("a peer holds it", contended=True)
+
+        cases = (
+            (legacy, CONTROLLER.EXIT_INVALID, "LOCK_UNAVAILABLE"),
+            (contended, CONTROLLER.EXIT_DRIVER_BUSY, "ORCHESTRATION_DRIVER_BUSY"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.start(target)
+            for raised, expected_code, expected_error in cases:
+                with self.subTest(error=expected_error):
+                    with mock.patch.object(CONTROLLER, "workspace_lock", side_effect=raised):
+                        code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+                    self.assertEqual(expected_code, code)
+                    self.assertEqual(expected_error, error["error_code"])
+
+    def test_driver_busy_refusal_renders_without_any_readable_holder(self):
+        """The refusal must survive knowing nothing about who it is refusing for.
+
+        ``read_lock_holder`` reports ``None`` for a sidecar that is missing,
+        truncated, or written by a crashed peer -- and the winner publishes its
+        sidecar just *after* acquiring, so a loser refused inside that window
+        legitimately sees nothing. A message that indexed the holder block would
+        raise while explaining a failure, replacing a clean refusal with a
+        traceback at precisely the moment a host needs to parse an envelope.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.start(target)
+            contended = CONTROLLER.LockUnavailableError("a peer holds it", contended=True)
+            with mock.patch.object(CONTROLLER, "workspace_lock", side_effect=contended), mock.patch.object(
+                CONTROLLER, "read_lock_holder", return_value=None
+            ):
+                code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(CONTROLLER.EXIT_DRIVER_BUSY, code)
+            self.assertEqual("ORCHESTRATION_DRIVER_BUSY", error["error_code"])
+            self.assertIsNone(error["details"]["holder"])
+            self.assertIn("<unrecorded agent>", error["message"])
+            self.assertIn("orch-test", error["message"])
+
+            # A sidecar that parses but carries nothing usable is the same story:
+            # the fields fall back individually rather than all-or-nothing.
+            for hostile in ({}, {"agent_id": None, "pid": "", "acquired_at": {}}):
+                with self.subTest(holder=hostile):
+                    with mock.patch.object(
+                        CONTROLLER, "workspace_lock", side_effect=contended
+                    ), mock.patch.object(CONTROLLER, "read_lock_holder", return_value=hostile):
+                        code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+                    self.assertEqual(CONTROLLER.EXIT_DRIVER_BUSY, code)
+                    self.assertIn("<unrecorded agent>", error["message"])
+
+            # And a hostile peer cannot turn a one-line refusal into a wall of text.
+            shouting = {"agent_id": "A" * 5000, "pid": 7, "acquired_at": "2026-08-10T00:00:00Z"}
+            with mock.patch.object(CONTROLLER, "workspace_lock", side_effect=contended), mock.patch.object(
+                CONTROLLER, "read_lock_holder", return_value=shouting
+            ):
+                code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(CONTROLLER.EXIT_DRIVER_BUSY, code)
+            self.assertLess(len(error["message"]), 400)
+
+    def test_driver_busy_refusal_is_immediate_and_writes_nothing(self):
+        """The default refuses now, and refusing leaves the session byte-identical.
+
+        Both halves matter. The bounded wait this replaces is what made
+        interleaved drivers silent, so "immediate" is the behaviour under test,
+        not an implementation detail -- and it is measured in-process, where no
+        interpreter start-up can hide a ten-second sleep. "Writes nothing" is the
+        fail-closed rule the rest of this controller keeps: a refusal that had
+        already appended an event would have made the session's own history lie
+        about what happened.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            self.start(target)
+            session_file = CONTROLLER.session_path(target, "orch-test")
+            events_file = CONTROLLER.events_path(target, "orch-test")
+            before_session = session_file.read_bytes()
+            before_events = events_file.read_bytes()
+
+            with LOCKS.workspace_lock(
+                CONTROLLER.session_lock_path(target, "orch-test"),
+                purpose="competing driver",
+                holder={"agent_id": "competing-driver", "pid": 4242, "acquired_at": "2026-08-10T00:00:00Z"},
+            ):
+                started = time.monotonic()
+                code, error, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
+                elapsed = time.monotonic() - started
+
+            self.assertEqual(CONTROLLER.EXIT_DRIVER_BUSY, code)
+            self.assertEqual("ORCHESTRATION_DRIVER_BUSY", error["error_code"])
+            self.assertTrue(error["recoverable"])
+            self.assertIn("status polling never requires this lock", error["remediation"])
+            self.assertEqual("competing-driver", error["details"]["holder"]["agent_id"])
+            self.assertEqual(4242, error["details"]["holder"]["pid"])
+            self.assertEqual("orch-test", error["details"]["orchestration_id"])
+            self.assertLess(elapsed, 1.0, "the default must refuse immediately, not wait")
+            self.assertEqual(before_session, session_file.read_bytes())
+            self.assertEqual(before_events, events_file.read_bytes())
+
+    def test_driver_wait_seconds_restores_queueing_for_hosts_that_ask(self):
+        """The opt-in wait is the compatibility lever for hosts that liked queueing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir), question=True)
+            self.start(target)
+            lock_path = CONTROLLER.session_lock_path(target, "orch-test")
+            acquired, released = threading.Event(), threading.Event()
+            hold_seconds = 0.5
+
+            def hold_briefly():
+                with LOCKS.workspace_lock(lock_path, purpose="competing driver", holder={"pid": 1}):
+                    acquired.set()
+                    time.sleep(hold_seconds)
+                released.set()
+
+            holder = threading.Thread(target=hold_briefly, daemon=True)
+            holder.start()
+            self.addCleanup(holder.join, 30)
+            # Waiting for the acquisition, rather than sleeping and hoping, is what
+            # keeps the elapsed-time assertion below meaningful instead of flaky.
+            self.assertTrue(acquired.wait(30), "the competing driver never acquired the session lock")
+
+            started = time.monotonic()
+            code, order, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--driver-wait-seconds",
+                "30",
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(0, code, stderr)
+        self.assertIn("action_id", order)
+        self.assertTrue(released.wait(30), "the holder never released")
+        # It queued rather than refusing (the lower bound) and it did not sit out
+        # the whole budget (the upper bound): the wait ends when the lock frees.
+        self.assertGreater(elapsed, hold_seconds / 2)
+        self.assertLess(elapsed, 30.0)
+
+    def test_a_negative_driver_wait_is_refused_at_the_cli_boundary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            for bad in ("-1", "-0.5", "nan", "inf", "soon"):
+                with self.subTest(value=bad):
+                    with self.assertRaises(SystemExit) as caught:
+                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                            CONTROLLER.main(
+                                [
+                                    "--project-root",
+                                    str(target),
+                                    "next",
+                                    "--orchestration-id",
+                                    "orch-test",
+                                    "--driver-wait-seconds",
+                                    bad,
+                                ]
+                            )
+                    self.assertEqual(2, caught.exception.code)
+            self.assertEqual(0.0, CONTROLLER.parse_wait_seconds("0"))
+            self.assertEqual(30.0, CONTROLLER.parse_wait_seconds("30"))
+
+    def test_driver_identity_is_recorded_in_issuance_and_completion_events(self):
+        """Post-hoc visibility: the events say which process wrote them.
+
+        Not enforcement. Nothing reads this block back to decide whether a write
+        is allowed -- span-level leases are deliberately future work. What it buys
+        is that an interleaving which slipped past the per-invocation lock (two
+        hosts taking turns under a long ``--driver-wait-seconds``) is legible in
+        ``events.jsonl`` afterwards instead of reconstructed from timestamps.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            _, order, stderr = self.controller(
+                target,
+                "next",
+                "--orchestration-id",
+                "orch-test",
+                "--agent-id",
+                "agent-test",
+            )
+            self.assertIn("action_id", order, stderr)
+            self.block_question(target)
+            code, _, stderr = self.submit(root, target, order["action_id"])
+            self.assertEqual(0, code, stderr)
+
+            events = self.events(target, "orch-test")
+            issued = next(event for event in events if event["event_type"] == "action_issued")
+            completed = next(event for event in events if event["event_type"] == "action_completed")
+            for event in (issued, completed):
+                with self.subTest(event=event["event_type"]):
+                    driver = event["data"]["driver"]
+                    self.assertEqual(os.getpid(), driver["pid"])
+                    self.assertTrue(driver["hostname"])
+                    self.assertEqual("agent-test", driver["agent_id"])
+            # The completion event keeps the payload it always carried.
+            self.assertEqual("completed", completed["data"]["outcome"])
+
+            # `next` replays `repair_last_completion_events`; a repair must not
+            # rewrite an event that already exists, driver block included. The
+            # whole existing prefix is compared, not just the one event, because
+            # a repair that appended a duplicate would still leave the original
+            # intact and pass a narrower check.
+            self.controller(target, "next", "--orchestration-id", "orch-test", "--agent-id", "agent-test")
+            after_events = self.events(target, "orch-test")
+            self.assertEqual(events, after_events[: len(events)])
+            self.assertEqual(
+                1,
+                sum(event["event_type"] == "action_completed" for event in after_events),
+            )
+
+    def test_events_written_outside_a_driver_lock_are_unchanged(self):
+        """A direct `record_event` still produces exactly the event it always did."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            session = self.start(target)
+            self.assertIsNone(CONTROLLER.event_driver_block())
+            CONTROLLER.record_event(target, session, "action_issued", "Direct call.", action_id="action-0001")
+            direct = self.events(target, "orch-test")[-1]
+            self.assertEqual({}, direct["data"])
+
+    # -- real-process driver contention ------------------------------------------------
+    #
+    # The refusal exists for two *hosts*, so the proof has to be two processes. An
+    # in-process test shares one interpreter, one lock table, and one pid, which is
+    # exactly the situation the lock is not needed for.
+
+    def spawn_holding_driver(
+        self,
+        target: Path,
+        scratch: Path,
+        *,
+        orchestration_id: str = "orch-test",
+        agent_id: str = "holding-driver",
+    ) -> tuple[subprocess.Popen, int, Path]:
+        """Start a second driver process and block until it truly holds the lock."""
+        ready = scratch / f"{orchestration_id}-ready"
+        release = scratch / f"{orchestration_id}-release"
+        process = subprocess.Popen(  # noqa: S603
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                HOLDING_DRIVER,
+                str(target / "scripts"),
+                str(target),
+                orchestration_id,
+                str(ready),
+                str(release),
+                agent_id,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        def stop() -> None:
+            """Let the holder go, tolerating a workspace that is already gone.
+
+            Registered as a cleanup so no test can leak a process that holds a
+            lock for two minutes, and written to survive running *after* the
+            temporary directory it signals through has been removed.
+            """
+            with contextlib.suppress(OSError):
+                release.touch()
+            try:
+                process.wait(30)
+            except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+                process.kill()
+                process.wait(30)
+
+        self.addCleanup(stop)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if ready.is_file():
+                return process, int(ready.read_text(encoding="utf-8")), release
+            if process.poll() is not None:
+                self.fail(f"the holding driver exited early: {process.communicate()[1]}")
+            time.sleep(0.02)
+        self.fail("the holding driver never acquired the session lock")
+
+    def run_controller_process(self, target: Path, *args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+        return subprocess.run(  # noqa: S603
+            [
+                sys.executable,
+                "-B",
+                str(target / "scripts" / "orchestration_controller.py"),
+                "--project-root",
+                str(target),
+                *args,
+                "--format",
+                "json",
+            ],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+
+    def test_a_second_driver_process_is_refused_and_names_the_winner(self):
+        """Two OS processes, one session: the loser exits 6 and says whose pid won.
+
+        This is CR-8's whole point stated as an experiment. Before it, the second
+        process waited ten seconds and then proceeded, interleaving its writes
+        with the first driver's; the corruption surfaced later, somewhere else,
+        with nothing tying it back to the moment two hosts overlapped.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            session_file = CONTROLLER.session_path(target, "orch-test")
+            events_file = CONTROLLER.events_path(target, "orch-test")
+
+            holder, holder_pid, release = self.spawn_holding_driver(target, root)
+            before_session = session_file.read_bytes()
+            before_events = events_file.read_bytes()
+
+            refused = self.run_controller_process(target, "next", "--orchestration-id", "orch-test")
+
+            self.assertEqual(CONTROLLER.EXIT_DRIVER_BUSY, refused.returncode, refused.stderr)
+            # Stdout purity: the envelope belongs on stderr, and stdout stays empty
+            # so a host parsing reports never sees a refusal interleaved with one.
+            self.assertEqual("", refused.stdout.strip())
+            envelope = json.loads(refused.stderr)
+            self.assertEqual("ORCHESTRATION_DRIVER_BUSY", envelope["error_code"])
+            self.assertTrue(envelope["recoverable"])
+            self.assertEqual(holder_pid, envelope["details"]["holder"]["pid"])
+            self.assertEqual("holding-driver", envelope["details"]["holder"]["agent_id"])
+            self.assertEqual("next", envelope["details"]["holder"]["command"])
+            self.assertIn(str(holder_pid), envelope["message"])
+            self.assertEqual(before_session, session_file.read_bytes())
+            self.assertEqual(before_events, events_file.read_bytes())
+
+            # The winner is unobstructed, and once it lets go a successor proceeds.
+            release.touch()
+            self.assertEqual(0, holder.wait(60), holder.communicate()[1])
+            proceeded = self.run_controller_process(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, proceeded.returncode, proceeded.stderr)
+            self.assertIn("action_id", json.loads(proceeded.stdout))
+
+    def test_status_is_never_blocked_by_a_held_driver_lock(self):
+        """Polling has to stay free, or a busy session becomes an unobservable one."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            self.start(target)
+            holder, _, release = self.spawn_holding_driver(target, root)
+
+            started = time.monotonic()
+            polled = self.run_controller_process(target, "status", "--orchestration-id", "orch-test")
+            elapsed = time.monotonic() - started
+
+            # Released inside the temporary directory rather than by the
+            # registered cleanup, which runs after it: Windows cannot delete a
+            # file another process still holds open, so a holder outliving the
+            # tree fails the teardown rather than the assertion.
+            release.touch()
+            holder.wait(60)
+
+        self.assertEqual(0, polled.returncode, polled.stderr)
+        self.assertEqual("orch-test", json.loads(polled.stdout)["orchestration_id"])
+        self.assertLess(elapsed, 30.0)
+
+    def test_a_driver_killed_mid_call_leaves_no_stale_refusal(self):
+        """SIGKILL is the crash the OS can tell us about; the successor must proceed.
+
+        Scoped to the native advisory backends on purpose. Only they learn of a
+        holder's death from the kernel. The exclusive-create fallback has no such
+        notification and recovers on a timer instead -- shortened to
+        ``DRIVER_LOCK_STALE_FALLBACK_SECONDS`` for this lock, but still a wait,
+        and covered by the lock module's own tests rather than by a two-minute
+        sleep here.
+        """
+        if not LOCKS.multiprocess_lock_supported():
+            self.skipTest("no native advisory lock backend on this platform")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            self.start(target)
+            holder, _, _ = self.spawn_holding_driver(target, root)
+
+            # ``Popen.kill`` rather than ``os.kill(pid, SIGKILL)``: Windows has no
+            # SIGKILL, and this is the portable spelling of the same
+            # uncatchable-termination the test is about (TerminateProcess there).
+            holder.kill()
+            holder.wait(60)
+            # The crashed driver's sidecar is still on disk; a successor must not
+            # mistake that leftover for a live owner.
+            self.assertTrue(LOCKS.lock_holder_path(CONTROLLER.session_lock_path(target, "orch-test")).exists())
+
+            proceeded = self.run_controller_process(target, "next", "--orchestration-id", "orch-test")
+
+        self.assertEqual(0, proceeded.returncode, proceeded.stderr)
+        self.assertIn("action_id", json.loads(proceeded.stdout))
+
+    def test_racing_starts_on_one_id_leave_exactly_one_session(self):
+        """Either refusal is truthful; what must never happen is two sessions.
+
+        A loser that arrived after the winner committed sees
+        ``ORCHESTRATION_EXISTS``; one that arrived during sees
+        ``ORCHESTRATION_DRIVER_BUSY``. Both are final and carry the same
+        remediation, so this asserts membership in that pair rather than a single
+        code -- pinning one would make the test flaky by construction.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            racers = [
+                subprocess.Popen(  # noqa: S603
+                    [
+                        sys.executable,
+                        "-B",
+                        str(target / "scripts" / "orchestration_controller.py"),
+                        "--project-root",
+                        str(target),
+                        "start",
+                        "--orchestration-id",
+                        "orch-race",
+                        "--agent-id",
+                        f"racer-{index}",
+                        "--format",
+                        "json",
+                    ],
+                    cwd=str(target),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for index in range(2)
+            ]
+            # Drained before the return code is read: a racer that filled a pipe
+            # while the test waited on it would deadlock rather than fail.
+            outcomes = []
+            for process in racers:
+                stdout, stderr = process.communicate(timeout=120)
+                outcomes.append((process.returncode, stdout, stderr))
+
+            winners = [outcome for outcome in outcomes if outcome[0] == 0]
+            losers = [outcome for outcome in outcomes if outcome[0] != 0]
+            self.assertEqual(1, len(winners), outcomes)
+            for code, _, stderr in losers:
+                self.assertTrue(stderr.strip().startswith("{"), f"the loser wrote no envelope: {stderr}")
+                self.assertIn(
+                    json.loads(stderr)["error_code"],
+                    {"ORCHESTRATION_EXISTS", "ORCHESTRATION_DRIVER_BUSY"},
+                    stderr,
+                )
+                self.assertIn(code, {CONTROLLER.EXIT_INVALID, CONTROLLER.EXIT_DRIVER_BUSY})
+            self.assertEqual(
+                ["orch-race"],
+                sorted(path.name for path in (target / "runs" / "orchestrations").iterdir()),
+            )
 
     def test_provider_policy_never_treats_legacy_strategies_as_network_authority(self):
         policy = CONTROLLER.provider_policy(

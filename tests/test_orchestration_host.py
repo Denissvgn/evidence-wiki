@@ -90,6 +90,38 @@ def control_workspace(root: Path) -> Path:
     return orchestration_root
 
 
+def fake_codex_execute(argv, **kwargs):
+    """Stand in for a live codex run: satisfy the phase's postconditions, then report."""
+    prompt = kwargs["stdin_text"]
+    run_id_match = re.search(r'"run_id": "([^"]+)"', prompt)
+    phase_match = re.search(r'"phase": "([^"]+)"', prompt)
+    if run_id_match and phase_match and phase_match.group(1) == "verification":
+        project_root = Path(kwargs["cwd"])
+        subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(project_root / "scripts" / "publication_readiness.py"),
+                "--project-root",
+                str(project_root),
+                "--format",
+                "json",
+                "bundle",
+                "--run-id",
+                run_id_match.group(1),
+            ],
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    output_path = Path(argv[argv.index("--output-last-message") + 1])
+    document = result()
+    document["artifacts"] = ["runs/orchestrations/model-reported/work-results/action-0001.json"]
+    output_path.write_text(json.dumps(document), encoding="utf-8")
+    return orchestration.ProcessResult(0, "", "")
+
+
 def file_tree(root: Path) -> dict[str, bytes]:
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
@@ -225,38 +257,6 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertTrue(all(isinstance(item, dict) for item in order["required_postconditions"]))
 
     def test_managed_run_completes_through_real_controller_with_fake_codex(self):
-        def fake_execute(argv, **kwargs):
-            prompt = kwargs["stdin_text"]
-            run_id_match = re.search(r'"run_id": "([^"]+)"', prompt)
-            phase_match = re.search(r'"phase": "([^"]+)"', prompt)
-            if run_id_match and phase_match and phase_match.group(1) == "verification":
-                project_root = Path(kwargs["cwd"])
-                subprocess.run(
-                    [
-                        sys.executable,
-                        "-B",
-                        str(project_root / "scripts" / "publication_readiness.py"),
-                        "--project-root",
-                        str(project_root),
-                        "--format",
-                        "json",
-                        "bundle",
-                        "--run-id",
-                        run_id_match.group(1),
-                    ],
-                    cwd=project_root,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            output_path = Path(argv[argv.index("--output-last-message") + 1])
-            document = result()
-            document["artifacts"] = [
-                "runs/orchestrations/model-reported/work-results/action-0001.json"
-            ]
-            output_path.write_text(json.dumps(document), encoding="utf-8")
-            return orchestration.ProcessResult(0, "", "")
-
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "managed workspace"
             with contextlib.redirect_stdout(io.StringIO()):
@@ -277,9 +277,9 @@ class OrchestrationHostTests(unittest.TestCase):
             stdout = io.StringIO()
             with mock.patch.object(orchestration, "_runner_executable", return_value="/tmp/fake codex"), mock.patch.object(
                 orchestration, "_validate_runner_capability"
-            ), mock.patch.object(orchestration, "_execute_bounded", side_effect=fake_execute), contextlib.redirect_stdout(
-                stdout
-            ):
+            ), mock.patch.object(
+                orchestration, "_execute_bounded", side_effect=fake_codex_execute
+            ), contextlib.redirect_stdout(stdout):
                 code = cli.main(
                     [
                         "orchestrate",
@@ -312,6 +312,95 @@ class OrchestrationHostTests(unittest.TestCase):
         self.assertTrue(attempt_documents)
         self.assertTrue(all(document["status"] == "submitted" for document in attempt_documents))
         self.assertTrue(all(document["artifact_type"] == "orchestration_attempt" for document in attempt_documents))
+
+    def test_managed_window_serializes_its_own_controller_calls_without_a_driver_refusal(self):
+        """One managed window makes many controller calls and never contends with itself.
+
+        The managed host holds ``managed-host.lock`` for the whole window and calls the
+        deployed controller strictly serially, so every one of its calls finds the
+        per-session lock free. The two locks compose rather than compete: a session-lock
+        refusal inside a managed window would mean the host was racing itself.
+        """
+        calls: list[dict[str, object]] = []
+        real_invoke = orchestration._invoke_controller
+
+        def window_is_held(root: Path, orchestration_id: str) -> bool:
+            try:
+                with orchestration._managed_session_lock(root, orchestration_id):
+                    return False
+            except orchestration.OrchestrationHostError:
+                return True
+
+        def spy(root, command, arguments):
+            identifiers = [
+                arguments[index + 1]
+                for index, token in enumerate(arguments)
+                if token == "--orchestration-id" and index + 1 < len(arguments)
+            ]
+            held = bool(identifiers) and window_is_held(root, identifiers[0])
+            completed = real_invoke(root, command, arguments)
+            calls.append(
+                {
+                    "command": command,
+                    "window_held": held,
+                    "output": f"{completed.stdout}\n{completed.stderr}",
+                }
+            )
+            return completed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "managed window workspace"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    0,
+                    cli.main(
+                        [
+                            "deploy",
+                            "--target",
+                            str(root),
+                            "--project-name",
+                            "managed-window-interplay",
+                            "--project-description",
+                            "One managed window must never contend with its own controller calls.",
+                        ]
+                    ),
+                )
+            stdout = io.StringIO()
+            with mock.patch.object(
+                orchestration, "_runner_executable", return_value="/tmp/fake codex"
+            ), mock.patch.object(orchestration, "_validate_runner_capability"), mock.patch.object(
+                orchestration, "_execute_bounded", side_effect=fake_codex_execute
+            ), mock.patch.object(
+                orchestration, "_invoke_controller", side_effect=spy
+            ), contextlib.redirect_stdout(stdout):
+                code = cli.main(
+                    [
+                        "orchestrate",
+                        "run",
+                        "--target",
+                        str(root),
+                        "--runner",
+                        "codex",
+                        "--agent-id",
+                        "host-test",
+                        "--format",
+                        "json",
+                    ]
+                )
+            session = json.loads(stdout.getvalue())
+
+        self.assertEqual(0, code)
+        self.assertEqual("complete", session["status"])
+
+        windowed = [call for call in calls if call["window_held"]]
+        self.assertGreater(len(windowed), 1, calls)
+        windowed_commands = {call["command"] for call in windowed}
+        self.assertIn("next", windowed_commands)
+        self.assertIn("submit", windowed_commands)
+        for call in calls:
+            self.assertNotIn("ORCHESTRATION_DRIVER_BUSY", call["output"])
+            self.assertNotIn("ORCHESTRATION_ALREADY_RUNNING", call["output"])
+            self.assertNotIn("LOCK_UNAVAILABLE", call["output"])
 
     def deployed_workspace(self, root: Path, *, orchestration_section: str = "") -> Path:
         target = root / "delegation workspace"
@@ -3205,24 +3294,169 @@ class OrchestrationHostTests(unittest.TestCase):
             controller.assert_not_called()
             runner.assert_not_called()
 
-    def test_control_snapshot_excludes_only_the_held_managed_host_lock(self):
+    def test_control_snapshot_excludes_the_whole_host_owned_lock_subtree(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             parent = control_workspace(root)
             with orchestration._managed_session_lock(root, "orch-1"):
                 snapshot = orchestration._capture_control_artifacts(root, "orch-1")
                 parent_entries = snapshot.roots["runs/orchestrations/orch-1"]
-                self.assertIn(".locks", parent_entries)
-                self.assertNotIn(orchestration.MANAGED_HOST_LOCK_CONTROL_PATH, parent_entries)
+                # The directory itself stays in the snapshot; only its contents
+                # are excluded. Its mode and kind are not volatile, and dropping
+                # them let a worker widen, replace, or delete the lock directory
+                # with the diff reporting nothing.
+                self.assertEqual(
+                    [".locks"],
+                    [key for key in parent_entries if key.split("/", 1)[0] == ".locks"],
+                )
+                self.assertEqual("directory", parent_entries[".locks"].kind)
+                self.assertIsNone(parent_entries[".locks"].digest)
 
                 orchestration._verify_control_artifacts_unchanged(root, snapshot)
 
-                (parent / ".locks" / "unexpected.lock").write_text("unexpected\n", encoding="utf-8")
+                # The lock machinery owns a family of artifact names, not one file:
+                # a stable session lock, a crashed driver's holder sidecar left
+                # behind, and a transient exclusive-fallback file that comes and
+                # goes mid-window. None of them is a control difference.
+                locks = parent / ".locks"
+                (locks / "session.lock").write_bytes(b"")
+                (locks / "session.lock.holder.json").write_text(
+                    json.dumps({"agent_id": "agent-1", "pid": 4242, "hostname": "crashed-host"}),
+                    encoding="utf-8",
+                )
+                transient = locks / "session.lock.exclusive"
+                transient.write_text("pid=4242\ncreated_at=2026-08-10T00:00:00Z\n", encoding="utf-8")
+                orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+                transient.unlink()
+                orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+                # Excluding the lock subtree does not blind the diff to the parent
+                # orchestration's real control artifacts.
+                (parent / "session.json").write_text('{"status":"paused"}\n', encoding="utf-8")
                 with self.assertRaisesRegex(
                     orchestration.OrchestrationHostError,
-                    r"CONTROL_ARTIFACT_TAMPERED.*\.locks/unexpected\.lock \[added\]",
+                    r"CONTROL_ARTIFACT_TAMPERED.*session\.json \[content_changed\]",
                 ):
                     orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+    def test_control_snapshot_still_sees_the_lock_directory_itself_change(self):
+        """Excluding the contents must not exclude the container.
+
+        A worker that widens the lock directory's permissions, replaces it with a
+        regular file, or deletes it is tampering with the mutual exclusion the
+        session depends on -- none of which is the transient runtime state the
+        exclusion exists to tolerate.
+        """
+        tampers = [("removed", lambda locks: locks.rmdir())]
+        if os.name == "posix":
+            # Windows does not carry POSIX permission bits, so ``chmod(0o777)``
+            # leaves ``stat.S_IMODE`` unchanged there and the case would assert a
+            # difference the filesystem never made. The guarantee under test --
+            # the directory entry is still in the snapshot -- is covered on every
+            # platform by the ``removed`` case.
+            tampers.insert(0, ("mode_changed", lambda locks: locks.chmod(0o777)))
+
+        for label, tamper in tampers:
+            with self.subTest(tamper=label), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                parent = control_workspace(root)
+                locks = parent / ".locks"
+                locks.mkdir(mode=0o700, exist_ok=True)
+
+                snapshot = orchestration._capture_control_artifacts(root, "orch-1")
+                orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+                tamper(locks)
+                with self.assertRaisesRegex(
+                    orchestration.OrchestrationHostError,
+                    r"CONTROL_ARTIFACT_TAMPERED.*\.locks",
+                ):
+                    orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+    def test_control_snapshot_still_refuses_unsafe_entries_inside_the_lock_subtree(self):
+        def locks_dir(root: Path) -> Path:
+            path = root / "runs" / "orchestrations" / "orch-1" / ".locks"
+            path.mkdir(mode=0o700, exist_ok=True)
+            return path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            control_workspace(root)
+            (locks_dir(root) / "session.lock").symlink_to(root / "research.yml")
+            with self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "CONTROL_ARTIFACT_UNSAFE.*host-owned control carveout.*\\.locks/session\\.lock is a symbolic",
+            ):
+                orchestration._capture_control_artifacts(root, "orch-1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            control_workspace(root)
+            snapshot = orchestration._capture_control_artifacts(root, "orch-1")
+            (locks_dir(root) / "session.lock").symlink_to(root / "research.yml")
+            with self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "CONTROL_ARTIFACT_TAMPERED.*inspection_failed.*host-owned control carveout.*symbolic",
+            ):
+                orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+        if hasattr(os, "mkfifo"):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                control_workspace(root)
+                os.mkfifo(locks_dir(root) / "session.lock")
+                with self.assertRaisesRegex(
+                    orchestration.OrchestrationHostError,
+                    "CONTROL_ARTIFACT_UNSAFE.*host-owned control carveout.*not a regular file or directory",
+                ):
+                    orchestration._capture_control_artifacts(root, "orch-1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            control_workspace(root)
+            locks = locks_dir(root)
+            (locks / "a.lock").write_bytes(b"")
+            try:
+                os.link(locks / "a.lock", locks / "b.lock")
+            except OSError as exc:  # pragma: no cover - filesystem capability guard
+                self.skipTest(f"hard links are unavailable on this filesystem: {exc}")
+            with self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                r"CONTROL_ARTIFACT_UNSAFE.*host-owned control carveout.*a\.lock has multiple hard links",
+            ):
+                orchestration._capture_control_artifacts(root, "orch-1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            control_workspace(root)
+            nested = locks_dir(root) / "nested"
+            nested.mkdir()
+            (nested / "escape").symlink_to(root / "research.yml")
+            with self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "CONTROL_ARTIFACT_UNSAFE.*host-owned control carveout.*nested/escape is a symbolic",
+            ):
+                orchestration._capture_control_artifacts(root, "orch-1")
+
+        # Exclusion does not buy an unbounded inspection: the subtree walk spends
+        # the same entry budget the fingerprinted walk does.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            control_workspace(root)
+            locks = locks_dir(root)
+            for index in range(4):
+                (locks / f"lock-{index}").write_bytes(b"")
+            with self.assertRaisesRegex(
+                orchestration.OrchestrationHostError,
+                "CONTROL_ARTIFACT_UNSAFE.*filesystem entries",
+            ):
+                orchestration._inspect_excluded_control_subtree(
+                    locks,
+                    label="runs/orchestrations/orch-1",
+                    key=".locks",
+                    entry_counter=[orchestration.MAX_CONTROL_ARTIFACT_ENTRIES],
+                )
 
     def test_control_snapshot_ignores_mtime_only_changes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -101,10 +101,33 @@ required when a deployment will execute untrusted process trees.
 
 One package-managed host owns a parent session for its complete run or resume
 window. A concurrent managed driver exits with
-`ORCHESTRATION_ALREADY_RUNNING` before a worker starts. An external protocol
-host must similarly serialize its driver and must not interleave `next` or
-`submit` with a managed host driving the same session; read-only status polling
-is safe.
+`ORCHESTRATION_ALREADY_RUNNING` before a worker starts. That lock is host-layer
+and window-scoped: one managed host holds it from preflight to teardown.
+
+Inside and outside that window, the workspace enforces the single-driver rule
+itself, per controller invocation.
+`start`, `next`, and `submit` each hold
+`runs/orchestrations/<orchestration_id>/.locks/session.lock` for the duration
+of the call; a second driver that finds it held is refused with
+`ORCHESTRATION_DRIVER_BUSY`, exit code `6`, and a `details.holder` block naming
+the holder's `agent_id` (or `null`), `pid`, `hostname`, `command`, and
+`acquired_at`. The refusal is immediate and writes nothing. A host that wants
+the bounded wait this replaced passes `--driver-wait-seconds SECONDS` to any of
+the three commands; the default `0` refuses immediately. `status` takes no lock
+and never blocks, so read-only polling is always safe.
+
+That per-invocation lock does not relieve an external protocol host of
+coordinating its own driver against a managed one. It is scoped to a single
+call and cannot see the gap *between* a managed host's controller calls, so an
+external `next` or `submit` slipped into that gap is not refused — it is the
+interleaving the rule forbids. Detecting interleaving across the `next` →
+`submit` span would require a session lease, which is deliberately future work;
+what exists today is a post-hoc audit trail: the `action_issued` and
+`action_completed` entries in `events.jsonl` carry a `driver` block in their
+`data` — `pid`, `hostname`, and `agent_id` when the command supplied one —
+naming the process that wrote them. Nothing reads that block back to decide
+whether a write is allowed; it exists so an interleaving that slipped through
+is legible afterwards instead of inferred from timestamps.
 
 After an interruption, recovery follows this exact order: accepted canonical
 result; clean validated host-staged result; replay the same persisted action.
@@ -385,7 +408,7 @@ errors that prevent the report from being built.
 | `intake_questions.py` | `python3 scripts/intake_questions.py --format json`, or any `--dry-run` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `HANDOFF_SIGNATURE_INVALID`, `INTAKE_FIELD_TOO_LONG`, `INTAKE_TOTAL_CAP_EXCEEDED`, `INTAKE_RATE_LIMITED`, `WORKSPACE_UNREADABLE` |
 | `lint.py` | `python3 scripts/lint.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `WORKSPACE_UNREADABLE` |
 | `normalize_sources.py` | `python3 scripts/normalize_sources.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `SOURCE_UNKNOWN`, `WORKSPACE_UNREADABLE` |
-| `orchestration_controller.py` | `python3 scripts/orchestration_controller.py start\|next\|submit\|status --format json` | `CONFIG_MISSING`, `CONFIG_INVALID`, `ORCHESTRATION_ID_INVALID`, `ACTION_ID_INVALID`, `AGENT_ID_INVALID`, `ORCHESTRATION_EXISTS`, `ORCHESTRATION_UNKNOWN`, `ORCHESTRATION_STATE_INVALID`, `ORCHESTRATION_EVENTS_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`, `ORCHESTRATION_WRITE_FAILED`, `ORCHESTRATION_WORKSPACE_UNSAFE`, `ORCHESTRATION_PROVIDER_POLICY_CHANGED`, `ORCHESTRATION_DELEGATION_CHANGED`, `ORCHESTRATION_CONTROL_REPAIR_REQUIRED`, `ORCHESTRATION_TRUSTED_INPUT_UNSAFE`, `ORCHESTRATION_TRUSTED_INPUT_CHANGED`, `ORCHESTRATION_LEGACY_ACTION_UNBOUND`, `ACTION_NOT_PENDING`, `RESULT_UNREADABLE`, `RESULT_INVALID`, `RESULT_CONFLICT`, `ORCHESTRATION_POSTCONDITION_FAILED`, `WORK_ORDER_INVALID`, `CANDIDATE_STORE_INVALID`, `SOURCE_REQUESTS_INVALID`, `WORKSPACE_UNREADABLE` |
+| `orchestration_controller.py` | `python3 scripts/orchestration_controller.py start\|next\|submit\|status --format json` | `CONFIG_MISSING`, `CONFIG_INVALID`, `ORCHESTRATION_ID_INVALID`, `ACTION_ID_INVALID`, `AGENT_ID_INVALID`, `ORCHESTRATION_EXISTS`, `ORCHESTRATION_UNKNOWN`, `ORCHESTRATION_STATE_INVALID`, `ORCHESTRATION_EVENTS_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`, `ORCHESTRATION_DRIVER_BUSY`, `ORCHESTRATION_WRITE_FAILED`, `ORCHESTRATION_WORKSPACE_UNSAFE`, `ORCHESTRATION_PROVIDER_POLICY_CHANGED`, `ORCHESTRATION_DELEGATION_CHANGED`, `ORCHESTRATION_CONTROL_REPAIR_REQUIRED`, `ORCHESTRATION_TRUSTED_INPUT_UNSAFE`, `ORCHESTRATION_TRUSTED_INPUT_CHANGED`, `ORCHESTRATION_LEGACY_ACTION_UNBOUND`, `ACTION_NOT_PENDING`, `RESULT_UNREADABLE`, `RESULT_INVALID`, `RESULT_CONFLICT`, `ORCHESTRATION_POSTCONDITION_FAILED`, `WORK_ORDER_INVALID`, `CANDIDATE_STORE_INVALID`, `SOURCE_REQUESTS_INVALID`, `WORKSPACE_UNREADABLE` |
 | `query_index.py` | `python3 scripts/query_index.py QUERY --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `QUERY_MISSING`, `WORKSPACE_UNREADABLE` |
 | `question_claim.py` | `python3 scripts/question_claim.py claim --slug SLUG --agent-id AGENT --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `CLAIM_NOT_STALE`, `STEAL_THRESHOLD_REQUIRED`, `STEAL_FLAG_REQUIRED`, `STEAL_NOT_APPLICABLE`, `STATUS_NOT_CLAIMABLE`, `STATUS_NOT_RELEASABLE`, `SLUG_INVALID`, `SLUG_UNKNOWN`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
 | `question_resolve.py` | `python3 scripts/question_resolve.py answer\|block\|defer\|reject\|reopen --slug SLUG --agent-id AGENT ... --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `STATUS_NOT_RESOLVABLE`, `STATUS_NOT_REOPENABLE`, `SOURCE_NOT_NORMALIZED`, `QUESTION_NOT_CLAIMED`, `ANSWER_SOURCE_REQUIRED`, `COVERAGE_REQUIRED`, `COVERAGE_BLOCKED`, `COVERAGE_MANIFEST_INVALID`, `ANSWER_PAGE_INVALID`, `ANSWER_PAGE_MISSING`, `SOURCE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_LINKED`, `REQUEST_SCOPE_MISMATCH`, `RESOLUTION_REASON_INVALID`, `VALUE_INVALID`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
@@ -414,7 +437,7 @@ result:
 | `ORCHESTRATION_LEASE_INVALID` | The pending work order's absolute lease expiry is malformed. | Inspect or restore the controller-owned work order, then resume the same action. No worker was launched. |
 | `ORCHESTRATION_LEASE_EXPIRED` | The pending work-order lease expired before a fresh worker could launch. | Resume the session so the controller renews the lease attempt for the same action ID. |
 | `ORCHESTRATION_LEASE_ACTIVE` | A retained `running` host attempt may still own the same current lease attempt. | Wait for the absolute lease expiry, then resume so the controller can renew that same action. Do not launch an overlapping worker. |
-| `ORCHESTRATION_ALREADY_RUNNING` | Another package-managed host holds the session-scoped driver lock. | Wait for that host to finish or stop it before resuming. Do not run an external protocol driver concurrently; no worker was launched by the refused host. |
+| `ORCHESTRATION_ALREADY_RUNNING` | Another package-managed host holds the session-scoped managed-host window lock for its whole run or resume. | Wait for that host to finish or stop it before resuming. Do not run an external protocol driver concurrently; no worker was launched by the refused host. Distinct from the controller's `ORCHESTRATION_DRIVER_BUSY`, which refuses a single contended invocation. |
 
 Stable error codes:
 
@@ -443,6 +466,7 @@ Stable error codes:
 | `ORCHESTRATION_UNKNOWN` | The requested parent session does not exist. | Inspect `runs/orchestrations/` or start a session. |
 | `ORCHESTRATION_STATE_INVALID` | A retained parent session has an invalid schema or state. | Restore the session artifact before continuing. |
 | `ORCHESTRATION_OWNER_MISMATCH` | A command supplied a different agent id from the session owner. | Retry with the owning `agent_id` or start a separately owned session. |
+| `ORCHESTRATION_DRIVER_BUSY` | Another driver holds `runs/orchestrations/<orchestration_id>/.locks/session.lock` for the duration of its `start`, `next`, or `submit`. Exit code `6`, `recoverable: true`, and `details.holder` names the holder (`agent_id` or `null`, `pid`, `hostname`, `command`, `acquired_at`) when the advisory sidecar can be read. | Retry once the holder's call completes, or serialize drivers host-side; the refused call wrote nothing. Pass `--driver-wait-seconds SECONDS` to wait instead of refusing. `status` never needs this lock. Not `LOCK_UNAVAILABLE`, which still means no lock backend exists on this filesystem. |
 | `ORCHESTRATION_WORKSPACE_UNSAFE` | Workspace health or a HIGH validation finding makes the next action unsafe. | Resolve the reported health or validation findings, then request the same next action again. |
 | `ORCHESTRATION_PROVIDER_POLICY_CHANGED` | The retained session's explicit provider authority no longer matches `research.yml`. | Restore the reviewed provider policy or start a new parent session for the changed policy. |
 | `ORCHESTRATION_DELEGATION_CHANGED` | The retained session's declared acquisition mode or acquirer no longer matches `research.yml` `orchestration:`. | Restore the declaration the session started under, or start a new parent session under the new one. |

@@ -14,11 +14,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
+import socket
 import stat
 import sys
 import uuid
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from types import ModuleType, SimpleNamespace
@@ -51,7 +55,7 @@ from _orchestration_config import (
 from _provider_plugins import registered_ids
 from _provider_registry import ProviderListError, ProviderNotRegisteredError, validate_provider_ids
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
-from _workspace_locks import LockUnavailableError, workspace_lock
+from _workspace_locks import LockUnavailableError, read_lock_holder, workspace_lock
 from _workspace_module_loader import load_workspace_module
 from source_failure_taxonomy import is_attempt_failure_code, is_retryable_attempt_failure_code
 
@@ -64,6 +68,42 @@ EXIT_OK = 0
 EXIT_INVALID = 2
 EXIT_BLOCKED = 3
 EXIT_PAUSED = 4
+#: A second driver already holds this session's lock.
+#:
+#: Distinct from ``EXIT_INVALID`` on purpose: this is the one refusal a host is
+#: *supposed* to retry, and 2 already means "permanently refused" for a dozen
+#: other conditions. A shell-only caller that can read nothing but ``$?`` must be
+#: able to tell "come back in a moment" from "this will never succeed"; 3 and 4
+#: already carry session outcomes, so contention gets its own code.
+#:
+#: 6, not 5. The package's own ``evidence-wiki orchestrate`` returns a controller
+#: status verbatim for ``start``/``next``/``submit`` *and* returns 5 from
+#: ``EXIT_RUNNER_FAILED`` for a managed ``run``/``resume`` whose runner failed or
+#: whose control artifacts were tampered with. Sharing 5 would have made the one
+#: code a caller must retry indistinguishable from one it must never retry --
+#: exactly the confusion this constant exists to remove -- and ``EXIT_RUNNER_FAILED``
+#: is already released, so the new code is the one that moves.
+EXIT_DRIVER_BUSY = 6
+
+#: How long the exclusive-create *fallback* backend may consider this session's
+#: lock file abandoned, overriding the module-wide 900 s default at this one call
+#: site (and only here -- every other workspace lock keeps the conservative
+#: default).
+#:
+#: Only the last-resort fallback reads this: fcntl and msvcrt learn of a holder's
+#: death from the OS, so on those platforms the value is inert. On a filesystem
+#: with neither, a driver killed mid-call would otherwise block every successor
+#: for fifteen minutes, which is indistinguishable from a hang for a host polling
+#: `next`. Two minutes is short enough to recover inside a human's patience and
+#: long enough to be safe: the fallback's heartbeat renews the lock every
+#: ``min(60, stale/3)`` seconds, so a live holder refreshes three times inside
+#: this window before a peer could consider it stale.
+DRIVER_LOCK_STALE_FALLBACK_SECONDS = 120.0
+
+#: Longest ``--agent-id`` accepted, and the cap applied when publishing one to a
+#: peer. Shared so the validating and the sanitizing path cannot disagree about
+#: how much of a caller-supplied id is allowed to travel.
+MAX_AGENT_ID_LENGTH = 160
 
 DEFAULT_MAX_ACTIONS = 12
 DEFAULT_ACTION_TIMEOUT_SECONDS = 30 * 60
@@ -218,6 +258,43 @@ def parse_positive_int(value: str) -> int:
     return parsed
 
 
+def parse_wait_seconds(value: str) -> float:
+    """Parse a non-negative wait, the float analogue of ``parse_positive_int``.
+
+    Zero is admitted and is the default: "do not wait" is the whole point of the
+    flag this parses, so it cannot be spelled as an error. Negative values are
+    refused rather than clamped, because a caller that typed ``-30`` meant
+    something the controller cannot honour and should hear so at the CLI boundary
+    instead of silently receiving the immediate-refusal behaviour. Infinities and
+    NaN are refused for the same reason ``float("inf")`` is not a timeout: they
+    would turn a bounded wait into a hang, and NaN would make every deadline
+    comparison false.
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative number of seconds") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative number of seconds")
+    return parsed
+
+
+DRIVER_WAIT_HELP = (
+    "Wait up to SECONDS for another driver to release the session before refusing with "
+    "ORCHESTRATION_DRIVER_BUSY. Default 0: refuse immediately."
+)
+
+
+def add_driver_wait_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--driver-wait-seconds",
+        type=parse_wait_seconds,
+        default=0.0,
+        metavar="SECONDS",
+        help=DRIVER_WAIT_HELP,
+    )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manage durable EvidenceWiki orchestration sessions.")
     parser.add_argument(
@@ -241,12 +318,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=parse_positive_int,
         default=DEFAULT_TOTAL_TIMEOUT_SECONDS,
     )
+    add_driver_wait_argument(start)
     start.add_argument("--format", choices=("text", "json"), default="text")
 
     next_parser = subparsers.add_parser("next", help="Issue or replay one persisted work order.")
     next_parser.add_argument("--orchestration-id", required=True)
     next_parser.add_argument("--agent-id", default=None)
     next_parser.add_argument("--resume", action="store_true")
+    add_driver_wait_argument(next_parser)
     next_parser.add_argument("--format", choices=("text", "json"), default="text")
 
     submit = subparsers.add_parser("submit", help="Submit one structured work result.")
@@ -254,6 +333,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     submit.add_argument("--action-id", required=True)
     submit.add_argument("--result-file", required=True)
     submit.add_argument("--agent-id", default=None)
+    add_driver_wait_argument(submit)
     submit.add_argument("--format", choices=("text", "json"), default="text")
 
     status = subparsers.add_parser("status", help="Read a parent orchestration session.")
@@ -277,7 +357,7 @@ def require_agent_id(value: Any) -> str:
     normalized = value.strip() if isinstance(value, str) else ""
     if (
         not normalized
-        or len(normalized) > 160
+        or len(normalized) > MAX_AGENT_ID_LENGTH
         or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
     ):
         raise OrchestrationControllerError("AGENT_ID_INVALID", "--agent-id must be a non-empty string")
@@ -307,6 +387,359 @@ def events_path(project_root: Path, orchestration_id: str) -> Path:
 
 def session_lock_path(project_root: Path, orchestration_id: str) -> Path:
     return session_dir(project_root, orchestration_id) / ".locks" / "session.lock"
+
+
+#: Identity of the driver currently holding this process's session lock, or
+#: ``None`` outside a ``driver_session_lock`` block.
+#:
+#: Module state rather than a threaded parameter because the two events that
+#: record it (``action_issued``, ``action_completed``) are appended from deep
+#: inside call chains that have no business growing a driver argument, and the
+#: controller runs one command per process: there is exactly one driver identity
+#: in flight at a time, established at the lock and torn down with it. Reading it
+#: outside a lock block yields ``None``, so a direct call to ``record_event`` --
+#: as tests make -- produces exactly the event it always did.
+_ACTIVE_DRIVER: dict[str, Any] | None = None
+
+
+def driver_hostname() -> str:
+    """Return this host's name, or a placeholder when the OS will not say.
+
+    ``gethostname`` is a syscall and can fail on a misconfigured container. This
+    value is diagnostic only -- it names a lock holder in a refusal message -- so
+    a failure to resolve it must not be allowed to abort the command that is
+    merely trying to identify itself.
+    """
+    try:
+        name = socket.gethostname()
+    except OSError:  # pragma: no cover - platform dependent
+        return "<unknown host>"
+    return name or "<unknown host>"
+
+
+def publishable_agent_id(agent_id: Any) -> str | None:
+    """Reduce ``--agent-id`` to something safe to publish to a peer process.
+
+    This *sanitizes*; it does not validate. ``next`` and ``submit`` accept the
+    flag as optional and check ownership only after ``load_session``, inside the
+    lock, so rejecting a bad id here would reorder those refusals and change
+    which error code a caller sees. But the value reaches a sidecar that a
+    *different* process reads and renders into its own stderr, and by then
+    ``require_agent_id`` has not run on either side -- ``start`` passes an
+    already-validated id while ``next`` and ``submit`` pass argv verbatim.
+
+    So the published form drops C0/C1 control characters, which would otherwise
+    let an id carry terminal escape sequences into a peer's refusal message, and
+    caps length the way ``require_agent_id`` does. What survives is a hint about
+    who is busy, never an authorization claim, and a value that renders as
+    itself. An id that is blank, non-string, or entirely control characters
+    publishes as ``null`` -- "the holder did not record an agent".
+    """
+    if not isinstance(agent_id, str):
+        return None
+    printable = "".join(
+        character
+        for character in agent_id.strip()
+        if not (ord(character) < 32 or 127 <= ord(character) <= 159)
+    )
+    return printable[:MAX_AGENT_ID_LENGTH] or None
+
+
+def driver_identity(command: str, agent_id: Any) -> dict[str, Any]:
+    """Build the holder block published beside a held session lock.
+
+    ``acquired_at`` is stamped when this is called, and the only caller calls it
+    *after* the lock is held -- see ``driver_session_lock``. Stamping it at
+    attempt time instead would under-report a queued driver's start by the whole
+    wait, and this field is exactly what an operator or a supervisor thresholds
+    on to decide whether a holder is stuck.
+    """
+    return {
+        "agent_id": publishable_agent_id(agent_id),
+        "pid": os.getpid(),
+        "hostname": driver_hostname(),
+        "command": command,
+        "acquired_at": timestamp_utc(),
+    }
+
+
+def event_driver_block() -> dict[str, Any] | None:
+    """Return the audit block naming the driver that appended an event.
+
+    Post-hoc visibility only (CR-8 D14). It records *who wrote this*, so that an
+    interleaving that slipped past the per-invocation lock -- two hosts taking
+    turns under a long ``--driver-wait-seconds``, say -- is legible afterwards in
+    ``events.jsonl`` instead of being reconstructed from timestamps. It is not a
+    fencing token and nothing reads it back to decide whether a write is allowed;
+    span-level enforcement is deliberately deferred.
+    """
+    if _ACTIVE_DRIVER is None:
+        return None
+    block: dict[str, Any] = {
+        "pid": _ACTIVE_DRIVER["pid"],
+        "hostname": _ACTIVE_DRIVER["hostname"],
+    }
+    agent_id = _ACTIVE_DRIVER.get("agent_id")
+    if agent_id:
+        block["agent_id"] = agent_id
+    return block
+
+
+def event_data_with_driver(data: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Return ``data`` with the active driver's audit block folded in.
+
+    Returns ``data`` untouched when no driver lock is held, so an event appended
+    outside a driver command carries exactly the payload it always carried.
+    """
+    driver = event_driver_block()
+    if driver is None:
+        return data
+    return {**(data or {}), "driver": driver}
+
+
+def rendered_holder_field(holder: dict[str, Any], key: str, fallback: str) -> str:
+    """Render one holder field for a human-readable refusal, never raising.
+
+    The holder sidecar is written by a *peer* process, so this treats it as
+    untrusted input to a message: a missing key, a null, an empty string, or a
+    value of the wrong type all fall back rather than propagate, and anything
+    long is truncated so a corrupt sidecar cannot turn a one-line refusal into a
+    wall of text. The refusal must render even when nothing about the holder is
+    knowable -- a controller that crashed while explaining a failure tells the
+    caller nothing at all.
+    """
+    value = holder.get(key)
+    if value is None or value == "" or isinstance(value, (dict, list)):
+        return fallback
+    # Control characters are stripped, not just escaped: this string is written
+    # to a terminal by a process that did not author it, and an id carrying an
+    # escape sequence would otherwise drive the reader's terminal. The writing
+    # side sanitizes too; doing it again here is what makes the guarantee hold
+    # for a sidecar written by any other version, or by hand.
+    text = "".join(
+        character for character in str(value) if not (ord(character) < 32 or 127 <= ord(character) <= 159)
+    )
+    return text if len(text) <= 120 else f"{text[:117]}..."
+
+
+def bounded_holder_details(holder: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Reduce a peer-written holder to a bounded block safe to hand a host.
+
+    ``rendered_holder_field`` bounds what reaches the *message*; this bounds what
+    reaches ``details``, which the library copies onto the typed exception for
+    hosts to log and index. Without it the two disagree: a refusal whose message
+    is one careful line would still carry an arbitrarily large, arbitrarily
+    nested document written by another process.
+
+    Only the block's documented keys survive, and only when the peer actually
+    recorded them -- a key this process invented would be a claim, not a report.
+    Types are preserved rather than rendered: ``pid`` stays an ``int`` because
+    hosts branch on it, while strings are truncated and stripped of control
+    characters the way the message is. Anything else, including a nested
+    structure, is dropped. A holder that could not be read at all stays ``None``
+    -- "unknown", which is not the same claim as "nobody".
+    """
+    if not isinstance(holder, dict):
+        return None
+    bounded: dict[str, Any] = {}
+    for key in ("agent_id", "pid", "hostname", "command", "acquired_at"):
+        if key not in holder:
+            continue
+        value = holder[key]
+        if value is None:
+            # The peer recorded the field as absent, which is itself a report --
+            # ``agent_id`` is documented ``str | null`` for exactly this.
+            bounded[key] = None
+        elif key == "pid":
+            # ``bool`` is a subclass of ``int``, so it has to be excluded
+            # explicitly or a peer writing ``pid: true`` would satisfy the type a
+            # host branches on.
+            if isinstance(value, int) and not isinstance(value, bool):
+                bounded[key] = value
+        elif isinstance(value, str):
+            bounded[key] = rendered_holder_field(holder, key, "")
+        # Everything else -- a bool, a number where a string belongs, a nested
+        # structure -- is omitted rather than coerced. A host reading this block
+        # should never have to guess whether a value came from the peer or from
+        # this renderer, and an omitted key says "not reported" honestly.
+    return bounded
+
+
+def holder_process_is_running(holder: dict[str, Any] | None) -> bool | None:
+    """Report whether the recorded holder process still exists, if knowable.
+
+    ``None`` means "cannot tell" and is the common answer: a holder on another
+    host, a malformed pid, or a platform where this probe is unreliable. Only a
+    definite ``False`` -- this host, a well-formed pid, and no such process --
+    is worth acting on, because that is the case where the refusal would
+    otherwise name a dead driver and tell the caller to wait for it.
+    """
+    if not isinstance(holder, dict):
+        return None
+    hostname = holder.get("hostname")
+    if not isinstance(hostname, str) or hostname != driver_hostname():
+        return None
+    pid = holder.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if os.name != "posix" or not hasattr(os, "kill"):
+        # Signal 0 does not answer this question portably off POSIX.
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Alive, owned by another user.
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def driver_busy_error(lock_path: Path, orchestration_id: str) -> OrchestrationControllerError:
+    """Translate a contended session lock into the stable driver-busy refusal.
+
+    The holder sidecar is read *here*, after acquisition has already failed, and
+    never before. A holder read while this process holds the lock would describe
+    this process; a holder read speculatively before attempting acquisition would
+    describe a state that the attempt itself may have invalidated. Reading it
+    only on the failure path means the block, when present, described a live
+    owner at the moment the refusal was composed.
+
+    ``read_lock_holder`` is best-effort and never raises: ``None`` means "could
+    not be read", not "no one holds the lock". Both the message and
+    ``details.holder`` are built to survive that -- the winner publishes its
+    sidecar just after acquiring, so a loser refused inside that narrow window
+    legitimately sees nothing and still gets a truthful, actionable refusal.
+
+    The sidecar is a *record*, not proof of life. A holder killed between
+    writing it and releasing the lock leaves it behind, and a successor that has
+    not yet published its own would otherwise be described by its predecessor's.
+    When the recorded process can be shown not to exist, the refusal says the
+    record is stale instead of instructing the caller to wait for a driver that
+    exited -- advice that never comes true, and that points an operator at a pid
+    the OS may since have reassigned to something unrelated.
+    """
+    holder = read_lock_holder(lock_path)
+    reported = holder if isinstance(holder, dict) else {}
+    identity = (
+        f"agent: {rendered_holder_field(reported, 'agent_id', '<unrecorded agent>')}, "
+        f"pid: {rendered_holder_field(reported, 'pid', 'unrecorded')}, "
+        f"since: {rendered_holder_field(reported, 'acquired_at', 'unrecorded')}"
+    )
+    holder_running = holder_process_is_running(holder)
+    if holder_running is False:
+        message = (
+            f"session {orchestration_id} is locked, but the recorded holder is no longer running "
+            f"({identity}); the lock is held by another process or the record is stale"
+        )
+        remediation = (
+            "Retry: the recorded holder has exited, so this lock is either held by a driver that "
+            "has not published its own record yet or is being released. Do not act on the pid above "
+            "-- it may since belong to an unrelated process. If refusals persist, inspect the lock "
+            "under runs/orchestrations/<id>/.locks/ before removing anything."
+        )
+    else:
+        message = f"another driver holds session {orchestration_id} ({identity})"
+        remediation = (
+            "Retry after the holder's call completes, or serialize drivers host-side; "
+            "status polling never requires this lock."
+        )
+    return OrchestrationControllerError(
+        "ORCHESTRATION_DRIVER_BUSY",
+        message,
+        exit_code=EXIT_DRIVER_BUSY,
+        recoverable=True,
+        remediation=remediation,
+        details={
+            "holder": bounded_holder_details(holder),
+            "holder_running": holder_running,
+            "orchestration_id": orchestration_id,
+        },
+    )
+
+
+@contextmanager
+def driver_session_lock(
+    project_root: Path,
+    orchestration_id: str,
+    *,
+    command: str,
+    agent_id: Any,
+    wait_seconds: float = 0.0,
+) -> Iterator[Any]:
+    """Hold the session lock for one driver command, refusing a busy session loudly.
+
+    This is the whole of CR-8's behaviour change. The lock itself is unchanged --
+    same file, same module, same scope -- but losing the race is now an outcome a
+    host can act on instead of a ten-second pause followed by an interleaved
+    write. ``wait_seconds`` defaults to 0, a single non-blocking attempt; a host
+    that genuinely wants queueing asks for it with ``--driver-wait-seconds``.
+
+    Contention is detected by reading ``contended`` off the exception rather than
+    by ``isinstance`` on a subclass. Workspace scripts load siblings by file path,
+    so several copies of ``_workspace_locks`` -- and therefore several distinct
+    ``LockUnavailableError`` classes -- can coexist in one interpreter, and a
+    class check across copies silently never fires. ``getattr(..., False)`` also
+    degrades correctly against an older vendored module that predates the flag:
+    unknown contention reports as "not contended" and takes the pre-existing
+    ``LOCK_UNAVAILABLE`` path, which is the conservative answer.
+
+    A non-contended failure means no backend could be established at all -- the
+    filesystem, not a peer, is the problem -- and is re-raised untouched so the
+    existing ``LOCK_UNAVAILABLE`` handler keeps reporting it. The two conditions
+    stay distinguishable by a host precisely because retrying fixes one and never
+    fixes the other.
+
+    Nothing durable is written before the lock is held, so a refusal from here
+    leaves the session exactly as it found it: no ``session.json``, no appended
+    event, not even a directory. Only the acquisition is inside the ``try``; a
+    ``LockUnavailableError`` raised by nested code *within* the guarded body (a
+    child run lock, for instance) belongs to that lock and must not be reported
+    as this session's driver being busy.
+    """
+    global _ACTIVE_DRIVER
+
+    lock_path = session_lock_path(project_root, orchestration_id)
+    # Built lazily so ``acquired_at`` is stamped when the lock is actually taken.
+    # A driver that queued behind a peer for most of its wait would otherwise
+    # publish a start time older than its real one by the whole wait, and that
+    # field is what an operator -- or a supervisor watching for a stuck holder --
+    # thresholds on. Captured once so the block the sidecar carries and the block
+    # the audit events carry are the same object.
+    published: dict[str, Any] | None = None
+
+    def build_holder() -> dict[str, Any]:
+        nonlocal published
+        published = driver_identity(command, agent_id)
+        return published
+
+    with ExitStack() as stack:
+        try:
+            handle = stack.enter_context(
+                workspace_lock(
+                    lock_path,
+                    timeout_seconds=max(float(wait_seconds), 0.0),
+                    purpose=f"orchestration {orchestration_id}",
+                    stale_exclusive_after_seconds=DRIVER_LOCK_STALE_FALLBACK_SECONDS,
+                    holder=build_holder,
+                )
+            )
+        except LockUnavailableError as error:
+            if not getattr(error, "contended", False):
+                raise
+            raise driver_busy_error(lock_path, orchestration_id) from error
+
+        previous = _ACTIVE_DRIVER
+        _ACTIVE_DRIVER = published if published is not None else driver_identity(command, agent_id)
+        stack.callback(_restore_active_driver, previous)
+        yield handle
+
+
+def _restore_active_driver(previous: dict[str, Any] | None) -> None:
+    global _ACTIVE_DRIVER
+    _ACTIVE_DRIVER = previous
 
 
 def work_order_path(project_root: Path, orchestration_id: str, action_id: str) -> Path:
@@ -4074,7 +4507,14 @@ def issue_work_order(project_root: Path, session: dict[str, Any], spec: dict[str
     session["window_action_count"] = int(session.get("window_action_count", 0)) + 1
     session["updated_at"] = timestamp_utc()
     write_json_atomic(session_path(project_root, session["orchestration_id"]), session)
-    record_event(project_root, session, "action_issued", f"Issued {spec['phase']} work order.", action_id=action_id)
+    record_event(
+        project_root,
+        session,
+        "action_issued",
+        f"Issued {spec['phase']} work order.",
+        action_id=action_id,
+        data=event_data_with_driver(),
+    )
     return work_order
 
 
@@ -4198,7 +4638,13 @@ def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any
             "workspace health rejected the research contract",
             details={"findings": health.get("findings", [])},
         )
-    with workspace_lock(session_lock_path(project_root, orchestration_id), purpose=f"orchestration {orchestration_id}"):
+    with driver_session_lock(
+        project_root,
+        orchestration_id,
+        command="start",
+        agent_id=agent_id,
+        wait_seconds=getattr(args, "driver_wait_seconds", 0.0),
+    ):
         path = session_path(project_root, orchestration_id)
         if path.exists():
             raise OrchestrationControllerError(
@@ -4261,7 +4707,13 @@ def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any
 
 def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
     orchestration_id = require_safe_id(args.orchestration_id, "orchestration_id")
-    with workspace_lock(session_lock_path(project_root, orchestration_id), purpose=f"orchestration {orchestration_id}"):
+    with driver_session_lock(
+        project_root,
+        orchestration_id,
+        command="next",
+        agent_id=args.agent_id,
+        wait_seconds=getattr(args, "driver_wait_seconds", 0.0),
+    ):
         session = load_session(project_root, orchestration_id)
         enforce_control_repair_gate(project_root, orchestration_id)
         if args.agent_id is not None and require_agent_id(args.agent_id) != session["agent_id"]:
@@ -6813,7 +7265,7 @@ def ensure_completion_events(
         "action_completed",
         result["summary"],
         action_id=action_id,
-        data={"artifacts": result["artifacts"], "outcome": result["outcome"]},
+        data=event_data_with_driver({"artifacts": result["artifacts"], "outcome": result["outcome"]}),
     )
     if session.get("status") in TERMINAL_STATUSES:
         reason = session.get("pause_reason") or result["summary"]
@@ -6971,7 +7423,13 @@ def submit_result(project_root: Path, args: argparse.Namespace) -> dict[str, Any
     orchestration_id = require_safe_id(args.orchestration_id, "orchestration_id")
     action_id = require_safe_id(args.action_id, "action_id")
     result = load_result(Path(args.result_file).expanduser().resolve(), action_id, project_root)
-    with workspace_lock(session_lock_path(project_root, orchestration_id), purpose=f"orchestration {orchestration_id}"):
+    with driver_session_lock(
+        project_root,
+        orchestration_id,
+        command="submit",
+        agent_id=args.agent_id,
+        wait_seconds=getattr(args, "driver_wait_seconds", 0.0),
+    ):
         session = load_session(project_root, orchestration_id)
         enforce_control_repair_gate(project_root, orchestration_id)
         if args.agent_id is not None and require_agent_id(args.agent_id) != session["agent_id"]:

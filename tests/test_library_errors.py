@@ -237,3 +237,76 @@ class EmittedCodeFamilyTests(unittest.TestCase):
         for code, reason in self.NOT_ERROR_CODES.items():
             with self.subTest(code=code):
                 self.assertTrue(reason.strip(), f"{code} is excluded without a reason")
+
+
+class ExitStatusReconstructionTests(unittest.TestCase):
+    """Where a typed exception's ``exit_code`` comes from, and what it costs.
+
+    ``docs/library-api.md`` documents the attribute as "the status the CLI would
+    have exited with". No envelope carries it: ``_script_errors.error_envelope``
+    emits ``schema_version``, ``error_code``, ``message``, ``recoverable``,
+    ``remediation`` and an optional ``details``, and never an exit status. So
+    ``errors.error_from_envelope`` *reconstructs* the number from
+    ``errors._EXIT_CODE_OVERRIDES``, a table this package maintains by hand
+    against the scripts' own ``EXIT_*`` constants -- and that is only ever as
+    good as the table.
+
+    CR-8 supplied the first miss. ``ORCHESTRATION_DRIVER_BUSY`` exits the
+    controller with ``EXIT_DRIVER_BUSY`` (6), the first refusal in the workspace
+    scripts to exit with anything the table had not been told about; every earlier
+    one exits 2, or the 3 the two claim codes already occupy. Until the table
+    learned it, the library reported 2 while both shells reported 5.
+
+    Both halves are pinned here: the mechanism, and the agreement the table entry
+    buys. The cross-check below reads the controller's own ``EXIT_DRIVER_BUSY``
+    out of the packaged asset rather than trusting a literal, so the two sides
+    cannot drift apart silently -- moving the constant without updating the table
+    fails here, which is the failure the hand-maintained table exists to invite.
+    The end-to-end demonstration lives in
+    ``tests/test_library_error_reachability.py``; this is the fast structural
+    statement of why it comes out that way.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.assets_root = shared_assets_root()
+        cls.script_errors = load_packaged_script(cls.assets_root, "_script_errors")
+
+    def test_no_error_envelope_carries_an_exit_status(self):
+        """The root of it: the number cannot survive the seam, because it is never sent."""
+        for code in sorted(self.script_errors._REMEDIATIONS):
+            with self.subTest(error_code=code):
+                envelope = self.script_errors.error_envelope(code, "x", details={"holder": None})
+                self.assertNotIn("exit_code", envelope)
+
+    def test_the_driver_busy_code_is_retryable_and_lands_in_the_orchestration_family(self):
+        """The two attributes a host reconstructs correctly without an envelope.
+
+        A host that builds the error itself -- from a logged code, or from a
+        refusal it forwarded -- gets the same recoverability and the same family
+        the controller sends, which is what makes ``except OrchestrationError``
+        plus a retry on ``recoverable`` a complete handler for contention.
+        """
+        self.assertIs(errors.OrchestrationError, errors.error_class_for("ORCHESTRATION_DRIVER_BUSY"))
+        self.assertTrue(errors.default_recoverable("ORCHESTRATION_DRIVER_BUSY"))
+
+    def test_the_driver_busy_exit_status_matches_the_controllers_own_constant(self):
+        """The third attribute, and the hand-maintained table that has to earn it.
+
+        Read from the packaged controller rather than asserted as a literal: the
+        point is that the two sides *agree*, so changing ``EXIT_DRIVER_BUSY``
+        without teaching ``_EXIT_CODE_OVERRIDES`` fails here rather than silently
+        making a library caller's ``exit_code`` disagree with its own shell.
+        """
+        controller = (self.assets_root / "workspace-template" / "scripts" / "orchestration_controller.py").read_text(
+            encoding="utf-8"
+        )
+        declared = re.search(r"^EXIT_DRIVER_BUSY = (\d+)$", controller, re.MULTILINE)
+        self.assertIsNotNone(declared, "the controller no longer declares EXIT_DRIVER_BUSY")
+        self.assertEqual(
+            int(declared.group(1)),
+            errors.default_exit_code("ORCHESTRATION_DRIVER_BUSY"),
+            "the controller's EXIT_DRIVER_BUSY and errors._EXIT_CODE_OVERRIDES disagree; a library "
+            "caller's exit_code would no longer match the status its own CLI exits with",
+        )
+        self.assertEqual(errors.EXIT_DRIVER_BUSY, errors.default_exit_code("ORCHESTRATION_DRIVER_BUSY"))

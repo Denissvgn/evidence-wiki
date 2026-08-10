@@ -12,6 +12,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -184,7 +185,38 @@ COMMON_PROTECTED_WORKSPACE_PATH_SUFFIX = (
     "venv",
 )
 WORKER_WRITABLE_CONTROL_PATHS = ("runs/run-reports",)
-MANAGED_HOST_LOCK_CONTROL_PATH = ".locks/managed-host.lock"
+#: The parent-orchestration subtree that is inspected for unsafe entries but not
+#: fingerprinted by the managed-run control-artifact snapshot.
+#:
+#: ``runs/orchestrations/<id>/.locks`` holds nothing a control diff can vouch for: it
+#: is the scratch space the lock machinery owns, and that machinery emits a *family*
+#: of artifacts, not one file. Beside the stable, empty ``session.lock`` the
+#: workspace's exclusive-create fallback backend writes a transient
+#: ``session.lock.exclusive`` (plus its removal guard) that appears and disappears
+#: while a call is in flight, and an acquisition sidecar can outlive a crashed
+#: holder. Fingerprinting any of that makes the snapshot report a difference nobody
+#: caused and demand a control repair nobody can perform, so the exclusion names the
+#: directory rather than the filenames -- enumerating filenames would re-open the
+#: hole the first time the lock machinery grows another artifact.
+#:
+#: Excluded is not uninspected: ``_capture_control_root`` still walks this subtree
+#: through ``_inspect_excluded_control_subtree`` and refuses a symlink, a junction, a
+#: special file, or a multiply-linked entry inside it. What changes is that its
+#: contents do not move the diff, so a genuine edit to ``session.json``, a work
+#: order, or any other parent-orchestration artifact is still detected exactly as
+#: before. ``_tripwire_control_fingerprint`` has always excluded this component, so
+#: the snapshot diff and the repair tripwire now agree about lock artifacts; and
+#: ``_managed_session_lock`` re-proves the directory is a real directory at the top
+#: of every managed window, before any snapshot is taken.
+HOST_LOCK_CONTROL_SUBTREE = ".locks"
+
+#: Errors that mean an entry disappeared between being listed and being inspected,
+#: rather than that something is wrong with it. ``FileNotFoundError`` covers the
+#: POSIX case; Windows reports a file in the delete-pending state as
+#: ``PermissionError`` from ``lstat``, which is the same benign race and must not
+#: be reported as tampering -- a lock sidecar being replaced mid-walk would
+#: otherwise quarantine a clean run.
+_VANISHED_ENTRY_ERRORS = (FileNotFoundError, PermissionError)
 
 # Declared literally rather than imported: this module is imported by
 # `orchestration_schemas`, so it cannot import back from it, and the host does not load
@@ -198,6 +230,18 @@ EXIT_INVALID = 2
 EXIT_BLOCKED = 3
 EXIT_PAUSED = 4
 EXIT_RUNNER_FAILED = 5
+
+#: How long a *managed* run waits for a competing driver before giving up.
+#:
+#: A managed window holds ``managed-host.lock`` for its whole duration, so it can
+#: never contend with itself; the contender is always external -- an operator's
+#: manual ``next``, or a second host. Unlike a one-shot CLI call, this driver has
+#: a durable session in flight and a worker mid-action, so aborting the entire run
+#: because another process held the lock for a moment is far more costly than
+#: waiting a few seconds. Before CR-8 this call inherited the lock's own 10 s
+#: bounded wait and almost always won; this restores that rather than adopting the
+#: refuse-immediately default meant for callers that can cheaply retry.
+MANAGED_DRIVER_WAIT_SECONDS = 10.0
 
 TERMINAL_STATUSES = frozenset({"complete", "blocked_on_sources", "no_ship", "failed"})
 PAUSED_STATUSES = frozenset({"paused", "action_limit_reached", "time_limit_reached"})
@@ -863,13 +907,53 @@ def _error_envelope(detail: str) -> dict[str, Any] | None:
     return parsed
 
 
+#: ``error_code`` for a deployed controller that predates an argument this
+#: package passes. ``Workspace.open`` deliberately applies no version gate, so an
+#: upgraded package driving a workspace deployed by an earlier release is a
+#: supported combination -- but argparse answers an unknown flag with a usage
+#: blob on stderr and exit 2, which reaches a host as an unparseable failure
+#: indistinguishable from a crashed controller. Naming the condition lets a host
+#: tell "this workspace is older than this argument" from "the controller died".
+CONTROLLER_TOO_OLD_ERROR_CODE = "ORCHESTRATION_CONTROLLER_TOO_OLD"
+
+_UNRECOGNIZED_ARGUMENT_RE = re.compile(r"unrecognized arguments:\s*(?P<argument>--[\w-]+)")
+
+
 def _controller_failure(command: str, completed: subprocess.CompletedProcess[str]) -> OrchestrationHostError:
     """Compose the refusal for a non-zero controller exit, envelope included."""
     detail = _redact((completed.stderr or completed.stdout).strip())
+    envelope = _error_envelope(detail)
+    if envelope is None and int(completed.returncode) == EXIT_INVALID:
+        unrecognized = _UNRECOGNIZED_ARGUMENT_RE.search(detail or "")
+        if unrecognized is not None:
+            argument = unrecognized.group("argument")
+            # Synthesized rather than parsed: argparse never emits an envelope,
+            # so without this the caller sees ORCHESTRATION_HOST_FAILED carrying
+            # usage text and cannot tell a version mismatch from a crash.
+            envelope = {
+                "schema_version": "1.0",
+                "error_code": CONTROLLER_TOO_OLD_ERROR_CODE,
+                "message": (
+                    f"The deployed workspace controller does not accept {argument}. "
+                    "It predates this argument; upgrade the workspace, or omit the argument "
+                    "to use the controller's own default."
+                ),
+                "recoverable": False,
+                "remediation": (
+                    f"Re-deploy the workspace with a release that supports {argument}, or drop the "
+                    "argument so the deployed controller applies its own default."
+                ),
+                "details": {"argument": argument, "command": command},
+            }
+            return OrchestrationHostError(
+                str(envelope["message"]),
+                exit_code=int(completed.returncode),
+                envelope=envelope,
+            )
     return OrchestrationHostError(
         detail or f"Workspace orchestration controller {command!r} failed.",
         exit_code=int(completed.returncode),
-        envelope=_error_envelope(detail),
+        envelope=envelope,
     )
 
 
@@ -934,11 +1018,15 @@ def protocol_start(
     max_actions: int | None = None,
     action_timeout_seconds: int | None = None,
     total_timeout_seconds: int | None = None,
+    driver_wait_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Create a parent orchestration session and return its session document.
 
     Every limit left as ``None`` is omitted from argv so the deployed
     controller applies its own default rather than this package imposing one.
+    ``driver_wait_seconds`` follows the same rule for the same reason: omitted,
+    the controller refuses a contended session immediately, which is its own
+    default and not one reproduced here.
     """
     return _controller_json(
         root,
@@ -949,6 +1037,7 @@ def protocol_start(
             max_actions=max_actions,
             action_timeout_seconds=action_timeout_seconds,
             total_timeout_seconds=total_timeout_seconds,
+            driver_wait_seconds=driver_wait_seconds,
         ),
     )
 
@@ -959,6 +1048,7 @@ def protocol_next(
     *,
     agent_id: str | None = None,
     resume: bool = False,
+    driver_wait_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Issue or replay the next work order.
 
@@ -966,8 +1056,15 @@ def protocol_next(
     can still make progress, or the session document once it cannot. A session
     that ended is an answer, so a terminal or paused session comes back as a
     result even though the controller exits non-zero for it.
+
+    ``driver_wait_seconds`` is omitted from argv when ``None``, which is what
+    keeps this call byte-identical to the one this package has always made.
     """
-    arguments = _identifier_arguments(orchestration_id=orchestration_id, agent_id=agent_id)
+    arguments = _identifier_arguments(
+        orchestration_id=orchestration_id,
+        agent_id=agent_id,
+        driver_wait_seconds=driver_wait_seconds,
+    )
     if resume:
         arguments.append("--resume")
     return _controller_json(root, "next", arguments)
@@ -980,11 +1077,16 @@ def protocol_submit(
     result_file: str | Path,
     *,
     agent_id: str | None = None,
+    driver_wait_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Submit one structured agent result read from ``result_file``.
 
     The controller re-verifies the workspace artifacts the result claims;
     ``result_file`` is the claim, not the evidence.
+
+    ``driver_wait_seconds`` matters more here than on ``next``: ``next`` is
+    idempotent, so a refused caller can simply ask again, while a refused
+    ``submit`` still holds a result the session has not accepted.
     """
     return _controller_json(
         root,
@@ -994,6 +1096,7 @@ def protocol_submit(
             action_id=action_id,
             result_file=str(result_file),
             agent_id=agent_id,
+            driver_wait_seconds=driver_wait_seconds,
         ),
     )
 
@@ -1047,6 +1150,74 @@ def _is_multiply_linked_regular(metadata: os.stat_result) -> bool:
     return stat.S_ISREG(metadata.st_mode) and int(getattr(metadata, "st_nlink", 1) or 1) != 1
 
 
+def _inspect_excluded_control_subtree(
+    path: Path,
+    *,
+    label: str,
+    key: str,
+    entry_counter: list[int],
+) -> None:
+    """Refuse unsafe entries in a control subtree whose contents are not fingerprinted.
+
+    This is the "excluded is not uninspected" half of an exclusion. The snapshot
+    deliberately stops describing what lives here (see ``HOST_LOCK_CONTROL_SUBTREE``),
+    but the tamper guarantees that do not depend on content still hold: a symlink or
+    junction could redirect a later host write outside the workspace, a special file
+    could block or feed a reader, and a multiply-linked regular file could alias a
+    protected control path so that writing the alias rewrites the original. Each is
+    refused here exactly as ``_capture_control_root`` refuses it elsewhere.
+
+    Nothing is read and nothing is hashed -- only ``lstat`` metadata is consulted --
+    so an excluded subtree consumes no part of the snapshot byte budget, and an entry
+    that vanishes mid-walk is tolerated rather than reported. That tolerance is the
+    point: the artifacts living under an excluded subtree are runtime state that
+    appears and disappears while the walk runs, and a race with them is not evidence
+    of tampering. Entries are still counted against ``entry_counter`` so a subtree
+    cannot be used to make the inspection itself unbounded.
+    """
+
+    def visit(current: Path, current_key: str) -> None:
+        entry_counter[0] += 1
+        if entry_counter[0] > MAX_CONTROL_ARTIFACT_ENTRIES:
+            raise _control_artifact_error(
+                f"trusted control inputs exceed {MAX_CONTROL_ARTIFACT_ENTRIES} filesystem entries."
+            )
+        try:
+            metadata = current.lstat()
+        except _VANISHED_ENTRY_ERRORS:
+            return
+        except OSError as exc:
+            raise _control_artifact_error(
+                f"cannot inspect host-owned control carveout {label}/{current_key}: {exc}."
+            ) from exc
+        if _is_link_like(current, metadata):
+            raise _control_artifact_error(
+                f"host-owned control carveout {label}/{current_key} is a symbolic link or junction."
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            try:
+                children = sorted(current.iterdir(), key=lambda child: child.name)
+            except _VANISHED_ENTRY_ERRORS:
+                return
+            except OSError as exc:
+                raise _control_artifact_error(
+                    f"cannot enumerate host-owned control carveout {label}/{current_key}: {exc}."
+                ) from exc
+            for child in children:
+                visit(child, f"{current_key}/{child.name}")
+            return
+        if not stat.S_ISREG(metadata.st_mode):
+            raise _control_artifact_error(
+                f"host-owned control carveout {label}/{current_key} is not a regular file or directory."
+            )
+        if _is_multiply_linked_regular(metadata):
+            raise _control_artifact_error(
+                f"host-owned control carveout {label}/{current_key} has multiple hard links."
+            )
+
+    visit(path, key)
+
+
 def _capture_control_root(
     path: Path,
     *,
@@ -1060,6 +1231,44 @@ def _capture_control_root(
     def visit(current: Path, relative: PurePosixPath) -> None:
         relative_key = "" if str(relative) == "." else relative.as_posix()
         if relative_key in excluded_subtrees:
+            # Exclude the *contents*, not the node. The entry for the excluded
+            # directory itself still goes into the snapshot, carrying its kind and
+            # mode: those are not volatile, and dropping them let a worker widen
+            # `.locks` to 0o777, replace it with a regular file, or delete it
+            # outright with the control diff reporting nothing. Only what lives
+            # *inside* is runtime state that legitimately appears and disappears
+            # mid-window.
+            _inspect_excluded_control_subtree(
+                current,
+                label=label,
+                key=relative_key,
+                entry_counter=entry_counter,
+            )
+            entry_counter[0] += 1
+            if entry_counter[0] > MAX_CONTROL_ARTIFACT_ENTRIES:
+                raise _control_artifact_error(
+                    f"trusted control inputs exceed {MAX_CONTROL_ARTIFACT_ENTRIES} filesystem entries."
+                )
+            try:
+                excluded_metadata = current.lstat()
+            except FileNotFoundError:
+                entries[relative_key] = ControlArtifactEntry("missing", 0, 0, None)
+                return
+            except OSError as exc:
+                raise _control_artifact_error(
+                    f"cannot inspect trusted control input {label}/{relative_key}: {exc}."
+                ) from exc
+            if _is_link_like(current, excluded_metadata):
+                raise _control_artifact_error(
+                    f"trusted control input {label}/{relative_key} is a symbolic link or junction."
+                )
+            kind = "directory" if stat.S_ISDIR(excluded_metadata.st_mode) else "file"
+            entries[relative_key] = ControlArtifactEntry(
+                kind,
+                stat.S_IMODE(excluded_metadata.st_mode),
+                0,
+                None,
+            )
             return
         entry_counter[0] += 1
         if entry_counter[0] > MAX_CONTROL_ARTIFACT_ENTRIES:
@@ -1165,7 +1374,7 @@ def _control_roots(root: Path, orchestration_id: str) -> tuple[tuple[str, Path, 
         (
             f"runs/orchestrations/{orchestration_id}",
             root / "runs" / "orchestrations" / orchestration_id,
-            frozenset({MANAGED_HOST_LOCK_CONTROL_PATH}),
+            frozenset({HOST_LOCK_CONTROL_SUBTREE}),
         ),
     )
 
@@ -1300,7 +1509,7 @@ def _tripwire_control_fingerprint(snapshot: ControlArtifactSnapshot) -> str:
     if parent_label not in snapshot.roots:
         raise _control_artifact_error("the parent-orchestration snapshot is missing.")
     excluded_roots = {
-        ".locks",
+        HOST_LOCK_CONTROL_SUBTREE,
         HOST_ATTEMPTS_DIR,
         HOST_STAGED_RESULTS_DIR,
         HOST_QUARANTINE_DIR,
@@ -4104,7 +4313,14 @@ def _submit_result(root: Path, orchestration_id: str, agent_id: str, result: dic
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-submit-") as tmpdir:
         path = Path(tmpdir) / "result.json"
         path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-        return protocol_submit(root, orchestration_id, result["action_id"], path, agent_id=agent_id)
+        return protocol_submit(
+            root,
+            orchestration_id,
+            result["action_id"],
+            path,
+            agent_id=agent_id,
+            driver_wait_seconds=MANAGED_DRIVER_WAIT_SECONDS,
+        )
 
 
 @contextlib.contextmanager
@@ -4126,7 +4342,7 @@ def _managed_session_lock(root: Path, orchestration_id: str):
             f"Parent orchestration {orchestration_id} is not a real directory.",
             exit_code=EXIT_RUNNER_FAILED,
         )
-    lock_root = session_root / ".locks"
+    lock_root = session_root / HOST_LOCK_CONTROL_SUBTREE
     lock_root.mkdir(mode=0o700, exist_ok=True)
     lock_metadata = lock_root.lstat()
     if not stat.S_ISDIR(lock_metadata.st_mode) or _is_link_like(lock_root, lock_metadata):
@@ -4260,7 +4476,13 @@ def _drive_session_unlocked(
         current_status = _session_status(status)
         if current_status in TERMINAL_STATUSES or (current_status in PAUSED_STATUSES and not resume_pending):
             return status
-        next_payload = protocol_next(root, orchestration_id, agent_id=agent_id, resume=resume_pending)
+        next_payload = protocol_next(
+            root,
+            orchestration_id,
+            agent_id=agent_id,
+            resume=resume_pending,
+            driver_wait_seconds=MANAGED_DRIVER_WAIT_SECONDS,
+        )
         resume_pending = False
         work_order = _work_order_from_next(next_payload)
         if work_order is None:
@@ -4515,6 +4737,37 @@ def _add_format(parser: argparse.ArgumentParser, *, default: str = "text") -> No
     parser.add_argument("--format", choices=("text", "json"), default=default, help="Output format.")
 
 
+def _wait_seconds(value: str) -> float:
+    """Parse a non-negative, finite wait, mirroring the deployed controller.
+
+    Validated here as well as in the controller because this is the door a shell
+    host actually knocks on: a caller that mistypes the flag should learn it from
+    the command it ran, not from a subprocess's usage text. ``inf`` and ``nan``
+    are refused rather than clamped -- either would turn a bounded wait into a
+    hang, and ``nan`` makes every deadline comparison false.
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative number of seconds") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative number of seconds")
+    return parsed
+
+
+def _add_driver_wait(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--driver-wait-seconds",
+        type=_wait_seconds,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Wait up to SECONDS for another driver to release the session before refusing with "
+            "ORCHESTRATION_DRIVER_BUSY. Omitted, the workspace's own default applies: refuse immediately."
+        ),
+    )
+
+
 def _add_managed_runner(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--runner",
@@ -4547,6 +4800,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--max-actions", type=_positive_int, default=DEFAULT_MAX_ACTIONS)
     start.add_argument("--action-timeout-seconds", type=_positive_int, default=DEFAULT_ACTION_TIMEOUT_SECONDS)
     start.add_argument("--total-timeout-seconds", type=_positive_int, default=DEFAULT_TOTAL_TIMEOUT_SECONDS)
+    _add_driver_wait(start)
     _add_format(start)
 
     next_parser = subparsers.add_parser("next", help="Issue or replay the next persisted work order.")
@@ -4554,6 +4808,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_parser.add_argument("--orchestration-id", required=True)
     next_parser.add_argument("--agent-id", default=None)
     next_parser.add_argument("--resume", action="store_true", help="Resume a paused session or reclaim expired work.")
+    _add_driver_wait(next_parser)
     _add_format(next_parser)
 
     submit = subparsers.add_parser("submit", help="Submit one structured agent result.")
@@ -4562,6 +4817,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--action-id", required=True)
     submit.add_argument("--result-file", required=True)
     submit.add_argument("--agent-id", default=None)
+    _add_driver_wait(submit)
     _add_format(submit)
 
     status = subparsers.add_parser("status", help="Read a parent orchestration session.")
@@ -4598,6 +4854,7 @@ def _protocol_arguments(args: argparse.Namespace) -> list[str]:
         "action_timeout_seconds",
         "total_timeout_seconds",
         "result_file",
+        "driver_wait_seconds",
     ):
         if not hasattr(args, option):
             continue

@@ -108,9 +108,67 @@ whose isolation contract has been implemented and verified.
 Only one package-managed `run` or `resume` process may drive a parent session
 at a time. The host holds a session-scoped lock for the complete managed window;
 a concurrent managed driver exits with `ORCHESTRATION_ALREADY_RUNNING` before
-launching a worker. An external protocol host must provide the same
-single-driver coordination and must not interleave `next` or `submit` calls with
-an active managed host for that session. Read-only status polling remains safe.
+launching a worker. That window lock is
+`runs/orchestrations/<orchestration_id>/.locks/managed-host.lock` and is owned
+by the host layer. It is complementary to the per-invocation driver lock below
+rather than a substitute for it: the window lock spans a whole managed run or
+resume, the driver lock spans one controller call.
+
+The single-driver rule is now enforced by the workspace instead of being
+promised by the host. `start`, `next`, and `submit` each hold
+`runs/orchestrations/<orchestration_id>/.locks/session.lock` for the duration of
+the call, and a second driver that finds it held is refused immediately with
+`ORCHESTRATION_DRIVER_BUSY` and exit code `6`. It has an exit code of its own,
+rather than sharing the general refusal exit `2`, because contention is the one
+refusal a host is supposed to retry unchanged; a shell-only caller that can read
+nothing but `$?` must be able to tell "come back in a moment" from "this will
+never succeed as issued". The refusal is
+`recoverable`, and `details.holder` names who the call lost to: `agent_id` (the
+holder's `--agent-id`, or `null` when that command supplied none), `pid`,
+`hostname`, `command`, and `acquired_at`. The holder block is a diagnostic hint
+written by a peer, never an authorization claim, and it is `null` when it cannot
+be read — a driver refused in the instant between the winner acquiring the lock
+and publishing its identity legitimately sees nothing, and the refusal still
+renders. A refused call writes nothing: no session document, no appended event.
+The loser therefore retries against exactly the state it observed.
+
+`ORCHESTRATION_DRIVER_BUSY` replaces `LOCK_UNAVAILABLE` for contention only.
+`LOCK_UNAVAILABLE` still means what it always meant — no lock backend could be
+established on this filesystem at all — and the two stay distinguishable because
+retrying fixes one and never fixes the other.
+
+Refusal rather than queueing is the default because queueing is what made
+interleaved drivers invisible: two hosts whose calls each finished quickly both
+succeeded, serially and silently, and the damage surfaced later as inconsistent
+session state. A host that wants the bounded wait back asks for it.
+`--driver-wait-seconds SECONDS` on `start`, `next`, and `submit` waits up to
+SECONDS for the holder to release before refusing; the default `0` refuses
+immediately. Negative, infinite, and non-numeric values are rejected at the CLI
+boundary rather than clamped.
+
+`status` takes no lock and never blocks, so a session another driver is
+mutating can always be polled.
+
+An external protocol host must still not interleave `next` or `submit` with an
+active managed host for the same session. The driver lock is scoped to one
+invocation, so it cannot see the gap *between* a managed host's own controller
+calls; the workspace refuses a simultaneous second driver, not a second driver
+that takes its turn between two of the first driver's calls.
+
+Two `start` calls racing on the same explicit `--orchestration-id` may surface
+either `ORCHESTRATION_EXISTS` — the loser arrived after the winner committed the
+session — or `ORCHESTRATION_DRIVER_BUSY`, when the two were genuinely
+simultaneous. Both are final for that call and carry the same remediation: pick
+another id, or poll `status` for the session that now exists. A caller must
+branch on the pair, never on which of the two it happened to receive.
+
+A holder that dies releases the session lock, because the shared workspace lock
+helper prefers `fcntl` and `msvcrt`, and those learn of process death from the
+OS. On a filesystem that offers neither, the helper falls back to an
+exclusive-create lock file with no owner-death notification, and there a driver
+killed mid-call can block its successors for up to about two minutes before the
+lock is treated as abandoned. That latency belongs to the exclusive-create
+fallback alone; it never applies where a native advisory lock is available.
 
 ## Artifacts
 
@@ -128,6 +186,7 @@ runs/orchestrations/<orchestration_id>/
   .host-results/<action_id>.json
   quarantine/<attempt_id>.json
   .locks/managed-host.lock
+  .locks/session.lock
   answers.json
 runs/orchestration-guards/<orchestration_id>.json
 ```
@@ -159,7 +218,16 @@ schema-valid result before the tripwire detected drift. The corresponding file
 under `runs/orchestration-guards/` is the durable repair gate shared by the
 managed host and workspace controller; it lives outside the guarded parent tree
 so replacing that tree cannot erase the repair requirement.
-The private `.locks/managed-host.lock` serializes managed drivers.
+The private `.locks/managed-host.lock` serializes managed drivers for a whole
+run or resume window; `.locks/session.lock` serializes one controller
+invocation and is what refuses a second driver with
+`ORCHESTRATION_DRIVER_BUSY`. Both are lock machinery rather than session
+content: the `.locks/` subtree is excluded from the managed-run control
+snapshot and from the semantic tripwire fingerprint, and its transient
+artifacts — the exclusive-create fallback's lock file, the holder sidecar a
+crashed driver leaves behind — are therefore never reported as control drift.
+Excluded is not uninspected: a symlink, special file, or hard link planted under
+`.locks/` is still refused as an unsafe control artifact.
 
 The repair guard is deliberately not stored below the parent-session tree.
 `runs/orchestration-guards/<orchestration_id>.json` is a preventive-only,

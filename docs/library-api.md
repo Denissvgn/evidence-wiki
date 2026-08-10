@@ -190,7 +190,7 @@ carries the whole error envelope:
 | `recoverable` | Whether a retry is meaningful. `False` for `CLAIM_HELD` and `CLAIM_NOT_STALE`. |
 | `remediation` | What an operator should do. Surface it. |
 | `details` | Structured context, possibly empty. |
-| `exit_code` | The status the CLI would have exited with: `2` for a fatal caller-fixable error, `3` for a conflict. |
+| `exit_code` | The status the CLI would have exited with: `2` for a fatal caller-fixable error, `3` for a conflict, `6` for `ORCHESTRATION_DRIVER_BUSY`. Envelopes carry no status, so it is reconstructed from `error_code`; a code whose script exits with something other than `2` must be registered in `errors._EXIT_CODE_OVERRIDES` for the two doors to agree. Dispatch on `error_code` when you need a specific condition — this attribute groups several. |
 
 Thirteen families sit under the base class. The family is selected from the code
 by prefix, with exact codes winning over prefixes and longer prefixes over
@@ -200,7 +200,7 @@ shorter ones — which is how `QUESTION_NOT_CLAIMED` lands in `ClaimError` while
 | Family | Covers |
 |--------|--------|
 | `ConfigError` | The workspace, its configuration, or the runtime cannot support the call: `CONFIG_*`, `WORKSPACE_UNREADABLE`, `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `UPGRADE_WRITE_FAILED`. |
-| `LockError` | `LOCK_UNAVAILABLE` — a workspace lock is held by another writer; that includes the per-session orchestration lock. |
+| `LockError` | `LOCK_UNAVAILABLE` — no workspace lock backend could be established, or a workspace lock stayed held past a call's bounded wait. A contended *orchestration session* lock is not this: it is `OrchestrationError` / `ORCHESTRATION_DRIVER_BUSY`. |
 | `ClaimError` | A claim could not be taken, stolen, released, or resolved: `CLAIM_*`, `STEAL_*`, `STATUS_NOT_*`, `QUESTION_NOT_CLAIMED`. |
 | `QuestionError` | A question, slug, or answer page is unusable: `QUESTION_*`, `SLUG_*`, `ANSWER_*`, `PAGE_INVALID`, `RESOLUTION_REASON_INVALID`. |
 | `CoverageError` | `COVERAGE_*`, `FACET_SCOPE_CONFLICT`. |
@@ -299,21 +299,53 @@ filesystem arbitrates, exactly as it does between processes.
 
 What remains the host's job:
 
-> **Serialize `next`/`submit` per orchestration session.** The protocol is a
-> single-driver protocol. The workspace enforces this with a per-session lock at
-> `runs/orchestrations/<id>/.locks/session.lock`: a second driver waits for the
-> lock's bounded window and is refused with `LOCK_UNAVAILABLE` if the window
-> expires. It never interleaves two, so a violation is a delay or a refusal
-> rather than a corrupted session. A host that wants forward progress instead of
-> a refusal — and that does not want to spend a controller subprocess per waiter
-> — holds its own per-session lock; the [ASGI
+> **Decide what a busy session should do to your request.** The protocol is a
+> single-driver protocol, and the workspace enforces it with a per-session lock
+> at `runs/orchestrations/<id>/.locks/session.lock` held for the whole of
+> `start`, `next`, and `submit`. A second driver that finds it held is refused
+> **immediately** with `OrchestrationError` / `ORCHESTRATION_DRIVER_BUSY`
+> (`recoverable=True`), whose `details["holder"]` names the holder's `agent_id`
+> (or `None`), `pid`, `hostname`, `command`, and `acquired_at`. Branch on
+> `error_code`, which is the stable contract; `exit_code` agrees with it here
+> (`6`, the status the controller process exits with) because the code is
+> registered in the reconstruction table. A refused call writes nothing. This is `LOCK_UNAVAILABLE`'s
+> replacement for *contention only*: that code kept its older, narrower meaning
+> — no lock backend could be established on this filesystem at all — and the two
+> stay distinct because retrying fixes one and never fixes the other.
+>
+> **A host-side lock is now a throughput optimization, not a correctness
+> requirement.** It buys one thing: not spending a controller subprocess merely
+> to be told you are busy. Drop it and concurrent requests get a typed refusal
+> instead of a queue; keep it and they queue in your process, which is cheaper
+> and lets you apply your own fairness policy. The [ASGI
 > example](#embedding-in-an-asgi-service) below shows the shape.
 >
-> `next` is idempotent, which softens this: eight threads calling `next()` on one
-> session with no host lock all succeed and all receive the *same* pending work
-> order, because the session lock serialized them and the controller replayed
-> rather than issuing eight actions. `submit` is where an unserialized second
-> driver actually costs something.
+> `next` is idempotent, but that no longer means concurrent callers all get
+> through. Eight threads calling `next()` on one session with no host lock used
+> to all succeed and all receive the same replayed work order; now one holds the
+> lock and every thread that arrives while it does is refused with
+> `ORCHESTRATION_DRIVER_BUSY`, because refusing is the default — the bounded
+> wait it replaced is exactly what let two interleaving drivers both succeed,
+> silently. A caller that wants the old behavior asks for it: with
+> a large enough wait, the eight serialize and all receive the *same* pending
+> work order, since the controller replays rather than issuing eight actions.
+> That is `--driver-wait-seconds` on the CLI and `driver_wait_seconds=` on
+> `start`, `next`, and `submit` here — omit it and the controller's own
+> immediate-refusal default applies, because this seam never restates a default
+> the deployed controller owns. Prefer your own in-process queue where you have
+> one: a controller-side wait costs a blocked subprocess, while an in-process
+> wait is cheap and lets you set your own fairness policy. Reach for the
+> parameter when the competing driver is in *another* process, which is the case
+> a host lock cannot see.
+>
+> **What the per-session lock does not cover** is interleaving *across* the
+> `next` → `submit` span: it is scoped to one invocation, so two drivers taking
+> turns — one calling `next`, the other `submit` — are never simultaneous and
+> are never refused. `submit` still refuses a second, divergent result for the
+> same action with `RESULT_CONFLICT`, and the `action_issued` /
+> `action_completed` events record a `driver` block naming the writing process,
+> so the interleaving is at least legible after the fact. Enforcing it is
+> deliberately not attempted here.
 
 Nothing here makes a *question* safe to drive from two places at once either.
 The workspace protects its own state; it does not merge two agents' intentions.
@@ -499,8 +531,11 @@ Four properties carry the weight:
 2. **Calls are offloaded to a thread.** The API is blocking filesystem I/O, not
    async. Calling it directly from a coroutine blocks the event loop.
 3. **Orchestration `next`/`submit` is serialized per session** by the host's own
-   lock, so concurrent requests queue instead of colliding with the workspace's
-   per-session lock.
+   lock — an optimization, not the correctness boundary. The workspace's
+   per-session lock refuses a concurrent driver with
+   `ORCHESTRATION_DRIVER_BUSY` either way; queueing in-process means a waiter
+   costs an `asyncio.Lock` rather than a controller subprocess and a refusal
+   the caller has to retry.
 4. **Typed errors map to HTTP responses** using `error_code` and `recoverable`.
 
 ```python
@@ -519,7 +554,9 @@ from evidence_wiki import Workspace, errors
 _workspaces: dict[str, Workspace] = {}
 _workspaces_guard = asyncio.Lock()
 
-# 3. One lock per orchestration session; the protocol is single-driver.
+# 3. One lock per orchestration session. The workspace enforces single-driver
+#    on its own; this keeps a waiter from paying for a controller subprocess
+#    just to be told ORCHESTRATION_DRIVER_BUSY. It cannot help across replicas.
 _session_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -548,6 +585,11 @@ def http_error(exc: errors.EvidenceWikiError) -> tuple[int, dict[str, Any]]:
         status = 400
     elif exc.exit_code == 3:        # a conflict: CLAIM_HELD, CLAIM_NOT_STALE
         status = 409
+    elif exc.error_code == "ORCHESTRATION_DRIVER_BUSY":
+        status = 503               # another driver holds the session right now;
+                                   # details["holder"] says who. Matched by code
+                                   # rather than exit_code (6) so this stays
+                                   # distinct from any future code sharing it.
     elif isinstance(exc, errors.LockError):
         status = 503               # contended, and worth retrying
     elif exc.recoverable:

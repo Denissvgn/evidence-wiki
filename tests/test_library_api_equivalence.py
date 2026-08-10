@@ -160,6 +160,7 @@ TIMESTAMP_KEYS = SCHEMA_TIMESTAMP_KEYS | QUESTION_API_TIMESTAMP_KEYS | RUN_ARTIF
 
 MASKED_TIMESTAMP = "<timestamp>"
 MASKED_REQUEST_ID = "<request-id>"
+MASKED_DRIVER_PID = b'"pid":"<driver-pid>"'
 
 #: An ISO-8601 date, optionally with a time. Used **only** on ``log.md`` lines,
 #: where prose carries the stamp and there is no key to hang the mask on.
@@ -600,17 +601,49 @@ def drive_through_api(target: Path) -> str:
     return request_id
 
 
+def driver_pid_tokens(root: Path) -> list[bytes]:
+    """Return the exact serialized ``pid`` tokens this drive's own driver blocks hold.
+
+    The second identifier a drive mints that its twin cannot reproduce, and
+    handled exactly like the request id rather than by widening a mask. CR-8's
+    driver audit block records *which OS process* appended the work-order-issued
+    and result-accepted events, so that an interleaving which slipped past the
+    per-invocation session lock stays legible afterwards. Two separate drives are
+    two processes by definition -- the value is unsatisfiable for the same reason
+    a timestamp is.
+
+    Substituting the exact token this drive wrote, read back from this drive's
+    own events, keeps the comparison honest in the way a ``"pid"`` key mask would
+    not: a side whose driver block lost its ``hostname``, changed its
+    ``agent_id``, or vanished entirely still fails, and a ``pid`` appearing under
+    any *other* key is untouched.
+    """
+    tokens: set[bytes] = set()
+    for path in sorted(root.glob("runs/orchestrations/*/events.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            driver = json.loads(line).get("data", {}).get("driver")
+            if isinstance(driver, dict) and isinstance(driver.get("pid"), int):
+                tokens.add(f'"pid":{driver["pid"]}'.encode())
+    return sorted(tokens)
+
+
 class Snapshot:
-    """One finished drive: its tree, and the clock-minted id it produced."""
+    """One finished drive: its tree, and the run-specific ids it produced."""
 
     def __init__(self, root: Path, request_id: str) -> None:
         self.root = root
         self.request_id = request_id
+        self.driver_pid_tokens = driver_pid_tokens(root)
 
     def read(self, relative_path: str) -> bytes:
-        """Return one artifact's bytes with this drive's own request id substituted."""
+        """Return one artifact's bytes with this drive's own minted ids substituted."""
         raw = (self.root / relative_path).read_bytes()
-        return raw.replace(self.request_id.encode("utf-8"), MASKED_REQUEST_ID.encode("utf-8"))
+        raw = raw.replace(self.request_id.encode("utf-8"), MASKED_REQUEST_ID.encode("utf-8"))
+        for token in self.driver_pid_tokens:
+            raw = raw.replace(token, MASKED_DRIVER_PID)
+        return raw
 
     def text(self, relative_path: str) -> str:
         return self.read(relative_path).decode("utf-8")
@@ -715,6 +748,21 @@ class SessionEquivalenceTests(unittest.TestCase):
         """Guards the substitution against silently becoming a no-op."""
         self.assertTrue(self.cli.mentions_request_id(), "the CLI drive recorded no source request")
         self.assertTrue(self.api.mentions_request_id(), "the API drive recorded no source request")
+
+    def test_the_driver_pid_substitution_is_not_vacuous(self):
+        """Same guard for the driver audit block: a mask over nothing proves nothing.
+
+        It also pins the block's presence on both paths. The library spawns the
+        workspace's own deployed controller rather than importing it, so if that
+        ever stopped being true the driver identity would go missing on one side
+        and this would say so.
+        """
+        self.assertTrue(self.cli.driver_pid_tokens, "the CLI drive recorded no driver identity")
+        self.assertTrue(self.api.driver_pid_tokens, "the API drive recorded no driver identity")
+        for label, snapshot in ((CLI_LABEL, self.cli), (API_LABEL, self.api)):
+            with self.subTest(side=label):
+                events = snapshot.text("runs/orchestrations/orch-equivalence/events.jsonl")
+                self.assertIn(MASKED_DRIVER_PID.decode("utf-8"), events)
 
     def test_every_artifact_in_both_trees_matches_once_timestamps_are_masked(self):
         """The criterion. Every path in both trees, not only the ones expected to change."""
