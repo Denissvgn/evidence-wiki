@@ -184,7 +184,30 @@ COMMON_PROTECTED_WORKSPACE_PATH_SUFFIX = (
     "venv",
 )
 WORKER_WRITABLE_CONTROL_PATHS = ("runs/run-reports",)
-MANAGED_HOST_LOCK_CONTROL_PATH = ".locks/managed-host.lock"
+#: The parent-orchestration subtree that is inspected for unsafe entries but not
+#: fingerprinted by the managed-run control-artifact snapshot.
+#:
+#: ``runs/orchestrations/<id>/.locks`` holds nothing a control diff can vouch for: it
+#: is the scratch space the lock machinery owns, and that machinery emits a *family*
+#: of artifacts, not one file. Beside the stable, empty ``session.lock`` the
+#: workspace's exclusive-create fallback backend writes a transient
+#: ``session.lock.exclusive`` (plus its removal guard) that appears and disappears
+#: while a call is in flight, and an acquisition sidecar can outlive a crashed
+#: holder. Fingerprinting any of that makes the snapshot report a difference nobody
+#: caused and demand a control repair nobody can perform, so the exclusion names the
+#: directory rather than the filenames -- enumerating filenames would re-open the
+#: hole the first time the lock machinery grows another artifact.
+#:
+#: Excluded is not uninspected: ``_capture_control_root`` still walks this subtree
+#: through ``_inspect_excluded_control_subtree`` and refuses a symlink, a junction, a
+#: special file, or a multiply-linked entry inside it. What changes is that its
+#: contents do not move the diff, so a genuine edit to ``session.json``, a work
+#: order, or any other parent-orchestration artifact is still detected exactly as
+#: before. ``_tripwire_control_fingerprint`` has always excluded this component, so
+#: the snapshot diff and the repair tripwire now agree about lock artifacts; and
+#: ``_managed_session_lock`` re-proves the directory is a real directory at the top
+#: of every managed window, before any snapshot is taken.
+HOST_LOCK_CONTROL_SUBTREE = ".locks"
 
 # Declared literally rather than imported: this module is imported by
 # `orchestration_schemas`, so it cannot import back from it, and the host does not load
@@ -1047,6 +1070,74 @@ def _is_multiply_linked_regular(metadata: os.stat_result) -> bool:
     return stat.S_ISREG(metadata.st_mode) and int(getattr(metadata, "st_nlink", 1) or 1) != 1
 
 
+def _inspect_excluded_control_subtree(
+    path: Path,
+    *,
+    label: str,
+    key: str,
+    entry_counter: list[int],
+) -> None:
+    """Refuse unsafe entries in a control subtree whose contents are not fingerprinted.
+
+    This is the "excluded is not uninspected" half of an exclusion. The snapshot
+    deliberately stops describing what lives here (see ``HOST_LOCK_CONTROL_SUBTREE``),
+    but the tamper guarantees that do not depend on content still hold: a symlink or
+    junction could redirect a later host write outside the workspace, a special file
+    could block or feed a reader, and a multiply-linked regular file could alias a
+    protected control path so that writing the alias rewrites the original. Each is
+    refused here exactly as ``_capture_control_root`` refuses it elsewhere.
+
+    Nothing is read and nothing is hashed -- only ``lstat`` metadata is consulted --
+    so an excluded subtree consumes no part of the snapshot byte budget, and an entry
+    that vanishes mid-walk is tolerated rather than reported. That tolerance is the
+    point: the artifacts living under an excluded subtree are runtime state that
+    appears and disappears while the walk runs, and a race with them is not evidence
+    of tampering. Entries are still counted against ``entry_counter`` so a subtree
+    cannot be used to make the inspection itself unbounded.
+    """
+
+    def visit(current: Path, current_key: str) -> None:
+        entry_counter[0] += 1
+        if entry_counter[0] > MAX_CONTROL_ARTIFACT_ENTRIES:
+            raise _control_artifact_error(
+                f"trusted control inputs exceed {MAX_CONTROL_ARTIFACT_ENTRIES} filesystem entries."
+            )
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise _control_artifact_error(
+                f"cannot inspect host-owned control carveout {label}/{current_key}: {exc}."
+            ) from exc
+        if _is_link_like(current, metadata):
+            raise _control_artifact_error(
+                f"host-owned control carveout {label}/{current_key} is a symbolic link or junction."
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            try:
+                children = sorted(current.iterdir(), key=lambda child: child.name)
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise _control_artifact_error(
+                    f"cannot enumerate host-owned control carveout {label}/{current_key}: {exc}."
+                ) from exc
+            for child in children:
+                visit(child, f"{current_key}/{child.name}")
+            return
+        if not stat.S_ISREG(metadata.st_mode):
+            raise _control_artifact_error(
+                f"host-owned control carveout {label}/{current_key} is not a regular file or directory."
+            )
+        if _is_multiply_linked_regular(metadata):
+            raise _control_artifact_error(
+                f"host-owned control carveout {label}/{current_key} has multiple hard links."
+            )
+
+    visit(path, key)
+
+
 def _capture_control_root(
     path: Path,
     *,
@@ -1060,6 +1151,14 @@ def _capture_control_root(
     def visit(current: Path, relative: PurePosixPath) -> None:
         relative_key = "" if str(relative) == "." else relative.as_posix()
         if relative_key in excluded_subtrees:
+            # Prune before recursing, so one token excludes a whole directory -- but
+            # inspect it first, so exclusion never becomes a blind spot.
+            _inspect_excluded_control_subtree(
+                current,
+                label=label,
+                key=relative_key,
+                entry_counter=entry_counter,
+            )
             return
         entry_counter[0] += 1
         if entry_counter[0] > MAX_CONTROL_ARTIFACT_ENTRIES:
@@ -1165,7 +1264,7 @@ def _control_roots(root: Path, orchestration_id: str) -> tuple[tuple[str, Path, 
         (
             f"runs/orchestrations/{orchestration_id}",
             root / "runs" / "orchestrations" / orchestration_id,
-            frozenset({MANAGED_HOST_LOCK_CONTROL_PATH}),
+            frozenset({HOST_LOCK_CONTROL_SUBTREE}),
         ),
     )
 
@@ -1300,7 +1399,7 @@ def _tripwire_control_fingerprint(snapshot: ControlArtifactSnapshot) -> str:
     if parent_label not in snapshot.roots:
         raise _control_artifact_error("the parent-orchestration snapshot is missing.")
     excluded_roots = {
-        ".locks",
+        HOST_LOCK_CONTROL_SUBTREE,
         HOST_ATTEMPTS_DIR,
         HOST_STAGED_RESULTS_DIR,
         HOST_QUARANTINE_DIR,
@@ -4126,7 +4225,7 @@ def _managed_session_lock(root: Path, orchestration_id: str):
             f"Parent orchestration {orchestration_id} is not a real directory.",
             exit_code=EXIT_RUNNER_FAILED,
         )
-    lock_root = session_root / ".locks"
+    lock_root = session_root / HOST_LOCK_CONTROL_SUBTREE
     lock_root.mkdir(mode=0o700, exist_ok=True)
     lock_metadata = lock_root.lstat()
     if not stat.S_ISDIR(lock_metadata.st_mode) or _is_link_like(lock_root, lock_metadata):
