@@ -15,6 +15,7 @@ from types import ModuleType, TracebackType
 from typing import Any
 
 from . import _script_host
+from ._facades._base import translated_refusals
 from ._facades.coverage import CoverageNamespace
 from ._facades.diagnostics import DiagnosticsNamespace
 from ._facades.grounding import GroundingNamespace
@@ -178,6 +179,45 @@ class Workspace:
     def _workspace_versions(self) -> dict[str, Any]:
         metadata = _read_workspace_system(self._root / WORKSPACE_SYSTEM_FILE)
         return {key: metadata.get(key) for key in _WORKSPACE_VERSION_KEYS}
+
+    # -- workspace-scoped operations ------------------------------------
+    #
+    # These two are methods on the handle rather than namespace operations
+    # because the published capability contract declares them as
+    # ``workspace.export_answers`` and ``workspace.doctor``. That contract is
+    # output a host negotiates against, so a declared name has to be a real one.
+
+    def export_answers(self, status: list[str] | None = None) -> dict[str, Any]:
+        """Export this workspace's answered questions.
+
+        Returns exactly the document ``evidence-wiki export --format json``
+        prints. ``status`` mirrors the repeatable ``--status`` filter; ``None``
+        (the default) exports every status. The export is a pure read -- nothing
+        under this call writes to the workspace.
+
+        ``--format`` and ``--output`` have no counterpart: both choose how the
+        document is rendered and where it is delivered, not what it says. A host
+        that wants the ``jsonl`` bytes reshapes this document itself.
+
+        Raises:
+            EvidenceWikiError: whatever the export refuses on -- an unreadable
+                workspace or a malformed ``research.yml`` arrive as
+                :class:`~evidence_wiki.errors.ConfigError`.
+        """
+        with translated_refusals():
+            return self._script("export_answers").run_export(self._root, status=status)
+
+    def doctor(self) -> dict[str, Any]:
+        """Diagnose this workspace's runtime, tooling, and configuration.
+
+        Returns exactly the report ``evidence-wiki doctor --format json`` prints.
+        A broken workspace is diagnosed rather than refused: read
+        ``report["verdict"]``. See
+        :meth:`evidence_wiki._facades.diagnostics.DiagnosticsNamespace.doctor`,
+        which this delegates to, for why the script's ``env`` injection point is
+        not part of the public signature.
+        """
+        return self.diagnostics.doctor()
 
     # -- script access --------------------------------------------------
 
