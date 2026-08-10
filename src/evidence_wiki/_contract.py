@@ -120,8 +120,10 @@ def contract() -> dict:
     # library caller polls the contract or rebuilds it per workspace handle, and
     # on a zip install every separate entry re-extracts the whole asset tree and
     # seeds a disjoint script-module cache, since that cache is keyed by the
-    # resolved script directory. Entering once per process bounds both. The CLI
-    # keeps its per-command ``with assets_root()`` entry everywhere else (AC-3);
+    # resolved script directory. Entering once per process bounds both. The
+    # per-command ``with assets_root()`` entry survives only in the subcommands
+    # that were never routed through the library API -- ``init``/``deploy``,
+    # ``upgrade``, ``pack validate``, ``serve-mcp`` and ``orchestrator-guide``;
     # the ``contract`` subcommand is a one-shot process, so releasing this root at
     # interpreter exit is indistinguishable from releasing it at block exit, and
     # no path from the root reaches the payload, so stdout is unchanged either way.
