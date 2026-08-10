@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 from collections.abc import Iterator
@@ -123,6 +124,39 @@ def _typed_errors(operation: str) -> Iterator[None]:
         raise _typed_error(operation, exc) from exc
 
 
+def _checked_wait_seconds(value: float | None) -> float | None:
+    """Reject a wait the controller would reject, before spawning it to find out.
+
+    Mirrors ``parse_wait_seconds`` in the deployed controller: zero is admitted
+    and *is* the default meaning "do not wait", negatives are refused rather
+    than clamped, and non-finite values are refused because ``inf`` turns a
+    bounded wait into a hang while ``nan`` makes every deadline comparison
+    false. The controller stays authoritative -- it re-validates whatever argv
+    it receives, including from a caller that bypassed this facade -- so this is
+    a faster, clearer refusal rather than the only one.
+
+    ``nan`` is the case that earns the local check: ``_identifier_arguments``
+    would render it as the literal string ``nan``, so without this the failure
+    arrives as an argparse usage error from a subprocess rather than as a typed
+    ``UsageError`` naming the argument.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise UsageError(
+            "VALUE_INVALID",
+            f"driver_wait_seconds must be a number of seconds, got {type(value).__name__}.",
+        )
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise UsageError(
+            "VALUE_INVALID",
+            f"driver_wait_seconds must be a non-negative, finite number of seconds, got {value!r}.",
+            details={"driver_wait_seconds": repr(value)},
+        )
+    return number
+
+
 @contextlib.contextmanager
 def _result_file(result: dict[str, Any]) -> Iterator[Path]:
     """Materialize a result document for the controller to read, then remove it.
@@ -185,7 +219,13 @@ class OrchestrationSession:
     def __repr__(self) -> str:
         return f"<OrchestrationSession {self._orchestration_id} at {self._namespace._workspace.root}>"
 
-    def next(self, *, agent_id: str | None = None, resume: bool = False) -> dict[str, Any]:
+    def next(
+        self,
+        *,
+        agent_id: str | None = None,
+        resume: bool = False,
+        driver_wait_seconds: float | None = None,
+    ) -> dict[str, Any]:
         """Issue or replay the next work order.
 
         Returns the work order when the session can still make progress, and
@@ -200,15 +240,28 @@ class OrchestrationSession:
         gets exactly the guarantees the managed path gets -- bounded size, safe
         relative paths, no absolute paths, no environment credential values.
 
+        ``driver_wait_seconds`` waits that long for a competing driver to
+        release the session before refusing with ``ORCHESTRATION_DRIVER_BUSY``.
+        Omitted, the controller's own default applies: refuse immediately. Waiting
+        in the controller costs a blocked subprocess, so a host that already
+        serializes its own callers should leave this alone and keep queueing in
+        its own process, where it can apply its own fairness policy.
+
         Raises:
+            UsageError: ``driver_wait_seconds`` is negative or not finite.
             OrchestrationError: the controller refused, or issued a work order
                 for a different session.
             EvidenceWikiError: any other typed refusal the controller reported.
         """
         root = self._root()
+        wait_seconds = _checked_wait_seconds(driver_wait_seconds)
         with _typed_errors("next"):
             payload = orchestration.protocol_next(
-                root, self._orchestration_id, agent_id=agent_id, resume=resume
+                root,
+                self._orchestration_id,
+                agent_id=agent_id,
+                resume=resume,
+                driver_wait_seconds=wait_seconds,
             )
             work_order = orchestration._work_order_from_next(payload)
             if work_order is None:
@@ -228,6 +281,7 @@ class OrchestrationSession:
         result: dict[str, Any] | str | os.PathLike[str],
         *,
         agent_id: str | None = None,
+        driver_wait_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Submit one structured agent result and return the updated session.
 
@@ -240,18 +294,30 @@ class OrchestrationSession:
         workspace does not actually satisfy, so passing a well-formed document
         is not a way to make a session progress.
 
+        ``driver_wait_seconds`` behaves as it does on :meth:`next`, and is worth
+        more here: ``next`` is idempotent, so a refused caller can just ask
+        again, while a refused ``submit`` leaves the caller holding a result the
+        session has not accepted.
+
         Raises:
-            UsageError: ``result`` is neither a mapping nor an existing file.
+            UsageError: ``result`` is neither a mapping nor an existing file, or
+                ``driver_wait_seconds`` is negative or not finite.
             OrchestrationError: the controller refused the submission.
         """
         root = self._root()
+        wait_seconds = _checked_wait_seconds(driver_wait_seconds)
         if isinstance(result, dict):
             # The guard is entered first so a temporary file that cannot even be
             # created -- a full or missing temp directory -- still leaves a typed
             # error rather than a bare ``OSError``.
             with _typed_errors("submit"), _result_file(result) as path:
                 return orchestration.protocol_submit(
-                    root, self._orchestration_id, action_id, path, agent_id=agent_id
+                    root,
+                    self._orchestration_id,
+                    action_id,
+                    path,
+                    agent_id=agent_id,
+                    driver_wait_seconds=wait_seconds,
                 )
         if isinstance(result, (str, os.PathLike)):
             path = Path(os.fspath(result))
@@ -263,7 +329,12 @@ class OrchestrationSession:
                 )
             with _typed_errors("submit"):
                 return orchestration.protocol_submit(
-                    root, self._orchestration_id, action_id, path, agent_id=agent_id
+                    root,
+                    self._orchestration_id,
+                    action_id,
+                    path,
+                    agent_id=agent_id,
+                    driver_wait_seconds=wait_seconds,
                 )
         raise UsageError(
             "VALUE_INVALID",
@@ -298,19 +369,25 @@ class OrchestrateNamespace(Namespace):
         max_actions: int | None = None,
         action_timeout_seconds: int | None = None,
         total_timeout_seconds: int | None = None,
+        driver_wait_seconds: float | None = None,
     ) -> OrchestrationSession:
         """Create a parent orchestration session and return a driver for it.
 
         Every limit left as ``None`` is omitted, so the workspace's deployed
         controller applies its own default rather than this package pinning one
-        that a newer workspace has moved on from.
+        that a newer workspace has moved on from. ``driver_wait_seconds``
+        follows that rule too; it matters least here, since two ``start`` calls
+        racing on one id have a durable refusal waiting for the loser either way
+        (``ORCHESTRATION_EXISTS``).
 
         Raises:
             ConfigError: the handle is closed.
+            UsageError: ``driver_wait_seconds`` is negative or not finite.
             OrchestrationError: the controller refused to create the session --
                 for example ``ORCHESTRATION_EXISTS`` for a reused id.
         """
         root = self._workspace_root()
+        wait_seconds = _checked_wait_seconds(driver_wait_seconds)
         with _typed_errors("start"):
             started = orchestration.protocol_start(
                 root,
@@ -319,6 +396,7 @@ class OrchestrateNamespace(Namespace):
                 max_actions=max_actions,
                 action_timeout_seconds=action_timeout_seconds,
                 total_timeout_seconds=total_timeout_seconds,
+                driver_wait_seconds=wait_seconds,
             )
             return OrchestrationSession(self, orchestration._session_id(started))
 

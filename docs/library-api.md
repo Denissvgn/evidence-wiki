@@ -326,12 +326,17 @@ What remains the host's job:
 > lock and every thread that arrives while it does is refused with
 > `ORCHESTRATION_DRIVER_BUSY`, because refusing is the default — the bounded
 > wait it replaced is exactly what let two interleaving drivers both succeed,
-> silently. A shell caller that wants the old behavior asks for it: with
-> `--driver-wait-seconds` set high enough, the eight serialize and all receive
-> the *same* pending work order, since the controller replays rather than issuing
-> eight actions. `ws.orchestrate` has no counterpart for that flag and always
-> takes the immediate-refusal default, so a host embedding this API waits in its
-> own process or handles the refusal.
+> silently. A caller that wants the old behavior asks for it: with
+> a large enough wait, the eight serialize and all receive the *same* pending
+> work order, since the controller replays rather than issuing eight actions.
+> That is `--driver-wait-seconds` on the CLI and `driver_wait_seconds=` on
+> `start`, `next`, and `submit` here — omit it and the controller's own
+> immediate-refusal default applies, because this seam never restates a default
+> the deployed controller owns. Prefer your own in-process queue where you have
+> one: a controller-side wait costs a blocked subprocess, while an in-process
+> wait is cheap and lets you set your own fairness policy. Reach for the
+> parameter when the competing driver is in *another* process, which is the case
+> a host lock cannot see.
 >
 > **What the per-session lock does not cover** is interleaving *across* the
 > `next` → `submit` span: it is scoped to one invocation, so two drivers taking

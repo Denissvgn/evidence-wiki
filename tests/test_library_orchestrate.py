@@ -423,6 +423,106 @@ class FacadeErrorTranslationTests(WorkspaceBuilder, unittest.TestCase):
         self.assertEqual(4242, caught.exception.details["holder"]["pid"])
         self.assertEqual(ORCHESTRATION_ID, caught.exception.details["orchestration_id"])
 
+    def test_a_waiting_driver_outlasts_the_holder_instead_of_being_refused(self):
+        """``driver_wait_seconds`` restores queueing for a library host too.
+
+        The refusal default is what makes interleaving loud, but CR-8's own
+        premise is that *the host* decides whether to wait or fail. That was
+        true only for shell callers until this parameter existed: the facade
+        passed no wait and every embedding host got the immediate refusal
+        whether it wanted one or not.
+
+        The competing driver is released on a timer rather than by the call
+        under test, so the wait is genuinely satisfied by the holder going away
+        -- not by the lock having been free all along. The preceding refusal is
+        what proves the lock was actually held when the waiting call started.
+        """
+        target = self.init_workspace(self.tmp)
+        lock_path = target / "runs" / "orchestrations" / ORCHESTRATION_ID / ".locks" / "session.lock"
+
+        with Workspace.open(target) as ws:
+            session = ws.orchestrate.start(AGENT_ID, orchestration_id=ORCHESTRATION_ID)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            held, release = threading.Event(), threading.Event()
+
+            def hold_the_session_lock():
+                with LOCKS.workspace_lock(
+                    lock_path,
+                    purpose="competing driver",
+                    holder={"agent_id": "competing-driver", "pid": 4242},
+                ):
+                    held.set()
+                    release.wait(120)
+
+            holder = threading.Thread(target=hold_the_session_lock, daemon=True)
+            holder.start()
+            self.addCleanup(holder.join, 30)
+            self.addCleanup(release.set)
+            self.assertTrue(held.wait(30), "the competing driver never acquired the session lock")
+
+            # Held right now: without a wait this is a refusal, every time.
+            with self.assertRaises(errors.OrchestrationError) as refused:
+                session.next()
+            self.assertEqual("ORCHESTRATION_DRIVER_BUSY", refused.exception.error_code)
+
+            # Hand the lock back shortly after the waiting call has started, so
+            # the call must actually block and then proceed.
+            threading.Timer(0.5, release.set).start()
+            work_order = session.next(driver_wait_seconds=60)
+
+        # A work order, not a refusal: the wait was honoured end to end, through
+        # the facade, the argv seam, and the deployed controller's own lock.
+        self.assertEqual(ORCHESTRATION_ID, work_order["orchestration_id"])
+
+    def test_an_omitted_wait_sends_no_flag_at_all(self):
+        """The default must be the controller's, not one this package restates.
+
+        Every limit on this seam is omitted from argv when ``None`` so a newer
+        deployed controller can move its own default. Asserting the *absence* of
+        the flag is the only way to catch a well-meaning ``or 0.0`` that would
+        pin today's default into the library forever -- and it is also what keeps
+        this call byte-identical against a workspace old enough not to know the
+        flag at all.
+        """
+        target = self.init_workspace(self.tmp, question=False)
+        seen: list[list[str]] = []
+
+        def capture(root, command, arguments):
+            seen.append(list(arguments))
+            return completed(0, stdout=json.dumps({"artifact_type": "orchestration_session"}))
+
+        with Workspace.open(target) as ws, mock.patch.object(
+            orchestration, "_invoke_controller", side_effect=capture
+        ):
+            ws.orchestrate.session(ORCHESTRATION_ID).next()
+            ws.orchestrate.session(ORCHESTRATION_ID).next(driver_wait_seconds=30)
+
+        self.assertNotIn("--driver-wait-seconds", seen[0])
+        self.assertIn("--driver-wait-seconds", seen[1])
+        self.assertEqual("30.0", seen[1][seen[1].index("--driver-wait-seconds") + 1])
+
+    def test_an_unusable_wait_is_refused_before_a_controller_is_spawned(self):
+        """A hang requested by argument is still a hang; refuse it locally.
+
+        ``nan`` is the case that earns a local check rather than deferring to
+        the controller: it renders into argv as the literal ``nan``, so the
+        failure would otherwise surface as an argparse usage error from a
+        subprocess instead of a typed refusal naming the argument.
+        """
+        target = self.init_workspace(self.tmp, question=False)
+
+        with Workspace.open(target) as ws, mock.patch.object(
+            orchestration, "_invoke_controller"
+        ) as invoked:
+            session = ws.orchestrate.session(ORCHESTRATION_ID)
+            for value in (-1, float("inf"), float("nan"), "30"):
+                with self.subTest(driver_wait_seconds=value):
+                    with self.assertRaises(errors.UsageError) as caught:
+                        session.next(driver_wait_seconds=value)
+                    self.assertEqual("VALUE_INVALID", caught.exception.error_code)
+                    self.assertIn("driver_wait_seconds", str(caught.exception))
+            invoked.assert_not_called()
+
     def test_a_controller_that_died_without_an_envelope_still_yields_a_typed_error(self):
         """No envelope is an absence, not a second failure to report."""
         target = self.init_workspace(self.tmp, question=False)

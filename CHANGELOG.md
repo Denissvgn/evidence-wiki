@@ -36,6 +36,18 @@
   drivers invisible. Negative, infinite, and non-numeric values are rejected at
   the CLI boundary rather than clamped.
 
+  The library has the same lever: `driver_wait_seconds=` on
+  `ws.orchestrate.start`, `.next`, and `.submit`. Without it "the host decides
+  whether to wait or fail" was true only for shell callers, since the facade
+  passed no wait and every embedding host took the immediate refusal whether it
+  wanted one or not. Omitted, the argument is left out of the controller's argv
+  entirely, so the deployed controller applies its own default and this call
+  stays byte-identical to the one earlier releases made. An embedding host that
+  already serializes its own callers should keep doing that — an in-process
+  waiter costs a lock, a controller-side one costs a blocked subprocess — and
+  reach for the parameter when the competing driver is in another process,
+  which is the case a host lock cannot see.
+
   `status` remains lock-free and never blocks, so polling a session another
   driver is mutating still returns. The managed-host window lock
   (`.locks/managed-host.lock`, `ORCHESTRATION_ALREADY_RUNNING`) is unchanged and

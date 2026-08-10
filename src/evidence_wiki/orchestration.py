@@ -957,11 +957,15 @@ def protocol_start(
     max_actions: int | None = None,
     action_timeout_seconds: int | None = None,
     total_timeout_seconds: int | None = None,
+    driver_wait_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Create a parent orchestration session and return its session document.
 
     Every limit left as ``None`` is omitted from argv so the deployed
     controller applies its own default rather than this package imposing one.
+    ``driver_wait_seconds`` follows the same rule for the same reason: omitted,
+    the controller refuses a contended session immediately, which is its own
+    default and not one reproduced here.
     """
     return _controller_json(
         root,
@@ -972,6 +976,7 @@ def protocol_start(
             max_actions=max_actions,
             action_timeout_seconds=action_timeout_seconds,
             total_timeout_seconds=total_timeout_seconds,
+            driver_wait_seconds=driver_wait_seconds,
         ),
     )
 
@@ -982,6 +987,7 @@ def protocol_next(
     *,
     agent_id: str | None = None,
     resume: bool = False,
+    driver_wait_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Issue or replay the next work order.
 
@@ -989,8 +995,15 @@ def protocol_next(
     can still make progress, or the session document once it cannot. A session
     that ended is an answer, so a terminal or paused session comes back as a
     result even though the controller exits non-zero for it.
+
+    ``driver_wait_seconds`` is omitted from argv when ``None``, which is what
+    keeps this call byte-identical to the one this package has always made.
     """
-    arguments = _identifier_arguments(orchestration_id=orchestration_id, agent_id=agent_id)
+    arguments = _identifier_arguments(
+        orchestration_id=orchestration_id,
+        agent_id=agent_id,
+        driver_wait_seconds=driver_wait_seconds,
+    )
     if resume:
         arguments.append("--resume")
     return _controller_json(root, "next", arguments)
@@ -1003,11 +1016,16 @@ def protocol_submit(
     result_file: str | Path,
     *,
     agent_id: str | None = None,
+    driver_wait_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Submit one structured agent result read from ``result_file``.
 
     The controller re-verifies the workspace artifacts the result claims;
     ``result_file`` is the claim, not the evidence.
+
+    ``driver_wait_seconds`` matters more here than on ``next``: ``next`` is
+    idempotent, so a refused caller can simply ask again, while a refused
+    ``submit`` still holds a result the session has not accepted.
     """
     return _controller_json(
         root,
@@ -1017,6 +1035,7 @@ def protocol_submit(
             action_id=action_id,
             result_file=str(result_file),
             agent_id=agent_id,
+            driver_wait_seconds=driver_wait_seconds,
         ),
     )
 
