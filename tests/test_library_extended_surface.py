@@ -348,16 +348,39 @@ class ForeignExportRefusal(ForeignRefusal, SystemExit):
     """The dual-inherited shape ``ExportRefusal(ScriptRefusal, SystemExit)`` has."""
 
 
+def seam_raising(exc):
+    """A loader whose seam raises ``exc``, for driving ``call_seam`` directly.
+
+    These cases are about the translation itself, so they bypass a real script
+    rather than contriving a workspace that produces each condition.
+    """
+
+    class _Stub:
+        @staticmethod
+        def seam():
+            raise exc
+
+    return lambda stem: _Stub
+
+
+def seam_returning(value):
+    class _Stub:
+        @staticmethod
+        def seam():
+            return value
+
+    return lambda stem: _Stub
+
+
 class RefusalTranslationTests(unittest.TestCase):
-    """``translated_refusals`` is the one place refusals and ``SystemExit`` are judged."""
+    """``call_seam`` is the one place refusals and ``SystemExit`` are judged."""
 
     def test_a_refusal_is_recognized_by_shape_not_by_class_identity(self):
         # The bug this exists to prevent: ``except ScriptRefusal`` in package code
         # compiles, reads as though it handled the case, and catches nothing --
         # because each loaded script owns a different ``ScriptRefusal`` object.
         with self.assertRaises(errors.CoverageError) as caught:
-            with _base.translated_refusals():
-                raise ForeignRefusal()
+            _base.call_seam(seam_raising(ForeignRefusal()), "stub", "seam")
         self.assertEqual("COVERAGE_REQUIRED", caught.exception.error_code)
         self.assertEqual("fixture refusal", str(caught.exception))
         self.assertEqual("fixture remediation", caught.exception.remediation)
@@ -376,8 +399,7 @@ class RefusalTranslationTests(unittest.TestCase):
         # arm first. Reconstructing it from its message there would silently
         # downgrade a precise code to whatever the message classifier guessed.
         with self.assertRaises(errors.GroundingError) as caught:
-            with _base.translated_refusals():
-                raise ForeignExportRefusal(error_code="GROUNDING_REQUIRED", message="ungrounded claim")
+            _base.call_seam(seam_raising(ForeignExportRefusal(error_code="GROUNDING_REQUIRED", message="ungrounded claim")), "stub", "seam")
         self.assertEqual("GROUNDING_REQUIRED", caught.exception.error_code)
 
     def test_a_message_carrying_system_exit_becomes_a_typed_error(self):
@@ -390,8 +412,7 @@ class RefusalTranslationTests(unittest.TestCase):
         ):
             with self.subTest(message=message):
                 with self.assertRaises(expected_class) as caught:
-                    with _base.translated_refusals():
-                        raise SystemExit(message)
+                    _base.call_seam(seam_raising(SystemExit(message)), "stub", "seam")
                 self.assertEqual(expected_code, caught.exception.error_code)
                 self.assertEqual(message, str(caught.exception))
 
@@ -401,8 +422,7 @@ class RefusalTranslationTests(unittest.TestCase):
         for code in (0, 2, None, 137):
             with self.subTest(code=code):
                 with self.assertRaises(SystemExit) as caught:
-                    with _base.translated_refusals():
-                        raise SystemExit(code)
+                    _base.call_seam(seam_raising(SystemExit(code)), "stub", "seam")
                 self.assertEqual(code, caught.exception.code)
 
     def test_an_ordinary_bug_propagates_unchanged(self):
@@ -411,8 +431,7 @@ class RefusalTranslationTests(unittest.TestCase):
         for exception in (KeyError("boom"), ValueError("boom"), RuntimeError("boom")):
             with self.subTest(exception=type(exception).__name__):
                 with self.assertRaises(type(exception)):
-                    with _base.translated_refusals():
-                        raise exception
+                    _base.call_seam(seam_raising(exception), "stub", "seam")
 
     def test_a_refusal_whose_envelope_cannot_render_still_arrives_typed(self):
         class Unrenderable(ForeignRefusal):
@@ -420,13 +439,11 @@ class RefusalTranslationTests(unittest.TestCase):
                 raise RuntimeError("envelope build failed")
 
         with self.assertRaises(errors.CoverageError) as caught:
-            with _base.translated_refusals():
-                raise Unrenderable()
+            _base.call_seam(seam_raising(Unrenderable()), "stub", "seam")
         self.assertEqual("COVERAGE_REQUIRED", caught.exception.error_code)
 
     def test_a_clean_block_returns_without_interference(self):
-        with _base.translated_refusals():
-            observed = {"ok": True}
+        observed = _base.call_seam(seam_returning({"ok": True}), "stub", "seam")
         self.assertEqual({"ok": True}, observed)
 
 

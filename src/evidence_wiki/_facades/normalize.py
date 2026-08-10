@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from ._base import Namespace, translated_refusals
+from ._base import Namespace
 
 
 class NormalizeNamespace(Namespace):
@@ -35,5 +35,4 @@ class NormalizeNamespace(Namespace):
                 ``research.yml`` that cannot be loaded. ``SourceError`` and
                 ``ConfigError`` are the families to expect.
         """
-        with translated_refusals():
-            return self._script("normalize_verify").run_verify(self._root, source_ids=source_ids)
+        return self._call("normalize_verify", "run_verify", self._root, source_ids=source_ids)

@@ -15,7 +15,7 @@ from types import ModuleType, TracebackType
 from typing import Any
 
 from . import _script_host
-from ._facades._base import translated_refusals
+from ._facades._base import call_seam
 from ._facades.coverage import CoverageNamespace
 from ._facades.diagnostics import DiagnosticsNamespace
 from ._facades.grounding import GroundingNamespace
@@ -204,8 +204,7 @@ class Workspace:
                 workspace or a malformed ``research.yml`` arrive as
                 :class:`~evidence_wiki.errors.ConfigError`.
         """
-        with translated_refusals():
-            return self._script("export_answers").run_export(self._root, status=status)
+        return call_seam(self._script, "export_answers", "run_export", self._root, status=status)
 
     def doctor(self) -> dict[str, Any]:
         """Diagnose this workspace's runtime, tooling, and configuration.
@@ -218,6 +217,54 @@ class Workspace:
         not part of the public signature.
         """
         return self.diagnostics.doctor()
+
+    # -- status ---------------------------------------------------------
+
+    def status(
+        self,
+        *,
+        no_cache: bool = False,
+        questions_processed_this_run: int | None = None,
+        source_requests_opened_this_run: int | None = None,
+        releases_this_run: int | None = None,
+        discovery_results_this_run: int | None = None,
+        acquisition_downloads_this_run: int | None = None,
+        github_archive_bytes_this_run: int | None = None,
+        academic_provider_requests_this_run: int | None = None,
+        web_downloads_this_run: int | None = None,
+        manual_url_deliveries_this_run: int | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the workspace status document.
+
+        Exactly what ``evidence-wiki status --format json`` prints, as a dict.
+        Every keyword mirrors the CLI flag of the same name, one for one.
+
+        ``--append-log`` has no counterpart, matching the seam: appending to
+        ``log.md`` is something the CLI does *after* the document is produced,
+        not part of producing it, so a host that wants a log entry writes one.
+
+        Raises:
+            ConfigError: the workspace cannot be read, or the handle is closed.
+            RunError: ``run_id`` names a run this workspace does not have.
+        """
+        return call_seam(
+            self._script,
+            "workspace_status",
+            "run_status_report",
+            self._root,
+            no_cache=no_cache,
+            questions_processed_this_run=questions_processed_this_run,
+            source_requests_opened_this_run=source_requests_opened_this_run,
+            releases_this_run=releases_this_run,
+            discovery_results_this_run=discovery_results_this_run,
+            acquisition_downloads_this_run=acquisition_downloads_this_run,
+            github_archive_bytes_this_run=github_archive_bytes_this_run,
+            academic_provider_requests_this_run=academic_provider_requests_this_run,
+            web_downloads_this_run=web_downloads_this_run,
+            manual_url_deliveries_this_run=manual_url_deliveries_this_run,
+            run_id=run_id,
+        )
 
     # -- script access --------------------------------------------------
 

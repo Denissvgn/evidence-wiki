@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .._script_host import load_packaged_script, shared_assets_root
-from ._base import Namespace, translated_refusals
+from ._base import Namespace, call_seam
 
 
 class DiagnosticsNamespace(Namespace):
@@ -50,8 +50,7 @@ class DiagnosticsNamespace(Namespace):
             ConfigError: if this handle is closed, or the packaged doctor script
                 cannot be loaded.
         """
-        with translated_refusals():
-            return self._script("doctor").run_doctor(self._root)
+        return self._call("doctor", "run_doctor", self._root)
 
 
 def fleet_status(targets: Sequence[str | Path], *, no_cache: bool = False) -> dict[str, Any]:
@@ -73,6 +72,9 @@ def fleet_status(targets: Sequence[str | Path], *, no_cache: bool = False) -> di
         EvidenceWikiError: only if the packaged scripts themselves cannot be
             loaded, which is an installation problem rather than a fleet finding.
     """
-    with translated_refusals():
-        script = load_packaged_script(shared_assets_root(), "fleet_status")
-        return script.run_fleet_status(targets, no_cache=no_cache)
+    # No handle owns a fleet read, so the loader is bound here rather than
+    # borrowed from a Namespace; ``call_seam`` still guards the load itself.
+    def load(stem: str):
+        return load_packaged_script(shared_assets_root(), stem)
+
+    return call_seam(load, "fleet_status", "run_fleet_status", targets, no_cache=no_cache)
