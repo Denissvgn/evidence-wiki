@@ -2,16 +2,36 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from evidence_wiki import orchestration  # noqa: E402
+from evidence_wiki.workspace import Workspace  # noqa: E402
+
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 GIT_ATTRIBUTES = REPO_ROOT / ".gitattributes"
+
+READ_BACK = "import pathlib, sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))"
+
+
+def descriptor_is_open(descriptor: int) -> bool:
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        return False
+    return True
 
 
 def load_script_module(name: str, filename: str):
@@ -109,6 +129,70 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
                 with self.subTest(value=value, validator=validator.__module__):
                     with self.assertRaises(SystemExit):
                         validator(value, "wiki.root")
+
+    def test_orchestration_result_files_are_closed_before_the_controller_child_reads_them(self):
+        """``ws.orchestrate`` must not still hold the result file it hands over.
+
+        On Windows a file the parent keeps open cannot be reopened by the child
+        process, so a submission staged through ``NamedTemporaryFile(delete=True)``
+        -- whose whole design is to hold the handle for the object's lifetime --
+        would leave the controller unable to read the very result it was given.
+        POSIX would never notice: the read succeeds either way. So the closure
+        is asserted directly, on both platforms, rather than inferred from a
+        successful read.
+        """
+        descriptors: list[int] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            descriptor, name = real_mkstemp(*args, **kwargs)
+            descriptors.append(descriptor)
+            return descriptor, name
+
+        observed: dict[str, object] = {}
+        session = {"artifact_type": "orchestration_session", "orchestration_id": "orch-cross-platform"}
+
+        def fake_invoke(root, command, arguments):
+            result_file = Path(arguments[arguments.index("--result-file") + 1])
+            # Read the descriptor's state first: spawning the child below opens
+            # pipes, and a recycled descriptor number would make a still-open
+            # handle look closed.
+            observed["still_open"] = descriptor_is_open(descriptors[-1])
+            observed["child"] = subprocess.run(  # noqa: S603 - this interpreter, fixed inline program
+                [sys.executable, "-c", READ_BACK, str(result_file)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            observed["result_file"] = result_file
+            return subprocess.CompletedProcess(
+                args=["controller"], returncode=0, stdout=json.dumps(session), stderr=""
+            )
+
+        result = {
+            "schema_version": "1.0",
+            "action_id": "action-0001",
+            "outcome": "completed",
+            "summary": "Cross-platform submission.",
+            "artifacts": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            (workspace / "research.yml").write_text("project:\n  name: cross-platform\n", encoding="utf-8")
+            with mock.patch.object(tempfile, "mkstemp", side_effect=recording_mkstemp), mock.patch.object(
+                orchestration, "_invoke_controller", side_effect=fake_invoke
+            ), Workspace.open(workspace) as ws:
+                returned = ws.orchestrate.session("orch-cross-platform").submit("action-0001", result)
+
+        child = observed["child"]
+        self.assertEqual(session, returned)
+        self.assertEqual(1, len(descriptors))
+        self.assertFalse(observed["still_open"], "the result descriptor was still open when the child ran")
+        self.assertEqual(0, child.returncode, child.stderr)
+        self.assertEqual(result, json.loads(child.stdout))
+        self.assertFalse(observed["result_file"].exists(), "the result file outlived the submission")
+        self.assertNotIn(workspace.resolve(), observed["result_file"].resolve().parents)
 
     def test_crlf_config_log_links_and_question_pages_are_parsed_consistently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
