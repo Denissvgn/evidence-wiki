@@ -40,8 +40,11 @@ EXIT_CONFLICT = 3
 
 #: Process exit status the orchestration controller uses when another driver holds
 #: the session lock. Distinct from ``EXIT_CONFLICT`` because a shell-only caller must
-#: be able to tell "retry in a moment" from a question claim held by another agent.
-EXIT_DRIVER_BUSY = 5
+#: be able to tell "retry in a moment" from a question claim held by another agent,
+#: and distinct from ``evidence_wiki.orchestration.EXIT_RUNNER_FAILED`` (5) because
+#: the same ``evidence-wiki orchestrate`` command family returns that for a managed
+#: run whose runner failed -- a condition that must *not* be retried.
+EXIT_DRIVER_BUSY = 6
 
 # Mirrors ``_script_errors.default_recoverable``: a held or fresh claim is not a
 # thing the caller can retry its way out of, every other condition is.

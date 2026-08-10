@@ -3301,10 +3301,16 @@ class OrchestrationHostTests(unittest.TestCase):
             with orchestration._managed_session_lock(root, "orch-1"):
                 snapshot = orchestration._capture_control_artifacts(root, "orch-1")
                 parent_entries = snapshot.roots["runs/orchestrations/orch-1"]
+                # The directory itself stays in the snapshot; only its contents
+                # are excluded. Its mode and kind are not volatile, and dropping
+                # them let a worker widen, replace, or delete the lock directory
+                # with the diff reporting nothing.
                 self.assertEqual(
-                    [],
+                    [".locks"],
                     [key for key in parent_entries if key.split("/", 1)[0] == ".locks"],
                 )
+                self.assertEqual("directory", parent_entries[".locks"].kind)
+                self.assertIsNone(parent_entries[".locks"].digest)
 
                 orchestration._verify_control_artifacts_unchanged(root, snapshot)
 
@@ -3331,6 +3337,34 @@ class OrchestrationHostTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     orchestration.OrchestrationHostError,
                     r"CONTROL_ARTIFACT_TAMPERED.*session\.json \[content_changed\]",
+                ):
+                    orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+    def test_control_snapshot_still_sees_the_lock_directory_itself_change(self):
+        """Excluding the contents must not exclude the container.
+
+        A worker that widens the lock directory's permissions, replaces it with a
+        regular file, or deletes it is tampering with the mutual exclusion the
+        session depends on -- none of which is the transient runtime state the
+        exclusion exists to tolerate.
+        """
+        for label, tamper in (
+            ("mode_changed", lambda locks: locks.chmod(0o777)),
+            ("removed", lambda locks: locks.rmdir()),
+        ):
+            with self.subTest(tamper=label), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                parent = control_workspace(root)
+                locks = parent / ".locks"
+                locks.mkdir(mode=0o700, exist_ok=True)
+
+                snapshot = orchestration._capture_control_artifacts(root, "orch-1")
+                orchestration._verify_control_artifacts_unchanged(root, snapshot)
+
+                tamper(locks)
+                with self.assertRaisesRegex(
+                    orchestration.OrchestrationHostError,
+                    r"CONTROL_ARTIFACT_TAMPERED.*\.locks",
                 ):
                     orchestration._verify_control_artifacts_unchanged(root, snapshot)
 

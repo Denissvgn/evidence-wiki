@@ -245,7 +245,10 @@ requires a bounded renewal grace period plus repeated matching ownership-token a
 timestamp observations. The helper refuses mutation with
 `LOCK_UNAVAILABLE` if no lock can be established. `EVIDENCE_WIKI_SINGLE_WRITER=1`
 is reserved for operator-controlled single-writer development runs on filesystems
-where no lock primitive is available.
+where no lock primitive is available. Its scope is exactly that condition: it does
+not suppress a refusal that reports contention, because a live peer holding the
+lock is the concurrent mutation the helper exists to prevent, not a missing
+backend.
 
 After creation, run smoke validation from the new workspace root:
 

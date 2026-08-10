@@ -75,7 +75,15 @@ EXIT_PAUSED = 4
 #: other conditions. A shell-only caller that can read nothing but ``$?`` must be
 #: able to tell "come back in a moment" from "this will never succeed"; 3 and 4
 #: already carry session outcomes, so contention gets its own code.
-EXIT_DRIVER_BUSY = 5
+#:
+#: 6, not 5. The package's own ``evidence-wiki orchestrate`` returns a controller
+#: status verbatim for ``start``/``next``/``submit`` *and* returns 5 from
+#: ``EXIT_RUNNER_FAILED`` for a managed ``run``/``resume`` whose runner failed or
+#: whose control artifacts were tampered with. Sharing 5 would have made the one
+#: code a caller must retry indistinguishable from one it must never retry --
+#: exactly the confusion this constant exists to remove -- and ``EXIT_RUNNER_FAILED``
+#: is already released, so the new code is the one that moves.
+EXIT_DRIVER_BUSY = 6
 
 #: How long the exclusive-create *fallback* backend may consider this session's
 #: lock file abandoned, overriding the module-wide 900 s default at this one call
@@ -91,6 +99,11 @@ EXIT_DRIVER_BUSY = 5
 #: ``min(60, stale/3)`` seconds, so a live holder refreshes three times inside
 #: this window before a peer could consider it stale.
 DRIVER_LOCK_STALE_FALLBACK_SECONDS = 120.0
+
+#: Longest ``--agent-id`` accepted, and the cap applied when publishing one to a
+#: peer. Shared so the validating and the sanitizing path cannot disagree about
+#: how much of a caller-supplied id is allowed to travel.
+MAX_AGENT_ID_LENGTH = 160
 
 DEFAULT_MAX_ACTIONS = 12
 DEFAULT_ACTION_TIMEOUT_SECONDS = 30 * 60
@@ -344,7 +357,7 @@ def require_agent_id(value: Any) -> str:
     normalized = value.strip() if isinstance(value, str) else ""
     if (
         not normalized
-        or len(normalized) > 160
+        or len(normalized) > MAX_AGENT_ID_LENGTH
         or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
     ):
         raise OrchestrationControllerError("AGENT_ID_INVALID", "--agent-id must be a non-empty string")
@@ -404,20 +417,45 @@ def driver_hostname() -> str:
     return name or "<unknown host>"
 
 
+def publishable_agent_id(agent_id: Any) -> str | None:
+    """Reduce ``--agent-id`` to something safe to publish to a peer process.
+
+    This *sanitizes*; it does not validate. ``next`` and ``submit`` accept the
+    flag as optional and check ownership only after ``load_session``, inside the
+    lock, so rejecting a bad id here would reorder those refusals and change
+    which error code a caller sees. But the value reaches a sidecar that a
+    *different* process reads and renders into its own stderr, and by then
+    ``require_agent_id`` has not run on either side -- ``start`` passes an
+    already-validated id while ``next`` and ``submit`` pass argv verbatim.
+
+    So the published form drops C0/C1 control characters, which would otherwise
+    let an id carry terminal escape sequences into a peer's refusal message, and
+    caps length the way ``require_agent_id`` does. What survives is a hint about
+    who is busy, never an authorization claim, and a value that renders as
+    itself. An id that is blank, non-string, or entirely control characters
+    publishes as ``null`` -- "the holder did not record an agent".
+    """
+    if not isinstance(agent_id, str):
+        return None
+    printable = "".join(
+        character
+        for character in agent_id.strip()
+        if not (ord(character) < 32 or 127 <= ord(character) <= 159)
+    )
+    return printable[:MAX_AGENT_ID_LENGTH] or None
+
+
 def driver_identity(command: str, agent_id: Any) -> dict[str, Any]:
     """Build the holder block published beside a held session lock.
 
-    ``agent_id`` is whatever the caller passed to ``--agent-id`` and is *not*
-    validated here. ``next`` and ``submit`` accept the flag as optional and check
-    ownership only after ``load_session``, inside the lock; validating it earlier
-    to make this block prettier would reorder those refusals and change which
-    error code a caller sees. A blank or non-string value therefore reports as
-    ``null`` -- "the holder did not record an agent" -- which is exactly what the
-    holder is: a hint about who is busy, never an authorization claim.
+    ``acquired_at`` is stamped when this is called, and the only caller calls it
+    *after* the lock is held -- see ``driver_session_lock``. Stamping it at
+    attempt time instead would under-report a queued driver's start by the whole
+    wait, and this field is exactly what an operator or a supervisor thresholds
+    on to decide whether a holder is stuck.
     """
-    normalized = agent_id.strip() if isinstance(agent_id, str) else ""
     return {
-        "agent_id": normalized or None,
+        "agent_id": publishable_agent_id(agent_id),
         "pid": os.getpid(),
         "hostname": driver_hostname(),
         "command": command,
@@ -473,8 +511,81 @@ def rendered_holder_field(holder: dict[str, Any], key: str, fallback: str) -> st
     value = holder.get(key)
     if value is None or value == "" or isinstance(value, (dict, list)):
         return fallback
-    text = str(value)
+    # Control characters are stripped, not just escaped: this string is written
+    # to a terminal by a process that did not author it, and an id carrying an
+    # escape sequence would otherwise drive the reader's terminal. The writing
+    # side sanitizes too; doing it again here is what makes the guarantee hold
+    # for a sidecar written by any other version, or by hand.
+    text = "".join(
+        character for character in str(value) if not (ord(character) < 32 or 127 <= ord(character) <= 159)
+    )
     return text if len(text) <= 120 else f"{text[:117]}..."
+
+
+def bounded_holder_details(holder: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Reduce a peer-written holder to a bounded block safe to hand a host.
+
+    ``rendered_holder_field`` bounds what reaches the *message*; this bounds what
+    reaches ``details``, which the library copies onto the typed exception for
+    hosts to log and index. Without it the two disagree: a refusal whose message
+    is one careful line would still carry an arbitrarily large, arbitrarily
+    nested document written by another process.
+
+    Only the block's documented keys survive, and only when the peer actually
+    recorded them -- a key this process invented would be a claim, not a report.
+    Types are preserved rather than rendered: ``pid`` stays an ``int`` because
+    hosts branch on it, while strings are truncated and stripped of control
+    characters the way the message is. Anything else, including a nested
+    structure, is dropped. A holder that could not be read at all stays ``None``
+    -- "unknown", which is not the same claim as "nobody".
+    """
+    if not isinstance(holder, dict):
+        return None
+    bounded: dict[str, Any] = {}
+    for key in ("agent_id", "pid", "hostname", "command", "acquired_at"):
+        if key not in holder:
+            continue
+        value = holder[key]
+        if value is None or isinstance(value, bool) or isinstance(value, int):
+            bounded[key] = value
+        elif isinstance(value, str):
+            bounded[key] = rendered_holder_field(holder, key, "")
+        # Everything else -- dict, list, float, arbitrary object -- is omitted
+        # rather than coerced, so a host reading this block never has to guess
+        # whether a value came from the peer or from this renderer.
+    return bounded
+
+
+def holder_process_is_running(holder: dict[str, Any] | None) -> bool | None:
+    """Report whether the recorded holder process still exists, if knowable.
+
+    ``None`` means "cannot tell" and is the common answer: a holder on another
+    host, a malformed pid, or a platform where this probe is unreliable. Only a
+    definite ``False`` -- this host, a well-formed pid, and no such process --
+    is worth acting on, because that is the case where the refusal would
+    otherwise name a dead driver and tell the caller to wait for it.
+    """
+    if not isinstance(holder, dict):
+        return None
+    hostname = holder.get("hostname")
+    if not isinstance(hostname, str) or hostname != driver_hostname():
+        return None
+    pid = holder.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if os.name != "posix" or not hasattr(os, "kill"):
+        # Signal 0 does not answer this question portably off POSIX.
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Alive, owned by another user.
+        return True
+    except OSError:
+        return None
+    return True
 
 
 def driver_busy_error(lock_path: Path, orchestration_id: str) -> OrchestrationControllerError:
@@ -492,22 +603,51 @@ def driver_busy_error(lock_path: Path, orchestration_id: str) -> OrchestrationCo
     ``details.holder`` are built to survive that -- the winner publishes its
     sidecar just after acquiring, so a loser refused inside that narrow window
     legitimately sees nothing and still gets a truthful, actionable refusal.
+
+    The sidecar is a *record*, not proof of life. A holder killed between
+    writing it and releasing the lock leaves it behind, and a successor that has
+    not yet published its own would otherwise be described by its predecessor's.
+    When the recorded process can be shown not to exist, the refusal says the
+    record is stale instead of instructing the caller to wait for a driver that
+    exited -- advice that never comes true, and that points an operator at a pid
+    the OS may since have reassigned to something unrelated.
     """
     holder = read_lock_holder(lock_path)
     reported = holder if isinstance(holder, dict) else {}
-    return OrchestrationControllerError(
-        "ORCHESTRATION_DRIVER_BUSY",
-        f"another driver holds session {orchestration_id} "
-        f"(agent: {rendered_holder_field(reported, 'agent_id', '<unrecorded agent>')}, "
+    identity = (
+        f"agent: {rendered_holder_field(reported, 'agent_id', '<unrecorded agent>')}, "
         f"pid: {rendered_holder_field(reported, 'pid', 'unrecorded')}, "
-        f"since: {rendered_holder_field(reported, 'acquired_at', 'unrecorded')})",
-        exit_code=EXIT_DRIVER_BUSY,
-        recoverable=True,
-        remediation=(
+        f"since: {rendered_holder_field(reported, 'acquired_at', 'unrecorded')}"
+    )
+    holder_running = holder_process_is_running(holder)
+    if holder_running is False:
+        message = (
+            f"session {orchestration_id} is locked, but the recorded holder is no longer running "
+            f"({identity}); the lock is held by another process or the record is stale"
+        )
+        remediation = (
+            "Retry: the recorded holder has exited, so this lock is either held by a driver that "
+            "has not published its own record yet or is being released. Do not act on the pid above "
+            "-- it may since belong to an unrelated process. If refusals persist, inspect the lock "
+            "under runs/orchestrations/<id>/.locks/ before removing anything."
+        )
+    else:
+        message = f"another driver holds session {orchestration_id} ({identity})"
+        remediation = (
             "Retry after the holder's call completes, or serialize drivers host-side; "
             "status polling never requires this lock."
-        ),
-        details={"holder": holder, "orchestration_id": orchestration_id},
+        )
+    return OrchestrationControllerError(
+        "ORCHESTRATION_DRIVER_BUSY",
+        message,
+        exit_code=EXIT_DRIVER_BUSY,
+        recoverable=True,
+        remediation=remediation,
+        details={
+            "holder": bounded_holder_details(holder),
+            "holder_running": holder_running,
+            "orchestration_id": orchestration_id,
+        },
     )
 
 
@@ -553,7 +693,19 @@ def driver_session_lock(
     global _ACTIVE_DRIVER
 
     lock_path = session_lock_path(project_root, orchestration_id)
-    holder = driver_identity(command, agent_id)
+    # Built lazily so ``acquired_at`` is stamped when the lock is actually taken.
+    # A driver that queued behind a peer for most of its wait would otherwise
+    # publish a start time older than its real one by the whole wait, and that
+    # field is what an operator -- or a supervisor watching for a stuck holder --
+    # thresholds on. Captured once so the block the sidecar carries and the block
+    # the audit events carry are the same object.
+    published: dict[str, Any] | None = None
+
+    def build_holder() -> dict[str, Any]:
+        nonlocal published
+        published = driver_identity(command, agent_id)
+        return published
+
     with ExitStack() as stack:
         try:
             handle = stack.enter_context(
@@ -562,7 +714,7 @@ def driver_session_lock(
                     timeout_seconds=max(float(wait_seconds), 0.0),
                     purpose=f"orchestration {orchestration_id}",
                     stale_exclusive_after_seconds=DRIVER_LOCK_STALE_FALLBACK_SECONDS,
-                    holder=holder,
+                    holder=build_holder,
                 )
             )
         except LockUnavailableError as error:
@@ -571,7 +723,7 @@ def driver_session_lock(
             raise driver_busy_error(lock_path, orchestration_id) from error
 
         previous = _ACTIVE_DRIVER
-        _ACTIVE_DRIVER = holder
+        _ACTIVE_DRIVER = published if published is not None else driver_identity(command, agent_id)
         stack.callback(_restore_active_driver, previous)
         yield handle
 

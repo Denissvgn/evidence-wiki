@@ -252,7 +252,7 @@ class ExitStatusReconstructionTests(unittest.TestCase):
     good as the table.
 
     CR-8 supplied the first miss. ``ORCHESTRATION_DRIVER_BUSY`` exits the
-    controller with ``EXIT_DRIVER_BUSY`` (5), the first refusal in the workspace
+    controller with ``EXIT_DRIVER_BUSY`` (6), the first refusal in the workspace
     scripts to exit with anything the table had not been told about; every earlier
     one exits 2, or the 3 the two claim codes already occupy. Until the table
     learned it, the library reported 2 while both shells reported 5.

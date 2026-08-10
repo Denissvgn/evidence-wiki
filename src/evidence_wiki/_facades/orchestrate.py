@@ -147,7 +147,18 @@ def _checked_wait_seconds(value: float | None) -> float | None:
             "VALUE_INVALID",
             f"driver_wait_seconds must be a number of seconds, got {type(value).__name__}.",
         )
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        # ``int`` is unbounded, so a value forwarded straight from a JSON body can
+        # be too large to convert. Nothing untyped may escape this module -- in an
+        # ASGI worker that terminates the process -- so this becomes the same
+        # refusal an out-of-range float gets.
+        raise UsageError(
+            "VALUE_INVALID",
+            "driver_wait_seconds is too large to express as a number of seconds.",
+            details={"driver_wait_seconds": repr(value)},
+        ) from exc
     if not math.isfinite(number) or number < 0:
         raise UsageError(
             "VALUE_INVALID",

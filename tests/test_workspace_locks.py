@@ -371,7 +371,18 @@ class WorkspaceLockTests(unittest.TestCase):
             self.assertTrue(exclusive_path.is_file())
             self.assertIn("live-owner-token", exclusive_path.read_text(encoding="utf-8"))
 
-    def test_exclusive_backend_does_not_break_stale_lock_after_deadline(self):
+    def test_exclusive_backend_breaks_a_stale_lock_even_past_the_deadline(self):
+        """Reaping an abandoned lock is not gated on willingness to wait.
+
+        This used to assert the opposite -- that an expired deadline suppressed
+        stale recovery -- which was correct only while every caller waited. The
+        orchestration driver lock acquires with ``timeout_seconds=0`` by design,
+        and under the old ordering that made recovery unreachable: a driver
+        killed mid-call left a lock file no later driver would ever break, so
+        the session was refused forever on any filesystem without a native
+        backend. A caller declining to queue behind a *live* peer is saying
+        nothing about a *dead* one.
+        """
         locks = load_locks_module()
         with tempfile.TemporaryDirectory() as tmpdir:
             lock_path = Path(tmpdir) / "workspace.lock"
@@ -379,6 +390,30 @@ class WorkspaceLockTests(unittest.TestCase):
             exclusive_path.write_text("ownership_token=stale-owner-token\n", encoding="utf-8")
             old_mtime_ns = time.time_ns() - 60_000_000_000
             os.utime(exclusive_path, ns=(old_mtime_ns, old_mtime_ns))
+
+            original_break_stale = locks._break_stale_exclusive_lock
+            with mock.patch.object(
+                locks, "_break_stale_exclusive_lock", wraps=original_break_stale
+            ) as break_stale:
+                acquired = locks._acquire_exclusive(
+                    lock_path,
+                    deadline=time.monotonic() - 1.0,
+                    poll_interval_seconds=0.001,
+                    stale_after_seconds=1.0,
+                )
+
+            break_stale.assert_called_once()
+            # The abandoned owner's token is gone: this process now owns the lock.
+            self.assertNotIn("stale-owner-token", exclusive_path.read_text(encoding="utf-8"))
+            locks._release_backend(acquired)
+
+    def test_exclusive_backend_leaves_a_live_lock_alone_past_the_deadline(self):
+        """Only a *stale* lock is reaped; a renewed one still refuses at once."""
+        locks = load_locks_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "workspace.lock"
+            exclusive_path = locks._exclusive_lock_path(lock_path)
+            exclusive_path.write_text("ownership_token=live-owner-token\n", encoding="utf-8")
 
             original_break_stale = locks._break_stale_exclusive_lock
             with (
@@ -389,12 +424,12 @@ class WorkspaceLockTests(unittest.TestCase):
                     lock_path,
                     deadline=time.monotonic() - 1.0,
                     poll_interval_seconds=0.001,
-                    stale_after_seconds=1.0,
+                    stale_after_seconds=600.0,
                 )
 
             break_stale.assert_not_called()
             self.assertTrue(exclusive_path.is_file())
-            self.assertIn("stale-owner-token", exclusive_path.read_text(encoding="utf-8"))
+            self.assertIn("live-owner-token", exclusive_path.read_text(encoding="utf-8"))
 
     def test_exclusive_heartbeat_retries_after_transient_removal_guard_collision(self):
         locks = load_locks_module()

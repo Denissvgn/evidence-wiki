@@ -12,6 +12,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -209,6 +210,14 @@ WORKER_WRITABLE_CONTROL_PATHS = ("runs/run-reports",)
 #: of every managed window, before any snapshot is taken.
 HOST_LOCK_CONTROL_SUBTREE = ".locks"
 
+#: Errors that mean an entry disappeared between being listed and being inspected,
+#: rather than that something is wrong with it. ``FileNotFoundError`` covers the
+#: POSIX case; Windows reports a file in the delete-pending state as
+#: ``PermissionError`` from ``lstat``, which is the same benign race and must not
+#: be reported as tampering -- a lock sidecar being replaced mid-walk would
+#: otherwise quarantine a clean run.
+_VANISHED_ENTRY_ERRORS = (FileNotFoundError, PermissionError)
+
 # Declared literally rather than imported: this module is imported by
 # `orchestration_schemas`, so it cannot import back from it, and the host does not load
 # workspace code into its own process. Kept in step with
@@ -221,6 +230,18 @@ EXIT_INVALID = 2
 EXIT_BLOCKED = 3
 EXIT_PAUSED = 4
 EXIT_RUNNER_FAILED = 5
+
+#: How long a *managed* run waits for a competing driver before giving up.
+#:
+#: A managed window holds ``managed-host.lock`` for its whole duration, so it can
+#: never contend with itself; the contender is always external -- an operator's
+#: manual ``next``, or a second host. Unlike a one-shot CLI call, this driver has
+#: a durable session in flight and a worker mid-action, so aborting the entire run
+#: because another process held the lock for a moment is far more costly than
+#: waiting a few seconds. Before CR-8 this call inherited the lock's own 10 s
+#: bounded wait and almost always won; this restores that rather than adopting the
+#: refuse-immediately default meant for callers that can cheaply retry.
+MANAGED_DRIVER_WAIT_SECONDS = 10.0
 
 TERMINAL_STATUSES = frozenset({"complete", "blocked_on_sources", "no_ship", "failed"})
 PAUSED_STATUSES = frozenset({"paused", "action_limit_reached", "time_limit_reached"})
@@ -886,13 +907,53 @@ def _error_envelope(detail: str) -> dict[str, Any] | None:
     return parsed
 
 
+#: ``error_code`` for a deployed controller that predates an argument this
+#: package passes. ``Workspace.open`` deliberately applies no version gate, so an
+#: upgraded package driving a workspace deployed by an earlier release is a
+#: supported combination -- but argparse answers an unknown flag with a usage
+#: blob on stderr and exit 2, which reaches a host as an unparseable failure
+#: indistinguishable from a crashed controller. Naming the condition lets a host
+#: tell "this workspace is older than this argument" from "the controller died".
+CONTROLLER_TOO_OLD_ERROR_CODE = "ORCHESTRATION_CONTROLLER_TOO_OLD"
+
+_UNRECOGNIZED_ARGUMENT_RE = re.compile(r"unrecognized arguments:\s*(?P<argument>--[\w-]+)")
+
+
 def _controller_failure(command: str, completed: subprocess.CompletedProcess[str]) -> OrchestrationHostError:
     """Compose the refusal for a non-zero controller exit, envelope included."""
     detail = _redact((completed.stderr or completed.stdout).strip())
+    envelope = _error_envelope(detail)
+    if envelope is None and int(completed.returncode) == EXIT_INVALID:
+        unrecognized = _UNRECOGNIZED_ARGUMENT_RE.search(detail or "")
+        if unrecognized is not None:
+            argument = unrecognized.group("argument")
+            # Synthesized rather than parsed: argparse never emits an envelope,
+            # so without this the caller sees ORCHESTRATION_HOST_FAILED carrying
+            # usage text and cannot tell a version mismatch from a crash.
+            envelope = {
+                "schema_version": "1.0",
+                "error_code": CONTROLLER_TOO_OLD_ERROR_CODE,
+                "message": (
+                    f"The deployed workspace controller does not accept {argument}. "
+                    "It predates this argument; upgrade the workspace, or omit the argument "
+                    "to use the controller's own default."
+                ),
+                "recoverable": False,
+                "remediation": (
+                    f"Re-deploy the workspace with a release that supports {argument}, or drop the "
+                    "argument so the deployed controller applies its own default."
+                ),
+                "details": {"argument": argument, "command": command},
+            }
+            return OrchestrationHostError(
+                str(envelope["message"]),
+                exit_code=int(completed.returncode),
+                envelope=envelope,
+            )
     return OrchestrationHostError(
         detail or f"Workspace orchestration controller {command!r} failed.",
         exit_code=int(completed.returncode),
-        envelope=_error_envelope(detail),
+        envelope=envelope,
     )
 
 
@@ -1123,7 +1184,7 @@ def _inspect_excluded_control_subtree(
             )
         try:
             metadata = current.lstat()
-        except FileNotFoundError:
+        except _VANISHED_ENTRY_ERRORS:
             return
         except OSError as exc:
             raise _control_artifact_error(
@@ -1136,7 +1197,7 @@ def _inspect_excluded_control_subtree(
         if stat.S_ISDIR(metadata.st_mode):
             try:
                 children = sorted(current.iterdir(), key=lambda child: child.name)
-            except FileNotFoundError:
+            except _VANISHED_ENTRY_ERRORS:
                 return
             except OSError as exc:
                 raise _control_artifact_error(
@@ -1170,13 +1231,43 @@ def _capture_control_root(
     def visit(current: Path, relative: PurePosixPath) -> None:
         relative_key = "" if str(relative) == "." else relative.as_posix()
         if relative_key in excluded_subtrees:
-            # Prune before recursing, so one token excludes a whole directory -- but
-            # inspect it first, so exclusion never becomes a blind spot.
+            # Exclude the *contents*, not the node. The entry for the excluded
+            # directory itself still goes into the snapshot, carrying its kind and
+            # mode: those are not volatile, and dropping them let a worker widen
+            # `.locks` to 0o777, replace it with a regular file, or delete it
+            # outright with the control diff reporting nothing. Only what lives
+            # *inside* is runtime state that legitimately appears and disappears
+            # mid-window.
             _inspect_excluded_control_subtree(
                 current,
                 label=label,
                 key=relative_key,
                 entry_counter=entry_counter,
+            )
+            entry_counter[0] += 1
+            if entry_counter[0] > MAX_CONTROL_ARTIFACT_ENTRIES:
+                raise _control_artifact_error(
+                    f"trusted control inputs exceed {MAX_CONTROL_ARTIFACT_ENTRIES} filesystem entries."
+                )
+            try:
+                excluded_metadata = current.lstat()
+            except FileNotFoundError:
+                entries[relative_key] = ControlArtifactEntry("missing", 0, 0, None)
+                return
+            except OSError as exc:
+                raise _control_artifact_error(
+                    f"cannot inspect trusted control input {label}/{relative_key}: {exc}."
+                ) from exc
+            if _is_link_like(current, excluded_metadata):
+                raise _control_artifact_error(
+                    f"trusted control input {label}/{relative_key} is a symbolic link or junction."
+                )
+            kind = "directory" if stat.S_ISDIR(excluded_metadata.st_mode) else "file"
+            entries[relative_key] = ControlArtifactEntry(
+                kind,
+                stat.S_IMODE(excluded_metadata.st_mode),
+                0,
+                None,
             )
             return
         entry_counter[0] += 1
@@ -4222,7 +4313,14 @@ def _submit_result(root: Path, orchestration_id: str, agent_id: str, result: dic
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-submit-") as tmpdir:
         path = Path(tmpdir) / "result.json"
         path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-        return protocol_submit(root, orchestration_id, result["action_id"], path, agent_id=agent_id)
+        return protocol_submit(
+            root,
+            orchestration_id,
+            result["action_id"],
+            path,
+            agent_id=agent_id,
+            driver_wait_seconds=MANAGED_DRIVER_WAIT_SECONDS,
+        )
 
 
 @contextlib.contextmanager
@@ -4378,7 +4476,13 @@ def _drive_session_unlocked(
         current_status = _session_status(status)
         if current_status in TERMINAL_STATUSES or (current_status in PAUSED_STATUSES and not resume_pending):
             return status
-        next_payload = protocol_next(root, orchestration_id, agent_id=agent_id, resume=resume_pending)
+        next_payload = protocol_next(
+            root,
+            orchestration_id,
+            agent_id=agent_id,
+            resume=resume_pending,
+            driver_wait_seconds=MANAGED_DRIVER_WAIT_SECONDS,
+        )
         resume_pending = False
         work_order = _work_order_from_next(next_payload)
         if work_order is None:
@@ -4633,6 +4737,37 @@ def _add_format(parser: argparse.ArgumentParser, *, default: str = "text") -> No
     parser.add_argument("--format", choices=("text", "json"), default=default, help="Output format.")
 
 
+def _wait_seconds(value: str) -> float:
+    """Parse a non-negative, finite wait, mirroring the deployed controller.
+
+    Validated here as well as in the controller because this is the door a shell
+    host actually knocks on: a caller that mistypes the flag should learn it from
+    the command it ran, not from a subprocess's usage text. ``inf`` and ``nan``
+    are refused rather than clamped -- either would turn a bounded wait into a
+    hang, and ``nan`` makes every deadline comparison false.
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative number of seconds") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative number of seconds")
+    return parsed
+
+
+def _add_driver_wait(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--driver-wait-seconds",
+        type=_wait_seconds,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Wait up to SECONDS for another driver to release the session before refusing with "
+            "ORCHESTRATION_DRIVER_BUSY. Omitted, the workspace's own default applies: refuse immediately."
+        ),
+    )
+
+
 def _add_managed_runner(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--runner",
@@ -4665,6 +4800,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--max-actions", type=_positive_int, default=DEFAULT_MAX_ACTIONS)
     start.add_argument("--action-timeout-seconds", type=_positive_int, default=DEFAULT_ACTION_TIMEOUT_SECONDS)
     start.add_argument("--total-timeout-seconds", type=_positive_int, default=DEFAULT_TOTAL_TIMEOUT_SECONDS)
+    _add_driver_wait(start)
     _add_format(start)
 
     next_parser = subparsers.add_parser("next", help="Issue or replay the next persisted work order.")
@@ -4672,6 +4808,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_parser.add_argument("--orchestration-id", required=True)
     next_parser.add_argument("--agent-id", default=None)
     next_parser.add_argument("--resume", action="store_true", help="Resume a paused session or reclaim expired work.")
+    _add_driver_wait(next_parser)
     _add_format(next_parser)
 
     submit = subparsers.add_parser("submit", help="Submit one structured agent result.")
@@ -4680,6 +4817,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--action-id", required=True)
     submit.add_argument("--result-file", required=True)
     submit.add_argument("--agent-id", default=None)
+    _add_driver_wait(submit)
     _add_format(submit)
 
     status = subparsers.add_parser("status", help="Read a parent orchestration session.")
@@ -4716,6 +4854,7 @@ def _protocol_arguments(args: argparse.Namespace) -> list[str]:
         "action_timeout_seconds",
         "total_timeout_seconds",
         "result_file",
+        "driver_wait_seconds",
     ):
         if not hasattr(args, option):
             continue

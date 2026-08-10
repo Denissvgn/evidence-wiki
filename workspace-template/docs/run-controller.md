@@ -227,7 +227,7 @@ Only one package-managed host may drive a parent session at a time; a second
 returns `ORCHESTRATION_ALREADY_RUNNING` without launching a worker. That lock
 is window-scoped; alongside it the parent controller enforces the
 single-driver rule per invocation, refusing a second concurrent `start`,
-`next`, or `submit` with `ORCHESTRATION_DRIVER_BUSY` and exit code `5` rather
+`next`, or `submit` with `ORCHESTRATION_DRIVER_BUSY` and exit code `6` rather
 than queueing behind it. `--driver-wait-seconds SECONDS` restores a bounded
 wait for a host that wants one, and `status` stays lock-free. External protocol
 hosts must still not interleave `next` or `submit` with an active managed host:

@@ -118,7 +118,7 @@ The single-driver rule is now enforced by the workspace instead of being
 promised by the host. `start`, `next`, and `submit` each hold
 `runs/orchestrations/<orchestration_id>/.locks/session.lock` for the duration of
 the call, and a second driver that finds it held is refused immediately with
-`ORCHESTRATION_DRIVER_BUSY` and exit code `5`. It has an exit code of its own,
+`ORCHESTRATION_DRIVER_BUSY` and exit code `6`. It has an exit code of its own,
 rather than sharing the general refusal exit `2`, because contention is the one
 refusal a host is supposed to retry unchanged; a shell-only caller that can read
 nothing but `$?` must be able to tell "come back in a moment" from "this will

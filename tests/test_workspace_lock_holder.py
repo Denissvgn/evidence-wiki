@@ -429,7 +429,13 @@ class ContentionSignalTests(unittest.TestCase):
         self.assertTrue(context.exception.contended)
 
     def test_zero_timeout_makes_exactly_one_exclusive_attempt(self):
-        """The fallback checks the deadline before it retries or breaks a stale lock."""
+        """A live incumbent refuses at once: one attempt, no retry sleep.
+
+        Staleness *is* consulted even at a zero timeout -- that is what keeps a
+        crashed holder from wedging the lock forever -- but a lock whose owner
+        is still renewing it is never observed stale, so nothing is broken and
+        nothing sleeps. The observation is a stat, not a wait.
+        """
         locks = load_locks_module()
         old_backends = locks.LOCK_BACKENDS
         locks.LOCK_BACKENDS = ("exclusive",)
@@ -441,16 +447,48 @@ class ContentionSignalTests(unittest.TestCase):
                 incumbent = exclusive_path.read_bytes()
 
                 with mock.patch.object(locks, "_sleep_until") as sleep, mock.patch.object(
-                    locks, "_stale_exclusive_lock_observation"
+                    locks, "_stale_exclusive_lock_observation", return_value=None
                 ) as observe:
                     with self.assertRaises(locks.LockUnavailableError) as context:
                         with locks.workspace_lock(lock_path, timeout_seconds=0.0, purpose="exclusive"):
                             pass  # pragma: no cover - the incumbent lock file always refuses
 
                 sleep.assert_not_called()
-                observe.assert_not_called()
+                observe.assert_called_once()
                 self.assertTrue(context.exception.contended)
                 self.assertEqual(incumbent, exclusive_path.read_bytes())
+        finally:
+            locks.LOCK_BACKENDS = old_backends
+
+    def test_zero_timeout_still_reaps_an_abandoned_exclusive_lock(self):
+        """A crashed holder must not wedge the lock for a caller that will not wait.
+
+        The orchestration driver lock acquires with ``timeout_seconds=0``. If
+        stale recovery were gated on the acquire deadline it would never run for
+        that caller, and a driver killed mid-call would refuse every successor
+        permanently on any filesystem without a native backend.
+        """
+        locks = load_locks_module()
+        old_backends = locks.LOCK_BACKENDS
+        locks.LOCK_BACKENDS = ("exclusive",)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                lock_path = Path(tmpdir) / "session.lock"
+                exclusive_path = locks._exclusive_lock_path(lock_path)
+                exclusive_path.write_text("pid=999999\ncreated_at=0\nownership_token=dead\n", encoding="utf-8")
+                abandoned_ns = time.time_ns() - 10_000_000_000
+                os.utime(exclusive_path, ns=(abandoned_ns, abandoned_ns))
+
+                with locks.workspace_lock(
+                    lock_path,
+                    timeout_seconds=0.0,
+                    purpose="successor",
+                    stale_exclusive_after_seconds=1.0,
+                ) as handle:
+                    self.assertTrue(handle.locked)
+                    # Acquired by breaking the abandoned lock, so the dead
+                    # owner's token is gone rather than merely waited out.
+                    self.assertNotIn("dead", exclusive_path.read_text(encoding="utf-8"))
         finally:
             locks.LOCK_BACKENDS = old_backends
 
@@ -489,8 +527,16 @@ class SingleWriterEscapeHatchTests(unittest.TestCase):
         finally:
             locks.LOCK_BACKENDS = old_backends
 
-    def test_single_writer_forfeits_driver_detection_under_real_contention(self):
-        """Documented degradation: the hatch swallows contention, so no peer is ever named."""
+    def test_single_writer_does_not_swallow_real_contention(self):
+        """The hatch covers an absent backend, never a live peer.
+
+        It exists for a filesystem that offers no lock primitive at all. A
+        contended refusal is the opposite situation -- someone holds this lock
+        right now -- and letting the hatch swallow it would admit exactly the
+        concurrent mutation every caller of ``workspace_lock`` is asking to be
+        protected from. The variable is set in deployment configs and inherited
+        by every child process, so the two conditions must not share a door.
+        """
         locks = load_locks_module()
         incumbent = {"agent_id": "agent-incumbent", "pid": os.getpid()}
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -498,19 +544,32 @@ class SingleWriterEscapeHatchTests(unittest.TestCase):
 
             with locks.workspace_lock(lock_path, holder=incumbent, purpose="incumbent"):
                 with mock.patch.dict(os.environ, {"EVIDENCE_WIKI_SINGLE_WRITER": "1"}, clear=False):
-                    with locks.workspace_lock(
-                        lock_path,
-                        timeout_seconds=0.0,
-                        holder={"agent_id": "agent-second"},
-                        purpose="second driver",
-                    ) as handle:
+                    with self.assertRaises(locks.LockUnavailableError) as caught:
+                        with locks.workspace_lock(
+                            lock_path,
+                            timeout_seconds=0.0,
+                            holder={"agent_id": "agent-second"},
+                            purpose="second driver",
+                        ):
+                            pass  # pragma: no cover - the incumbent always refuses
+                    self.assertTrue(caught.exception.contended)
+
+                # The incumbent's sidecar is neither overwritten nor removed by a
+                # driver that never took the lock.
+                self.assertEqual(incumbent, locks.read_lock_holder(lock_path))
+
+    def test_single_writer_still_yields_when_no_backend_exists(self):
+        """The condition the hatch was actually built for still passes through."""
+        locks = load_locks_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "session.lock"
+            absent = locks.LockUnavailableError("no backend here")
+
+            with mock.patch.dict(os.environ, {"EVIDENCE_WIKI_SINGLE_WRITER": "1"}, clear=False):
+                with mock.patch.object(locks, "_acquire_backend", side_effect=absent):
+                    with locks.workspace_lock(lock_path, timeout_seconds=0.0, purpose="only writer") as handle:
                         self.assertFalse(handle.locked)
                         self.assertTrue(handle.single_writer)
-                        # The incumbent's sidecar is neither overwritten nor removed
-                        # by a driver that never actually took the lock.
-                        self.assertEqual(incumbent, locks.read_lock_holder(lock_path))
-
-                self.assertEqual(incumbent, locks.read_lock_holder(lock_path))
 
 
 class MultiprocessContentionTests(unittest.TestCase):

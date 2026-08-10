@@ -10,7 +10,10 @@
   the damage surfaced later as inconsistent session state rather than as a
   refused call. Contention is now a loud, machine-readable refusal:
   `ORCHESTRATION_DRIVER_BUSY`, `recoverable: true`, with a new process exit code
-  `5` beside the existing `0` ok, `2` invalid, `3` blocked, and `4` paused, and
+  `6` beside the existing `0` ok, `2` invalid, `3` blocked, and `4` paused — `5`
+  was left alone because `evidence-wiki orchestrate run`/`resume` already returns
+  it for a failed managed runner, and the one status a caller must retry must not
+  collide with one it must never retry — and
   a `details.holder` block naming the holder's `agent_id` — `null` when that
   command supplied none — `pid`, `hostname`, `command`, and `acquired_at`. The
   refused call writes nothing: no session document, no appended event, so the
@@ -22,7 +25,7 @@
   error envelope carries an exit status, `exit_code` is reconstructed from
   `error_code`, so this is the first refusal needing an entry in
   `errors._EXIT_CODE_OVERRIDES` — without it the typed exception would have said
-  `2` while the process exited `5`, breaking the documented promise that the
+  `2` while the process exited `6`, breaking the documented promise that the
   attribute is the status the CLI would have exited with.
 
   This changes default behavior, and that is the point. A single-driver host

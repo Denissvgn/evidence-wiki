@@ -20,7 +20,7 @@ those tests also spawn processes. What this file adds is the *deployment* shape:
   ``workspace-template/`` source tree;
 - every driver is a real OS process, so the pid in a refusal belongs to a
   process the kernel knows about and the exit code is a real ``$?`` that a shell
-  host would dispatch on (decision D6: 5 is ``EXIT_DRIVER_BUSY``);
+  host would dispatch on (decision D6: 6 is ``EXIT_DRIVER_BUSY``);
 - the exit codes are asserted as literals, not imported from the controller. A
   test that imported them would keep passing if the numbers changed, and the
   numbers *are* the contract for a host that can read nothing but ``$?``.
@@ -63,7 +63,10 @@ QUESTION_SLUG = "driver-lock-e2e-question"
 #: The process contract CR-8 fixes, asserted as literals on purpose (D6).
 EXIT_OK = 0
 EXIT_INVALID = 2
-EXIT_DRIVER_BUSY = 5
+#: 6, not 5: ``evidence-wiki orchestrate run``/``resume`` already returns 5 for a
+#: failed managed runner, and a caller reading only ``$?`` must not confuse the
+#: one status it should retry with one it never should.
+EXIT_DRIVER_BUSY = 6
 
 #: How long ``status`` may take while another driver holds the session lock.
 #:

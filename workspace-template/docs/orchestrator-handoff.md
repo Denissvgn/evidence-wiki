@@ -109,7 +109,7 @@ itself, per controller invocation.
 `start`, `next`, and `submit` each hold
 `runs/orchestrations/<orchestration_id>/.locks/session.lock` for the duration
 of the call; a second driver that finds it held is refused with
-`ORCHESTRATION_DRIVER_BUSY`, exit code `5`, and a `details.holder` block naming
+`ORCHESTRATION_DRIVER_BUSY`, exit code `6`, and a `details.holder` block naming
 the holder's `agent_id` (or `null`), `pid`, `hostname`, `command`, and
 `acquired_at`. The refusal is immediate and writes nothing. A host that wants
 the bounded wait this replaced passes `--driver-wait-seconds SECONDS` to any of

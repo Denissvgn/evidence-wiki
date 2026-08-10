@@ -11,12 +11,16 @@ If no lock can be acquired, mutation refuses with ``LOCK_UNAVAILABLE``.
 
 ``EVIDENCE_WIKI_SINGLE_WRITER=1`` is a development-only escape hatch for
 operator-controlled single-writer runs on filesystems where no lock primitive is
-available. It bypasses refusal but reports an unlocked handle to callers. It
-also forfeits **driver detection**: because it swallows contention as well as
-backend absence, a second concurrent writer is neither refused nor recorded (no
-holder sidecar is written on that path), so callers that translate contention
-into a refusal — such as the orchestration controller's driver-busy check — can
-never fire under it.
+available. It bypasses refusal but reports an unlocked handle to callers, and no
+holder sidecar is written on that path because it holds nothing to publish.
+
+Its scope is exactly the condition it names: *no backend could be established*.
+It does **not** swallow contention. A refusal that reports ``contended`` means a
+peer holds this lock right now, which is the concurrent mutation callers use this
+module to prevent, so it is raised even under the hatch. That keeps the hatch a
+statement about the filesystem rather than a blanket opt-out of locking, and
+keeps callers that translate contention into a refusal — such as the
+orchestration controller's driver-busy check — working wherever a backend exists.
 """
 
 from __future__ import annotations
@@ -25,9 +29,10 @@ import errno
 import json
 import os
 import secrets
+import stat
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -52,6 +57,15 @@ LOCK_REMEDIATION = (
 LOCK_BACKENDS = ("fcntl", "msvcrt", "exclusive")
 _CONTENDED_ERRNOS = {errno.EACCES, errno.EAGAIN}
 
+# Errnos that mean the filesystem cannot support this lock, never that a peer
+# holds it. Retrying any of them is futile, so a backend that sees one steps
+# aside for the next rather than reporting contention a host would retry.
+_PERMANENT_LOCK_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in ("ENOSPC", "EROFS", "EBADF", "EINVAL", "EIO", "ENODEV", "EPERM", "EFBIG", "EDQUOT")
+    if hasattr(errno, name)
+)
+
 # Optional holder metadata is published beside the lock file rather than inside
 # it. The native backends cannot portably carry a payload in the locked file
 # (msvcrt locks a byte range over a sentinel byte), and the exclusive fallback's
@@ -59,6 +73,14 @@ _CONTENDED_ERRNOS = {errno.EACCES, errno.EAGAIN}
 # diagnostic field. A sidecar keeps holder reporting backend-agnostic and keeps
 # the lock files themselves byte-identical for callers that pass no holder.
 LOCK_HOLDER_SUFFIX = ".holder.json"
+
+# Cap on the sidecar a *peer* wrote, applied when reading rather than writing.
+# The blocks this module publishes are a few hundred bytes; the bound exists
+# because the file is read on a refusal path, where a document large enough to
+# exhaust memory would replace a truthful refusal with a crash. Sized to leave
+# room for a caller's own holder shape to grow without ever approaching a size
+# worth streaming.
+MAX_LOCK_HOLDER_BYTES = 64 * 1024
 
 # The exclusive-create backend is the last resort, used only when neither
 # fcntl nor msvcrt is available (for example, some network filesystems). It
@@ -199,7 +221,7 @@ def lock_holder_path(lock_path: Path) -> Path:
     return normalized.with_name(f"{normalized.name}{LOCK_HOLDER_SUFFIX}")
 
 
-def _write_lock_holder(lock_path: Path, holder: dict[str, object]) -> None:
+def _write_lock_holder(lock_path: Path, holder: dict[str, object]) -> tuple[int, int] | None:
     """Publish holder metadata beside a lock this process already holds.
 
     The holder block is opaque to this module: it is serialized as given, with
@@ -216,10 +238,17 @@ def _write_lock_holder(lock_path: Path, holder: dict[str, object]) -> None:
     attribute this lock to a process that no longer owns it. The lock itself is
     already held at this point, so no I/O failure here is allowed to turn a
     successful acquisition into a refusal.
+
+    The identity of the file this publishes is returned so the matching removal
+    can prove it is deleting *its own* sidecar. Without that, a holder whose
+    lock was stale-broken while it was stopped would, on resuming, delete the
+    sidecar of the live successor that replaced it -- leaving a genuinely held
+    lock reporting no holder at all.
     """
     holder_path = lock_holder_path(lock_path)
     payload = json.dumps(holder, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     tmp_path = holder_path.with_name(f".{holder_path.name}.{secrets.token_hex(16)}.tmp")
+    published: tuple[int, int] | None = None
     try:
         try:
             with tmp_path.open("w", encoding="utf-8") as handle:
@@ -229,21 +258,47 @@ def _write_lock_holder(lock_path: Path, holder: dict[str, object]) -> None:
                     os.fsync(handle.fileno())
                 except OSError:  # pragma: no cover - fsync can be unavailable on unusual filesystems
                     pass
+            # Identity is read from the temp file *before* the rename: after it,
+            # the name may already belong to a successor, and statting the
+            # destination could adopt that successor's inode as this writer's.
+            metadata = tmp_path.stat()
+            published = (metadata.st_dev, metadata.st_ino)
             tmp_path.replace(holder_path)
         except OSError:  # pragma: no cover - best effort advisory metadata
-            _unlink_lock_holder(lock_path)
+            published = None
     finally:
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
             except OSError:  # pragma: no cover - best effort cleanup
                 pass
+    return published
 
 
-def _unlink_lock_holder(lock_path: Path) -> None:
-    """Remove the holder sidecar, tolerating a filesystem that refuses."""
+def _unlink_lock_holder(lock_path: Path, published: tuple[int, int] | None) -> None:
+    """Remove a holder sidecar this process published, tolerating a refusal.
+
+    ``published`` is the ``(st_dev, st_ino)`` of the file this process wrote.
+    The sidecar is removed only when the path still resolves to that exact
+    inode, which is the same ownership discipline
+    ``_remove_exclusive_lock_if_owned`` applies to the lock file itself: a
+    predecessor whose lock was broken must not delete its successor's block.
+    ``None`` means nothing was successfully published, so there is nothing this
+    process is entitled to remove.
+    """
+    if published is None:
+        return
     try:
-        lock_holder_path(lock_path).unlink(missing_ok=True)
+        holder_path = lock_holder_path(lock_path)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(holder_path, flags)
+        try:
+            metadata = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != published:
+            return
+        holder_path.unlink(missing_ok=True)
     except OSError:  # pragma: no cover - best effort cleanup
         pass
 
@@ -263,20 +318,51 @@ def read_lock_holder(lock_path: Path) -> dict[str, object] | None:
     consult it only after losing the lock, and even then the answer is a hint:
     the winner writes its sidecar just after acquiring, so a loser that is
     refused inside that window legitimately sees nothing.
+
+    The file is peer-written, so it is read the way every other untrusted
+    document in this package is: opened ``O_NOFOLLOW`` so a symlink planted at
+    the sidecar path cannot redirect the read at an arbitrary file, rejected
+    unless it is a regular file so a FIFO cannot block the refusal forever, and
+    capped at ``MAX_LOCK_HOLDER_BYTES`` so an oversized document cannot exhaust
+    memory while a caller is composing a failure. Each of those is a ``None``,
+    not an exception -- the promise that this never raises is what lets the
+    refusal path depend on it.
     """
     try:
-        # ValueError subsumes both ways a path can fail here: UnicodeError from
-        # bytes that are not valid UTF-8, and a lock path with no filename
-        # component, which ``with_name`` rejects. Neither may reach the caller.
-        raw = lock_holder_path(lock_path).read_text(encoding="utf-8")
-    except (OSError, ValueError):
+        holder_path = lock_holder_path(lock_path)
+    except ValueError:
+        # A lock path with no filename component, which ``with_name`` rejects.
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(holder_path, flags)
+    except OSError:
         return None
     try:
-        parsed = json.loads(raw)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                # A FIFO would make the read below block until some writer
+                # appeared, hanging a refusal that must always complete.
+                return None
+            # One byte over the cap is read so a document at exactly the limit
+            # is still accepted while an oversized one is detected, never read
+            # whole, and reported as unreadable.
+            payload = os.read(descriptor, MAX_LOCK_HOLDER_BYTES + 1)
+        except OSError:
+            return None
+        finally:
+            os.close(descriptor)
+    except OSError:  # pragma: no cover - close failing is not the caller's problem
+        return None
+    if len(payload) > MAX_LOCK_HOLDER_BYTES:
+        return None
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
     except (ValueError, RecursionError):
-        # ValueError covers JSONDecodeError; RecursionError covers a deeply
-        # nested document written by a buggy or hostile peer. Neither may
-        # escape into a caller's refusal path.
+        # ValueError covers JSONDecodeError and the UnicodeDecodeError from
+        # bytes that are not valid UTF-8; RecursionError covers a deeply nested
+        # document written by a buggy or hostile peer. Neither may escape into a
+        # caller's refusal path.
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -358,12 +444,26 @@ def _acquire_msvcrt(lock_path: Path, deadline: float, poll_interval_seconds: flo
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                 return _AcquiredBackend("msvcrt", handle=handle, path=lock_path)
             except OSError as exc:
+                # This loop can raise for two unrelated reasons, and only one of
+                # them is contention. A byte-range lock refusal or the transient
+                # sharing violation a concurrent initializer causes are
+                # peer-induced, and retrying is the right answer. The sentinel
+                # ``handle.write`` in the same block can also fail for reasons no
+                # amount of retrying fixes -- a full disk, a read-only share, a
+                # revoked handle -- and reporting those as contention would hand a
+                # host a ``recoverable`` refusal naming a driver that does not
+                # exist, to be retried forever. Those fall through to the next
+                # backend instead, exactly as ``_acquire_fcntl`` does for an errno
+                # outside ``_CONTENDED_ERRNOS``.
+                #
+                # Deny-list rather than allow-list because on Windows ``EACCES``
+                # is genuinely ambiguous -- both a locked region and a permission
+                # failure report it -- so an unrecognized errno keeps the
+                # retry-as-contention behavior rather than silently disabling the
+                # backend.
+                if exc.errno in _PERMANENT_LOCK_ERRNOS:
+                    raise _BackendUnsupported(str(exc)) from exc
                 if time.monotonic() >= deadline:
-                    # Both failures this loop retries are peer-induced: a byte-range
-                    # lock refusal, and the transient sharing violation a concurrent
-                    # initializer causes. Exhausting the deadline on either one means
-                    # another writer was there, so this is contention rather than an
-                    # absent backend.
                     raise LockUnavailableError(
                         f"Timed out acquiring workspace lock for {lock_path}",
                         contended=True,
@@ -620,11 +720,16 @@ def _acquire_exclusive(
                 heartbeat_thread=heartbeat_thread,
             )
         except FileExistsError as exc:
-            if time.monotonic() >= deadline:
-                raise LockUnavailableError(
-                    f"Timed out acquiring workspace lock for {lock_path}",
-                    contended=True,
-                ) from exc
+            # Stale recovery is attempted *before* the deadline check, and on a
+            # budget of its own. Reaping a lock whose owner has provably stopped
+            # renewing it is orthogonal to how long this caller is willing to
+            # queue behind a *live* peer: with ``timeout_seconds=0`` -- the
+            # orchestration driver lock's default -- a deadline-first ordering
+            # made recovery unreachable, so a crashed holder wedged the lock
+            # permanently and every successor was refused as though a live
+            # driver held it. A live owner's lock is never observed stale, so a
+            # zero-timeout caller facing one still pays nothing and is refused
+            # immediately; only an already-abandoned lock costs the grace.
             if not already_attempted_stale_recovery:
                 observation = _stale_exclusive_lock_observation(path, stale_after_seconds)
                 if observation is not None:
@@ -634,17 +739,23 @@ def _acquire_exclusive(
                     # owner just renewed it.
                     already_attempted_stale_recovery = True
                     grace_seconds = _stale_recovery_grace_seconds(stale_after_seconds)
-                    if _wait_for_stale_recheck(deadline, grace_seconds):
+                    recovery_deadline = max(deadline, time.monotonic() + 2 * grace_seconds)
+                    if _wait_for_stale_recheck(recovery_deadline, grace_seconds):
                         confirmation = _stale_exclusive_lock_observation(path, stale_after_seconds)
-                        if confirmation == observation and time.monotonic() < deadline:
+                        if confirmation == observation and time.monotonic() < recovery_deadline:
                             _break_stale_exclusive_lock(
                                 path,
                                 observation.ownership_token,
                                 stale_after_seconds,
                                 expected_mtime_ns=observation.mtime_ns,
-                                deadline=deadline,
+                                deadline=recovery_deadline,
                             )
                     continue
+            if time.monotonic() >= deadline:
+                raise LockUnavailableError(
+                    f"Timed out acquiring workspace lock for {lock_path}",
+                    contended=True,
+                ) from exc
             _sleep_until(deadline, poll_interval_seconds)
         except OSError as exc:
             raise _BackendUnsupported(str(exc)) from exc
@@ -714,7 +825,7 @@ def workspace_lock(
     poll_interval_seconds: float = 0.05,
     purpose: str = "workspace mutation",
     stale_exclusive_after_seconds: float = DEFAULT_STALE_EXCLUSIVE_LOCK_SECONDS,
-    holder: dict[str, object] | None = None,
+    holder: dict[str, object] | Callable[[], dict[str, object]] | None = None,
 ) -> Iterator[WorkspaceLockHandle]:
     """Acquire an exclusive workspace mutation lock.
 
@@ -754,8 +865,14 @@ def workspace_lock(
             poll_interval_seconds=poll_interval_seconds,
             stale_exclusive_after_seconds=stale_exclusive_after_seconds,
         )
-    except LockUnavailableError:
-        if os.environ.get("EVIDENCE_WIKI_SINGLE_WRITER") == "1":
+    except LockUnavailableError as error:
+        # The hatch exists for a workspace whose filesystem offers no lock
+        # primitive at all. Contention is the opposite situation: a peer holds
+        # this lock right now, and proceeding anyway is precisely the concurrent
+        # mutation every caller of this function is asking to be protected from.
+        # Swallowing it would silently reintroduce that, so a contended refusal
+        # is re-raised even here.
+        if os.environ.get("EVIDENCE_WIKI_SINGLE_WRITER") == "1" and not error.contended:
             yield WorkspaceLockHandle(
                 path=normalized,
                 purpose=purpose,
@@ -766,15 +883,20 @@ def workspace_lock(
             return
         raise
 
+    published: tuple[int, int] | None = None
     try:
         if holder is not None:
-            _write_lock_holder(normalized, holder)
+            # A callable is resolved here, after acquisition, so a block can
+            # record when the lock was actually taken rather than when it was
+            # first attempted -- the two differ by the whole wait for a caller
+            # that queued. Resolving inside this ``try`` keeps a raising callable
+            # from leaking the backend.
+            published = _write_lock_holder(normalized, holder() if callable(holder) else holder)
         yield WorkspaceLockHandle(path=normalized, purpose=purpose, backend=acquired.name)
     finally:
         # Nested so that nothing on the sidecar path — including a caller error
         # that made the holder unserializable — can leave the backend held.
         try:
-            if holder is not None:
-                _unlink_lock_holder(normalized)
+            _unlink_lock_holder(normalized, published)
         finally:
             _release_backend(acquired)

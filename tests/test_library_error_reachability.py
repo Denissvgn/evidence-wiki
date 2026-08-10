@@ -890,10 +890,10 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
         self.assertIn(OTHER, str(raised))
 
     def test_the_controllers_new_exit_status_classifies_nothing_and_does_not_reach_the_exception(self):
-        """Exit 5 is invisible to the facade: on purpose in one direction, by accident in the other.
+        """Exit 6 is invisible to the facade: on purpose in one direction, by accident in the other.
 
         CR-8 gave contention its own process exit status -- ``EXIT_DRIVER_BUSY``,
-        5 -- the first status this package's orchestration path had ever seen from
+        6 -- the first status this package's orchestration path had ever seen from
         the controller. Two questions follow, with different answers.
 
         **Classification.** The exit status must not decide *what happened*.
@@ -903,11 +903,11 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
         is one, falling back to ``ORCHESTRATION_HOST_FAILED`` only when there is
         not and to ``ORCHESTRATION_HOST_EXITED`` only for a ``SystemExit``. So an
         unrecognized status cannot demote a coded refusal into a host error. This
-        case asserts that against the status actually observed from a shell, 5,
+        case asserts that against the status actually observed from a shell, 6,
         because "an unknown status changes nothing" is worth nothing if the status
         under test was 2 the whole time.
 
-        **The reported ``exit_code`` is 5, matching both shells.** That agreement
+        **The reported ``exit_code`` is 6, matching both shells.** That agreement
         is not automatic. No error envelope in this package carries an ``exit_code``
         key -- ``_script_errors.error_envelope`` never emits one -- so
         ``errors.error_from_envelope`` reconstructs the status from the static
@@ -935,7 +935,7 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
         )
 
         self.assertEqual(
-            5, returncode, "the controller no longer exits EXIT_DRIVER_BUSY for a contended session"
+            6, returncode, "the controller no longer exits EXIT_DRIVER_BUSY for a contended session"
         )
         # Everything a host branches on agrees across the two doors ...
         self.assertEqual(envelope["error_code"], raised.error_code)

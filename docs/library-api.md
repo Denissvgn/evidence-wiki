@@ -190,7 +190,7 @@ carries the whole error envelope:
 | `recoverable` | Whether a retry is meaningful. `False` for `CLAIM_HELD` and `CLAIM_NOT_STALE`. |
 | `remediation` | What an operator should do. Surface it. |
 | `details` | Structured context, possibly empty. |
-| `exit_code` | The status the CLI would have exited with: `2` for a fatal caller-fixable error, `3` for a conflict, `5` for `ORCHESTRATION_DRIVER_BUSY`. Envelopes carry no status, so it is reconstructed from `error_code`; a code whose script exits with something other than `2` must be registered in `errors._EXIT_CODE_OVERRIDES` for the two doors to agree. Dispatch on `error_code` when you need a specific condition — this attribute groups several. |
+| `exit_code` | The status the CLI would have exited with: `2` for a fatal caller-fixable error, `3` for a conflict, `6` for `ORCHESTRATION_DRIVER_BUSY`. Envelopes carry no status, so it is reconstructed from `error_code`; a code whose script exits with something other than `2` must be registered in `errors._EXIT_CODE_OVERRIDES` for the two doors to agree. Dispatch on `error_code` when you need a specific condition — this attribute groups several. |
 
 Thirteen families sit under the base class. The family is selected from the code
 by prefix, with exact codes winning over prefixes and longer prefixes over
