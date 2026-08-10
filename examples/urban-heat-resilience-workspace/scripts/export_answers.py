@@ -78,7 +78,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _handoff_signature import project_handoff_verification
-from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, is_refusal, json_mode_requested
 from _workspace_module_loader import load_workspace_module
 
 
@@ -220,7 +220,14 @@ def load_manifest_records(project_root: Path, config: dict[str, Any], warnings: 
     normalize = load_sibling_module("normalize_sources")
     try:
         manifest_rel, _ = normalize.source_paths(config)
-    except SystemExit as exc:
+    except (SystemExit, Exception) as exc:  # noqa: B014 - SystemExit is not an Exception subclass
+        # A sibling refuses today by raising ``SystemExit``; once it grows a seam it
+        # refuses by raising ``ScriptRefusal``, whose class object on this side of the
+        # module-isolation boundary is a different object (see ``is_refusal``). Sorting
+        # on shape keeps this arm correct across that change instead of silently
+        # turning a sibling's refusal into a traceback the day it lands.
+        if not isinstance(exc, SystemExit) and not is_refusal(exc):
+            raise
         warnings.append(f"Cannot resolve manifest path: {exc}")
         return {}
     manifest_path = project_root / manifest_rel
@@ -403,7 +410,11 @@ def load_source_request_records(project_root: Path, config: dict[str, Any], warn
     try:
         path = source_requests.requests_path(project_root, config)
         requests = source_requests.load_requests(path)
-    except SystemExit as exc:
+    except (SystemExit, Exception) as exc:  # noqa: B014 - SystemExit is not an Exception subclass
+        # Sorted on shape rather than class identity, for the reason given in
+        # ``load_manifest_records`` above.
+        if not isinstance(exc, SystemExit) and not is_refusal(exc):
+            raise
         warnings.append(f"Cannot load source requests: {exc}")
         return {}
     by_id: dict[str, dict[str, Any]] = {}

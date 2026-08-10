@@ -462,6 +462,31 @@ def emit_error(
         print(message, file=sys.stderr)
 
 
+def is_refusal(exc: object) -> bool:
+    """Recognize a :class:`ScriptRefusal` by shape rather than by class identity.
+
+    ``_workspace_module_loader`` isolates every sibling stem on each load,
+    ``_script_errors`` included, so each workspace script gets its *own*
+    ``ScriptRefusal`` class object::
+
+        cov = load_workspace_module(d, "coverage_manifest")
+        exp = load_workspace_module(d, "export_answers")
+        cov._script_errors.ScriptRefusal is exp.ScriptRefusal   # False
+
+    A refusal raised inside one script is therefore not an ``isinstance`` of the
+    ``ScriptRefusal`` another script imported, and ``except ScriptRefusal`` across
+    that boundary would catch nothing while reading as though it handled the case.
+
+    ``except ScriptRefusal`` stays correct for refusals a module raises *itself* --
+    which is what every seam and every ``main`` catches, and why this is a latent
+    hazard rather than a live bug. At a cross-script boundary use either the
+    sibling's own attribute (``except sibling.SomeError``, which names the class
+    object that actually exists on the other side) or this predicate, which does
+    not depend on class identity at all.
+    """
+    return callable(getattr(exc, "to_envelope", None)) and isinstance(getattr(exc, "error_code", None), str)
+
+
 def emit_refusal(refusal: ScriptRefusal, *, json_mode: bool) -> int:
     """Render one refusal exactly as ``main`` always rendered it and return its exit code.
 
@@ -469,6 +494,10 @@ def emit_refusal(refusal: ScriptRefusal, *, json_mode: bool) -> int:
 
         except ScriptRefusal as refusal:
             return emit_refusal(refusal, json_mode=json_mode)
+
+    Any object :func:`is_refusal` accepts renders here too: the attributes read
+    below are the shape that predicate tests for, so a refusal that crossed a
+    module-isolation boundary needs no conversion to be emitted.
     """
     if json_mode:
         emit_error(
