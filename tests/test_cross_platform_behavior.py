@@ -12,6 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The library-API cases below import ``evidence_wiki`` itself, not just the
+# packaged scripts, so this checkout's ``src`` has to win over any installed copy.
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
@@ -22,12 +24,6 @@ from evidence_wiki.workspace import Workspace  # noqa: E402
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 GIT_ATTRIBUTES = REPO_ROOT / ".gitattributes"
-
-# The library-API cases below import ``evidence_wiki`` itself, not just the
-# packaged scripts, so this checkout's ``src`` has to win over any installed copy.
-SRC_ROOT = REPO_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
 
 READ_BACK = "import pathlib, sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))"
 

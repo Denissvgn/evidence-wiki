@@ -190,7 +190,7 @@ BUDGET_COUNTER_FIELDS = (
 )
 from _handoff_signature import project_handoff_verification
 from _intake_limits import recent_intake_summary
-from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, is_refusal, json_mode_requested
 
 
 def parse_non_negative_int(value: str) -> int:
@@ -2724,15 +2724,22 @@ def run_status_report(
             manual_url_deliveries_this_run=manual_url_deliveries_this_run,
             run_id=run_id,
         )
-    except ScriptRefusal:
-        # A sibling script's seam already refused in the shared shape. Re-wrapping it
-        # below would keep the envelope but lose its text rendering, so pass it on.
-        raise
-    except SystemExit as exc:
-        # A workspace this command cannot read reaches here as SystemExit(str);
-        # from_system_exit re-raises anything else untouched.
-        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_WORKSPACE_UNREADABLE) from exc
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
+        if is_refusal(exc):
+            # Already refused in the shared shape, so pass it on untouched: re-wrapping
+            # would keep the envelope and lose the `text_line` each refusal carries.
+            #
+            # Recognized by shape rather than by `except ScriptRefusal`. The module
+            # loader isolates every sibling stem, `_script_errors` included, so a
+            # refusal raised inside `coverage_manifest` is an instance of *its*
+            # ScriptRefusal, not this module's -- an `except` naming the class would
+            # match this script's own refusals and silently miss every sibling's,
+            # which is the case the pass-through exists for.
+            raise
+        if isinstance(exc, SystemExit):
+            # A workspace this command cannot read reaches here as SystemExit(str);
+            # from_system_exit re-raises anything else untouched.
+            raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_WORKSPACE_UNREADABLE) from exc
         if is_run_controller_error(exc):
             raise ScriptRefusal(
                 exc.error_code,

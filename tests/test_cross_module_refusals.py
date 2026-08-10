@@ -296,3 +296,65 @@ class InvariantGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PassThroughArmTests(unittest.TestCase):
+    """A seam that passes refusals through must recognize them by shape.
+
+    Three seams once opened with ``except ScriptRefusal: raise`` under a comment
+    promising that a *sibling* seam's refusal would be handed on untouched. None
+    of them could do it: the arm binds the catching module's own ``ScriptRefusal``,
+    and a sibling's is a different class object, so a foreign refusal fell past it
+    into whatever generic handler came next and was re-wrapped -- keeping the
+    envelope but losing the ``text_line`` the pass-through existed to preserve.
+
+    An ``except`` clause cannot name "any script's refusal", so the arms now sort
+    on :func:`_script_errors.is_refusal` instead. This guard keeps them that way.
+    """
+
+    #: A bare pass-through arm: ``except ScriptRefusal`` whose body is just ``raise``.
+    def bare_pass_through_arms(self, tree: ast.Module) -> list[int]:
+        found: list[int] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ExceptHandler) or node.type is None:
+                continue
+            caught = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+            names = {item.id for item in caught if isinstance(item, ast.Name)}
+            if "ScriptRefusal" not in names:
+                continue
+            body = [stmt for stmt in node.body if not isinstance(stmt, ast.Pass)]
+            if len(body) == 1 and isinstance(body[0], ast.Raise) and body[0].exc is None:
+                found.append(node.lineno)
+        return found
+
+    def test_no_seam_passes_refusals_through_by_class_name(self):
+        offenders: list[str] = []
+        for path in sorted(SCRIPTS.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            offenders.extend(f"{path.name}:{line}" for line in self.bare_pass_through_arms(tree))
+        self.assertEqual(
+            [],
+            offenders,
+            "`except ScriptRefusal: raise` only passes through this module's own refusals; "
+            "sort on `is_refusal(exc)` so a sibling's refusal is handed on with its text_line",
+        )
+
+    def test_a_foreign_refusal_survives_a_seam_untouched(self):
+        """The behaviour the guard above protects, asserted end to end."""
+        status = load_script("workspace_status")
+        coverage = load_script("coverage_manifest")
+        foreign = coverage.CoverageManifestError("COVERAGE_MANIFEST_INVALID", "sibling refused", exit_code=2)
+
+        # Not catchable by class across the boundary, but recognizable by shape.
+        self.assertNotIsInstance(foreign, status.ScriptRefusal)
+        self.assertTrue(status.is_refusal(foreign))
+
+        original = status.cached_status_document
+        status.cached_status_document = lambda *a, **k: (_ for _ in ()).throw(foreign)
+        try:
+            with self.assertRaises(type(foreign)) as caught:
+                status.run_status_report(".")
+        finally:
+            status.cached_status_document = original
+        self.assertIs(foreign, caught.exception, "the seam re-wrapped a refusal it should have passed on")
+        self.assertEqual("sibling refused", caught.exception.text_line)

@@ -56,7 +56,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, is_refusal, json_mode_requested
 from _workspace_module_loader import load_workspace_module
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
@@ -957,15 +957,24 @@ def run_verify(
         report = build_grounding_report(root, slugs)
         if write:
             write_verification_metadata(root, verified_by, report)
-    except ScriptRefusal:
-        # Already the shared refusal — VerifyQuotesError is one, and a sibling seam
-        # may raise its own. Re-wrapping would keep the envelope and lose the text
-        # rendering each of them carries.
+    except (Exception, SystemExit) as exc:
+        if is_refusal(exc):
+            # Already the shared refusal — VerifyQuotesError is one, and a sibling
+            # seam may raise its own. Pass it on rather than re-wrapping, which
+            # would keep the envelope and lose the `text_line` each one carries.
+            #
+            # Recognized by shape, not by `except ScriptRefusal`. Sibling isolation
+            # gives each loaded script its own ScriptRefusal class, so naming the
+            # class here would match this script's refusals and miss `question_claim`'s
+            # entirely -- and a dual-inherited one would then fall to the SystemExit
+            # branch below and be reclassified from its message text, discarding the
+            # very error_code it arrived with.
+            raise
+        if isinstance(exc, SystemExit):
+            # An unreadable workspace or a missing sibling script reaches here as
+            # SystemExit(str); from_system_exit re-raises anything else untouched.
+            raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
         raise
-    except SystemExit as exc:
-        # An unreadable workspace or a missing sibling script reaches here as
-        # SystemExit(str); from_system_exit re-raises anything else untouched.
-        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
     return report
 
 

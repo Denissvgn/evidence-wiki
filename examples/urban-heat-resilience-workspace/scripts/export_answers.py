@@ -870,13 +870,20 @@ def run_export(project_root: str | Path, *, status: list[str] | None = None) -> 
             Path(project_root).expanduser().resolve(),
             list(status) if status is not None else None,
         )
-    except ScriptRefusal:
-        # ``ExportRefusal`` arrives here already carrying its code and details.
+    except (Exception, SystemExit) as exc:
+        if is_refusal(exc):
+            # ``ExportRefusal`` arrives here already carrying its code and details,
+            # and so does a refusal from `verify_quotes` or `coverage_manifest`,
+            # which `build_export` calls. Recognized by shape rather than by
+            # `except ScriptRefusal`: sibling isolation gives each of those scripts
+            # its own ScriptRefusal class, so naming the class would pass this
+            # module's refusals through and reclassify every sibling's.
+            raise
+        if isinstance(exc, SystemExit):
+            # An unreadable workspace or malformed research.yml is still a plain
+            # SystemExit(str); classified exactly as handle_system_exit classified it.
+            raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_UNREADABLE) from exc
         raise
-    except SystemExit as exc:
-        # An unreadable workspace or malformed research.yml is still a plain
-        # SystemExit(str); classified exactly as handle_system_exit classified it.
-        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_UNREADABLE) from exc
 
 
 def main(argv: list[str] | None = None) -> int:

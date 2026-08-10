@@ -88,7 +88,7 @@ from _intake_limits import (
     recent_intake_summary,
     timestamp_utc,
 )
-from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
+from _script_errors import ScriptRefusal, emit_refusal, is_refusal, json_mode_requested
 from _workspace_module_loader import load_workspace_module
 
 
@@ -725,16 +725,24 @@ def run_intake(
             dry_run=dry_run,
             from_file_label=batch_label,
         )
-    except ScriptRefusal:
-        # Already the shared shape, carrying its own code, details and text
-        # rendering; ``IntakeValidationError`` arrives here. Re-wrapping it below
-        # would reclassify it from its message and lose ``details``.
+    except (Exception, SystemExit) as exc:
+        if is_refusal(exc):
+            # Already the shared shape, carrying its own code, details and text
+            # rendering; ``IntakeValidationError`` arrives here. Re-wrapping it
+            # below would reclassify it from its message and lose ``details``.
+            #
+            # Sorted on shape rather than caught as ``ScriptRefusal``: that name
+            # binds this module's own class, and sibling isolation gives every
+            # other loaded script a different one -- so a refusal from a sibling
+            # would slip past the name and be reclassified by the branch below,
+            # which is the exact outcome this arm exists to prevent.
+            raise
+        if isinstance(exc, SystemExit):
+            # Every schema and workspace rejection in this file is still a plain
+            # SystemExit(str); from_system_exit classifies it exactly as
+            # handle_system_exit did, and re-raises anything else untouched.
+            raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
         raise
-    except SystemExit as exc:
-        # Every schema and workspace rejection in this file is still a plain
-        # SystemExit(str); from_system_exit classifies it exactly as
-        # handle_system_exit did, and re-raises anything else untouched.
-        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
 
 
 def main(argv: list[str] | None = None) -> int:
