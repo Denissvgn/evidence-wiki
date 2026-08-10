@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+- Refuse a second orchestration driver instead of quietly queueing behind it.
+  The per-session lock at `runs/orchestrations/<id>/.locks/session.lock` has
+  always covered `start`, `next`, and `submit`, but a contended call waited up
+  to ten seconds and then simply proceeded — so two host replicas whose calls
+  each finished inside that window both succeeded, serially and silently, and
+  the damage surfaced later as inconsistent session state rather than as a
+  refused call. Contention is now a loud, machine-readable refusal:
+  `ORCHESTRATION_DRIVER_BUSY`, `recoverable: true`, with a new process exit code
+  `5` beside the existing `0` ok, `2` invalid, `3` blocked, and `4` paused, and
+  a `details.holder` block naming the holder's `agent_id` — `null` when that
+  command supplied none — `pid`, `hostname`, `command`, and `acquired_at`. The
+  refused call writes nothing: no session document, no appended event, so the
+  loser retries against exactly the state it observed. `LOCK_UNAVAILABLE` keeps
+  its older, narrower meaning — no lock backend could be established on this
+  filesystem at all — which is what finally lets a host tell "another driver
+  owns this session, retry" from "this filesystem cannot lock, retrying will
+  never help".
+
+  This changes default behavior, and that is the point. A single-driver host
+  sees nothing new, because its lock is never contended; a host that was
+  accidentally interleaving drivers starts getting `ORCHESTRATION_DRIVER_BUSY`,
+  which is the bug surfacing, not a regression. The compatibility lever is
+  `--driver-wait-seconds SECONDS` on `start`, `next`, and `submit`: it waits up
+  to SECONDS for the holder to release before refusing, restoring the old
+  queueing for a host that genuinely wants it. The default is `0`, refuse
+  immediately, because the bounded wait is precisely what made interleaved
+  drivers invisible. Negative, infinite, and non-numeric values are rejected at
+  the CLI boundary rather than clamped.
+
+  `status` remains lock-free and never blocks, so polling a session another
+  driver is mutating still returns. The managed-host window lock
+  (`.locks/managed-host.lock`, `ORCHESTRATION_ALREADY_RUNNING`) is unchanged and
+  complementary rather than redundant: it is host-layer and spans a whole
+  managed run or resume, while the driver lock is controller-layer and spans one
+  call. Two `start` calls racing on the same explicit `--orchestration-id` may
+  surface either `ORCHESTRATION_EXISTS` or `ORCHESTRATION_DRIVER_BUSY` depending
+  on how close the race was; both are final and carry the same remediation, so
+  callers must branch on the pair. On a filesystem with no native advisory lock,
+  where the shared helper falls back to an exclusive-create lock file, a driver
+  killed mid-call can block its successors for about two minutes before the lock
+  is treated as abandoned; that latency belongs to the fallback backend alone
+  and never applies where `fcntl` or `msvcrt` is available.
+
+  Interleaving across the `next` → `submit` *span* is not covered and stays
+  deferred to a possible CR-8.1. A per-invocation lock cannot see two drivers
+  taking turns between calls, and detecting that needs a session lease or
+  fencing token every host would have to carry and return — a protocol change
+  this release deliberately does not make. What ships instead is visibility: the
+  `action_issued` and `action_completed` events now carry a `driver` block
+  (`pid`, `hostname`, and `agent_id` when supplied) in their `data`, so an
+  interleaving that slips past the per-invocation lock is legible afterwards in
+  `events.jsonl` instead of reconstructed from timestamps. Nothing reads that
+  block back to authorize a write.
+
 ## 0.3.0 - 2026-08-10
 
 - Drive a workspace from Python without spawning a process per operation. Every
