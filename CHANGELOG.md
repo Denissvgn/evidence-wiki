@@ -76,6 +76,70 @@
   `events.jsonl` instead of reconstructed from timestamps. Nothing reads that
   block back to authorize a write.
 
+- Let a domain pack decide its own evidence policies instead of sending every one
+  of them to a human. A pack could always name a policy in its own namespace —
+  `pack:market-data/quote-48h` — but definition text was the only thing it could
+  attach, so every namespaced source, freshness, and identity policy evaluated to
+  `manual_review`, including the ones that are pure computation. "A supplier quote
+  must be at most 48 hours old" is a subtraction, and a review queue holding
+  subtractions is a queue nobody drains. `domain_pack.policy_rules` is the missing
+  half: beside the definition a reviewer reads, a pack now declares how this
+  package decides the policy unaided. A rule is data, never code — no expression
+  language, no callable, no import hook — because a pack that could execute would
+  make "what does this workspace do?" unanswerable from the pack's own text. The
+  primitive set is closed: `max_age`, `equals`, `numeric_range`, `regex`, and
+  `one_of_provenance`, composed by `all_of` and `any_of` at most three deep. A
+  primitive that names a `field` addresses it through the same RFC 6901 pointers
+  anchor-form grounding already resolves, rooted at `record/` for the source's
+  hash-bound structured-view sidecar, `provenance/` for its merged delivery
+  provenance, and a bare `question_field: metadata/...` for the question's
+  frontmatter — one addressing scheme, three consumers.
+  `regex` is a full match and never a search, with the
+  pattern capped at 512 characters; `equals` is canonical scalar equality,
+  decimal-aware and text-normalized, never containment; `max_age` tolerates five
+  minutes of clock skew on a future timestamp and no more, and that bound is
+  deliberately not pack-configurable, since a pack able to widen it would be
+  loosening a fail-closed bound from inside the thing being bounded.
+
+  Evaluation is fail-closed everywhere. A structured view that is missing or
+  corrupt, a pointer that resolves to nothing, a target that is a mapping rather
+  than a scalar, a timestamp `max_age` cannot parse — each is a `fail`, never a
+  `manual_review`, because degrading to review under adverse conditions would
+  quietly recreate the queue this exists to drain, and would do it on exactly the
+  sources least deserving the benefit of the doubt. Per-source reasons carry stable
+  new prefixes — `rule_field_unresolved`, `rule_value_mismatch`,
+  `rule_out_of_range`, `rule_stale`, `rule_future_timestamp`, `rule_regex_mismatch`,
+  and `rule_provenance_not_allowed` — beside the existing `structured_view_missing`
+  and `structured_view_corrupt`, which a rule reuses rather than restates so a host
+  that already handles one handles the other. A malformed declaration fails louder
+  still: `evidence-wiki pack validate` reports a new `policy_rules` check failure
+  before the pack can ship, and at answer time evaluation refuses with
+  `CONFIG_INVALID` instead of treating the pack as declaring nothing — silently
+  dropping a pack's automation would return all of its policies to manual review
+  without saying so. `manual_review_required: true` keeps the human step in
+  addition to the mechanical checks rather than instead of them: primitives fail
+  and the verdict is `fail`; they pass and the verdict is `manual_review`.
+
+  Nothing else moves. Verdict rollup is unchanged — a `fail` blocks a required
+  facet as any failing policy does, a `manual_review` still routes
+  `question_resolve.py answer --require-coverage` to `human_review` — so
+  `question_resolve.py` and `publication_readiness.py` needed no changes and shift
+  behaviour only because verdicts do. A pack that declares no rules behaves exactly
+  as it did, `policy_vocabulary_definitions` keeps its existing contract shape, and
+  `evidence_paths` policies stay ruleless because an evidence path names which
+  facet must be covered rather than anything a rule could read. What is new on the
+  surface: `evidence-wiki contract` gains an additive top-level `policy_rules` key
+  reporting each installed pack's declared primitives and review flag; the
+  autonomous-required-facets lint stops counting a rule-backed policy as
+  manual-only unless it sets `manual_review_required`, since it now *is* a
+  deterministic policy, so a required facet may use one without
+  `domain_pack.human_gated: true`; and `one_of_provenance` matches providers
+  against `provider_registration.id`, `academic_provider`, and
+  `standards.registry_provider`, never against `retrieved_by`, which names the
+  fetching agent rather than where the evidence came from. Judgement stays where it
+  belongs: `pack:general-science/study-recency` — recent enough *for the scientific
+  question* — ships with no rule, and should not get one.
+
 ## 0.3.0 - 2026-08-10
 
 - Drive a workspace from Python without spawning a process per operation. Every

@@ -346,8 +346,9 @@ state an intent the workspace will not act on. Omit a key to accept its default,
 Optional. A domain pack's own configuration, merged into a workspace's `research.yml` from
 the pack overlay (`research.overlay.yml`) at `evidence-wiki init` through the generic
 deep-merge — declaring `request_kinds` needs no extra wiring beyond that merge. This section
-documents `request_kinds` only; `policy_vocabularies` and `coverage_templates` are documented
-in [evidence-policies.md](evidence-policies.md) and [coverage-manifest.md](coverage-manifest.md).
+documents `request_kinds` and `policy_rules`; `policy_vocabularies` and `coverage_templates`
+are documented in [evidence-policies.md](evidence-policies.md) and
+[coverage-manifest.md](coverage-manifest.md).
 
 `request_kinds` declares source-request kinds specific to the pack's domain, namespaced
 exactly like pack evidence policies so one pack can never define kinds in another's
@@ -387,6 +388,43 @@ error codes:
 
 See [source-delivery.md](source-delivery.md) for how a request's `kind` is recorded and
 carried through fulfilment.
+
+`policy_rules` declares how this pack's own evidence policies are decided, so that a
+namespaced policy no longer falls to `manual_review` merely because the pack had no
+vocabulary in which to express the check:
+
+```yaml
+domain_pack:
+  name: market-data
+  policy_vocabularies:
+    freshness_policy:
+      pack:market-data/quote-48h: A supplier quote must be at most 48 hours old.
+  policy_rules:
+    pack:market-data/quote-48h:
+      all_of:
+        - max_age: {field: provenance/retrieved_at, hours: 48}
+```
+
+- A mapping of `pack:<pack-name>/<policy-id>` to one rule declaration. The pack-name
+  segment must equal this pack's own `domain_pack.name`, exactly as for `request_kinds`,
+  so one pack can never decide another's policies.
+- Every key must already appear under `domain_pack.policy_vocabularies.source_policy`,
+  `.freshness_policy`, or `.identity_policy`. `evidence_paths` entries carry no rules: an
+  evidence path names which facet must be covered, and the coverage manifest resolves that
+  structurally before any policy runs.
+- A rule declares exactly one of `all_of` or `any_of` — each a non-empty list of
+  primitives, nesting at most three deep — plus an optional `manual_review_required`
+  boolean defaulting to `false`. Any other key is refused rather than ignored.
+- The primitives are `max_age`, `equals`, `numeric_range`, `regex`, and
+  `one_of_provenance`. A pack *declares* them and never ships code that runs; there is no
+  expression language and no callable. See [evidence-policies.md](evidence-policies.md)
+  for each primitive's arguments, the field-reference syntax, and what each outcome means
+  for a facet verdict.
+- Declarations are validated in one module that both consumers read, so they can never
+  disagree about what a pack declared: `evidence-wiki pack validate` reports a
+  `policy_rules` check before the pack ships, and evaluation refuses a malformed block at
+  answer time with `CONFIG_INVALID` rather than quietly treating the pack as declaring no
+  rules at all.
 
 ### `lint`
 
