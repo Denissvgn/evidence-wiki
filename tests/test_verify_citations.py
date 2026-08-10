@@ -1051,6 +1051,37 @@ class VerifyCitationsTests(unittest.TestCase):
         self.assertNotIn("secret-value", stderr)
         self.assertNotIn("api_key=", stderr)
 
+    def test_a_malformed_pack_policy_rule_refuses_with_an_envelope_not_a_traceback(self):
+        """Loading policy inputs now parses the pack's rules, so this command must refuse.
+
+        The declaration is fail-closed everywhere it is read; the thing that would make
+        that a regression here is a traceback where an error envelope belongs.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.add_source(
+                workspace,
+                "paper:openalex",
+                {"title": "Synthetic Retrieval Paper", "openalex_id": "W260100001"},
+            )
+            config_path = workspace / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["domain_pack"] = {
+                "name": "market-data",
+                "policy_vocabularies": {
+                    "freshness_policy": {"pack:market-data/quote-48h": "At most 48 hours old."}
+                },
+                "policy_rules": {"pack:market-data/quote-48h": {"all_of": [{"max_age": {"hours": 48}}]}},
+            }
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+            code, stdout, stderr = self.run_verify("--project-root", str(workspace), "--format", "json")
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout)
+        self.assertEqual("CONFIG_INVALID", json.loads(stderr)["error_code"])
+        self.assertIn("domain_pack.policy_rules", json.loads(stderr)["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

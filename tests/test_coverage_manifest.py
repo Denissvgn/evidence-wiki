@@ -11,6 +11,22 @@ from typing import Any
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tests._pack_policy_rule_fixture import (  # noqa: E402
+    ALL_RULES,
+    FRESHNESS_POLICY,
+    IDENTITY_POLICY,
+    PRIMITIVE_RULES_ONLY,
+    SOURCE_POLICY,
+    add_question_metadata,
+    coverage_manifest_document,
+    declare_pack,
+    deliver_quote,
+    write_coverage_manifest,
+)
+
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
 COVERAGE_SCRIPT_PATH = SCRIPTS / "coverage_manifest.py"
@@ -1443,6 +1459,126 @@ class CoverageManifestCliTests(unittest.TestCase):
             code, payload, _ = self.run_coverage_json(coverage, target, "init", "--slug", "which-benchmarks")
             self.assertEqual(2, code)
             self.assertEqual("CONFIG_INVALID", payload["error_code"])
+
+
+class PackPolicyRuleCoverageTests(unittest.TestCase):
+    """CR-9 T4: a rule-backed pack policy moves facet and coverage verdicts by itself.
+
+    The rollup already blocks a required facet on a failing policy result, so these cases
+    assert plumbing rather than new arithmetic: the slug reaches the evaluator, the rule
+    verdict reaches the rollup, and a declaration this workspace cannot parse refuses the
+    command instead of quietly leaving the policy at manual review.
+    """
+
+    SLUG = "needs-quote-evidence"
+
+    def load_coverage(self):
+        return load_script_module("research_coverage_manifest_pack_rules", COVERAGE_SCRIPT_PATH)
+
+    def init_workspace(self, root: Path) -> Path:
+        target = root / "pack-rule-coverage-workspace"
+        profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text(encoding="utf-8"))
+        profile["workspace_init"]["target_path"] = str(target)
+        profile["workspace_init"]["questions"] = [
+            {"id": self.SLUG, "question": "What does the supplier quote for B0ABC12345?", "priority": "high"}
+        ]
+        profile_path = root / "profile.yml"
+        profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = INIT.main(["--profile", str(profile_path)])
+        self.assertEqual(0, int(code or 0))
+        return target
+
+    def run_evaluate(self, coverage: Any, target: Path) -> tuple[int, dict[str, Any], str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = coverage.main(
+                ["--project-root", str(target), "evaluate", "--slug", self.SLUG, "--format", "json"]
+            )
+        raw = stdout.getvalue() if stdout.getvalue().strip() else stderr.getvalue()
+        return int(code or 0), json.loads(raw), stderr.getvalue()
+
+    def prepare(self, root: Path, *, age_hours: float, rules: dict[str, Any] | None) -> Path:
+        target = self.init_workspace(root)
+        declare_pack(target, rules=rules)
+        add_question_metadata(target, self.SLUG)
+        source_id = deliver_quote(target, "quote:supplier", age_hours=age_hours)
+        write_coverage_manifest(
+            target,
+            self.SLUG,
+            coverage_manifest_document(self.SLUG, source_ids=[source_id], identity_policy=IDENTITY_POLICY),
+        )
+        return target
+
+    def test_rule_backed_pack_policies_pass_the_facet_and_the_coverage_verdict(self):
+        coverage = self.load_coverage()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(Path(tmpdir), age_hours=2, rules=ALL_RULES)
+
+            code, payload, stderr = self.run_evaluate(coverage, target)
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("pass", payload["coverage_verdict"])
+            self.assertEqual("pass", payload["manifest"]["required_facets"][0]["facet_verdict"])
+            results = payload["policy_results"]["facets"][0]["policy_results"]
+            self.assertEqual([SOURCE_POLICY, FRESHNESS_POLICY, IDENTITY_POLICY], [r["policy"] for r in results])
+            self.assertEqual(["pass", "pass", "pass"], [r["verdict"] for r in results])
+            reason_text = "\n".join(reason for result in results for reason in result["reasons"])
+            self.assertIn("provenance/retrieved_at", reason_text)
+            self.assertIn("max_age allows 48h.", reason_text)
+            self.assertIn("record/supplier_quote/sku", reason_text)
+            self.assertNotIn("manual_review", json.dumps(payload["policy_results"]))
+            # The manifest on disk carries the recomputed verdicts, not just the report.
+            written = yaml.safe_load((target / "sources" / "coverage" / f"{self.SLUG}.yml").read_text(encoding="utf-8"))
+            self.assertEqual("pass", written["coverage_verdict"])
+            self.assertEqual("pass", written["required_facets"][0]["facet_verdict"])
+
+    def test_a_stale_quote_blocks_the_facet_and_the_coverage_verdict(self):
+        coverage = self.load_coverage()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(Path(tmpdir), age_hours=50, rules=ALL_RULES)
+
+            code, payload, stderr = self.run_evaluate(coverage, target)
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("blocked", payload["coverage_verdict"])
+            self.assertEqual("blocked", payload["manifest"]["required_facets"][0]["facet_verdict"])
+            results = payload["policy_results"]["facets"][0]["policy_results"]
+            self.assertEqual(["pass", "fail", "pass"], [r["verdict"] for r in results])
+            freshness = next(result for result in results if result["policy"] == FRESHNESS_POLICY)
+            self.assertTrue(any(reason.startswith("rule_stale: quote:supplier") for reason in freshness["reasons"]))
+            self.assertIn(FRESHNESS_POLICY, freshness["remediation"])
+
+    def test_a_definition_only_pack_policy_still_evaluates_to_manual_review(self):
+        coverage = self.load_coverage()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(Path(tmpdir), age_hours=2, rules=PRIMITIVE_RULES_ONLY)
+
+            code, payload, stderr = self.run_evaluate(coverage, target)
+
+            self.assertEqual(0, code, stderr)
+            # manual_review never blocks a facet; only a fail does. Coverage still passes.
+            self.assertEqual("pass", payload["coverage_verdict"])
+            results = payload["policy_results"]["facets"][0]["policy_results"]
+            self.assertEqual(["pass", "pass", "manual_review"], [r["verdict"] for r in results])
+
+    def test_evaluate_refuses_a_malformed_policy_rules_block_and_writes_nothing(self):
+        coverage = self.load_coverage()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(
+                Path(tmpdir),
+                age_hours=2,
+                rules={FRESHNESS_POLICY: {"all_of": [{"max_age": {"field": "provenance/retrieved_at"}}]}},
+            )
+            manifest = target / "sources" / "coverage" / f"{self.SLUG}.yml"
+            before = manifest.read_bytes()
+
+            code, payload, _ = self.run_evaluate(coverage, target)
+
+            self.assertEqual(2, code)
+            self.assertEqual("CONFIG_INVALID", payload["error_code"])
+            self.assertIn("domain_pack.policy_rules", payload["message"])
+            self.assertEqual(before, manifest.read_bytes())
 
 
 if __name__ == "__main__":
