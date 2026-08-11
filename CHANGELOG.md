@@ -26,11 +26,14 @@
   depth-agnostic, matching the repeat check beside it: every group inside a repeated
   one is examined, because ambiguity nested a level deeper is the same ambiguity. Leads
   fold case only inside an IGNORECASE scope, so `(?i:a|A)+` is refused and a plain
-  `(a|A)+` — which `re` keeps apart — is not. An atomic group and everything inside it
-  is skipped, which keeps `(?>a|a)+` available: the engine never re-enters one on
-  backtracking, and making a group atomic is the standard repair for exactly this
-  defect, so refusing the repair alongside the bug would leave a pack author nowhere to
-  go.
+  `(a|A)+` — which `re` keeps apart — is not; a scoped `(?-i:` turns folding back off
+  inside a pattern that switched it on globally, as the flag does for `re` itself. An
+  atomic group and everything inside it is skipped, which keeps `(?>a|a)+` available:
+  the engine never re-enters one on backtracking, and making a group atomic is the
+  standard repair for exactly this defect, so refusing the repair alongside the bug
+  would leave a pack author nowhere to go. (Atomic groups need Python 3.11; on 3.10
+  `re` does not recognize the syntax, so such a pattern is still refused — as an
+  invalid expression rather than as a backtracking risk.)
 
   The guard stays syntactic and conservative, and is not a proof of safety in either
   direction: it still refuses shapes that would have been safe (an optional lead is

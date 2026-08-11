@@ -474,8 +474,11 @@ class _GroupPrefix:
 
     body_start: int
     atomic: bool = False
-    #: This prefix enables IGNORECASE (``(?i:``, or the ``(?i)`` setter form).
-    ignorecase: bool = False
+    #: Tri-state, because a prefix may enable IGNORECASE (``(?i:``), disable it
+    #: (``(?-i:``), or say nothing and inherit. A plain boolean could not express the
+    #: middle case, and treating "not enabled" as "off" would lose an enclosing scope
+    #: while treating it as "inherit" would make ``(?-i:`` unable to turn folding off.
+    ignorecase: bool | None = None
     #: The ``(?i)`` form, which carries no body and sets flags for the whole pattern.
     sets_global_flags: bool = False
 
@@ -508,14 +511,19 @@ def _group_prefix(pattern: str, open_index: int) -> _GroupPrefix:
     while cursor < length and pattern[cursor] in _GROUP_FLAG_CHARS:
         cursor += 1
     enabled = pattern[flags_start:cursor]
+    disabled = ""
     if cursor < length and pattern[cursor] == "-":
         cursor += 1
+        disabled_start = cursor
         while cursor < length and pattern[cursor] in _GROUP_FLAG_CHARS:
             cursor += 1
+        disabled = pattern[disabled_start:cursor]
+    # `(?i-i:` is rejected by `re`, so at most one of these is ever true.
+    scoped = True if "i" in enabled else (False if "i" in disabled else None)
     if cursor < length and pattern[cursor] == ":":
-        return _GroupPrefix(cursor + 1, ignorecase="i" in enabled)
+        return _GroupPrefix(cursor + 1, ignorecase=scoped)
     if cursor < length and pattern[cursor] == ")" and cursor > flags_start:
-        return _GroupPrefix(NO_GROUP_BODY, ignorecase="i" in enabled, sets_global_flags=True)
+        return _GroupPrefix(NO_GROUP_BODY, ignorecase=scoped, sets_global_flags=True)
     return _GroupPrefix(NO_GROUP_BODY)
 
 
@@ -559,10 +567,13 @@ def _regex_syntax_positions(pattern: str) -> list[_Token]:
             continue
         if char == "(":
             prefix = _group_prefix(pattern, index)
-            if prefix.sets_global_flags and prefix.ignorecase:
-                global_ignorecase = True
+            if prefix.sets_global_flags and prefix.ignorecase is not None:
+                global_ignorecase = prefix.ignorecase
             inherited = scopes[-1] if scopes else global_ignorecase
-            folded = inherited or prefix.ignorecase or global_ignorecase
+            # A scoped prefix wins over what it inherits, in both directions: `(?-i:`
+            # turns folding off inside a pattern that switched it on globally, which is
+            # what `re` itself does with the flag.
+            folded = inherited if prefix.ignorecase is None else prefix.ignorecase
             tokens.append(_Token(index, char, prefix.body_start, prefix.atomic, folded))
             scopes.append(folded)
             index = prefix.body_start if prefix.body_start > index else index + 1
