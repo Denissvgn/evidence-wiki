@@ -20,7 +20,9 @@ future timestamp read as age zero, and a date-only value quietly becoming "fresh
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
+import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -354,6 +356,123 @@ class PrimitiveValidationTests(unittest.TestCase):
                     self.only_error({"regex": {"field": "record/sku", "pattern": pattern}}),
                 )
 
+    def test_alternative_overlap_is_refused_in_every_spelling(self):
+        """The overlap family must be refused however the group or its leads are spelled.
+
+        Each of these timed exponential against `re.fullmatch` while an earlier guard
+        accepted it: a group-modifier prefix read as the first alternative's lead
+        (`(?:a|a)+`, `(?i:a|A)+` — IGNORECASE makes case-distinct leads the same text —
+        and `(?P<x>a|a)+`), an alternative that is itself a group (`((a)|a)+`), and an
+        alternative opening with an escape the syntax scan cannot see through
+        (`(\\da|1a)+` — `\\d` begins like `1`, but the scan compared `a` against `1`).
+        An empty alternative and a `?`-group with no ordinary body are refused on the
+        same conservative footing rather than proven exponential.
+        """
+        for pattern in (
+            "(?:a|a)+",
+            "(?i:a|A)+",
+            "(?P<x>a|a)+",
+            "((a)|a)+",
+            r"(\da|1a)+",
+            "(|a)+",
+            "(a||b)+",
+            "(?=a|b)+",
+        ):
+            with self.subTest(pattern=pattern):
+                self.assertIn(
+                    "repeats a group that already repeats",
+                    self.only_error({"regex": {"field": "record/sku", "pattern": pattern}}),
+                )
+
+    def test_an_optional_lead_does_not_hide_an_overlapping_alternative(self):
+        """`b?` can match empty, so `(b?a|a)+` really has two branches beginning `a`.
+
+        A guard comparing only the written first token found `b` and `a` distinct and
+        accepted these; each then timed exponential against `re.fullmatch` on a field of
+        26 characters (`(b?a|a)+c`: 4655 ms, doubling per character added).
+        """
+        for pattern in ("(b?a|a)+c", "(b{0,3}a|a)+c", "(a|b?a)+c", "(b{,3}a|a)+c"):
+            with self.subTest(pattern=pattern):
+                self.assertIn(
+                    "repeats a group that already repeats",
+                    self.only_error({"regex": {"field": "record/sku", "pattern": pattern}}),
+                )
+
+    def test_a_wrapping_group_does_not_hide_an_overlapping_alternative(self):
+        """Ambiguity nested one group deeper is the same ambiguity.
+
+        `((a|a))+c` blows up exactly as `(a|a)+c` does — each repetition still chooses
+        between the branches — but a check reading only the repeated group's own
+        top-level `|` saw none and accepted it (3017 ms on 26 characters; `(?:(a|a))+c`
+        2536 ms). The alternation scan is depth-agnostic, as the repeat scan beside it
+        has always been.
+        """
+        for pattern in ("((a|a))+c", "(?:(a|a))+c", "(x(a|a))+c", "((((a|a))))+c"):
+            with self.subTest(pattern=pattern):
+                self.assertIn(
+                    "repeats a group that already repeats",
+                    self.only_error({"regex": {"field": "record/sku", "pattern": pattern}}),
+                )
+
+    def test_an_atomic_group_is_not_refused_for_its_own_alternatives(self):
+        """`(?>...)` is the standard repair for this defect, so it must stay available.
+
+        The engine never re-enters an atomic group on backtracking, so its branches
+        cannot multiply an outer repetition's choices: `(?>a|a)+` matches 26 characters
+        in 0.018 ms. Refusing the repair alongside the bug would leave a pack author
+        with nowhere to go.
+        """
+        for pattern in ("(?>a|a)+", "(?>(a|a))+"):
+            with self.subTest(pattern=pattern):
+                self.assertEqual([], self.errors_for({"regex": {"field": "record/sku", "pattern": pattern}}))
+
+    def test_case_folding_of_leads_is_scoped_to_ignorecase(self):
+        """`re` keeps `a` and `A` apart unless a flag says otherwise, and so does this.
+
+        Folding every pattern's leads refused `(a|A)+c` — measured linear — for a
+        property it does not have. The fold follows the group's own scope instead.
+        """
+        for pattern in ("(a|A)+c", "(?-i:a|A)+c"):
+            with self.subTest(pattern=pattern):
+                self.assertEqual([], self.errors_for({"regex": {"field": "record/sku", "pattern": pattern}}))
+        for pattern in ("(?i:a|A)+c", "(?i)(a|A)+c"):
+            with self.subTest(pattern=pattern):
+                self.assertIn(
+                    "repeats a group that already repeats",
+                    self.only_error({"regex": {"field": "record/sku", "pattern": pattern}}),
+                )
+
+    def test_every_accepted_pattern_matches_adversarial_input_quickly(self):
+        """The property the refusals exist for, asserted on what actually ships.
+
+        Enumerating exponential spellings only ever catches the ones somebody thought
+        of — which is how three of them survived a previous round. This asserts the
+        complement instead: whatever the guard *accepts* must not blow up on
+        source-controlled text. One-sided on purpose, so it fails loudly on a real
+        regression and never flakes on a slow machine: the budget is seconds against
+        patterns that finish in microseconds.
+        """
+        adversarial = ("a" * 3000, "ab" * 1500, "B0" * 1500, "1" * 3000, "foo" * 1000, "sku-" * 750)
+        for pattern in (
+            r"(B0|B1)[A-Z0-9]{8}",
+            r"(?:sku-)?\d+",
+            r"(\d{2}-)+",
+            r"(a{1,3})+",
+            r"(foo|bar)+",
+            r"(?:foo|bar)+",
+            r"([]+]a)+",
+            r"(a\|a)+",
+            r"(?>a|a)+",
+            r"(a|A)+c",
+        ):
+            self.assertEqual([], self.errors_for({"regex": {"field": "record/sku", "pattern": pattern}}))
+            compiled = re.compile(pattern)
+            for text in adversarial:
+                with self.subTest(pattern=pattern, length=len(text)):
+                    started = time.perf_counter()
+                    compiled.fullmatch(text)
+                    self.assertLess(time.perf_counter() - started, 5.0)
+
     def test_ordinary_grouped_patterns_are_still_accepted(self):
         """A bounded inner repeat and disjoint alternatives are not catastrophic.
 
@@ -370,7 +489,10 @@ class PrimitiveValidationTests(unittest.TestCase):
             r"(a{2})+",
             r"(a{1,3})+",
             r"(foo|bar)+",
+            r"(?:foo|bar)+",
+            r"(?P<x>foo|bar)+",
             r"([]+]a)+",
+            r"(a\|a)+",
         ):
             with self.subTest(pattern=pattern):
                 self.assertEqual([], self.errors_for({"regex": {"field": "record/sku", "pattern": pattern}}))

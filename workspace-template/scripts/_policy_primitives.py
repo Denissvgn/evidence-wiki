@@ -433,10 +433,96 @@ _OPEN_ENDED_REPEAT_RE = re.compile(r"\{\d*,\}")
 _ANY_REPEAT_RE = re.compile(r"\{\d+(,\d*)?\}")
 
 
-def _regex_syntax_positions(pattern: str) -> list[tuple[int, str]]:
-    """Every ``(index, char)`` in ``pattern`` that `re` reads as syntax, not as data.
+#: The inline flag letters Python accepts inside a group prefix. `-` is handled apart
+#: from these, because it separates the enabled set from the disabled one.
+_GROUP_FLAG_CHARS = "aiLmsux"
+#: A quantifier whose lower bound is zero, so the token it follows may match nothing:
+#: `?`, `*`, `{0}`, `{0,}`, `{0,5}`, and the `{,5}` spelling `re` reads as `{0,5}`.
+_OPTIONAL_QUANTIFIER_RE = re.compile(r"[?*]|\{0*(?:,\d*)?\}")
 
-    One scanner for both checks below, so there is a single definition of what regex
+#: `body_start` on a group token that has no ordinary body to split into alternatives —
+#: a lookaround, a conditional, a backreference, an inline flag setter.
+NO_GROUP_BODY = -1
+
+
+@dataclass(frozen=True)
+class _Token:
+    """One character `re` reads as syntax, plus what the scanner resolved about it.
+
+    ``body_start``, ``atomic`` and ``ignorecase`` are meaningful only on a ``(`` token.
+    They ride on the token rather than being re-derived by each check, because a second
+    function that walked the pattern its own way is exactly how this guard has gone
+    wrong before: two scanners disagreeing with `re`'s parse, and each disagreeing
+    differently.
+    """
+
+    index: int
+    char: str
+    #: Raw index where the group's first alternative starts, or :data:`NO_GROUP_BODY`.
+    body_start: int = NO_GROUP_BODY
+    #: ``(?>...)``. The engine never re-enters an atomic group on backtracking, so
+    #: neither it nor anything inside it can multiply an outer repetition's choices.
+    atomic: bool = False
+    #: Whether IGNORECASE is in force for this group, by its own ``(?i:`` prefix, an
+    #: enclosing scope, or a pattern-global ``(?i)``.
+    ignorecase: bool = False
+
+
+@dataclass(frozen=True)
+class _GroupPrefix:
+    """What sits between a ``(`` and the first alternative of its body."""
+
+    body_start: int
+    atomic: bool = False
+    #: This prefix enables IGNORECASE (``(?i:``, or the ``(?i)`` setter form).
+    ignorecase: bool = False
+    #: The ``(?i)`` form, which carries no body and sets flags for the whole pattern.
+    sets_global_flags: bool = False
+
+
+def _group_prefix(pattern: str, open_index: int) -> _GroupPrefix:
+    """Read the modifier syntax a group may open with, before its body starts.
+
+    ``?:`` (non-capturing), ``?P<name>`` (named), ``?imsx-imsx:`` (scoped flags) and
+    ``?>`` (atomic) are group plumbing, not the first alternative's text. Reading one as
+    the body is how ``(?:a|a)+`` once slipped past the overlap check, with leads of
+    ``?`` and ``a`` comparing distinct.
+
+    A ``?``-group this does not recognize — a lookaround, a conditional, a
+    backreference — has no ordinary body, and says so with :data:`NO_GROUP_BODY` rather
+    than guessing.
+    """
+    length = len(pattern)
+    cursor = open_index + 1
+    if cursor >= length or pattern[cursor] != "?":
+        return _GroupPrefix(cursor)
+    cursor += 1
+    if cursor < length and pattern[cursor] == ":":
+        return _GroupPrefix(cursor + 1)
+    if cursor < length and pattern[cursor] == ">":
+        return _GroupPrefix(cursor + 1, atomic=True)
+    if pattern.startswith("P<", cursor):
+        close = pattern.find(">", cursor + 2)
+        return _GroupPrefix(NO_GROUP_BODY) if close == -1 else _GroupPrefix(close + 1)
+    flags_start = cursor
+    while cursor < length and pattern[cursor] in _GROUP_FLAG_CHARS:
+        cursor += 1
+    enabled = pattern[flags_start:cursor]
+    if cursor < length and pattern[cursor] == "-":
+        cursor += 1
+        while cursor < length and pattern[cursor] in _GROUP_FLAG_CHARS:
+            cursor += 1
+    if cursor < length and pattern[cursor] == ":":
+        return _GroupPrefix(cursor + 1, ignorecase="i" in enabled)
+    if cursor < length and pattern[cursor] == ")" and cursor > flags_start:
+        return _GroupPrefix(NO_GROUP_BODY, ignorecase="i" in enabled, sets_global_flags=True)
+    return _GroupPrefix(NO_GROUP_BODY)
+
+
+def _regex_syntax_positions(pattern: str) -> list[_Token]:
+    """Every character in ``pattern`` that `re` reads as syntax, not as data.
+
+    One scanner for every check below, so there is a single definition of what regex
     syntax this module understands. Escapes consume the character after them, and a
     character class swallows everything to its close — including the quantifiers and
     parentheses inside it, which are literal members there.
@@ -445,10 +531,17 @@ def _regex_syntax_positions(pattern: str) -> list[tuple[int, str]]:
     member rather than the close, which is why the class scan starts past it: reading
     ``[]+]`` as the class ``[]`` followed by a stray ``+`` would both refuse valid
     patterns and mis-read what follows as syntax.
+
+    A group's modifier prefix is consumed here too, so those characters never reach a
+    caller as syntax positions of their own and no caller has to filter them back out.
+    IGNORECASE is tracked on the way through, since whether two leads may be folded
+    together is a property of the scope a group sits in, not of the whole pattern.
     """
-    positions: list[tuple[int, str]] = []
+    tokens: list[_Token] = []
     index = 0
     length = len(pattern)
+    global_ignorecase = False
+    scopes: list[bool] = []
     while index < length:
         char = pattern[index]
         if char == "\\":
@@ -464,9 +557,25 @@ def _regex_syntax_positions(pattern: str) -> list[tuple[int, str]]:
                 index += 2 if pattern[index] == "\\" else 1
             index += 1
             continue
-        positions.append((index, char))
+        if char == "(":
+            prefix = _group_prefix(pattern, index)
+            if prefix.sets_global_flags and prefix.ignorecase:
+                global_ignorecase = True
+            inherited = scopes[-1] if scopes else global_ignorecase
+            folded = inherited or prefix.ignorecase or global_ignorecase
+            tokens.append(_Token(index, char, prefix.body_start, prefix.atomic, folded))
+            scopes.append(folded)
+            index = prefix.body_start if prefix.body_start > index else index + 1
+            continue
+        if char == ")":
+            if scopes:
+                scopes.pop()
+            tokens.append(_Token(index, char))
+            index += 1
+            continue
+        tokens.append(_Token(index, char))
         index += 1
-    return positions
+    return tokens
 
 
 def _opens_unbounded_repeat(pattern: str, index: int) -> bool:
@@ -494,68 +603,152 @@ def _nested_quantifier_span(pattern: str) -> str | None:
     hang evaluation with the gate neither open nor closed. Refusing the construct where
     the pack author can see the message is the only place the cost is bounded.
 
-    Two families reach exponential time, and both are refused here: a group repeated
-    without bound whose body also repeats without bound (`(a+)+`), and one whose
-    alternatives can match the same text so the engine must try each ordering
-    (`(a|a)+`, `(a|ab)*`). A bounded inner repeat is not either of them — `(\\d{2}-)+`
-    gives the outer quantifier one way to match and is left alone.
+    Two shapes reach exponential time: a group repeated without bound whose body also
+    repeats without bound (`(a+)+`), and one that can match the same text two ways so
+    the engine must try each ordering (`(a|a)+`, `(a|ab)*`). A bounded inner repeat is
+    neither — `(\\d{2}-)+` gives the outer quantifier one way to match and is left alone.
 
-    Deliberately syntactic and conservative: it reads shape, not language emptiness, so
-    it can refuse a pattern that would have been safe. Rewriting such a pattern is always
-    possible; hanging on real evidence is not always recoverable.
+    Deliberately **syntactic and conservative**, and therefore not a proof of safety in
+    either direction. It reads shape, not language emptiness, so it refuses patterns
+    that would have been safe, and a construct nobody has taught it to see would pass.
+    Treat the shapes it names as the ones it is known to catch, never as the closure of
+    what can backtrack: this guard has twice been extended after a spelling of an
+    already-"covered" family was found to slip through, so a maintainer touching it
+    should re-derive coverage rather than trust this paragraph.
     """
     positions = _regex_syntax_positions(pattern)
     opens: list[int] = []
-    for cursor, (index, char) in enumerate(positions):
-        if char == "(":
+    closes: dict[int, int] = {}
+    for cursor, token in enumerate(positions):
+        if token.char == "(":
             opens.append(cursor)
-        elif char == ")" and opens:
+        elif token.char == ")" and opens:
             open_cursor = opens.pop()
-            start = positions[open_cursor][0]
-            after = index + 1
+            # Recorded innermost-first, so by the time a group closes every group nested
+            # inside it is already paired and `_ambiguous_alternation` can walk them.
+            closes[open_cursor] = cursor
+            start = positions[open_cursor].index
+            after = token.index + 1
             if after >= len(pattern) or not _opens_unbounded_repeat(pattern, after):
                 continue
             inner = positions[open_cursor + 1 : cursor]
-            if _repeats_within(pattern, inner) or _alternatives_overlap(pattern, inner):
+            if _repeats_within(pattern, inner) or _ambiguous_alternation(
+                pattern, positions, closes, open_cursor, cursor
+            ):
                 return pattern[start : after + 1]
     return None
 
 
-def _repeats_within(pattern: str, inner: list[tuple[int, str]]) -> bool:
+def _repeats_within(pattern: str, inner: list[_Token]) -> bool:
     """Whether a group body repeats without an upper bound of its own."""
-    return any(_opens_unbounded_repeat(pattern, index) for index, _ in inner)
+    return any(_opens_unbounded_repeat(pattern, token.index) for token in inner)
 
 
-def _alternatives_overlap(pattern: str, inner: list[tuple[int, str]]) -> bool:
-    """Whether two of a group's alternatives can begin with the same text.
+def _ambiguous_alternation(
+    pattern: str,
+    tokens: list[_Token],
+    closes: dict[int, int],
+    open_cursor: int,
+    close_cursor: int,
+) -> bool:
+    """Whether any alternation the repeated group can backtrack into has overlapping branches.
+
+    Depth-agnostic, exactly as :func:`_repeats_within` is, and for the same reason: a
+    wrapping group does not make the ambiguity beneath it disappear. ``((a|a))+`` blows
+    up precisely as ``(a|a)+`` does, because each repetition still chooses between the
+    branches independently — and checking only the outermost group's own alternatives
+    is how that spelling used to pass. Every group inside the repeated one is examined,
+    not just the one that carries a top-level ``|``.
+
+    An atomic group is skipped along with everything inside it: the engine never
+    re-enters one on backtracking, so its branches cannot multiply the outer
+    repetition's choices. That also keeps ``(?>a|a)+`` available, which matters because
+    making a group atomic is the standard repair for exactly this defect — refusing the
+    repair alongside the bug would leave a pack author nowhere to go.
+    """
+    cursor = open_cursor
+    while cursor < close_cursor:
+        token = tokens[cursor]
+        if token.char != "(":
+            cursor += 1
+            continue
+        end = closes.get(cursor, close_cursor)
+        if token.atomic:
+            cursor = end + 1
+            continue
+        if _alternatives_overlap(pattern, tokens, cursor, end):
+            return True
+        cursor += 1
+    return False
+
+
+def _alternative_lead(text: str, *, fold: bool) -> str | None:
+    """The comparable first token of one alternative, or ``None`` when unknowable.
+
+    ``None`` means "may begin like anything": an empty alternative, or one opening with
+    a class, a nested group, a wildcard, an anchor, or an escape. An escape is opaque on
+    purpose — ``\\d`` begins like ``1`` — and it is also invisible to the syntax
+    scanner, which is how ``(\\da|1a)+`` used to read its *second* character as the lead.
+
+    A first token that may match nothing is ``None`` for a subtler reason: it is not
+    really the lead. ``b?`` can match empty, so both branches of ``(b?a|a)+`` begin with
+    ``a`` and the group has two ways to match every character — an exponential the
+    earlier check waved through, because it compared ``b`` against ``a`` and found them
+    distinct. Rather than compute the full set of possible first tokens, an optional
+    lead reports "unknowable" and the caller refuses. That is conservative in the
+    direction this module always chooses: it can refuse ``(b?a|c)+``, which was safe.
+
+    ``fold`` comes from the group's own scope, so ``(?i:a|A)+`` is refused while a
+    plain ``(a|A)+`` — which `re` keeps apart — is not.
+    """
+    if not text:
+        return None
+    char = text[0]
+    if char in "([.^$\\":
+        return None
+    if _OPTIONAL_QUANTIFIER_RE.match(text, 1):
+        return None
+    return char.casefold() if fold else char
+
+
+def _alternatives_overlap(
+    pattern: str, tokens: list[_Token], open_cursor: int, close_cursor: int
+) -> bool:
+    """Whether two of one group's own alternatives can begin with the same text.
 
     Disjoint alternatives (`(foo|bar)+`) give the engine one way to match each input and
-    are safe; alternatives sharing a first character (`(a|a)+`, `(a|ab)*`) give it two,
-    and a repeated group multiplies that choice by its length. Comparing only the leading
-    token keeps this cheap and errs toward refusing: anything not a plain literal — a
-    class, a nested group, a dot, an escape — is treated as able to overlap everything.
+    are safe; alternatives sharing a first token (`(a|a)+`, `(a|ab)*`) give it two, and
+    a repeated group multiplies that choice by its length. Top-level ``|`` boundaries
+    come from the syntax scan, but each alternative's lead is read from the raw pattern
+    text of its span — the scan omits escaped characters and class members, so it can
+    say where an alternative starts and not what it starts with. Comparing only the
+    leading token keeps this cheap and errs toward refusing: any lead that cannot be
+    shown distinct is treated as able to overlap everything.
+
+    Scoped to this one group; walking the groups nested inside it is
+    :func:`_ambiguous_alternation`'s job.
     """
+    group = tokens[open_cursor]
+    if group.body_start == NO_GROUP_BODY:
+        return True
     depth = 0
-    leads: list[str | None] = []
-    expect_lead = True
-    for index, char in inner:
+    boundaries: list[int] = []
+    for cursor in range(open_cursor + 1, close_cursor):
+        char = tokens[cursor].char
         if char == "(":
             depth += 1
         elif char == ")":
             depth -= 1
         elif char == "|" and depth == 0:
-            expect_lead = True
-            continue
-        if depth == 0 and expect_lead:
-            # `?:` and friends are group syntax, not the alternative's first token.
-            if char == "?" and leads and leads[-1] is None:
-                continue
-            leads.append(None if char in "[(.\\^" else pattern[index])
-            expect_lead = False
-    if expect_lead:
-        leads.append(None)
-    if len(leads) < 2:
+            boundaries.append(tokens[cursor].index)
+    if not boundaries:
         return False
+    starts = [group.body_start, *(boundary + 1 for boundary in boundaries)]
+    ends = [*boundaries, tokens[close_cursor].index]
+    leads = [
+        _alternative_lead(pattern[start:end], fold=group.ignorecase)
+        for start, end in zip(starts, ends, strict=True)
+    ]
     if any(lead is None for lead in leads):
         return True
     return len(set(leads)) != len(leads)

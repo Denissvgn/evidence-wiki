@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+- Close five spellings of catastrophic backtracking that a pack's `regex` rules could
+  ship past `pack validate`. The declaration-time guard exists because the text a
+  pattern runs against is the *source's*, and `re` offers no step budget to bound a
+  catastrophic match at answer time — so a pattern that slips through hangs answer-time
+  evaluation with the gate neither open nor closed. Each of these was measured
+  exponential against `re.fullmatch` on a 26-character field while the guard accepted
+  it: a group opened with modifier syntax (`(?:a|a)+`, `(?i:a|A)+`, `(?P<x>a|a)+`),
+  whose prefix the lead comparison read as the first alternative's own text; an
+  alternative that is itself a group (`((a)|a)+`), whose recorded lead was the closing
+  parenthesis; an alternative opening with an escape (`(\da|1a)+`), which the syntax
+  scan omits entirely, so the *second* character was compared as the lead; an
+  optionally-quantified lead (`(b?a|a)+`, 4655 ms), where `b?` can match empty so both
+  branches really begin with `a` and the written first token was never the lead at all;
+  and an alternation wrapped in one redundant group (`((a|a))+`, 3017 ms), which the
+  boundary scan missed because it looked only at the repeated group's own top level.
+
+  The scanner is now the single place that parses regex structure: it consumes each
+  group's modifier prefix, so no caller filters those characters back out, and it
+  carries what it resolved — where the body starts, whether the group is atomic,
+  whether IGNORECASE is in force — on the token itself. A second function walking the
+  pattern its own way is how this guard has gone wrong twice. The alternation check is
+  depth-agnostic, matching the repeat check beside it: every group inside a repeated
+  one is examined, because ambiguity nested a level deeper is the same ambiguity. Leads
+  fold case only inside an IGNORECASE scope, so `(?i:a|A)+` is refused and a plain
+  `(a|A)+` — which `re` keeps apart — is not. An atomic group and everything inside it
+  is skipped, which keeps `(?>a|a)+` available: the engine never re-enters one on
+  backtracking, and making a group atomic is the standard repair for exactly this
+  defect, so refusing the repair alongside the bug would leave a pack author nowhere to
+  go.
+
+  The guard stays syntactic and conservative, and is not a proof of safety in either
+  direction: it still refuses shapes that would have been safe (an optional lead is
+  reported unknowable rather than resolved, so `(b?a|c)+` is refused too), and a
+  construct nobody has taught it to see would still pass. The shapes named above are
+  the ones it is known to catch, not the closure of what can backtrack. Beside the
+  per-spelling tests, the suite now asserts the complementary property on what actually
+  ships — every pattern the guard *accepts* must match adversarial input quickly —
+  because enumerating exponential spellings only ever catches the ones somebody
+  thought of.
+
 - Let a recorded review settle the coverage policy it was collected for. A policy
   that needs a person was a `safety` no-ship reason until the review was recorded
   — that part worked — but publication readiness also read the policy's own
