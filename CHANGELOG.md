@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Let a recorded review settle the coverage policy it was collected for. A policy
+  that needs a person was a `safety` no-ship reason until the review was recorded
+  — that part worked — but publication readiness also read the policy's own
+  verdict, and answer export re-evaluates policies live, so the verdict stayed
+  `manual_review` however the review went. The recorded acceptance cleared the
+  safety reason and then the same policy raised `attention` from the coverage
+  path, which meant no workspace carrying a manual-review policy could reach
+  `ship` at all, and the review could never satisfy the gate it was collected
+  for. Readiness now matches each `manual_review` verdict against the question's
+  `human_reviews` entries by policy id, so an accepted review settles exactly the
+  policy it names. Everything about that stays fail closed: a policy with no
+  entry is still an open item, a rejected review settles nothing, accepting one
+  policy says nothing about another, and no review settles a policy that returned
+  `fail` or `contradicted` — accepting a policy is not licence to publish
+  evidence that failed it. Both reviewer topologies already write the entries
+  this reads, so `question_resolve.py approve` and per-policy
+  `question_resolve.py review --verdict accepted --review-ref …` satisfy it
+  identically, and the entries ship in the export as the audit trail for why a
+  workspace was allowed to publish.
+
 - Refuse a second orchestration driver instead of quietly queueing behind it.
   The per-session lock at `runs/orchestrations/<id>/.locks/session.lock` has
   always covered `start`, `next`, and `submit`, but a contended call waited up

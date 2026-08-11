@@ -55,6 +55,73 @@ class PublicationReadinessTests(unittest.TestCase):
         self.assertEqual("", stderr.getvalue())
         return int(code or 0), json.loads(stdout.getvalue())
 
+    def export_with_policy(self, verdict: str, *, reviews: list[dict] | None = None, policy: str = "pack:p/a") -> dict:
+        """One answered question whose single facet carries one policy result."""
+        question: dict = {
+            "slug": "q1",
+            "status": "answered",
+            "human_review": {"pending": False},
+            "coverage_facets": [{"facet_id": "f1", "policy_results": [{"policy": policy, "verdict": verdict}]}],
+        }
+        if reviews is not None:
+            question["human_reviews"] = reviews
+        return {"questions": [question]}
+
+    def test_an_accepted_review_settles_the_policy_it_was_recorded_for(self):
+        """The recorded review satisfies the gate it was collected for.
+
+        Export re-evaluates policies live, so an accepted review never changes the
+        verdict the policy returns; without consulting the review, a workspace carrying
+        any manual-review policy could never leave `attention_required`.
+        """
+        reasons = READINESS.empty_reasons()
+        no_ship, blocked, attention = READINESS.classify_export(
+            self.export_with_policy(
+                "manual_review",
+                reviews=[{"policy": "pack:p/a", "verdict": "accepted", "reviewed_by": "auditor"}],
+            ),
+            reasons,
+        )
+        self.assertEqual((False, False, False), (no_ship, blocked, attention))
+        self.assertEqual([], reasons.get("coverage", []))
+
+    def test_an_unreviewed_manual_policy_still_needs_attention(self):
+        reasons = READINESS.empty_reasons()
+        _, _, attention = READINESS.classify_export(self.export_with_policy("manual_review"), reasons)
+        self.assertTrue(attention)
+        self.assertTrue(any("pack:p/a" in reason for reason in reasons["coverage"]), reasons)
+
+    def test_a_rejected_review_does_not_settle_the_policy(self):
+        reasons = READINESS.empty_reasons()
+        _, _, attention = READINESS.classify_export(
+            self.export_with_policy(
+                "manual_review",
+                reviews=[{"policy": "pack:p/a", "verdict": "rejected", "reviewed_by": "auditor"}],
+            ),
+            reasons,
+        )
+        self.assertTrue(attention)
+
+    def test_accepting_one_policy_says_nothing_about_another(self):
+        reasons = READINESS.empty_reasons()
+        export = self.export_with_policy("manual_review", policy="pack:p/b")
+        export["questions"][0]["human_reviews"] = [{"policy": "pack:p/a", "verdict": "accepted"}]
+        _, _, attention = READINESS.classify_export(export, reasons)
+        self.assertTrue(attention)
+        self.assertTrue(any("pack:p/b" in reason for reason in reasons["coverage"]), reasons)
+
+    def test_an_accepted_review_never_settles_a_failing_policy(self):
+        """A person accepting a policy is not licence to ship evidence that failed it."""
+        reasons = READINESS.empty_reasons()
+        _, blocked, _ = READINESS.classify_export(
+            self.export_with_policy(
+                "fail", reviews=[{"policy": "pack:p/a", "verdict": "accepted", "reviewed_by": "auditor"}]
+            ),
+            reasons,
+        )
+        self.assertTrue(blocked)
+        self.assertTrue(any("pack:p/a" in reason for reason in reasons["coverage"]), reasons)
+
     def test_low_unresolved_license_lint_does_not_block_ship_classification(self):
         reasons: dict[str, list[str]] = {}
         no_ship, attention = READINESS.classify_lint_issues(

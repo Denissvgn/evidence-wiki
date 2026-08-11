@@ -390,6 +390,29 @@ def grounding_failure_reason(slug: str, result: dict[str, Any]) -> str:
     return f"{slug} grounding claim {claim} from {source_id} returned {outcome}."
 
 
+def accepted_review_policies(question: dict[str, Any]) -> set[str]:
+    """The policy ids a person accepted on this question, from its recorded reviews.
+
+    Both reviewer topologies write these entries: ``question_resolve.py approve`` accepts
+    every still-pending policy in one call, and ``question_resolve.py review --policy P
+    --verdict accepted`` records one a host collected in its own queue. Matching per
+    policy rather than on the question's overall approval keeps the grain of the record:
+    accepting one policy says nothing about another, and a question with any policy still
+    unreviewed is held by the pending-review branch above regardless.
+
+    Fail-closed by construction — only an ``accepted`` verdict counts, so a policy with no
+    entry, or one whose review was rejected, is still an open item.
+    """
+    entries = question.get("human_reviews")
+    if not isinstance(entries, list):
+        return set()
+    return {
+        str(entry.get("policy"))
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("verdict") == "accepted" and entry.get("policy")
+    }
+
+
 def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tuple[bool, bool, bool]:
     no_ship = False
     blocked = False
@@ -438,6 +461,7 @@ def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tu
                 if not isinstance(result, dict) or result.get("result") == "verified":
                     continue
                 append_reason(reasons, "grounding", grounding_failure_reason(str(slug), result))
+        accepted_reviews = accepted_review_policies(question)
         facets = question.get("coverage_facets") if isinstance(question.get("coverage_facets"), list) else []
         for facet in facets:
             if not isinstance(facet, dict):
@@ -448,6 +472,15 @@ def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tu
                 verdict = result.get("verdict")
                 policy = str(result.get("policy", "unknown"))
                 if verdict == "pass":
+                    continue
+                if verdict == "manual_review" and policy in accepted_reviews:
+                    # The policy asked for a person and got one. Export re-evaluates
+                    # policies live, so the verdict stays `manual_review` however the
+                    # review went — reading it as an open item regardless is what kept
+                    # every workspace carrying such a policy at `attention_required`
+                    # forever, and made the recorded review unable to satisfy the gate it
+                    # was collected for. The entry itself is the audit trail: it ships in
+                    # the export under `human_reviews` with its reviewer and review-ref.
                     continue
                 message = f"{slug} facet {facet.get('facet_id')} policy {policy} returned {verdict}."
                 policy_reasons = result.get("reasons") if isinstance(result.get("reasons"), list) else []

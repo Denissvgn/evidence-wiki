@@ -314,6 +314,12 @@ class PolicyPrimitivesWorkspace:
     def run_readiness(self, workspace: Path) -> tuple[int, dict[str, Any], str]:
         return self.run_module(READINESS, ["--project-root", str(workspace), "--format", "json"])
 
+    def exported_question(self, workspace: Path, slug: str) -> dict[str, Any]:
+        """The export record readiness classifies, for one question."""
+        code, payload, stderr = self.run_module(EXPORT, ["--project-root", str(workspace), "--format", "json"])
+        self.assertEqual(0, code, stderr)
+        return next(question for question in payload["questions"] if question["slug"] == slug)
+
     def mcp_tool(self, workspace: Path, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         server = MCP.ResearchWikiMcpServer(workspace)
         response = server.handle_message(
@@ -639,13 +645,12 @@ class AnsweringChainTests(PolicyPrimitivesWorkspace, unittest.TestCase):
     def test_recording_both_reviews_answers_the_question_and_clears_the_safety_gate(self):
         """CR-9 composed with CR-1: the reviews the pack still asks for close normally.
 
-        `publication_readiness.py` needed no change for any of this, and the assertions
-        below are all against its unmodified output. It does not reach `ship` here, and
-        that is a property of the readiness gate rather than of CR-9: `classify_export`
-        raises `attention` for any facet policy whose verdict is not `pass`, and an
-        accepted review does not change the verdict the policy returns. The same was true
-        of a definition-only pack policy before CR-9 — see the sibling test for the ship
-        verdict a workspace reaches when every policy on it carries a rule.
+        Every policy here needs a person, and once each has one the workspace ships. That
+        is the whole point of recording a review: export re-evaluates policies live, so an
+        accepted review never changes the verdict a policy returns, and readiness has to
+        read the recorded entry to know the question was settled. The sibling test covers
+        the other route to the same verdict — a workspace where no policy needs a person
+        at all.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.stage_workspace(Path(tmpdir), slugs=(RULE_SLUG, REVIEW_SLUG))
@@ -683,18 +688,17 @@ class AnsweringChainTests(PolicyPrimitivesWorkspace, unittest.TestCase):
             code, reviewed, stderr = self.run_readiness(workspace)
 
             self.assertEqual([], reviewed["reasons"]["safety"], stderr)
-            self.assertEqual(READINESS.VERDICT_ATTENTION, reviewed["verdict"], reviewed["reasons"])
-            # And the only thing still holding it there is the pair of policies a person
-            # decided — nothing about the rule-backed question, and nothing about grounding.
+            self.assertEqual(READINESS.VERDICT_SHIP, reviewed["verdict"], reviewed["reasons"])
+            # Nothing is left holding it: not the two policies a person decided, not the
+            # rule-backed question, not grounding.
+            self.assertEqual([], reviewed["reasons"]["coverage"])
+            self.assertEqual([], reviewed["reasons"]["grounding"])
+            # The audit trail is the reason it may ship, so it travels with the export.
+            exported = self.exported_question(workspace, REVIEW_SLUG)
             self.assertEqual(
                 {REVIEWED_POLICY, DEFINITION_ONLY_POLICY},
-                {
-                    policy
-                    for policy in ALL_PACK_POLICIES
-                    if any(policy in reason for reason in reviewed["reasons"]["coverage"])
-                },
+                {entry["policy"] for entry in exported["human_reviews"] if entry["verdict"] == "accepted"},
             )
-            self.assertEqual([], reviewed["reasons"]["grounding"])
 
     def test_a_workspace_decided_entirely_by_rules_reaches_a_shippable_verdict(self):
         """The outcome CR-9 was filed for, stated as a publication verdict.
