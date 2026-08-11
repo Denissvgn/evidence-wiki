@@ -564,13 +564,12 @@ class DomainPackValidationTests(unittest.TestCase):
         self.assertIn(self.QUOTE_POLICY, autonomy["message"])
         self.assertIn("use a deterministic policy", autonomy["message"])
 
-    def test_a_rule_exempts_only_the_section_it_decides(self):
-        """The gate must not be switched off by a rule that decides another field.
+    def test_a_rule_on_an_id_declared_under_two_sections_is_refused(self):
+        """`pack validate` refuses the ambiguity rather than letting it ship.
 
-        The id is declared under both `freshness_policy` and `identity_policy` with a
-        rule only on the freshness side. The required facet names it as its
-        `identity_policy`, which no rule decides, so it still needs a human and the pack
-        must not ship as autonomously satisfiable.
+        A facet names one policy per section, so a rule on an id declared under several
+        cannot say which field it decides. Refusing here is what makes the per-field
+        manual-only subtraction below unambiguous for every pack that does ship.
         """
         shared = self.QUOTE_POLICY
         facet = self.rule_backed_required_facet("no_staleness_check")
@@ -586,11 +585,36 @@ class DomainPackValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(1, code)
+        self.assert_policy_rules_failure(
+            payload,
+            "more than one rule-carrying vocabulary section",
+            "freshness_policy, identity_policy",
+        )
+
+    def test_a_rule_exempts_only_the_section_it_decides(self):
+        """The autonomy gate reads the rule's own section, not just its policy id.
+
+        Declared under `freshness_policy` alone and used as a required facet's
+        `identity_policy`, which no rule decides — so the facet still needs a human.
+        """
+        facet = self.rule_backed_required_facet("no_staleness_check")
+        facet["identity_policy"] = "pack:market-data/sku-matches"
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            {
+                **self.QUOTE_VOCABULARY,
+                "identity_policy": {"pack:market-data/sku-matches": "The quoted SKU must match."},
+            },
+            {self.QUOTE_POLICY: self.QUOTE_RULE},
+            required_facet=facet,
+        )
+
+        self.assertEqual(1, code)
         checks = {check["id"]: check for check in payload["checks"]}
         autonomy = checks["autonomous_required_facets"]
         self.assertEqual("fail", autonomy["status"], autonomy)
-        self.assertIn(shared, autonomy["message"])
-        self.assertEqual("freshness_policy", payload["domain_pack"]["policy_rules"][shared]["section"])
+        self.assertIn("pack:market-data/sku-matches", autonomy["message"])
+        self.assertEqual("freshness_policy", payload["domain_pack"]["policy_rules"][self.QUOTE_POLICY]["section"])
 
     def test_rule_requiring_manual_review_keeps_a_required_facet_manual_only(self):
         code, payload = self.validate_pack_declaring_policy_rules(

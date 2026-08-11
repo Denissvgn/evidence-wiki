@@ -193,7 +193,10 @@ rule using `one_of_provenance: {providers: [...]}` (see
 [evidence-policies.md](evidence-policies.md)). Provider membership is decided
 against exactly three sidecar fields — `provider_registration.id` (see
 [provider-registration.md](provider-registration.md)), `academic_provider`, and
-`standards.registry_provider` — matched by exact equality. A host delivering
+`standards.registry_provider` — matched exactly but for case, since registry
+metadata spells the same provider `ISO` or `iso` depending on who wrote the
+sidecar. Nothing else is folded: a fullwidth or en-dash lookalike of an allowed
+id is a different id. A host delivering
 through this contract that wants its sources to satisfy such a rule stamps
 `provider_registration.id` with its own connector id. `retrieved_by` is never
 consulted for provider membership: it identifies the *agent* that performed the

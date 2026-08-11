@@ -436,14 +436,6 @@ def request_kinds_check(scripts: LoadedScripts, domain_pack: Any) -> tuple[dict[
     )
 
 
-def _rule_primitive_names(primitive: Any) -> set[str]:
-    """Collect every primitive name one parsed rule tree uses, compositions included."""
-    names = {primitive.name}
-    for child in primitive.children:
-        names |= _rule_primitive_names(child)
-    return names
-
-
 def policy_rules_check(scripts: LoadedScripts, domain_pack: Any) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Validate ``domain_pack.policy_rules`` before the pack can ship.
 
@@ -468,17 +460,7 @@ def policy_rules_check(scripts: LoadedScripts, domain_pack: Any) -> tuple[dict[s
     # Summarized rather than carried through as dataclasses: this payload is handed to
     # ``json.dumps`` in ``main``, and the report answers "what does this pack decide
     # itself", not "how is each rule spelled" -- the overlay is the text for that.
-    declared = {
-        policy_id: {
-            "primitives": sorted(_rule_primitive_names(rule.composition)),
-            "manual_review_required": rule.manual_review_required,
-            # The vocabulary section the rule was declared under. A pack may declare one
-            # id under more than one section, and the rule decides only its own, so a
-            # consumer reasoning about which fields are automated needs to know which.
-            "section": rule.section,
-        }
-        for policy_id, rule in rules.items()
-    }
+    declared = {policy_id: scripts.policy_primitives.rule_summary(rule) for policy_id, rule in rules.items()}
     if not declared:
         return declared, check(
             "policy_rules",

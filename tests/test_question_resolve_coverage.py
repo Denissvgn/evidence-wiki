@@ -45,6 +45,8 @@ def load_script_module(name: str, filename: str):
 RESOLVE = load_script_module("research_question_resolve_coverage", "question_resolve.py")
 CLAIM = load_script_module("research_question_resolve_coverage_claim", "question_claim.py")
 INIT = load_script_module("research_question_resolve_coverage_init", "init_research_workspace.py")
+EXPORT = load_script_module("research_question_resolve_coverage_export", "export_answers.py")
+STATUS = load_script_module("research_question_resolve_coverage_status", "workspace_status.py")
 
 
 class QuestionResolveCoverageTests(unittest.TestCase):
@@ -492,6 +494,33 @@ class PackPolicyRuleResolveTests(unittest.TestCase):
             error = payload.get("error", payload)
             self.assertEqual("CONFIG_INVALID", error.get("error_code"), payload)
             self.assertIn("domain_pack.policy_rules", str(error.get("message")), payload)
+
+    def test_a_malformed_rules_block_never_crashes_a_read_only_command(self):
+        """The refusal travels in the summary, so callers that do not refuse still work.
+
+        `coverage_summary_for_question` has five callers and only `answer` refuses over
+        this; raising past the others left them with an uncaught exception where an
+        envelope belongs.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, _ = self.prepare(Path(tmpdir), rules=ALL_RULES)
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["domain_pack"]["policy_rules"][FRESHNESS_POLICY] = {
+                "all_of": [{"max_age": {"hours": 48}}]  # no `field`
+            }
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+            for module, argv in (
+                (EXPORT, ["--project-root", str(target), "--format", "json"]),
+                (STATUS, ["--project-root", str(target), "--format", "json"]),
+            ):
+                with self.subTest(script=module.__name__):
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        code = module.main(argv)
+                    self.assertEqual(0, int(code or 0), stderr.getvalue())
+                    self.assertNotIn("Traceback", stdout.getvalue() + stderr.getvalue())
 
     def test_a_definition_only_pack_policy_is_the_only_one_named_for_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:

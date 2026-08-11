@@ -1373,15 +1373,15 @@ def coverage_summary_for_question(
         evaluated = evaluate_manifest_readonly(document, policy_results_by_facet)
         validate_manifest(evaluated, expected_slug=slug, policy_vocabularies=policy_vocabularies)
     except CoverageManifestError as exc:
-        if exc.error_code == "CONFIG_INVALID":
-            # A malformed `domain_pack.policy_rules` block is a research.yml error, not a
-            # defect in this question's manifest. Degrading it to `coverage_status:
-            # invalid` would make every caller report COVERAGE_MANIFEST_INVALID against a
-            # manifest that is fine, and would hide the code the docs promise for it, so
-            # it is re-raised for the command's own CONFIG_INVALID handling.
-            raise
         summary["coverage_status"] = "invalid"
         summary["error"] = str(exc)
+        # Carried rather than raised. A malformed `domain_pack.policy_rules` block is a
+        # research.yml error, not a defect in this question's manifest, and a caller that
+        # refuses over it should say so — but this function has five callers and only one
+        # of them refuses at all. Raising past the other four left `export_answers` and
+        # `workspace_status` with an uncaught exception where an envelope belongs, so the
+        # code travels in the summary and each caller decides what to do with it.
+        summary["error_code"] = exc.error_code
         return summary
 
     blocking_request_ids = unique_blocking_request_ids(evaluated)

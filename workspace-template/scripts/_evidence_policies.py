@@ -179,7 +179,7 @@ class PolicyInputs:
     warnings: list[str] = field(default_factory=list)
     policy_rules: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     structured_view_loads: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
-    question_frontmatters: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
+    question_frontmatters: dict[str, dict[str, Any] | None] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # Parsed once here rather than per policy, and eagerly rather than lazily: a
@@ -203,23 +203,40 @@ class PolicyInputs:
             )
         return self.structured_view_loads[source_id]
 
-    def question_frontmatter_for(self, slug: str) -> dict[str, Any]:
-        """This question page's frontmatter mapping, read at most once per slug.
+    def question_frontmatter_for(self, slug: str) -> dict[str, Any] | None:
+        """This question page's frontmatter mapping, or ``None`` when there is none to read.
 
         The questions directory comes from ``wiki.root``, which ``research.yml`` lets a
         workspace rename; hardcoding ``wiki/`` would read a path that does not exist and
         report every ``question_field`` rule as unresolved, blaming the question page for
-        a key it actually carries. The slug is shape-checked before it is joined, because
-        it reaches here from a coverage manifest read off disk and a path-shaped value
-        would otherwise choose which file a rule compares against.
+        a key it actually carries.
+
+        ``None`` rather than an empty mapping for every case where no page was read — an
+        unusable slug, an unusable ``wiki.root``, a page that is not there. An empty
+        mapping is indistinguishable from a question whose frontmatter simply lacks the
+        key, so a rule would be refused with a reason naming the wrong artifact; ``None``
+        reaches the resolver's own "carries no frontmatter" branch instead.
         """
         if slug not in self.question_frontmatters:
-            self.question_frontmatters[slug] = (
-                read_frontmatter(self.questions_dir() / f"{slug}.md")
-                if QUESTION_SLUG_RE.fullmatch(slug)
-                else {}
-            )
+            self.question_frontmatters[slug] = self.read_question_frontmatter(slug)
         return self.question_frontmatters[slug]
+
+    def read_question_frontmatter(self, slug: str) -> dict[str, Any] | None:
+        # Shape-checked before it is joined: the slug reaches here from a coverage
+        # manifest read off disk, and a path-shaped value would otherwise choose which
+        # file a rule compares against.
+        if QUESTION_SLUG_RE.fullmatch(slug) is None:
+            return None
+        try:
+            directory = self.questions_dir()
+        except ValueError:
+            # An unusable `wiki.root` is a config error, and one this deep in evaluation
+            # cannot become a refusal envelope — the commands that load a workspace
+            # validate the same key up front. Rules fail closed on it rather than the
+            # evaluator dying on a bare ValueError.
+            return None
+        path = directory / f"{slug}.md"
+        return read_frontmatter(path) if path.is_file() else None
 
     def questions_dir(self) -> Path:
         wiki = self.config.get("wiki") if isinstance(self.config.get("wiki"), dict) else {}

@@ -105,22 +105,6 @@ def _pack_policy_vocabularies(root: Path, coverage_module: ModuleType, yaml_modu
     return result
 
 
-def _rule_primitive_names(primitive: Any) -> set[str]:
-    """Collect every primitive name used anywhere in one rule's composition tree.
-
-    Walked structurally, not by type: ``Primitive`` comes from a script module
-    loaded fresh per process, so an ``isinstance`` check against a type imported
-    here would never match the instances this call actually receives.
-    ``all_of``/``any_of`` are collected alongside the leaves they wrap -- the
-    primitives module's own ``PRIMITIVE_NAMES`` counts compositions as primitives
-    too, so a host asking "what does this rule use" expects both.
-    """
-    names = {primitive.name}
-    for child in primitive.children:
-        names |= _rule_primitive_names(child)
-    return names
-
-
 def _pack_policy_rules(
     root: Path, policy_primitives_module: ModuleType, yaml_module: ModuleType
 ) -> dict[str, dict[str, dict[str, Any]]]:
@@ -160,16 +144,11 @@ def _pack_policy_rules(
             continue
         if not rules:
             continue
+        # Summarized by the primitives module itself, so `evidence-wiki contract` and
+        # `evidence-wiki pack validate` cannot drift into reporting the same pack
+        # differently.
         result[name.strip()] = {
-            policy_id: {
-                "primitives": sorted(_rule_primitive_names(rule.composition)),
-                "manual_review_required": rule.manual_review_required,
-                # Which vocabulary section the rule decides. One id may be declared under
-                # several, and the rule binds to exactly one, so a host reading this to
-                # learn what a pack automates cannot infer it from the id alone.
-                "section": rule.section,
-            }
-            for policy_id, rule in rules.items()
+            policy_id: policy_primitives_module.rule_summary(rule) for policy_id, rule in rules.items()
         }
     return result
 

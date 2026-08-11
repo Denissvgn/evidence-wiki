@@ -394,9 +394,17 @@ def _as_utc_earliest(value: datetime) -> datetime:
     offset was written by a host whose zone we do not know, so it is read at the extreme
     that can only make the evidence look older — never fresher, which would be a pass the
     gate should have refused.
+
+    A value within the offset of ``datetime.min`` cannot be shifted at all, so it is left
+    where it is rather than raising: at that distance every ``max_age`` bound has failed
+    by millions of years, and no bound exists that fourteen hours could flip.
     """
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc) - MAX_UTC_OFFSET
+        stamped = value.replace(tzinfo=timezone.utc)
+        try:
+            return stamped - MAX_UTC_OFFSET
+        except OverflowError:
+            return stamped
     return value.astimezone(timezone.utc)
 
 
@@ -413,69 +421,144 @@ _ISO_BARE_OFFSET_RE = re.compile(r"([+-]\d{2})(\d{2})$")
 _ISO_FRACTION_RE = re.compile(r"\.(\d+)")
 
 
-#: Characters that repeat whatever precedes them an unbounded number of times. `?` is
-#: absent on purpose: it repeats at most once, so it cannot drive the exponential blowup
-#: this check exists to refuse.
-_UNBOUNDED_QUANTIFIERS = frozenset("*+{")
+#: Characters that repeat whatever precedes them without an upper bound. `?` is absent on
+#: purpose: it repeats at most once, so it cannot drive the exponential blowup this check
+#: exists to refuse. `{` is absent too — it is a quantifier only in some spellings, and
+#: `_opens_unbounded_repeat` decides which.
+_UNBOUNDED_QUANTIFIERS = frozenset("*+")
+#: `{n,}` repeats without an upper bound; `{n}` and `{n,m}` do not, and a bounded inner
+#: repeat gives an outer quantifier nothing to explore. A `{` that spells none of the
+#: three is a literal brace to `re`, and to this scanner.
+_OPEN_ENDED_REPEAT_RE = re.compile(r"\{\d*,\}")
+_ANY_REPEAT_RE = re.compile(r"\{\d+(,\d*)?\}")
 
 
-def _nested_quantifier_span(pattern: str) -> str | None:
-    """Return the quantified group whose body also repeats, or ``None`` when none does.
+def _regex_syntax_positions(pattern: str) -> list[tuple[int, str]]:
+    """Every ``(index, char)`` in ``pattern`` that `re` reads as syntax, not as data.
 
-    `(a+)+` and `([A-Za-z0-9]+ ?)+` are six and seventeen characters, so a length cap
-    cannot refuse them, and `re` offers no step budget or timeout to bound them at match
-    time. The input that triggers the blowup is the *source's* text, not the pack's, so a
-    verbose upstream record would hang evaluation with the gate neither open nor closed.
-    Refusing the construct where the pack author can see the message is the only place
-    the cost is bounded.
+    One scanner for both checks below, so there is a single definition of what regex
+    syntax this module understands. Escapes consume the character after them, and a
+    character class swallows everything to its close — including the quantifiers and
+    parentheses inside it, which are literal members there.
 
-    Deliberately syntactic and conservative — it reads nesting, not language emptiness,
-    so it can refuse a pattern that would have been safe. Rewriting such a pattern
-    without the nested quantifier is always possible; hanging on real evidence is not
-    always recoverable.
+    A ``]`` in the first position of a class (or first after ``[^``) is itself a literal
+    member rather than the close, which is why the class scan starts past it: reading
+    ``[]+]`` as the class ``[]`` followed by a stray ``+`` would both refuse valid
+    patterns and mis-read what follows as syntax.
     """
-    depth_starts: list[int] = []
+    positions: list[tuple[int, str]] = []
     index = 0
-    in_class = False
-    while index < len(pattern):
+    length = len(pattern)
+    while index < length:
         char = pattern[index]
         if char == "\\":
             index += 2
             continue
-        if in_class:
-            in_class = char != "]"
+        if char == "[":
+            index += 1
+            if index < length and pattern[index] == "^":
+                index += 1
+            if index < length and pattern[index] == "]":
+                index += 1
+            while index < length and pattern[index] != "]":
+                index += 2 if pattern[index] == "\\" else 1
             index += 1
             continue
-        if char == "[":
-            in_class = True
-        elif char == "(":
-            depth_starts.append(index)
-        elif char == ")" and depth_starts:
-            start = depth_starts.pop()
-            following = pattern[index + 1 : index + 2]
-            if following in _UNBOUNDED_QUANTIFIERS and _repeats_within(pattern[start + 1 : index]):
-                return pattern[start : index + 2]
+        positions.append((index, char))
         index += 1
+    return positions
+
+
+def _opens_unbounded_repeat(pattern: str, index: int) -> bool:
+    """Whether the quantifier at ``index`` may repeat without an upper bound."""
+    char = pattern[index]
+    if char in _UNBOUNDED_QUANTIFIERS:
+        return True
+    return char == "{" and _OPEN_ENDED_REPEAT_RE.match(pattern, index) is not None
+
+
+def _quantifier_at(pattern: str, index: int) -> bool:
+    """Whether a quantifier of any kind sits at ``index``."""
+    char = pattern[index]
+    if char in _UNBOUNDED_QUANTIFIERS:
+        return True
+    return char == "{" and _ANY_REPEAT_RE.match(pattern, index) is not None
+
+
+def _nested_quantifier_span(pattern: str) -> str | None:
+    """Return the quantified group whose body can also blow up, or ``None`` when none can.
+
+    `(a+)+` and `(a|a)+` are six characters, so a length cap cannot refuse them, and `re`
+    offers no step budget or timeout to bound them at match time. The input that triggers
+    the blowup is the *source's* text, not the pack's, so a verbose upstream record would
+    hang evaluation with the gate neither open nor closed. Refusing the construct where
+    the pack author can see the message is the only place the cost is bounded.
+
+    Two families reach exponential time, and both are refused here: a group repeated
+    without bound whose body also repeats without bound (`(a+)+`), and one whose
+    alternatives can match the same text so the engine must try each ordering
+    (`(a|a)+`, `(a|ab)*`). A bounded inner repeat is not either of them — `(\\d{2}-)+`
+    gives the outer quantifier one way to match and is left alone.
+
+    Deliberately syntactic and conservative: it reads shape, not language emptiness, so
+    it can refuse a pattern that would have been safe. Rewriting such a pattern is always
+    possible; hanging on real evidence is not always recoverable.
+    """
+    positions = _regex_syntax_positions(pattern)
+    opens: list[int] = []
+    for cursor, (index, char) in enumerate(positions):
+        if char == "(":
+            opens.append(cursor)
+        elif char == ")" and opens:
+            open_cursor = opens.pop()
+            start = positions[open_cursor][0]
+            after = index + 1
+            if after >= len(pattern) or not _opens_unbounded_repeat(pattern, after):
+                continue
+            inner = positions[open_cursor + 1 : cursor]
+            if _repeats_within(pattern, inner) or _alternatives_overlap(pattern, inner):
+                return pattern[start : after + 1]
     return None
 
 
-def _repeats_within(body: str) -> bool:
-    """Whether a group body contains an unbounded quantifier of its own."""
-    index = 0
-    in_class = False
-    while index < len(body):
-        char = body[index]
-        if char == "\\":
-            index += 2
+def _repeats_within(pattern: str, inner: list[tuple[int, str]]) -> bool:
+    """Whether a group body repeats without an upper bound of its own."""
+    return any(_opens_unbounded_repeat(pattern, index) for index, _ in inner)
+
+
+def _alternatives_overlap(pattern: str, inner: list[tuple[int, str]]) -> bool:
+    """Whether two of a group's alternatives can begin with the same text.
+
+    Disjoint alternatives (`(foo|bar)+`) give the engine one way to match each input and
+    are safe; alternatives sharing a first character (`(a|a)+`, `(a|ab)*`) give it two,
+    and a repeated group multiplies that choice by its length. Comparing only the leading
+    token keeps this cheap and errs toward refusing: anything not a plain literal — a
+    class, a nested group, a dot, an escape — is treated as able to overlap everything.
+    """
+    depth = 0
+    leads: list[str | None] = []
+    expect_lead = True
+    for index, char in inner:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth == 0:
+            expect_lead = True
             continue
-        if in_class:
-            in_class = char != "]"
-        elif char == "[":
-            in_class = True
-        elif char in _UNBOUNDED_QUANTIFIERS:
-            return True
-        index += 1
-    return False
+        if depth == 0 and expect_lead:
+            # `?:` and friends are group syntax, not the alternative's first token.
+            if char == "?" and leads and leads[-1] is None:
+                continue
+            leads.append(None if char in "[(.\\^" else pattern[index])
+            expect_lead = False
+    if expect_lead:
+        leads.append(None)
+    if len(leads) < 2:
+        return False
+    if any(lead is None for lead in leads):
+        return True
+    return len(set(leads)) != len(leads)
 
 
 def _normalize_iso_offset(text: str) -> str:
@@ -861,12 +944,18 @@ def _parse_rule(policy_id: str, declaration: Any, label: str, section: str = "")
     )
 
 
-def _declared_vocabulary(domain_pack: dict[str, Any]) -> dict[str, str]:
-    """Map every policy id the pack declares to the vocabulary section it sits in."""
+def _declared_vocabulary(domain_pack: dict[str, Any]) -> dict[str, list[str]]:
+    """Map every policy id the pack declares to the vocabulary sections it sits in.
+
+    A list rather than one section: an id may be declared under several, and which one a
+    rule decides is then genuinely ambiguous. Recording all of them lets
+    :func:`_collect_declarations` refuse that where it is written instead of leaving every
+    consumer to guess.
+    """
     vocabularies = domain_pack.get("policy_vocabularies")
     if not isinstance(vocabularies, dict):
         return {}
-    declared: dict[str, str] = {}
+    declared: dict[str, list[str]] = {}
     for section in (*RULE_TARGET_SECTIONS, EVIDENCE_PATHS_SECTION):
         definitions = vocabularies.get(section)
         if not isinstance(definitions, dict):
@@ -874,7 +963,7 @@ def _declared_vocabulary(domain_pack: dict[str, Any]) -> dict[str, str]:
         for policy_id in definitions:
             if not isinstance(policy_id, str) or not policy_id.strip():
                 continue
-            declared.setdefault(policy_id.strip(), section)
+            declared.setdefault(policy_id.strip(), []).append(section)
     return declared
 
 
@@ -913,13 +1002,25 @@ def _collect_declarations(domain_pack: Any) -> tuple[dict[str, Rule], list[str]]
                 f"{label} declares namespace {namespace!r} but the pack is named {pack_name!r}"
             )
             continue
-        section = vocabulary.get(policy_id)
-        if section is None:
+        sections = vocabulary.get(policy_id)
+        if not sections:
             errors.append(
                 f"{label} is not declared under domain_pack.policy_vocabularies; "
                 f"declare it under one of: {', '.join(RULE_TARGET_SECTIONS)}"
             )
             continue
+        rule_sections = [name for name in sections if name in RULE_TARGET_SECTIONS]
+        if len(rule_sections) > 1:
+            # Refused where it is written. A facet names one policy per section, so a rule
+            # on an id declared under several cannot say which field it decides — and
+            # guessing would let a rule written for one section decide another's evidence.
+            errors.append(
+                f"{label} is declared under more than one rule-carrying vocabulary section "
+                f"({', '.join(rule_sections)}), so the rule cannot say which one it decides; "
+                "give each section its own policy id"
+            )
+            continue
+        section = rule_sections[0] if rule_sections else sections[0]
         if section not in RULE_TARGET_SECTIONS:
             errors.append(
                 f"{label} is declared under domain_pack.policy_vocabularies.{section}, which carries "
@@ -934,6 +1035,31 @@ def _collect_declarations(domain_pack: Any) -> tuple[dict[str, Rule], list[str]]
         if rule is not None:
             rules[policy_id] = rule
     return rules, errors
+
+
+def rule_summary(rule: Rule) -> dict[str, Any]:
+    """The JSON-safe description of one rule that every published surface reports.
+
+    `evidence-wiki pack validate` and `evidence-wiki contract` both answer "what does this
+    pack decide itself", and they must answer it identically. Built here, beside the
+    ``Rule`` and ``Primitive`` shapes it walks, so a new field lands in both surfaces at
+    once rather than in whichever one its author remembered.
+    """
+    return {
+        "primitives": sorted(_primitive_names(rule.composition)),
+        "manual_review_required": rule.manual_review_required,
+        # The vocabulary section the rule decides. A consumer reasoning about which fields
+        # a pack automates cannot infer it from the policy id alone.
+        "section": rule.section,
+    }
+
+
+def _primitive_names(primitive: Primitive) -> set[str]:
+    """Every primitive name one rule's composition tree uses, compositions included."""
+    names = {primitive.name}
+    for child in primitive.children:
+        names |= _primitive_names(child)
+    return names
 
 
 def declaration_errors(domain_pack: Any) -> list[str]:
@@ -1162,11 +1288,13 @@ def _evaluate_regex(primitive: Primitive, context: RuleContext) -> tuple[bool, s
 def _evaluate_one_of_provenance(primitive: Primitive, context: RuleContext) -> tuple[bool, str]:
     for allowed in primitive.providers:
         for observed in context.provider_ids:
-            # Exact equality, not `expected_matches`. That helper folds case, NFKC,
+            # Exact but for case, not `expected_matches`. That helper also folds NFKC,
             # dashes and whitespace, which is right for grounding prose against a record
-            # and wrong for an identity allowlist: it would admit `PARTNER-CATALOG`, a
-            # fullwidth spelling, and an en-dash lookalike as the id the pack allowed.
-            if observed == allowed:
+            # and wrong for an identity allowlist: it would admit a fullwidth spelling and
+            # an en-dash lookalike as the id the pack allowed. Case is the one fold worth
+            # keeping — registry metadata spells the same provider `ISO` or `iso`
+            # depending on who wrote the sidecar, and a pack cannot know which.
+            if observed.casefold() == allowed.casefold():
                 return True, _satisfied(
                     context.source_id,
                     f"was delivered by provider {observed!r}, which one_of_provenance allows.",

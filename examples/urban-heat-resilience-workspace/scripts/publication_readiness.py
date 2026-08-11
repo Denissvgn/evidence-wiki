@@ -29,6 +29,9 @@ SCHEMA_VERSION = "1.0"
 EXIT_READY = 0
 EXIT_NOT_READY = 1
 EXIT_UNREADABLE = 2
+#: The verdict `question_resolve.py` writes into a `human_reviews` entry a person
+#: accepted; that script defines the vocabulary, this gate only reads it.
+REVIEW_VERDICT_ACCEPTED = "accepted"
 VERDICT_SHIP = "ship"
 VERDICT_NO_SHIP = "no_ship"
 VERDICT_BLOCKED = "blocked_on_sources"
@@ -390,7 +393,21 @@ def grounding_failure_reason(slug: str, result: dict[str, Any]) -> str:
     return f"{slug} grounding claim {claim} from {source_id} returned {outcome}."
 
 
-def accepted_review_policies(question: dict[str, Any]) -> set[str]:
+def _policy_rule_error() -> type[BaseException]:
+    """The refusal class a malformed ``domain_pack.policy_rules`` block raises.
+
+    Resolved through ``verify_citations`` because that is the module whose
+    ``_evidence_policies`` copy actually raises: sibling isolation gives every load its
+    own class object, so catching a differently-loaded ``PolicyRuleError`` would catch
+    nothing. Resolved lazily, inside the ``except`` clause that needs it, so the default
+    readiness path never pays for a module it does not otherwise reach and a loader
+    failure cannot escape past the ``SystemExit`` arm that exists to turn it into an
+    envelope.
+    """
+    return load_sibling_module("verify_citations").policies.PolicyRuleError
+
+
+def settled_review_policies(question: dict[str, Any]) -> set[str]:
     """The policy ids a person accepted on this question, from its recorded reviews.
 
     Both reviewer topologies write these entries: ``question_resolve.py approve`` accepts
@@ -409,7 +426,7 @@ def accepted_review_policies(question: dict[str, Any]) -> set[str]:
     return {
         str(entry.get("policy"))
         for entry in entries
-        if isinstance(entry, dict) and entry.get("verdict") == "accepted" and entry.get("policy")
+        if isinstance(entry, dict) and entry.get("verdict") == REVIEW_VERDICT_ACCEPTED and entry.get("policy")
     }
 
 
@@ -461,7 +478,7 @@ def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tu
                 if not isinstance(result, dict) or result.get("result") == "verified":
                     continue
                 append_reason(reasons, "grounding", grounding_failure_reason(str(slug), result))
-        accepted_reviews = accepted_review_policies(question)
+        accepted_reviews = settled_review_policies(question)
         facets = question.get("coverage_facets") if isinstance(question.get("coverage_facets"), list) else []
         for facet in facets:
             if not isinstance(facet, dict):
@@ -846,10 +863,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=True)
     project_root = Path(args.project_root).expanduser().resolve()
-    # Resolved through `verify_citations` because that is the module whose `_evidence_policies`
-    # copy actually raises: sibling isolation gives every load its own class object, so
-    # catching a differently-loaded `PolicyRuleError` would catch nothing.
-    policy_rule_error = load_sibling_module("verify_citations").policies.PolicyRuleError
     try:
         if args.command == "bundle":
             document = build_bundle(project_root, args.run_id)
@@ -864,7 +877,7 @@ def main(argv: list[str] | None = None) -> int:
                 exit_code = EXIT_READY if document["verdict"] == VERDICT_SHIP else EXIT_NOT_READY
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_UNREADABLE)
-    except policy_rule_error as exc:
+    except _policy_rule_error() as exc:
         # `bundle` reaches the policy evaluator through local citation verification, which
         # parses the active pack's rules and refuses a malformed block. That refusal is a
         # plain exception rather than a SystemExit, so without this arm it would leave the

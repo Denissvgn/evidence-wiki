@@ -671,6 +671,16 @@ class AnsweringChainTests(PolicyPrimitivesWorkspace, unittest.TestCase):
             self.assertEqual("human_review", first["status"])
             self.assertEqual([DEFINITION_ONLY_POLICY], first["pending_policies"])
 
+            # Readiness, not just the question record: one accepted policy must not settle
+            # the other, and the half-reviewed state is where the safety branch and the
+            # coverage branch interact.
+            code, half, stderr = self.run_readiness(workspace)
+            self.assertNotEqual(READINESS.VERDICT_SHIP, half["verdict"], half["reasons"])
+            self.assertTrue(
+                any("pending required human review" in reason for reason in half["reasons"]["safety"]),
+                half["reasons"]["safety"],
+            )
+
             code, second, stderr = self.run_review(workspace, REVIEW_SLUG, DEFINITION_ONLY_POLICY)
             self.assertEqual(0, code, stderr)
             self.assertEqual("answered", second["status"])

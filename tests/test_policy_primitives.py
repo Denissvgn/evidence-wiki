@@ -342,8 +342,12 @@ class PrimitiveValidationTests(unittest.TestCase):
         )
 
     def test_a_catastrophically_backtracking_pattern_is_refused(self):
-        """`(a+)+` is six characters, so the length cap cannot be what bounds this."""
-        for pattern in ("(a+)+$", "([A-Za-z0-9]+ ?)+", "(a*)*"):
+        """`(a+)+` and `(a|a)+` are six characters, so a length cap cannot bound this.
+
+        Both exponential families: a repeated group whose body also repeats without
+        bound, and one whose alternatives can match the same text.
+        """
+        for pattern in ("(a+)+$", "([A-Za-z0-9]+ ?)+", "(a*)*", "(x{2,})+", "(a|a)+$", "(a|ab)*$"):
             with self.subTest(pattern=pattern):
                 self.assertIn(
                     "repeats a group that already repeats",
@@ -351,7 +355,23 @@ class PrimitiveValidationTests(unittest.TestCase):
                 )
 
     def test_ordinary_grouped_patterns_are_still_accepted(self):
-        for pattern in (r"(B0|B1)[A-Z0-9]{8}", r"(?:sku-)?\d+", r"[A-Za-z]+(-[A-Za-z]+)?"):
+        """A bounded inner repeat and disjoint alternatives are not catastrophic.
+
+        `(\\d{2}-)+` gives the outer quantifier one way to match, and `(foo|bar)+`
+        alternatives cannot both match the same text — refusing either would block a
+        pack author from a pattern that was always safe. `([]+]a)+` is here because a
+        `]` first in a class is a literal member, not the class close.
+        """
+        for pattern in (
+            r"(B0|B1)[A-Z0-9]{8}",
+            r"(?:sku-)?\d+",
+            r"[A-Za-z]+(-[A-Za-z]+)?",
+            r"(\d{2}-)+",
+            r"(a{2})+",
+            r"(a{1,3})+",
+            r"(foo|bar)+",
+            r"([]+]a)+",
+        ):
             with self.subTest(pattern=pattern):
                 self.assertEqual([], self.errors_for({"regex": {"field": "record/sku", "pattern": pattern}}))
 
@@ -439,6 +459,12 @@ class TimestampReaderTests(unittest.TestCase):
         earliest = datetime(2026, 8, 9, 10, 0, tzinfo=timezone.utc)
         self.assertEqual(earliest, RULES.datetime_from_value("2026-08-10"))
         self.assertEqual(earliest, RULES.datetime_from_value(date(2026, 8, 10)))
+
+    def test_a_timestamp_at_the_floor_of_representable_time_decides(self):
+        """Shifting it would underflow `datetime.min`; every bound has failed anyway."""
+        for value in ("0001-01-01", "0001-01-01T02:00:00", datetime(1, 1, 1)):
+            with self.subTest(value=str(value)):
+                self.assertIsNotNone(RULES.datetime_from_value(value))
 
     def test_a_lowercase_zulu_designator_is_accepted(self):
         """RFC 3339 spells its ABNF case-insensitively; CPython's parser does not."""
@@ -735,22 +761,20 @@ class ProvenanceEvaluationTests(unittest.TestCase):
         evaluation = RULES.evaluate_rule(rule, context(provider_ids=("fixture-agent/keepa",)))
         self.assertFalse(evaluation.passed, evaluation.reasons)
 
-    def test_a_provider_allowlist_is_matched_exactly(self):
-        """An identity allowlist is the one place prose folding must not apply.
+    def test_a_provider_allowlist_ignores_case_and_nothing_else(self):
+        """An identity allowlist is where prose folding must not apply — bar case.
 
         `expected_matches` folds case, NFKC, dashes and whitespace, which is right for
-        grounding a quote against a record and wrong here: it would admit a lookalike as
-        the id the pack allowed.
+        grounding a quote against a record and wrong here: a fullwidth or en-dash
+        lookalike is a different id. Case is the one fold worth keeping, because registry
+        metadata spells the same provider `ISO` or `iso` depending on who wrote it.
         """
         rule = self.rule(providers=["partner-catalog"])
-        for observed in (
-            "PARTNER-CATALOG",
-            "Partner-Catalog",
-            "ｐａｒｔｎｅｒ-ｃａｔａｌｏｇ",
-            "partner–catalog",
-            " partner-catalog ",
-        ):
-            with self.subTest(observed=observed):
+        for observed in ("PARTNER-CATALOG", "Partner-Catalog"):
+            with self.subTest(accepted=observed):
+                self.assertTrue(RULES.evaluate_rule(rule, context(provider_ids=(observed,))).passed)
+        for observed in ("ｐａｒｔｎｅｒ-ｃａｔａｌｏｇ", "partner–catalog", " partner-catalog ", "partner catalog"):
+            with self.subTest(refused=observed):
                 evaluation = RULES.evaluate_rule(rule, context(provider_ids=(observed,)))
                 self.assertFalse(evaluation.passed, evaluation.reasons)
 
