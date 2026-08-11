@@ -123,7 +123,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _script_errors import handle_system_exit, json_mode_requested
+from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_health import evaluate_workspace_health
 from _workspace_module_loader import load_workspace_module
 
@@ -813,6 +813,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=True)
     project_root = Path(args.project_root).expanduser().resolve()
+    # Resolved through `verify_citations` because that is the module whose `_evidence_policies`
+    # copy actually raises: sibling isolation gives every load its own class object, so
+    # catching a differently-loaded `PolicyRuleError` would catch nothing.
+    policy_rule_error = load_sibling_module("verify_citations").policies.PolicyRuleError
     try:
         if args.command == "bundle":
             document = build_bundle(project_root, args.run_id)
@@ -827,6 +831,20 @@ def main(argv: list[str] | None = None) -> int:
                 exit_code = EXIT_READY if document["verdict"] == VERDICT_SHIP else EXIT_NOT_READY
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_UNREADABLE)
+    except policy_rule_error as exc:
+        # `bundle` reaches the policy evaluator through local citation verification, which
+        # parses the active pack's rules and refuses a malformed block. That refusal is a
+        # plain exception rather than a SystemExit, so without this arm it would leave the
+        # command as a traceback where docs/orchestrator-handoff.md promises a
+        # CONFIG_INVALID envelope.
+        emit_error(
+            exc.message,
+            json_mode=json_mode,
+            error_code=exc.error_code,
+            remediation=exc.remediation,
+            details=exc.details,
+        )
+        return EXIT_UNREADABLE
 
     output = render(document)
     if args.output:

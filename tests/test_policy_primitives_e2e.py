@@ -559,16 +559,21 @@ class CoverageEvaluationChainTests(PolicyPrimitivesWorkspace, unittest.TestCase)
     def test_the_fetching_agent_path_is_never_read_as_the_delivering_provider(self):
         """`retrieved_by` names who fetched, not where the evidence came from.
 
-        The fixture's `retrieved_by` ends in an id `one_of_provenance` allows, so a rule
-        that admitted the field would pass this delivery with its registration removed.
+        With the registration removed and `retrieved_by` set to the allowed id verbatim,
+        the delivery carries the allowlisted string and nothing else. Admitting the field
+        would therefore pass it, so the `fail` below is evidence the field is not read.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.stage_workspace(Path(tmpdir))
             sidecar = self.provenance_sidecar(workspace, FRESH_SOURCE)
             document = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
-            # The premise, checked rather than assumed: the field left behind still names
-            # an allowed provider id, so a rule that read it would report a pass.
-            self.assertEqual(f"fixture-agent/{ALLOWED_PROVIDER}", document["retrieved_by"])
+            # The premise, checked rather than assumed. `retrieved_by` is set to the bare
+            # allowed id, not the usual `fixture-agent/<id>` path: provider matching is
+            # equality, so a path-shaped value would fail this rule whether or not the
+            # field were admitted, and the test would pass without proving anything. With
+            # the value spelled exactly as the allowlist spells it, the only thing keeping
+            # the verdict at `fail` is that `retrieved_by` is not read at all.
+            document["retrieved_by"] = ALLOWED_PROVIDER
             document.pop("provider_registration")
             sidecar.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 

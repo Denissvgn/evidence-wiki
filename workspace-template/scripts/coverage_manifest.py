@@ -997,9 +997,9 @@ def facet_scope_backfill_targets(
 ) -> list[str]:
     """Return the linked request ids whose scope still needs ``facet_id`` back-filled.
 
-    Read-only and deliberately lock-free: this is the pre-check of the sequencing in
-    docs/CR/cr4-backlog.md §2.5, so a conflicting request is refused *before* the facet
-    write and a refusal leaves the manifest untouched. Unknown request ids are left to
+    Read-only and deliberately lock-free: this is step one of the four-step sequence
+    ``run_set_facet`` runs, so a conflicting request is refused *before* the facet write
+    and a refusal leaves the manifest untouched. Unknown request ids are left to
     ``validate_request_ids``, which runs first and refuses them with ``REQUEST_UNKNOWN``.
 
     Every record is scanned rather than the first match per id, because the back-fill
@@ -1039,15 +1039,15 @@ def backfill_facet_scope(
 ) -> list[str]:
     """Write ``scope.facet_id`` into each named request that does not carry it yet.
 
-    Takes the source-requests lock alone — never nested inside another workspace lock
-    (docs/CR/cr4-backlog.md §2.5) — and writes through ``_write_requests_unlocked`` rather
-    than the public ``write_requests`` wrapper, which would re-acquire the same lock.
+    Takes the source-requests lock alone — never nested inside another workspace lock,
+    because two locks held at once by commands that acquire them in different orders is
+    how a deadlock is built. Writes through ``_write_requests_unlocked`` rather than the
+    public ``write_requests`` wrapper, which would re-acquire the same lock.
 
     Deliberately *not* gated by ``source_requests.require_in_order_request_mutation``:
     recording which facet a request already blocks is manifest bookkeeping, not
-    fulfilment, so it must stay available outside a delegated acquisition work order
-    (docs/CR/cr4-backlog.md T7). That gate wraps only ``fulfill`` and
-    ``record-attempt-failure``.
+    fulfilment, so it must stay available outside a delegated acquisition work order.
+    That gate wraps only ``fulfill`` and ``record-attempt-failure``.
 
     Idempotent: a request already scoped to ``facet_id`` is skipped, and when nothing
     needs writing the requests file is not rewritten at all.
@@ -1373,6 +1373,13 @@ def coverage_summary_for_question(
         evaluated = evaluate_manifest_readonly(document, policy_results_by_facet)
         validate_manifest(evaluated, expected_slug=slug, policy_vocabularies=policy_vocabularies)
     except CoverageManifestError as exc:
+        if exc.error_code == "CONFIG_INVALID":
+            # A malformed `domain_pack.policy_rules` block is a research.yml error, not a
+            # defect in this question's manifest. Degrading it to `coverage_status:
+            # invalid` would make every caller report COVERAGE_MANIFEST_INVALID against a
+            # manifest that is fine, and would hide the code the docs promise for it, so
+            # it is re-raised for the command's own CONFIG_INVALID handling.
+            raise
         summary["coverage_status"] = "invalid"
         summary["error"] = str(exc)
         return summary
@@ -1464,10 +1471,10 @@ def run_set_facet(project_root: Path, config: dict[str, Any], args: argparse.Nam
     validate_source_ids(project_root, config, accepted_source_ids)
     validate_request_ids(project_root, config, slug, blocking_request_ids)
     facet = find_facet(document, facet_id)
-    # Step 1 of docs/CR/cr4-backlog.md §2.5: refuse a request that already answers a
-    # different facet before anything is written, so a conflict leaves the manifest as
-    # it was. --clear-blocking-request-ids drops only the manifest link, so an unlinked
-    # request keeps its scope and is never a back-fill target.
+    # Step 1: refuse a request that already answers a different facet before anything is
+    # written, so a conflict leaves the manifest as it was. --clear-blocking-request-ids
+    # drops only the manifest link, so an unlinked request keeps its scope and is never a
+    # back-fill target.
     backfill_targets = facet_scope_backfill_targets(project_root, config, facet_id, blocking_request_ids)
     facet["accepted_source_ids"] = merge_unique(
         facet["accepted_source_ids"],

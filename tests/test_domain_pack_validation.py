@@ -469,10 +469,12 @@ class DomainPackValidationTests(unittest.TestCase):
                 self.QUOTE_POLICY: {
                     "primitives": ["all_of", "max_age"],
                     "manual_review_required": False,
+                    "section": "freshness_policy",
                 },
                 "pack:market-data/sku-matches": {
                     "primitives": ["any_of", "equals", "one_of_provenance"],
                     "manual_review_required": True,
+                    "section": "identity_policy",
                 },
             },
             payload["domain_pack"]["policy_rules"],
@@ -561,6 +563,34 @@ class DomainPackValidationTests(unittest.TestCase):
         self.assertEqual("fail", autonomy["status"], autonomy)
         self.assertIn(self.QUOTE_POLICY, autonomy["message"])
         self.assertIn("use a deterministic policy", autonomy["message"])
+
+    def test_a_rule_exempts_only_the_section_it_decides(self):
+        """The gate must not be switched off by a rule that decides another field.
+
+        The id is declared under both `freshness_policy` and `identity_policy` with a
+        rule only on the freshness side. The required facet names it as its
+        `identity_policy`, which no rule decides, so it still needs a human and the pack
+        must not ship as autonomously satisfiable.
+        """
+        shared = self.QUOTE_POLICY
+        facet = self.rule_backed_required_facet("no_staleness_check")
+        facet["identity_policy"] = shared
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            {
+                "freshness_policy": {shared: "A supplier quote must be at most 48 hours old."},
+                "identity_policy": {shared: "The quoted SKU must match the candidate."},
+            },
+            {shared: self.QUOTE_RULE},
+            required_facet=facet,
+        )
+
+        self.assertEqual(1, code)
+        checks = {check["id"]: check for check in payload["checks"]}
+        autonomy = checks["autonomous_required_facets"]
+        self.assertEqual("fail", autonomy["status"], autonomy)
+        self.assertIn(shared, autonomy["message"])
+        self.assertEqual("freshness_policy", payload["domain_pack"]["policy_rules"][shared]["section"])
 
     def test_rule_requiring_manual_review_keeps_a_required_facet_manual_only(self):
         code, payload = self.validate_pack_declaring_policy_rules(

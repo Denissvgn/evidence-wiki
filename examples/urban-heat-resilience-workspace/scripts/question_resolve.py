@@ -473,7 +473,19 @@ def enforce_coverage(project_root: Path, config: dict[str, Any], slug: str, mani
     frontmatter: dict[str, Any] = {"coverage_required": True}
     if manifest_value is not None:
         frontmatter["coverage_manifest"] = manifest_value
-    summary = coverage.coverage_summary_for_question(project_root, config, slug, frontmatter)
+    try:
+        summary = coverage.coverage_summary_for_question(project_root, config, slug, frontmatter)
+    except coverage.CoverageManifestError as exc:
+        # A research.yml error — a malformed `domain_pack.policy_rules` block — reaches
+        # here as a refusal rather than a summary, precisely so it is not reported against
+        # this question's manifest. Carried through with its own code so the operator is
+        # sent to the file that is actually wrong.
+        raise ResolveError(
+            EXIT_INVALID,
+            exc.error_code,
+            exc.message,
+            details=exc.details,
+        ) from exc
     manifest_label = summary.get("coverage_manifest") or f"sources/coverage/{slug}.yml"
     if summary["coverage_status"] == "missing":
         raise ResolveError(

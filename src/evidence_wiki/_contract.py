@@ -164,6 +164,10 @@ def _pack_policy_rules(
             policy_id: {
                 "primitives": sorted(_rule_primitive_names(rule.composition)),
                 "manual_review_required": rule.manual_review_required,
+                # Which vocabulary section the rule decides. One id may be declared under
+                # several, and the rule binds to exactly one, so a host reading this to
+                # learn what a pack automates cannot infer it from the id alone.
+                "section": rule.section,
             }
             for policy_id, rule in rules.items()
         }

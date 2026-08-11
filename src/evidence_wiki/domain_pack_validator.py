@@ -472,6 +472,10 @@ def policy_rules_check(scripts: LoadedScripts, domain_pack: Any) -> tuple[dict[s
         policy_id: {
             "primitives": sorted(_rule_primitive_names(rule.composition)),
             "manual_review_required": rule.manual_review_required,
+            # The vocabulary section the rule was declared under. A pack may declare one
+            # id under more than one section, and the rule decides only its own, so a
+            # consumer reasoning about which fields are automated needs to know which.
+            "section": rule.section,
         }
         for policy_id, rule in rules.items()
     }
@@ -576,18 +580,26 @@ def manual_only_policies_by_field(
     empty whenever that check failed, so a malformed declaration excludes nothing.
     """
     pack_policy_vocabularies = pack_policy_vocabularies or {}
-    deterministic = {
-        policy_id
-        for policy_id, summary in (pack_policy_rules or {}).items()
-        if not summary.get("manual_review_required", False)
-    }
+
+    def deterministic_in(field: str) -> set[str]:
+        # Per field, not one flat set: a rule decides only the section it was declared
+        # under, so subtracting an id from every field would exempt an identity policy
+        # from the gate on the strength of a rule written for the source policy -- a
+        # facet that still needs a human, shipped as though it were automated.
+        return {
+            policy_id
+            for policy_id, summary in (pack_policy_rules or {}).items()
+            if not summary.get("manual_review_required", False) and summary.get("section") == field
+        }
+
     return {
-        "source_policy": set(getattr(scripts.evidence, "MANUAL_ONLY_SOURCE_POLICIES", ()))
-        | (set(pack_policy_vocabularies.get("source_policy", {})) - deterministic),
-        "freshness_policy": set(getattr(scripts.evidence, "MANUAL_ONLY_FRESHNESS_POLICIES", ()))
-        | (set(pack_policy_vocabularies.get("freshness_policy", {})) - deterministic),
-        "identity_policy": set(getattr(scripts.evidence, "MANUAL_ONLY_IDENTITY_POLICIES", ()))
-        | (set(pack_policy_vocabularies.get("identity_policy", {})) - deterministic),
+        field: set(getattr(scripts.evidence, constant, ()))
+        | (set(pack_policy_vocabularies.get(field, {})) - deterministic_in(field))
+        for field, constant in (
+            ("source_policy", "MANUAL_ONLY_SOURCE_POLICIES"),
+            ("freshness_policy", "MANUAL_ONLY_FRESHNESS_POLICIES"),
+            ("identity_policy", "MANUAL_ONLY_IDENTITY_POLICIES"),
+        )
     }
 
 

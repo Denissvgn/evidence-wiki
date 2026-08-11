@@ -141,6 +141,10 @@ MANUAL_ONLY_SOURCE_POLICIES = ("manual_review_required", "domain_pack_allowed")
 MANUAL_ONLY_FRESHNESS_POLICIES = ("manual_review",)
 MANUAL_ONLY_IDENTITY_POLICIES: tuple[str, ...] = ()
 PACK_POLICY_ID_RE = re.compile(r"^pack:[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*$")
+# Same shape coverage_manifest.SLUG_RE enforces, restated rather than imported: a slug
+# reaching PolicyInputs comes from a manifest document, and one carrying a separator or a
+# `..` segment would escape the questions directory when joined to it.
+QUESTION_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass
@@ -200,12 +204,27 @@ class PolicyInputs:
         return self.structured_view_loads[source_id]
 
     def question_frontmatter_for(self, slug: str) -> dict[str, Any]:
-        """This question page's frontmatter mapping, read at most once per slug."""
+        """This question page's frontmatter mapping, read at most once per slug.
+
+        The questions directory comes from ``wiki.root``, which ``research.yml`` lets a
+        workspace rename; hardcoding ``wiki/`` would read a path that does not exist and
+        report every ``question_field`` rule as unresolved, blaming the question page for
+        a key it actually carries. The slug is shape-checked before it is joined, because
+        it reaches here from a coverage manifest read off disk and a path-shaped value
+        would otherwise choose which file a rule compares against.
+        """
         if slug not in self.question_frontmatters:
-            self.question_frontmatters[slug] = read_frontmatter(
-                self.project_root / "wiki" / "questions" / f"{slug}.md"
+            self.question_frontmatters[slug] = (
+                read_frontmatter(self.questions_dir() / f"{slug}.md")
+                if QUESTION_SLUG_RE.fullmatch(slug)
+                else {}
             )
         return self.question_frontmatters[slug]
+
+    def questions_dir(self) -> Path:
+        wiki = self.config.get("wiki") if isinstance(self.config.get("wiki"), dict) else {}
+        root = wiki.get("root", "wiki")
+        return self.project_root / validate_workspace_relative_path(root, "wiki.root") / "questions"
 
 
 @dataclass
@@ -1434,18 +1453,25 @@ def pack_policy_manual_result(policy: str, source_ids: list[str], definition: st
 def rule_provider_ids(inputs: PolicyInputs, source_id: str) -> tuple[str, ...]:
     """The provider identities a ``one_of_provenance`` rule may match, in a stable order.
 
-    Exactly three delivery fields carry a provider identity. ``retrieved_by`` is
-    deliberately not among them: it names the *agent* that performed the fetch and holds
-    path-shaped values such as ``fetch_sources.py/arxiv``, so admitting it would let a
-    rule match on the fetcher rather than on where the evidence came from.
+    Exactly three delivery fields carry a provider identity, and all three are read from
+    the merged provenance only. ``retrieved_by`` is deliberately not among them: it names
+    the *agent* that performed the fetch and holds path-shaped values such as
+    ``fetch_sources.py/arxiv``, so admitting it would let a rule match on the fetcher
+    rather than on where the evidence came from.
+
+    ``standards.registry_provider`` is read straight from provenance rather than through
+    ``standards_metadata``, which widens its search to the normalized record, the manifest
+    record, and finally the *discovery candidates* — rows describing what a search
+    proposed, not what was delivered. A rule that asks who delivered the evidence must not
+    be satisfiable by who was merely suggested.
     """
     provenance = inputs.provenance_by_source_id.get(source_id, {})
     registration = provenance.get("provider_registration")
-    standards = standards_metadata(inputs, source_id)
+    standards = provenance.get("standards")
     values = [
         mapping_string(registration, "id") if isinstance(registration, dict) else None,
         mapping_string(provenance, "academic_provider"),
-        standards_provider(standards) if standards else None,
+        mapping_string(standards, "registry_provider") if isinstance(standards, dict) else None,
     ]
     return tuple(unique_strings([value for value in values if value]))
 
@@ -1550,15 +1576,18 @@ def pack_policy_result(
     """Decide a policy this pack declares, or ``None`` when the pack declares no such policy.
 
     A declared rule takes precedence over the recorded-review fallback — that precedence is
-    the whole point of the rules block. The rule is looked up only once the *field's own*
-    vocabulary is known to declare the policy, so a rule written for an identity policy can
-    never decide a freshness field that merely reused the id.
+    the whole point of the rules block. The rule must have been declared under *this*
+    field's vocabulary section: a pack may declare one id under more than one section, and
+    a rule written for the source policy would otherwise decide the identity field too,
+    reporting a provenance check as though it had compared the identity the definition
+    names. A rule bound to another section leaves the policy on the review fallback, which
+    is where an undecided pack policy belongs.
     """
     definition = pack_policy_definition(inputs, field, policy)
     if definition is None:
         return None
     rule = inputs.policy_rules.get(policy)
-    if rule is None:
+    if rule is None or rule.section != field:
         return pack_policy_manual_result(policy, ids, definition)
     if not present:
         # Each evaluator already refuses an all-missing set before reaching here. Restated

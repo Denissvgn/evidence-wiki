@@ -6,10 +6,9 @@
 retrieved_at_hours_ago: 2
 origin_url: https://api.supplier.test/product/B0ABC12345
 license: CC-BY-4.0
-# The fetching agent, never a provider identity. Its trailing segment is deliberately an
-# id `one_of_provenance` allows: a rule that read `retrieved_by` as the provider would
-# pass this delivery even after `provider_registration` is taken away, and the suite
-# checks exactly that.
+# The fetching agent, never a provider identity. Provider matching is equality, so this
+# path-shaped value could not satisfy an allowlist even if the field were read; the test
+# that proves the field is ignored rewrites it to the bare allowed id first.
 retrieved_by: fixture-agent/aliexpress-ds
 provider_registration:
   id: aliexpress-ds

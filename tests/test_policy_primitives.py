@@ -341,6 +341,27 @@ class PrimitiveValidationTests(unittest.TestCase):
             self.errors_for({"regex": {"field": "record/sku", "pattern": "a" * RULES.MAX_REGEX_PATTERN_LENGTH}}),
         )
 
+    def test_a_catastrophically_backtracking_pattern_is_refused(self):
+        """`(a+)+` is six characters, so the length cap cannot be what bounds this."""
+        for pattern in ("(a+)+$", "([A-Za-z0-9]+ ?)+", "(a*)*"):
+            with self.subTest(pattern=pattern):
+                self.assertIn(
+                    "repeats a group that already repeats",
+                    self.only_error({"regex": {"field": "record/sku", "pattern": pattern}}),
+                )
+
+    def test_ordinary_grouped_patterns_are_still_accepted(self):
+        for pattern in (r"(B0|B1)[A-Z0-9]{8}", r"(?:sku-)?\d+", r"[A-Za-z]+(-[A-Za-z]+)?"):
+            with self.subTest(pattern=pattern):
+                self.assertEqual([], self.errors_for({"regex": {"field": "record/sku", "pattern": pattern}}))
+
+    def test_an_oversized_repetition_count_is_a_finding_not_a_traceback(self):
+        """`re.compile` signals this with OverflowError, which is not an `re.error`."""
+        self.assertIn(
+            "not a valid regular expression",
+            self.only_error({"regex": {"field": "record/sku", "pattern": "a{4294967296}"}}),
+        )
+
     def test_one_of_provenance_needs_a_non_empty_list(self):
         self.assertIn("providers list, domains list, or both", self.only_error({"one_of_provenance": {}}))
         self.assertIn(
@@ -401,17 +422,38 @@ class TimestampReaderTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(expected, RULES.datetime_from_value(text))
 
-    def test_a_naive_timestamp_is_read_as_utc(self):
+    def test_an_offsetless_timestamp_is_read_at_its_earliest_possible_instant(self):
+        """A host east of UTC must not be able to make stale evidence look fresh.
+
+        `2026-08-10T09:00:00` stamped at +14:00 is really `2026-08-09T19:00:00Z`. Reading
+        it as UTC would report it 14 hours fresher than it is, which is a false pass;
+        reading it at the earliest offset any zone uses can only overstate its age.
+        """
         self.assertEqual(
-            datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 9, 19, 0, tzinfo=timezone.utc),
             RULES.datetime_from_value("2026-08-10T09:00:00"),
         )
 
-    def test_a_date_only_value_becomes_midnight_utc(self):
-        """Conservative on purpose: midnight can only make a source look older."""
-        midnight = datetime(2026, 8, 10, 0, 0, tzinfo=timezone.utc)
-        self.assertEqual(midnight, RULES.datetime_from_value("2026-08-10"))
-        self.assertEqual(midnight, RULES.datetime_from_value(date(2026, 8, 10)))
+    def test_a_date_only_value_is_read_at_its_earliest_possible_instant(self):
+        """Conservative on purpose: it can only make a source look older."""
+        earliest = datetime(2026, 8, 9, 10, 0, tzinfo=timezone.utc)
+        self.assertEqual(earliest, RULES.datetime_from_value("2026-08-10"))
+        self.assertEqual(earliest, RULES.datetime_from_value(date(2026, 8, 10)))
+
+    def test_a_lowercase_zulu_designator_is_accepted(self):
+        """RFC 3339 spells its ABNF case-insensitively; CPython's parser does not."""
+        expected = datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(expected, RULES.datetime_from_value("2026-08-10T09:00:00z"))
+
+    def test_fractional_seconds_parse_on_every_supported_interpreter(self):
+        """A pack's verdict must not depend on the interpreter underneath it."""
+        expected = datetime(2026, 8, 10, 9, 0, 0, 123456, tzinfo=timezone.utc)
+        self.assertEqual(expected, RULES.datetime_from_value("2026-08-10T09:00:00.123456789Z"))
+        self.assertEqual(
+            datetime(2026, 8, 10, 9, 0, 0, 120000, tzinfo=timezone.utc),
+            RULES.datetime_from_value("2026-08-10T09:00:00.12Z"),
+        )
+        self.assertEqual(expected, RULES.datetime_from_value("2026-08-10T09:00:00.123456+0000"))
 
     def test_unreadable_values_are_none(self):
         for value in (None, "", "   ", "yesterday", 1754820000, [], {"a": 1}):
@@ -572,6 +614,16 @@ class NumericRangeEvaluationTests(unittest.TestCase):
     def view(self, price: Any) -> dict[str, Any]:
         return {"supplier_quote": {"price": price}}
 
+    def test_an_extreme_bound_decides_rather_than_raising(self):
+        """A bound past the decimal context's Emax parses, so it must also evaluate.
+
+        `normalize` raises on it, and the reason text is built before the comparison, so
+        an unguarded render would turn a rule that was about to pass into a traceback.
+        """
+        rule = self.rule(min="1", max="1e1000000")
+        evaluation = RULES.evaluate_rule(rule, context(structured_view=self.view("5")))
+        self.assertTrue(evaluation.passed, evaluation.reasons)
+
     def test_bounds_are_inclusive_on_both_ends(self):
         rule = self.rule(min=10, max=20)
         for price in (10, 15, 20, "10.000", 19.99):
@@ -648,6 +700,24 @@ class RegexEvaluationTests(unittest.TestCase):
         evaluation = RULES.evaluate_rule(rule, context(structured_view={"supplier_quote": {"price": 23.99}}))
         self.assertTrue(evaluation.passed, evaluation.reasons)
 
+    def test_a_null_field_never_satisfies_a_pattern(self):
+        """`null` is what a normalizer writes when it could not extract a value.
+
+        Matching its rendering would pass an identity check on precisely the evidence
+        that is missing, so the permissive patterns a pack actually writes must not.
+        """
+        for pattern in ("[a-z]+", ".+", r"[\w-]+"):
+            with self.subTest(pattern=pattern):
+                evaluation = RULES.evaluate_rule(
+                    self.rule(pattern), context(structured_view=self.view(None))
+                )
+                self.assertFalse(evaluation.passed, evaluation.reasons)
+                self.assertIn(RULES.REASON_REGEX_MISMATCH, evaluation.reasons[0])
+
+    def test_a_boolean_field_never_satisfies_a_pattern(self):
+        evaluation = RULES.evaluate_rule(self.rule("[a-z]+"), context(structured_view=self.view(True)))
+        self.assertFalse(evaluation.passed, evaluation.reasons)
+
 
 class ProvenanceEvaluationTests(unittest.TestCase):
     def rule(self, **lists: Any):
@@ -664,6 +734,25 @@ class ProvenanceEvaluationTests(unittest.TestCase):
         rule = self.rule(providers=["keepa"])
         evaluation = RULES.evaluate_rule(rule, context(provider_ids=("fixture-agent/keepa",)))
         self.assertFalse(evaluation.passed, evaluation.reasons)
+
+    def test_a_provider_allowlist_is_matched_exactly(self):
+        """An identity allowlist is the one place prose folding must not apply.
+
+        `expected_matches` folds case, NFKC, dashes and whitespace, which is right for
+        grounding a quote against a record and wrong here: it would admit a lookalike as
+        the id the pack allowed.
+        """
+        rule = self.rule(providers=["partner-catalog"])
+        for observed in (
+            "PARTNER-CATALOG",
+            "Partner-Catalog",
+            "ｐａｒｔｎｅｒ-ｃａｔａｌｏｇ",
+            "partner–catalog",
+            " partner-catalog ",
+        ):
+            with self.subTest(observed=observed):
+                evaluation = RULES.evaluate_rule(rule, context(provider_ids=(observed,)))
+                self.assertFalse(evaluation.passed, evaluation.reasons)
 
     def test_a_domain_hit_goes_through_the_injected_matcher(self):
         rule = self.rule(domains=["supplier.example"])

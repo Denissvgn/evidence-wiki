@@ -272,6 +272,7 @@ class PackPolicyRulesTests(unittest.TestCase):
                     "pack:temp-pack/quote-48h": {
                         "primitives": ["all_of", "max_age"],
                         "manual_review_required": True,
+                        "section": "freshness_policy",
                     },
                 },
             },

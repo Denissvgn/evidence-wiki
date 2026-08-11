@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tests._pack_policy_rule_fixture import (  # noqa: E402
     ALL_RULES,
+    FRESHNESS_POLICY,
     IDENTITY_POLICY,
     PRIMITIVE_RULES_ONLY,
     QUESTION_METADATA_BLOCK,
@@ -467,6 +468,30 @@ class PackPolicyRuleResolveTests(unittest.TestCase):
             self.assertEqual(
                 [], [key for key in frontmatter if key.startswith("human_review")], frontmatter
             )
+
+    def test_a_malformed_rules_block_refuses_as_a_config_error_not_a_manifest_one(self):
+        """The manifest is fine; research.yml is not, and the refusal must say so.
+
+        Reporting COVERAGE_MANIFEST_INVALID here would point the operator at
+        `sources/coverage/<slug>.yml` — a healthy file — and hide the CONFIG_INVALID the
+        docs promise for a malformed `domain_pack.policy_rules` block.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, answer_page = self.prepare(Path(tmpdir), rules=ALL_RULES)
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["domain_pack"]["policy_rules"][FRESHNESS_POLICY] = {
+                "all_of": [{"max_age": {"hours": 48}}]  # no `field`
+            }
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            self.run_claim(target)
+
+            code, payload, stderr = self.run_answer(target, answer_page)
+
+            self.assertEqual(2, code, stderr)
+            error = payload.get("error", payload)
+            self.assertEqual("CONFIG_INVALID", error.get("error_code"), payload)
+            self.assertIn("domain_pack.policy_rules", str(error.get("message")), payload)
 
     def test_a_definition_only_pack_policy_is_the_only_one_named_for_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -21,6 +21,9 @@ from tests._pack_policy_rule_fixture import (  # noqa: E402
     IDENTITY_POLICY,
     IDENTITY_RULE,
     PACK_NAME,
+    PROVIDER_ID,
+    SOURCE_POLICY,
+    SOURCE_RULE,
     declare_pack,
     deliver_quote,
 )
@@ -1428,6 +1431,91 @@ class PackPolicyRuleTests(unittest.TestCase):
 
     def reason_text(self, policy_result) -> str:
         return "\n".join(policy_result.reasons)
+
+    def test_a_rule_decides_only_the_section_it_was_declared_under(self):
+        """A pack may declare one id under two sections; the rule binds to exactly one.
+
+        Without that binding the source rule here would also decide the identity field,
+        reporting a provenance check as though it had compared the SKU the identity
+        definition names — a pass on evidence no rule examined.
+        """
+        shared = f"pack:{PACK_NAME}/registered-provider"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            config_path = workspace / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["domain_pack"]["policy_vocabularies"] = {
+                "source_policy": {shared: "Must come from a registered provider."},
+                "identity_policy": {shared: "The quoted SKU must match the candidate."},
+            }
+            config["domain_pack"]["policy_rules"] = {
+                shared: {"all_of": [{"one_of_provenance": {"providers": [PROVIDER_ID]}}]}
+            }
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            self.add_quote_source(workspace, "quote:wrong-sku", age_hours=2, sku="B0WRONGSKU9")
+            helper, inputs = self.load_inputs(workspace)
+
+            source = helper.evaluate_source_policy(shared, ["quote:wrong-sku"], inputs)
+            identity = helper.evaluate_identity_policy(shared, ["quote:wrong-sku"], inputs)
+
+            self.assertEqual(helper.VERDICT_OK, source.verdict, self.reason_text(source))
+            self.assertEqual(helper.VERDICT_MANUAL_REVIEW, identity.verdict, self.reason_text(identity))
+            self.assertIn("The quoted SKU must match", self.reason_text(identity))
+
+    def test_a_discovery_candidate_is_never_a_delivered_provider_identity(self):
+        """`one_of_provenance` asks who delivered the evidence, not who was proposed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={SOURCE_POLICY: SOURCE_RULE})
+            source_id = self.add_quote_source(
+                workspace, "quote:unattributed", age_hours=2, provider_id=None
+            )
+            origin = f"https://api.supplier.test/product/{CANDIDATE_SKU}"
+            candidates = workspace / "sources" / "discovery"
+            candidates.mkdir(parents=True, exist_ok=True)
+            (candidates / "candidates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "candidate_id": "cand-1",
+                        "source_id": source_id,
+                        "url": origin,
+                        "standards": {"registry_provider": PROVIDER_ID},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            helper, inputs = self.load_inputs(workspace)
+
+            self.assertEqual((), helper.rule_provider_ids(inputs, source_id))
+            decided = helper.evaluate_source_policy(SOURCE_POLICY, [source_id], inputs)
+            self.assertEqual(helper.VERDICT_FAIL, decided.verdict, self.reason_text(decided))
+
+    def test_the_questions_directory_follows_the_configured_wiki_root(self):
+        """`wiki.root` is renameable, and every other reader honours it."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            config_path = workspace / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["wiki"] = {"root": "knowledge"}
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            moved = workspace / "knowledge" / "questions"
+            moved.mkdir(parents=True)
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            (workspace / "wiki" / "questions" / f"{QUESTION_SLUG}.md").rename(moved / f"{QUESTION_SLUG}.md")
+            self.add_quote_source(workspace, "quote:matching", age_hours=2, sku=CANDIDATE_SKU)
+            helper, inputs = self.load_inputs(workspace)
+
+            decided = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:matching"], inputs, question_slug=QUESTION_SLUG
+            )
+            self.assertEqual(helper.VERDICT_OK, decided.verdict, self.reason_text(decided))
+
+    def test_a_path_shaped_slug_never_leaves_the_questions_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            helper, inputs = self.load_inputs(workspace)
+            self.assertEqual({}, inputs.question_frontmatter_for("../../etc/passwd"))
+            self.assertEqual({}, inputs.question_frontmatter_for("/etc/hosts"))
 
     def test_pack_freshness_rule_decides_the_quote_instead_of_queueing_it(self):
         """The headline: 48h declared, a 50-hour quote fails, a fresh one passes, no review."""

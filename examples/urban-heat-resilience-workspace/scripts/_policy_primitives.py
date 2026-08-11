@@ -52,12 +52,13 @@ the sources least likely to deserve the benefit of the doubt.
 
 from __future__ import annotations
 
+import decimal
 import math
 import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -110,8 +111,9 @@ RULE_KEYS = ("all_of", "any_of", "manual_review_required")
 # — the deepest shape a policy has needed. The cap keeps a declaration readable and its
 # evaluation cost bounded by the declaration itself rather than by the data.
 MAX_COMPOSITION_DEPTH = 3
-# A pattern long enough to be unreadable is long enough to hide a catastrophic-backtracking
-# construct from the reviewer approving the pack, so the limit is on the declaration.
+# Keeps a declaration readable for the reviewer approving the pack. It is NOT what bounds
+# backtracking — `(a+)+` is six characters — so catastrophic constructs are refused
+# separately by `_nested_quantifier_span`.
 MAX_REGEX_PATTERN_LENGTH = 512
 # Deliberately NOT pack-configurable: a pack that could widen this would be loosening a
 # fail-closed bound from inside the thing being bounded. Five minutes absorbs ordinary NTP
@@ -267,11 +269,19 @@ class Rule:
     ``manual_review_required`` is carried, never acted on here. Whether a policy that
     *passes* its rule still needs a human is the evaluator's verdict to render;
     :func:`evaluate_rule` answers only "does the evidence satisfy the declaration".
+
+    ``section`` is the ``policy_vocabularies`` section the id was declared under, kept
+    rather than discarded because a facet names one policy per section and the same id
+    may be declared under more than one. Without it a consumer looking a rule up by id
+    alone would let a rule written for one section decide another section's field.
     """
 
     policy_id: str
     composition: Primitive
     manual_review_required: bool = False
+    #: Empty only for a Rule built outside :func:`pack_policy_rules`; it then matches no
+    #: section, so an unbound rule falls back to review rather than deciding anything.
+    section: str = ""
 
 
 @dataclass(frozen=True)
@@ -356,10 +366,125 @@ class RuleEvaluation:
     reasons: list[str]
 
 
+#: The largest UTC offset any zone uses (+14:00, Kiritimati). A timestamp that names no
+#: offset is read as the *earliest* instant it could denote — its local time at +14:00 —
+#: so an unknown zone can only make evidence look older than it is. Reading it as UTC
+#: instead would make a delivery from any zone east of UTC look fresher, which is a false
+#: pass, and this module's whole posture is that a gate may only fail closed.
+MAX_UTC_OFFSET = timedelta(hours=14)
+
+
 def _as_utc(value: datetime) -> datetime:
+    """Plain normalization: a naive value is the caller's own UTC clock or literal text.
+
+    Used where the value is *not* evidence whose zone is in question — the injected
+    ``now``, and the canonical rendering an ``equals`` operand is compared as. Shifting
+    either would be wrong: it would age every source by the offset, and it would stop a
+    question's frontmatter timestamp comparing equal to the same instant in a record.
+    """
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _as_utc_earliest(value: datetime) -> datetime:
+    """The earliest instant a value could denote, for reading delivered evidence.
+
+    Only :func:`datetime_from_value` uses this. A delivered timestamp that names no
+    offset was written by a host whose zone we do not know, so it is read at the extreme
+    that can only make the evidence look older — never fresher, which would be a pass the
+    gate should have refused.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc) - MAX_UTC_OFFSET
+    return value.astimezone(timezone.utc)
+
+
+#: A trailing UTC designator. RFC 3339 §5.6 spells its ABNF case-insensitively, so a
+#: lowercase `z` is a valid timestamp that CPython's parser rejects on every version.
+_ISO_ZULU_RE = re.compile(r"[Zz]$")
+#: A trailing numeric offset written without its colon (`+0000`), which `fromisoformat`
+#: did not accept before Python 3.11.
+_ISO_BARE_OFFSET_RE = re.compile(r"([+-]\d{2})(\d{2})$")
+#: Fractional seconds. Before 3.11 `fromisoformat` accepted exactly 3 or 6 digits, so a
+#: nanosecond timestamp — what Go-backed vendor APIs emit — parses on 3.11+ and not on
+#: 3.10. Truncating to microseconds is what the later parser does anyway, which keeps one
+#: pack's verdict from depending on the interpreter underneath it.
+_ISO_FRACTION_RE = re.compile(r"\.(\d+)")
+
+
+#: Characters that repeat whatever precedes them an unbounded number of times. `?` is
+#: absent on purpose: it repeats at most once, so it cannot drive the exponential blowup
+#: this check exists to refuse.
+_UNBOUNDED_QUANTIFIERS = frozenset("*+{")
+
+
+def _nested_quantifier_span(pattern: str) -> str | None:
+    """Return the quantified group whose body also repeats, or ``None`` when none does.
+
+    `(a+)+` and `([A-Za-z0-9]+ ?)+` are six and seventeen characters, so a length cap
+    cannot refuse them, and `re` offers no step budget or timeout to bound them at match
+    time. The input that triggers the blowup is the *source's* text, not the pack's, so a
+    verbose upstream record would hang evaluation with the gate neither open nor closed.
+    Refusing the construct where the pack author can see the message is the only place
+    the cost is bounded.
+
+    Deliberately syntactic and conservative — it reads nesting, not language emptiness,
+    so it can refuse a pattern that would have been safe. Rewriting such a pattern
+    without the nested quantifier is always possible; hanging on real evidence is not
+    always recoverable.
+    """
+    depth_starts: list[int] = []
+    index = 0
+    in_class = False
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if in_class:
+            in_class = char != "]"
+            index += 1
+            continue
+        if char == "[":
+            in_class = True
+        elif char == "(":
+            depth_starts.append(index)
+        elif char == ")" and depth_starts:
+            start = depth_starts.pop()
+            following = pattern[index + 1 : index + 2]
+            if following in _UNBOUNDED_QUANTIFIERS and _repeats_within(pattern[start + 1 : index]):
+                return pattern[start : index + 2]
+        index += 1
+    return None
+
+
+def _repeats_within(body: str) -> bool:
+    """Whether a group body contains an unbounded quantifier of its own."""
+    index = 0
+    in_class = False
+    while index < len(body):
+        char = body[index]
+        if char == "\\":
+            index += 2
+            continue
+        if in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char in _UNBOUNDED_QUANTIFIERS:
+            return True
+        index += 1
+    return False
+
+
+def _normalize_iso_offset(text: str) -> str:
+    """Spell an RFC 3339 timestamp the way every supported `fromisoformat` accepts it."""
+    text = _ISO_ZULU_RE.sub("+00:00", text)
+    text = _ISO_BARE_OFFSET_RE.sub(r"\1:\2", text)
+    # Padded as well as truncated: `.12` is two digits, which 3.10 also rejects, and
+    # `.120000` is the same instant.
+    return _ISO_FRACTION_RE.sub(lambda match: "." + match.group(1)[:6].ljust(6, "0"), text, count=1)
 
 
 def datetime_from_value(value: Any) -> datetime | None:
@@ -371,30 +496,29 @@ def datetime_from_value(value: Any) -> datetime | None:
     reader ``max_age`` needs; the two are deliberately separate rather than one widened
     function, because every existing caller of the date reader wants a date.
 
-    A **date-only** value is valid ISO 8601 and is accepted, read as midnight UTC. That
-    is the conservative direction on purpose: under ``max_age`` midnight can only make a
-    source look *older* than it is, never fresher, so the choice can produce a false
-    ``fail`` (which a human sees and can correct) but never a false ``pass`` (which
-    nobody sees). A naive datetime is likewise read as UTC.
+    A value that names **no UTC offset** — a bare date, a naive datetime, an offset-less
+    ISO string — is read as the earliest instant it could denote, by way of
+    :data:`MAX_UTC_OFFSET`. That is the conservative direction on purpose: under
+    ``max_age`` it can only make a source look *older* than it is, never fresher, so the
+    choice can produce a false ``fail`` (which a human sees and can correct) but never a
+    false ``pass`` (which nobody sees).
     """
     if isinstance(value, datetime):
-        return _as_utc(value)
+        return _as_utc_earliest(value)
     if isinstance(value, date):
-        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+        return _as_utc_earliest(datetime(value.year, value.month, value.day))
     if not isinstance(value, str) or not value.strip():
         return None
-    text = value.strip()
+    text = _normalize_iso_offset(value.strip())
     try:
-        # `fromisoformat` did not accept a trailing `Z` before Python 3.11, and this
-        # package supports 3.10, so the offset is spelled out before parsing.
-        return _as_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
+        return _as_utc_earliest(datetime.fromisoformat(text))
     except ValueError:
         pass
     try:
         parsed = date.fromisoformat(text)
     except ValueError:
         return None
-    return datetime(parsed.year, parsed.month, parsed.day, tzinfo=timezone.utc)
+    return _as_utc_earliest(datetime(parsed.year, parsed.month, parsed.day))
 
 
 def _canonical_operand(value: Any) -> Any:
@@ -419,8 +543,19 @@ def _value_kind(value: Any) -> str:
 
 
 def _format_number(value: Decimal) -> str:
-    """Render a declared bound the way its author wrote it: 48, not 48.0 or 4.8E+1."""
-    return format(value.normalize(), "f")
+    """Render a declared bound the way its author wrote it: 48, not 48.0 or 4.8E+1.
+
+    ``normalize`` is a context operation, so a bound whose exponent exceeds the decimal
+    context's ``Emax`` raises rather than returning a string. That bound parsed cleanly
+    at declaration time, so the raise would land at answer time, inside the reason text
+    built *before* the comparison — turning a rule that was about to pass into a
+    traceback. An exponent that extreme has no readable plain form anyway, so it falls
+    back to the value's own spelling.
+    """
+    try:
+        return format(value.normalize(), "f")
+    except decimal.DecimalException:
+        return str(value)
 
 
 def _reworded(detail: str, document_label: str) -> str:
@@ -599,11 +734,21 @@ def _parse_regex(body: dict[str, Any], label: str) -> tuple[Primitive | None, li
         return None, [
             f"{label}.pattern is {len(pattern)} characters; the limit is {MAX_REGEX_PATTERN_LENGTH}"
         ]
+    span = _nested_quantifier_span(pattern)
+    if span is not None:
+        return None, [
+            f"{label}.pattern repeats a group that already repeats ({span!r}), which can "
+            "backtrack catastrophically on ordinary source text; rewrite it without the "
+            "nested quantifier"
+        ]
     try:
         # Compiled here, at declaration time, so a pack ships a pattern that is known to
         # compile rather than one that raises on the first source it is asked about.
+        # `re.compile` signals an oversized repetition count with OverflowError and a
+        # deeply nested one with RecursionError, neither of which is an `re.error`; they
+        # are caught here because `declaration_errors` promises never to raise.
         compiled = re.compile(pattern)
-    except re.error as exc:
+    except (re.error, OverflowError, RecursionError) as exc:
         return None, [f"{label}.pattern is not a valid regular expression: {exc}"]
     return Primitive(name="regex", field=ref, pattern=pattern, compiled=compiled), []
 
@@ -686,7 +831,7 @@ def _parse_primitive(entry: Any, *, label: str, depth: int) -> tuple[Primitive |
     return _LEAF_PARSERS[name](body, scoped)
 
 
-def _parse_rule(policy_id: str, declaration: Any, label: str) -> tuple[Rule | None, list[str]]:
+def _parse_rule(policy_id: str, declaration: Any, label: str, section: str = "") -> tuple[Rule | None, list[str]]:
     if not isinstance(declaration, dict):
         return None, [f"{label} must be a mapping declaring exactly one of all_of or any_of"]
     present = [key for key in COMPOSITION_PRIMITIVES if key in declaration]
@@ -705,7 +850,15 @@ def _parse_rule(policy_id: str, declaration: Any, label: str) -> tuple[Rule | No
     )
     if composition is None:
         return None, errors
-    return Rule(policy_id=policy_id, composition=composition, manual_review_required=manual_review), []
+    return (
+        Rule(
+            policy_id=policy_id,
+            composition=composition,
+            manual_review_required=manual_review,
+            section=section,
+        ),
+        [],
+    )
 
 
 def _declared_vocabulary(domain_pack: dict[str, Any]) -> dict[str, str]:
@@ -776,7 +929,7 @@ def _collect_declarations(domain_pack: Any) -> tuple[dict[str, Rule], list[str]]
         if policy_id in rules:
             errors.append(f"{label} is declared more than once")
             continue
-        rule, rule_errors = _parse_rule(policy_id, declaration, label)
+        rule, rule_errors = _parse_rule(policy_id, declaration, label, section)
         errors.extend(rule_errors)
         if rule is not None:
             rules[policy_id] = rule
@@ -976,6 +1129,18 @@ def _evaluate_regex(primitive: Primitive, context: RuleContext) -> tuple[bool, s
     resolved = resolve_field(context, primitive.field)
     if isinstance(resolved, ResolutionFailure):
         return False, resolved.reason(context.source_id)
+    # A present-but-null field resolves successfully — `is_scalar(None)` is true — and
+    # canonicalizes to the text "null", which any permissive pattern matches. `null` is
+    # what a normalizer writes when it could not extract a value, so matching its
+    # rendering would pass an identity check on precisely the evidence that is missing.
+    # Booleans render the same way and are never an identity either.
+    if resolved.value is None or isinstance(resolved.value, bool):
+        return False, _reason(
+            REASON_REGEX_MISMATCH,
+            context.source_id,
+            f"holds {_structured_view.canonical_scalar(resolved.value)}, not text a pattern can identify.",
+            primitive.field,
+        )
     target_text = _structured_view.canonical_scalar(resolved.value)
     # `fullmatch`, never `search`: `search` would reintroduce implicit containment, which
     # is precisely the weakness structured-view equality exists to remove. An author who
@@ -997,7 +1162,11 @@ def _evaluate_regex(primitive: Primitive, context: RuleContext) -> tuple[bool, s
 def _evaluate_one_of_provenance(primitive: Primitive, context: RuleContext) -> tuple[bool, str]:
     for allowed in primitive.providers:
         for observed in context.provider_ids:
-            if _structured_view.expected_matches(observed, allowed):
+            # Exact equality, not `expected_matches`. That helper folds case, NFKC,
+            # dashes and whitespace, which is right for grounding prose against a record
+            # and wrong for an identity allowlist: it would admit `PARTNER-CATALOG`, a
+            # fullwidth spelling, and an en-dash lookalike as the id the pack allowed.
+            if observed == allowed:
                 return True, _satisfied(
                     context.source_id,
                     f"was delivered by provider {observed!r}, which one_of_provenance allows.",
