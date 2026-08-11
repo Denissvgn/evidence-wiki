@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-11
+
 - Close five spellings of catastrophic backtracking that a pack's `regex` rules could
   ship past `pack validate`. The declaration-time guard exists because the text a
   pattern runs against is the *source's*, and `re` offers no step budget to bound a
@@ -202,8 +204,6 @@
   fetching agent rather than where the evidence came from. Judgement stays where it
   belongs: `pack:general-science/study-recency` — recent enough *for the scientific
   question* — ships with no rule, and should not get one.
-
-## 0.3.0 - 2026-08-10
 
 - Drive a workspace from Python without spawning a process per operation. Every
   interaction previously cost a `subprocess` spawn plus JSON-envelope parsing,
