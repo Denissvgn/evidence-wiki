@@ -2112,7 +2112,12 @@ class DocumentedWorkflowTests(unittest.TestCase):
         self.assertIn("All remaining questions await human review", orchestration)
         self.assertIn("ORCHESTRATION_TRUSTED_INPUT_CHANGED", orchestration)
         self.assertIn("review.escalation_scope", policies)
-        self.assertIn("CR-9", policies)
+        # The scoping section has to keep saying what *reduces* how often a human is
+        # needed. That used to be a forward reference to unshipped work; now it is the
+        # policy-rules vocabulary, and the doc must point at it rather than at an
+        # internal backlog path that never ships inside a workspace.
+        self.assertIn("domain_pack.policy_rules", policies)
+        self.assertNotIn("docs/CR", policies)
 
     def test_documented_external_review_workflow_ships_a_scoped_workspace(self):
         """Execute the question-api review command sequence end to end."""

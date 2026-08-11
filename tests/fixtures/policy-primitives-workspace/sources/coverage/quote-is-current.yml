@@ -1,0 +1,22 @@
+# Every policy on this facet is decided by a rule the pack declares, so nothing here
+# routes to a person. This is the manifest CR-9 acceptance criterion 3 is about.
+schema_version: "1.0"
+question_slug: quote-is-current
+created_at: "2026-08-11T00:00:00Z"
+updated_at: "2026-08-11T00:00:00Z"
+coverage_profile: supplier-quote
+coverage_verdict: pending
+required_facets:
+  - facet_id: supplier-quote
+    description: A current supplier quote for the candidate SKU.
+    required: true
+    evidence_path: vendor_product_spec
+    source_policy: pack:market-data/quote-provider
+    freshness_policy: pack:market-data/quote-48h
+    identity_policy: pack:market-data/sku-matches-candidate
+    min_sources: 1
+    accepted_source_ids:
+      - quote:supplier-fresh
+    blocking_request_ids: []
+    facet_verdict: pending
+optional_facets: []

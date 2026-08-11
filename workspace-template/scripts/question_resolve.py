@@ -483,11 +483,16 @@ def enforce_coverage(project_root: Path, config: dict[str, Any], slug: str, mani
             details={"manifest_path": manifest_label},
         )
     if summary["coverage_status"] == "invalid":
+        # The summary names which artifact was wrong. A malformed `domain_pack.policy_rules`
+        # block arrives as CONFIG_INVALID, and reporting it as COVERAGE_MANIFEST_INVALID
+        # would send the operator to a manifest that is fine; anything else really is this
+        # question's manifest, so only that case names the manifest path.
+        error_code = summary.get("error_code") or "COVERAGE_MANIFEST_INVALID"
         raise ResolveError(
             EXIT_INVALID,
-            "COVERAGE_MANIFEST_INVALID",
+            error_code,
             summary.get("error") or f"coverage manifest is invalid: {manifest_label}",
-            details={"manifest_path": manifest_label},
+            details=({"manifest_path": manifest_label} if error_code == "COVERAGE_MANIFEST_INVALID" else {}),
         )
     verdict = summary["coverage_verdict"]
     if verdict != "pass":

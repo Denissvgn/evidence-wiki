@@ -14,8 +14,11 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -24,7 +27,8 @@ if str(SRC_ROOT) not in sys.path:
 
 import evidence_wiki
 from evidence_wiki import _contract as contract_module
-from evidence_wiki import cli
+from evidence_wiki import cli, resources
+from evidence_wiki._script_host import load_packaged_script
 
 
 def run_cli_contract() -> str:
@@ -190,6 +194,156 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
         self.assertIn("library_api", payload)
         self.assertIn("orchestration_capabilities", payload)
         self.assertIn("artifact_schemas", payload)
+
+
+class PackPolicyRulesTests(unittest.TestCase):
+    """`_pack_policy_rules` (CR-9 T6): the `policy_rules` block published beside
+    `policy_vocabulary_definitions`.
+
+    Exercised directly against the injected-parameter helper rather than through a
+    full `evidence_wiki.contract()` call, mirroring how the module was written to be
+    tested: ``root`` names an arbitrary ``domain-packs`` directory, decoupled from
+    where ``policy_primitives_module`` itself was loaded from, so these cases never
+    have to touch the real ``domain-packs/`` tree that ships with the package.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with resources.assets_root() as root:
+            cls.policy_primitives_module = load_packaged_script(root, "_policy_primitives")
+
+    @staticmethod
+    def _root_with_pack(tmpdir: Path, overlay_document: dict) -> Path:
+        pack_dir = tmpdir / "domain-packs" / "temp-pack"
+        pack_dir.mkdir(parents=True)
+        (pack_dir / "research.overlay.yml").write_text(
+            yaml.safe_dump(overlay_document), encoding="utf-8"
+        )
+        return tmpdir
+
+    def test_no_domain_packs_directory_yields_an_empty_block(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = contract_module._pack_policy_rules(Path(tmpdir), self.policy_primitives_module, yaml)
+        self.assertEqual({}, result)
+
+    def test_a_pack_declaring_no_rules_is_absent_from_the_block(self):
+        # Same posture as `_pack_policy_vocabularies`: a pack that declares nothing
+        # relevant is left out entirely rather than published as an empty entry.
+        overlay = {
+            "domain_pack": {
+                "name": "temp-pack",
+                "policy_vocabularies": {
+                    "freshness_policy": {
+                        "pack:temp-pack/quote-48h": "A supplier quote must be at most 48 hours old.",
+                    },
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root_with_pack(Path(tmpdir), overlay)
+            result = contract_module._pack_policy_rules(root, self.policy_primitives_module, yaml)
+        self.assertEqual({}, result)
+
+    def test_a_populated_rule_reports_its_primitives_and_review_flag(self):
+        overlay = {
+            "domain_pack": {
+                "name": "temp-pack",
+                "policy_vocabularies": {
+                    "freshness_policy": {
+                        "pack:temp-pack/quote-48h": "A supplier quote must be at most 48 hours old.",
+                    },
+                },
+                "policy_rules": {
+                    "pack:temp-pack/quote-48h": {
+                        "manual_review_required": True,
+                        "all_of": [
+                            {"max_age": {"field": "provenance/retrieved_at", "hours": 48}},
+                        ],
+                    },
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root_with_pack(Path(tmpdir), overlay)
+            result = contract_module._pack_policy_rules(root, self.policy_primitives_module, yaml)
+        self.assertEqual(
+            {
+                "temp-pack": {
+                    "pack:temp-pack/quote-48h": {
+                        "primitives": ["all_of", "max_age"],
+                        "manual_review_required": True,
+                        "section": "freshness_policy",
+                    },
+                },
+            },
+            result,
+        )
+
+    def test_primitive_names_are_sorted_and_deduplicated_across_a_nested_composition(self):
+        overlay = {
+            "domain_pack": {
+                "name": "temp-pack",
+                "policy_vocabularies": {
+                    "identity_policy": {
+                        "pack:temp-pack/sku-matches": "The quoted SKU must match the candidate.",
+                    },
+                },
+                "policy_rules": {
+                    "pack:temp-pack/sku-matches": {
+                        "any_of": [
+                            {
+                                "all_of": [
+                                    {
+                                        "equals": {
+                                            "field": "record/supplier_quote/sku",
+                                            "question_field": "metadata/candidate_sku",
+                                        }
+                                    },
+                                    {"one_of_provenance": {"providers": ["aliexpress-ds"]}},
+                                ]
+                            },
+                            {"one_of_provenance": {"providers": ["partner-catalog"]}},
+                        ],
+                    },
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root_with_pack(Path(tmpdir), overlay)
+            result = contract_module._pack_policy_rules(root, self.policy_primitives_module, yaml)
+        entry = result["temp-pack"]["pack:temp-pack/sku-matches"]
+        self.assertEqual(["all_of", "any_of", "equals", "one_of_provenance"], entry["primitives"])
+        self.assertFalse(entry["manual_review_required"])
+
+    def test_a_malformed_rule_is_skipped_rather_than_raised(self):
+        # `not_a_real_primitive` is not in `PRIMITIVE_NAMES`, so `pack_policy_rules`
+        # raises `PolicyRuleError`; the walk must catch exactly that type and move on,
+        # the same posture `_pack_policy_vocabularies` takes on `CoverageManifestError`.
+        overlay = {
+            "domain_pack": {
+                "name": "temp-pack",
+                "policy_vocabularies": {
+                    "freshness_policy": {
+                        "pack:temp-pack/quote-48h": "A supplier quote must be at most 48 hours old.",
+                    },
+                },
+                "policy_rules": {
+                    "pack:temp-pack/quote-48h": {"all_of": [{"not_a_real_primitive": {}}]},
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root_with_pack(Path(tmpdir), overlay)
+            result = contract_module._pack_policy_rules(root, self.policy_primitives_module, yaml)
+        self.assertEqual({}, result)
+
+    def test_the_block_is_reachable_through_the_full_contract_payload(self):
+        # End-to-end through `evidence_wiki.contract()` itself, not just the helper:
+        # on a stock checkout no shipped pack declares rules, so the key exists and
+        # is empty -- additive, and distinguishable from the key being absent.
+        payload = evidence_wiki.contract()
+        self.assertIn("policy_rules", payload)
+        self.assertEqual({}, payload["policy_rules"])
 
 
 if __name__ == "__main__":

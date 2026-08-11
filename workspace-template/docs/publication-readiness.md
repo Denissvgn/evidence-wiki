@@ -53,6 +53,18 @@ question a rejected review returned to `open`: that question has no answer to
 review, and it independently holds the workspace verdict at `in_progress`, so it
 cannot reach `ship` regardless.
 
+A recorded review also settles the coverage policy it names. Answer export
+re-evaluates policies live, so a policy that needs a person keeps returning
+`manual_review` however the review went — reading that as an open item
+regardless would hold every workspace carrying such a policy at
+`attention_required` permanently, and leave the review unable to satisfy the
+gate it was collected for. The gate therefore matches each `manual_review`
+verdict against the question's recorded `human_reviews` entries, per policy id,
+and only an `accepted` verdict settles one. A policy with no entry, or one whose
+review was rejected, is still an open item; and no review settles a policy that
+returned `fail` or `contradicted` — accepting a policy is not licence to publish
+evidence that failed it.
+
 Standards coverage policies fail closed through the same `coverage` and
 `currentness` paths. Common standards no-ship reasons include
 `standard_reference_missing`, `standard_edition_missing`,

@@ -188,6 +188,24 @@ such as `official_standards_registry`, `current_standard_reference`, and
 `standard_designation_matches_registry`, but it does not grant rights to store
 full standards text.
 
+A domain pack may require evidence to come from a named provider, through a policy
+rule using `one_of_provenance: {providers: [...]}` (see
+[evidence-policies.md](evidence-policies.md)). Provider membership is decided
+against exactly three sidecar fields — `provider_registration.id` (see
+[provider-registration.md](provider-registration.md)), `academic_provider`, and
+`standards.registry_provider` — matched exactly but for case, since registry
+metadata spells the same provider `ISO` or `iso` depending on who wrote the
+sidecar. Nothing else is folded: a fullwidth or en-dash lookalike of an allowed
+id is a different id. A host delivering
+through this contract that wants its sources to satisfy such a rule stamps
+`provider_registration.id` with its own connector id. `retrieved_by` is never
+consulted for provider membership: it identifies the *agent* that performed the
+fetch and carries path-shaped values such as `fetch_sources.py/arxiv`, so matching
+on it would match the fetcher rather than where the evidence came from. The
+`domains` variant of the same primitive needs no extra fields — it matches the
+host of `origin_url`, which every delivery already records — and is the
+zero-effort path for a host that would rather not stamp registration blocks.
+
 Legal, regulatory, tax, and product evidence can record currentness metadata in
 the same sidecar. `effective_date` and `publication_date` should be ISO dates or
 timestamps. `validity_period` uses ISO interval text such as

@@ -118,6 +118,15 @@ fixtures:
     shipped_paths:
       - tests/fixtures/mutation-fault-recovery/**
   - <<: *synthetic_defaults
+    stable_id: policy-primitives-workspace
+    source_work: Synthetic domain-pack workspace exercising deterministic policy primitives end to end
+    created_at: 2026-08-11
+    transformations: >-
+      Wholly synthetic pack declarations, supplier quotes, provenance sidecars, and
+      structured views; source ages are declared as offsets rather than instants.
+    shipped_paths:
+      - tests/fixtures/policy-primitives-workspace/**
+  - <<: *synthetic_defaults
     stable_id: pdf-extraction
     source_work: Synthetic PDF reading-order and layout parser inputs
     transformations: Wholly synthetic prose and layout markers shaped to exercise title, abstract, column, table, and figure extraction.

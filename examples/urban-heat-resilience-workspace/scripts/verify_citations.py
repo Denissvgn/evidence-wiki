@@ -857,6 +857,18 @@ def main(argv: list[str] | None = None) -> int:
             details={"provider_error": redact_secrets(exc.message)},
         )
         return EXIT_INVALID
+    except policies.PolicyRuleError as exc:
+        # Loading policy inputs parses the active pack's declarative policy rules and
+        # refuses a malformed block rather than losing its automation. Caught through
+        # `policies` because that is the module whose class object is actually raised.
+        emit_error(
+            redact_secrets(exc.message),
+            json_mode=json_mode,
+            error_code=exc.error_code,
+            remediation=redact_secrets(exc.remediation),
+            details=redact_secrets(exc.details),
+        )
+        return EXIT_INVALID
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
 

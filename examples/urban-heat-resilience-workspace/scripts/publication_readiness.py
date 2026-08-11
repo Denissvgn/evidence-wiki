@@ -29,6 +29,9 @@ SCHEMA_VERSION = "1.0"
 EXIT_READY = 0
 EXIT_NOT_READY = 1
 EXIT_UNREADABLE = 2
+#: The verdict `question_resolve.py` writes into a `human_reviews` entry a person
+#: accepted; that script defines the vocabulary, this gate only reads it.
+REVIEW_VERDICT_ACCEPTED = "accepted"
 VERDICT_SHIP = "ship"
 VERDICT_NO_SHIP = "no_ship"
 VERDICT_BLOCKED = "blocked_on_sources"
@@ -123,7 +126,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _script_errors import handle_system_exit, json_mode_requested
+from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_health import evaluate_workspace_health
 from _workspace_module_loader import load_workspace_module
 
@@ -390,6 +393,43 @@ def grounding_failure_reason(slug: str, result: dict[str, Any]) -> str:
     return f"{slug} grounding claim {claim} from {source_id} returned {outcome}."
 
 
+def _policy_rule_error() -> type[BaseException]:
+    """The refusal class a malformed ``domain_pack.policy_rules`` block raises.
+
+    Resolved through ``verify_citations`` because that is the module whose
+    ``_evidence_policies`` copy actually raises: sibling isolation gives every load its
+    own class object, so catching a differently-loaded ``PolicyRuleError`` would catch
+    nothing. Resolved lazily, inside the ``except`` clause that needs it, so the default
+    readiness path never pays for a module it does not otherwise reach and a loader
+    failure cannot escape past the ``SystemExit`` arm that exists to turn it into an
+    envelope.
+    """
+    return load_sibling_module("verify_citations").policies.PolicyRuleError
+
+
+def settled_review_policies(question: dict[str, Any]) -> set[str]:
+    """The policy ids a person accepted on this question, from its recorded reviews.
+
+    Both reviewer topologies write these entries: ``question_resolve.py approve`` accepts
+    every still-pending policy in one call, and ``question_resolve.py review --policy P
+    --verdict accepted`` records one a host collected in its own queue. Matching per
+    policy rather than on the question's overall approval keeps the grain of the record:
+    accepting one policy says nothing about another, and a question with any policy still
+    unreviewed is held by the pending-review branch above regardless.
+
+    Fail-closed by construction — only an ``accepted`` verdict counts, so a policy with no
+    entry, or one whose review was rejected, is still an open item.
+    """
+    entries = question.get("human_reviews")
+    if not isinstance(entries, list):
+        return set()
+    return {
+        str(entry.get("policy"))
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("verdict") == REVIEW_VERDICT_ACCEPTED and entry.get("policy")
+    }
+
+
 def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tuple[bool, bool, bool]:
     no_ship = False
     blocked = False
@@ -438,6 +478,7 @@ def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tu
                 if not isinstance(result, dict) or result.get("result") == "verified":
                     continue
                 append_reason(reasons, "grounding", grounding_failure_reason(str(slug), result))
+        accepted_reviews = settled_review_policies(question)
         facets = question.get("coverage_facets") if isinstance(question.get("coverage_facets"), list) else []
         for facet in facets:
             if not isinstance(facet, dict):
@@ -448,6 +489,15 @@ def classify_export(export: dict[str, Any], reasons: dict[str, list[str]]) -> tu
                 verdict = result.get("verdict")
                 policy = str(result.get("policy", "unknown"))
                 if verdict == "pass":
+                    continue
+                if verdict == "manual_review" and policy in accepted_reviews:
+                    # The policy asked for a person and got one. Export re-evaluates
+                    # policies live, so the verdict stays `manual_review` however the
+                    # review went — reading it as an open item regardless is what kept
+                    # every workspace carrying such a policy at `attention_required`
+                    # forever, and made the recorded review unable to satisfy the gate it
+                    # was collected for. The entry itself is the audit trail: it ships in
+                    # the export under `human_reviews` with its reviewer and review-ref.
                     continue
                 message = f"{slug} facet {facet.get('facet_id')} policy {policy} returned {verdict}."
                 policy_reasons = result.get("reasons") if isinstance(result.get("reasons"), list) else []
@@ -827,6 +877,20 @@ def main(argv: list[str] | None = None) -> int:
                 exit_code = EXIT_READY if document["verdict"] == VERDICT_SHIP else EXIT_NOT_READY
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_UNREADABLE)
+    except _policy_rule_error() as exc:
+        # `bundle` reaches the policy evaluator through local citation verification, which
+        # parses the active pack's rules and refuses a malformed block. That refusal is a
+        # plain exception rather than a SystemExit, so without this arm it would leave the
+        # command as a traceback where docs/orchestrator-handoff.md promises a
+        # CONFIG_INVALID envelope.
+        emit_error(
+            exc.message,
+            json_mode=json_mode,
+            error_code=exc.error_code,
+            remediation=exc.remediation,
+            details=exc.details,
+        )
+        return EXIT_UNREADABLE
 
     output = render(document)
     if args.output:

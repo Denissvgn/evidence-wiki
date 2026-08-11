@@ -1,0 +1,66 @@
+# The only thing this workspace changes about a freshly initialized one: it installs a
+# domain pack whose evidence policies mostly decide themselves.
+#
+# The suite merges these keys into the research.yml the real initializer wrote, then
+# deletes this file from the staged workspace — everything else about the workspace stays
+# whatever the shipped starter produces, so a starter change shows up here as a failure
+# rather than being masked by a fixture copy of the config.
+#
+# Five policies, four rules. `pack:market-data/supplier-contract-in-force` is deliberately
+# left without one: a definition-only pack policy still evaluates to manual_review, and
+# the suite needs both halves in one workspace to show the difference is the declaration
+# and nothing else.
+domain_pack:
+  name: market-data
+  policy_vocabularies:
+    source_policy:
+      pack:market-data/quote-provider: A supplier quote must be delivered by a registered quote provider.
+      pack:market-data/reviewed-quote-provider: >-
+        A supplier quote must come from a registered quote provider at a plausible unit
+        price, and the supplier relationship must also carry a recorded domain review.
+    freshness_policy:
+      pack:market-data/quote-48h: A supplier quote must be at most 48 hours old.
+    identity_policy:
+      pack:market-data/sku-matches-candidate: The quoted SKU must match the candidate identity on the question.
+      pack:market-data/supplier-contract-in-force: >-
+        A reviewer must confirm that a supply contract is in force with the quoting
+        supplier for the period the quote covers.
+  policy_rules:
+    pack:market-data/quote-provider:
+      all_of:
+        - one_of_provenance:
+            providers:
+              - aliexpress-ds
+              - partner-catalog
+    pack:market-data/quote-48h:
+      all_of:
+        - max_age:
+            field: provenance/retrieved_at
+            hours: 48
+    pack:market-data/sku-matches-candidate:
+      manual_review_required: false
+      all_of:
+        - equals:
+            field: record/supplier_quote/sku
+            question_field: metadata/candidate_sku
+        - one_of_provenance:
+            providers:
+              - aliexpress-ds
+              - partner-catalog
+    # Everything mechanical about this policy is decided here; the flag says the pack
+    # still wants a person to sign the supplier relationship off before it counts.
+    pack:market-data/reviewed-quote-provider:
+      manual_review_required: true
+      all_of:
+        - one_of_provenance:
+            providers:
+              - aliexpress-ds
+              - partner-catalog
+        - regex:
+            field: provenance/origin_url
+            pattern: https://api\.supplier\.test/product/[A-Z0-9]+
+        - numeric_range:
+            field: record/supplier_quote/unit_price_eur
+            min: 1
+            max: 500
+    # pack:market-data/supplier-contract-in-force declares no rule on purpose.

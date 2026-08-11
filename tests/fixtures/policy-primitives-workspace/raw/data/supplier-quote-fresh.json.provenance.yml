@@ -1,0 +1,16 @@
+# `retrieved_at_hours_ago` is the fixture's own key, not part of the delivery contract.
+# The staging helper in tests/test_policy_primitives_e2e.py subtracts it from the clock and
+# writes the resulting `retrieved_at` before any command runs, so this file states how old
+# the delivery is rather than when it happened — the only form a `max_age` fixture can take
+# without rotting.
+retrieved_at_hours_ago: 2
+origin_url: https://api.supplier.test/product/B0ABC12345
+license: CC-BY-4.0
+# The fetching agent, never a provider identity. Provider matching is equality, so this
+# path-shaped value could not satisfy an allowlist even if the field were read; the test
+# that proves the field is ignored rewrites it to the bare allowed id first.
+retrieved_by: fixture-agent/aliexpress-ds
+provider_registration:
+  id: aliexpress-ds
+  display_name: AliExpress Dropshipping Feed
+  registered_by: fixture-operator

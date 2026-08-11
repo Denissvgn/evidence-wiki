@@ -3,13 +3,33 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import date
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tests._pack_policy_rule_fixture import (  # noqa: E402
+    CANDIDATE_SKU,
+    FRESHNESS_DEFINITION,
+    FRESHNESS_POLICY,
+    FRESHNESS_RULE,
+    IDENTITY_DEFINITION,
+    IDENTITY_POLICY,
+    IDENTITY_RULE,
+    PACK_NAME,
+    PROVIDER_ID,
+    SOURCE_POLICY,
+    SOURCE_RULE,
+    declare_pack,
+    deliver_quote,
+)
+
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 POLICY_HELPER_PATH = SCRIPTS / "_evidence_policies.py"
 
@@ -1364,6 +1384,466 @@ class EvidencePolicyHelperTests(unittest.TestCase):
             },
             manifest_results["facets"][0]["policy_results"][0],
         )
+
+
+QUESTION_SLUG = "needs-quote-evidence"
+
+
+class PackPolicyRuleTests(unittest.TestCase):
+    """CR-9 T3: a pack's declared rules decide its own policies instead of queueing them."""
+
+    def build_workspace(self, root: Path, *, rules: dict[str, Any] | None = None) -> Path:
+        workspace = root / "pack-workspace"
+        (workspace / "raw" / "data").mkdir(parents=True)
+        (workspace / "sources" / "normalized").mkdir(parents=True)
+        (workspace / "wiki" / "questions").mkdir(parents=True)
+        (workspace / "research.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "project": {"name": "pack-rule-fixture"},
+                    "sources": {
+                        "manifest_path": "sources/manifest.jsonl",
+                        "normalized_dir": "sources/normalized",
+                        "coverage_dir": "sources/coverage",
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (workspace / "sources" / "manifest.jsonl").write_text("", encoding="utf-8")
+        declare_pack(workspace, rules=rules)
+        return workspace
+
+    def write_question(self, workspace: Path, *, metadata: dict[str, Any] | None = None) -> None:
+        frontmatter: dict[str, Any] = {"type": "question", "slug": QUESTION_SLUG, "status": "open"}
+        if metadata is not None:
+            frontmatter["metadata"] = metadata
+        (workspace / "wiki" / "questions" / f"{QUESTION_SLUG}.md").write_text(
+            "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n\n# Question\n",
+            encoding="utf-8",
+        )
+
+    def add_quote_source(self, workspace: Path, source_id: str, **kwargs: Any) -> str:
+        return deliver_quote(workspace, source_id, **kwargs)
+
+    def load_inputs(self, workspace: Path):
+        helper = load_policy_helper()
+        return helper, helper.load_policy_inputs(workspace)
+
+    def reason_text(self, policy_result) -> str:
+        return "\n".join(policy_result.reasons)
+
+    def test_a_rule_for_an_id_declared_under_two_sections_is_refused(self):
+        """The ambiguity is refused where it is written, not guessed at downstream.
+
+        A facet names one policy per section, so a rule on an id declared under several
+        cannot say which field it decides. Loading such a pack refuses rather than binding
+        the rule to whichever section happened to be checked first.
+        """
+        shared = f"pack:{PACK_NAME}/registered-provider"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            config_path = workspace / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["domain_pack"]["policy_vocabularies"] = {
+                "source_policy": {shared: "Must come from a registered provider."},
+                "identity_policy": {shared: "The quoted SKU must match the candidate."},
+            }
+            config["domain_pack"]["policy_rules"] = {
+                shared: {"all_of": [{"one_of_provenance": {"providers": [PROVIDER_ID]}}]}
+            }
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            helper = load_policy_helper()
+
+            with self.assertRaises(helper.PolicyRuleError) as caught:
+                helper.load_policy_inputs(workspace)
+
+            self.assertEqual("CONFIG_INVALID", caught.exception.error_code)
+            self.assertIn("more than one rule-carrying vocabulary section", caught.exception.message)
+
+    def test_a_rule_bound_to_another_section_decides_nothing(self):
+        """Defence in depth behind the declaration refusal above.
+
+        Nothing a pack can write reaches this now, but the lookup is by policy id, so the
+        guard stays: a rule that does not belong to the field being decided must leave the
+        policy on the review fallback rather than answering for it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            self.add_quote_source(workspace, "quote:matching", age_hours=2, sku=CANDIDATE_SKU)
+            helper, inputs = self.load_inputs(workspace)
+            bound = inputs.policy_rules[IDENTITY_POLICY]
+            self.assertEqual("identity_policy", bound.section)
+
+            # The same rule, mislabelled as deciding the freshness field.
+            inputs.policy_rules[IDENTITY_POLICY] = replace(bound, section="freshness_policy")
+            decided = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:matching"], inputs, question_slug=QUESTION_SLUG
+            )
+
+            self.assertEqual(helper.VERDICT_MANUAL_REVIEW, decided.verdict, self.reason_text(decided))
+            self.assertIn(IDENTITY_DEFINITION, self.reason_text(decided))
+
+    def test_a_discovery_candidate_is_never_a_delivered_provider_identity(self):
+        """`one_of_provenance` asks who delivered the evidence, not who was proposed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={SOURCE_POLICY: SOURCE_RULE})
+            source_id = self.add_quote_source(
+                workspace, "quote:unattributed", age_hours=2, provider_id=None
+            )
+            origin = f"https://api.supplier.test/product/{CANDIDATE_SKU}"
+            candidates = workspace / "sources" / "discovery"
+            candidates.mkdir(parents=True, exist_ok=True)
+            (candidates / "candidates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "candidate_id": "cand-1",
+                        "source_id": source_id,
+                        "url": origin,
+                        "standards": {"registry_provider": PROVIDER_ID},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            helper, inputs = self.load_inputs(workspace)
+
+            self.assertEqual((), helper.rule_provider_ids(inputs, source_id))
+            decided = helper.evaluate_source_policy(SOURCE_POLICY, [source_id], inputs)
+            self.assertEqual(helper.VERDICT_FAIL, decided.verdict, self.reason_text(decided))
+
+    def test_the_questions_directory_follows_the_configured_wiki_root(self):
+        """`wiki.root` is renameable, and every other reader honours it."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            config_path = workspace / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["wiki"] = {"root": "knowledge"}
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            moved = workspace / "knowledge" / "questions"
+            moved.mkdir(parents=True)
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            (workspace / "wiki" / "questions" / f"{QUESTION_SLUG}.md").rename(moved / f"{QUESTION_SLUG}.md")
+            self.add_quote_source(workspace, "quote:matching", age_hours=2, sku=CANDIDATE_SKU)
+            helper, inputs = self.load_inputs(workspace)
+
+            decided = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:matching"], inputs, question_slug=QUESTION_SLUG
+            )
+            self.assertEqual(helper.VERDICT_OK, decided.verdict, self.reason_text(decided))
+
+    def test_a_path_shaped_slug_never_leaves_the_questions_directory(self):
+        """`None`, not `{}`: an empty mapping reads as a question missing a key."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            helper, inputs = self.load_inputs(workspace)
+            self.assertIsNone(inputs.question_frontmatter_for("../../etc/passwd"))
+            self.assertIsNone(inputs.question_frontmatter_for("/etc/hosts"))
+
+    def test_an_unusable_wiki_root_fails_rules_closed_instead_of_raising(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            config_path = workspace / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["wiki"] = {"root": "../escape"}
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            self.add_quote_source(workspace, "quote:a", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            self.assertIsNone(inputs.question_frontmatter_for(QUESTION_SLUG))
+            decided = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:a"], inputs, question_slug=QUESTION_SLUG
+            )
+            self.assertEqual(helper.VERDICT_FAIL, decided.verdict, self.reason_text(decided))
+
+    def test_pack_freshness_rule_decides_the_quote_instead_of_queueing_it(self):
+        """The headline: 48h declared, a 50-hour quote fails, a fresh one passes, no review."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={FRESHNESS_POLICY: FRESHNESS_RULE})
+            self.add_quote_source(workspace, "quote:fresh", age_hours=2)
+            self.add_quote_source(workspace, "quote:stale", age_hours=50)
+            helper, inputs = self.load_inputs(workspace)
+
+            fresh = helper.evaluate_freshness_policy(FRESHNESS_POLICY, ["quote:fresh"], inputs)
+            stale = helper.evaluate_freshness_policy(FRESHNESS_POLICY, ["quote:stale"], inputs)
+
+        self.assertEqual("pass", fresh.verdict)
+        self.assertEqual("fail", stale.verdict)
+        self.assertNotIn("manual_review", json.dumps(fresh.to_dict()))
+        self.assertNotIn("manual_review", json.dumps(stale.to_dict()))
+        self.assertIn("provenance/retrieved_at", self.reason_text(fresh))
+        self.assertIn("2.0h old; max_age allows 48h.", self.reason_text(fresh))
+        self.assertIn("rule_stale: quote:stale provenance/retrieved_at", self.reason_text(stale))
+        self.assertIn("50.0h old; max_age allows 48h.", self.reason_text(stale))
+        self.assertIn(FRESHNESS_POLICY, stale.remediation)
+
+    def test_declared_pack_policy_without_a_rule_still_requires_manual_review(self):
+        """The fallback this change must not disturb, pinned to its exact recorded text."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir))
+            self.add_quote_source(workspace, "quote:fresh", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.evaluate_freshness_policy(FRESHNESS_POLICY, ["quote:fresh"], inputs)
+
+        self.assertEqual("manual_review", result.verdict)
+        self.assertEqual(
+            [f"Domain-pack policy {FRESHNESS_POLICY} requires recorded domain review: {FRESHNESS_DEFINITION}"],
+            result.reasons,
+        )
+        self.assertEqual(
+            "Review the accepted local source metadata and record a stronger source, provenance, or manual decision.",
+            result.remediation,
+        )
+
+    def test_undeclared_namespaced_policy_still_fails_closed_alongside_rules(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={FRESHNESS_POLICY: FRESHNESS_RULE})
+            self.add_quote_source(workspace, "quote:fresh", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.evaluate_freshness_policy(f"pack:{PACK_NAME}/never-declared", ["quote:fresh"], inputs)
+
+        self.assertEqual("fail", result.verdict)
+        self.assertIn("is not declared by the active domain pack", self.reason_text(result))
+
+    def test_unusable_evidence_still_wins_over_a_rule_that_would_pass(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={FRESHNESS_POLICY: FRESHNESS_RULE})
+            self.add_quote_source(workspace, "quote:unusable", age_hours=2, usable=False)
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.evaluate_freshness_policy(FRESHNESS_POLICY, ["quote:unusable"], inputs)
+
+        self.assertEqual("fail", result.verdict)
+        self.assertIn("is marked unusable evidence", self.reason_text(result))
+        self.assertNotIn("max_age", self.reason_text(result))
+
+    def test_record_pointer_fails_closed_when_the_source_has_no_structured_view(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            self.add_quote_source(workspace, "quote:no-view", age_hours=2, structured_view="absent")
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:no-view"], inputs, question_slug=QUESTION_SLUG
+            )
+
+        self.assertEqual("fail", result.verdict)
+        self.assertIn("structured_view_missing: quote:no-view record/supplier_quote/sku", self.reason_text(result))
+
+    def test_record_pointer_fails_closed_when_the_structured_view_is_corrupt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            self.add_quote_source(workspace, "quote:tampered", age_hours=2, structured_view="corrupt")
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:tampered"], inputs, question_slug=QUESTION_SLUG
+            )
+
+        self.assertEqual("fail", result.verdict)
+        self.assertIn("structured_view_corrupt: quote:tampered record/supplier_quote/sku", self.reason_text(result))
+
+    def test_question_field_rule_passes_with_the_key_and_fails_without_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            self.add_quote_source(workspace, "quote:matching", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+            matched = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:matching"], inputs, question_slug=QUESTION_SLUG
+            )
+
+            self.write_question(workspace, metadata={"unrelated": "value"})
+            _, reloaded = self.load_inputs(workspace)
+            unkeyed = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:matching"], reloaded, question_slug=QUESTION_SLUG
+            )
+
+        self.assertEqual("pass", matched.verdict)
+        self.assertIn("record/supplier_quote/sku", self.reason_text(matched))
+        self.assertIn("was delivered by provider 'aliexpress-ds'", self.reason_text(matched))
+        self.assertEqual("fail", unkeyed.verdict)
+        self.assertIn("rule_field_unresolved: quote:matching question/metadata/candidate_sku", self.reason_text(unkeyed))
+
+    def test_question_field_rule_without_a_threaded_slug_fails_rather_than_crashing(self):
+        """A caller that predates the slug parameter gets a named refusal, not a traceback."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            self.add_quote_source(workspace, "quote:matching", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.evaluate_identity_policy(IDENTITY_POLICY, ["quote:matching"], inputs)
+
+        self.assertEqual("fail", result.verdict)
+        self.assertIn("rule_field_unresolved: quote:matching question/metadata/candidate_sku", self.reason_text(result))
+        self.assertIn("the question carries no frontmatter mapping", self.reason_text(result))
+
+    def test_one_of_provenance_never_reads_the_fetching_agent_as_a_provider(self):
+        """`retrieved_by` holds `fetch_sources.py/aliexpress-ds`; matching on it would pass."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            self.add_quote_source(workspace, "quote:agent-only", age_hours=2, provider_id=None)
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:agent-only"], inputs, question_slug=QUESTION_SLUG
+            )
+
+        self.assertEqual("fail", result.verdict)
+        self.assertIn("rule_provenance_not_allowed: quote:agent-only", self.reason_text(result))
+        self.assertIn("has provider ids (none)", self.reason_text(result))
+
+    def test_multi_source_facet_fails_listing_only_the_stale_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={FRESHNESS_POLICY: FRESHNESS_RULE})
+            self.add_quote_source(workspace, "quote:fresh", age_hours=2)
+            self.add_quote_source(workspace, "quote:stale", age_hours=50)
+            helper, inputs = self.load_inputs(workspace)
+
+            results = helper.evaluate_facet_policies(
+                {
+                    "facet_id": "supplier-quote",
+                    "source_policy": "none-of-your-business",
+                    "freshness_policy": FRESHNESS_POLICY,
+                    "identity_policy": "none",
+                    "accepted_source_ids": ["quote:fresh", "quote:stale"],
+                },
+                inputs,
+                question_slug=QUESTION_SLUG,
+            )
+
+        freshness = next(result for result in results if result.policy == FRESHNESS_POLICY)
+        self.assertEqual("fail", freshness.verdict)
+        self.assertEqual(["quote:fresh", "quote:stale"], freshness.source_ids)
+        self.assertIn("quote:stale", self.reason_text(freshness))
+        self.assertNotIn("quote:fresh", self.reason_text(freshness))
+
+    def test_manual_review_required_keeps_a_passing_rule_in_the_review_queue(self):
+        """A pack may automate the mechanical half and still insist on a human for the rest."""
+        rule = {**FRESHNESS_RULE, "manual_review_required": True}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={FRESHNESS_POLICY: rule})
+            self.add_quote_source(workspace, "quote:fresh", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.evaluate_freshness_policy(FRESHNESS_POLICY, ["quote:fresh"], inputs)
+
+        self.assertEqual("manual_review", result.verdict)
+        self.assertIn("satisfied every declared rule check", self.reason_text(result))
+        self.assertIn(FRESHNESS_DEFINITION, self.reason_text(result))
+        self.assertIn("max_age allows 48h.", self.reason_text(result))
+
+    def test_an_injected_clock_decides_the_age_rather_than_wall_time(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={FRESHNESS_POLICY: FRESHNESS_RULE})
+            self.add_quote_source(workspace, "quote:fresh", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            later = helper.evaluate_freshness_policy(
+                FRESHNESS_POLICY,
+                ["quote:fresh"],
+                inputs,
+                now=datetime.now(timezone.utc) + timedelta(hours=60),
+            )
+
+        self.assertEqual("fail", later.verdict)
+        self.assertIn("62.0h old; max_age allows 48h.", self.reason_text(later))
+
+    def test_a_rule_declared_for_one_field_cannot_decide_another(self):
+        """The identity rule's id is not in the freshness vocabulary, so freshness refuses it."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            self.add_quote_source(workspace, "quote:matching", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.evaluate_freshness_policy(
+                IDENTITY_POLICY, ["quote:matching"], inputs, question_slug=QUESTION_SLUG
+            )
+
+        self.assertEqual("fail", result.verdict)
+        self.assertIn("is not declared by the active domain pack", self.reason_text(result))
+
+    def test_a_malformed_rule_refuses_the_whole_evaluation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(
+                Path(tmpdir),
+                rules={FRESHNESS_POLICY: {"all_of": [{"max_age": {"field": "provenance/retrieved_at", "hours": -1}}]}},
+            )
+            helper = load_policy_helper()
+
+            with self.assertRaises(helper._policy_primitives.PolicyRuleError) as caught:
+                helper.load_policy_inputs(workspace)
+
+        self.assertEqual("CONFIG_INVALID", caught.exception.error_code)
+        self.assertIn("hours must be greater than zero", caught.exception.details["errors"][0])
+
+    def test_a_rule_decided_over_no_present_source_reports_missing_rather_than_pass(self):
+        """The evaluators refuse an all-missing set first; the helper refuses it again."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={FRESHNESS_POLICY: FRESHNESS_RULE})
+            helper, inputs = self.load_inputs(workspace)
+
+            result = helper.pack_policy_result(
+                FRESHNESS_POLICY,
+                "freshness_policy",
+                ["quote:absent"],
+                [],
+                ["quote:absent"],
+                inputs,
+                question_slug=None,
+                now=None,
+            )
+
+        self.assertEqual("fail", result.verdict)
+        self.assertIn("Missing accepted source id(s): quote:absent.", result.reasons)
+
+    def test_the_facet_level_clock_reaches_every_policy_it_dispatches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={FRESHNESS_POLICY: FRESHNESS_RULE})
+            self.add_quote_source(workspace, "quote:fresh", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+            facet = {
+                "facet_id": "supplier-quote",
+                "source_policy": "manual_review_required",
+                "freshness_policy": FRESHNESS_POLICY,
+                "identity_policy": "none",
+                "accepted_source_ids": ["quote:fresh"],
+            }
+
+            now = helper.evaluate_facet_policies(facet, inputs)
+            later = helper.evaluate_facet_policies(
+                facet, inputs, now=datetime.now(timezone.utc) + timedelta(hours=60)
+            )
+
+        self.assertEqual("pass", next(r for r in now if r.policy == FRESHNESS_POLICY).verdict)
+        self.assertEqual("fail", next(r for r in later if r.policy == FRESHNESS_POLICY).verdict)
+
+    def test_the_structured_view_and_question_page_are_each_read_once(self):
+        """The caches are what let a rules-free workspace pay nothing for this machinery."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: IDENTITY_RULE})
+            self.write_question(workspace, metadata={"candidate_sku": CANDIDATE_SKU})
+            self.add_quote_source(workspace, "quote:matching", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+            self.assertEqual({}, inputs.structured_view_loads)
+            self.assertEqual({}, inputs.question_frontmatters)
+
+            first = inputs.structured_view_for("quote:matching")
+            helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:matching"], inputs, question_slug=QUESTION_SLUG
+            )
+
+        self.assertIs(first, inputs.structured_view_for("quote:matching"))
+        self.assertEqual([QUESTION_SLUG], list(inputs.question_frontmatters))
 
 
 if __name__ == "__main__":

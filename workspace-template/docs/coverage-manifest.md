@@ -236,6 +236,20 @@ evidence; broader policy-enforcement gates remain separate evidence-policy work.
 Policy results are not written back into the coverage manifest file; the manifest
 stores only verdict fields and the accepted/blocking IDs.
 
+A facet may name a policy its active domain pack declares, written
+`pack:<pack-name>/<policy-id>`. Such a policy reports through the same
+`policy_results` block. On its own it evaluates to `manual_review`, because the
+pack's definition text says what the policy means and not how to decide it. When
+the pack also declares a rule for that id under `domain_pack.policy_rules`, the
+policy is decided here instead: the rule reads the accepted source's
+structured-view sidecar, its merged provenance, and the question's frontmatter,
+and returns `pass` or `fail` like any base policy. Every accepted source on the
+facet must satisfy the rule, and a `fail` blocks a required facet exactly as any
+other failing policy does — including when the rule could not be decided at all,
+since rule evaluation is fail-closed. Failing reasons carry stable prefixes such
+as `rule_stale`, `rule_value_mismatch`, and `rule_provenance_not_allowed`. See
+[Evidence Policy Vocabulary](evidence-policies.md).
+
 ## Resolver Gate
 
 High-stakes answers can require this manifest before the question lifecycle moves
@@ -264,7 +278,10 @@ On success it records `coverage_required: true` and
 `coverage_manifest: sources/coverage/<slug>.yml` in the question frontmatter so
 status, lint, and export can identify covered high-stakes answers after the
 resolver command has finished.
-Facet policy results can still require human review. `manual_review` can pass
+Facet policy results can still require human review. A pack policy backed by a
+rule under `domain_pack.policy_rules` never reaches that path unless its rule
+sets `manual_review_required: true`, which keeps the reviewer in addition to the
+mechanical checks rather than instead of them. `manual_review` can pass
 coverage when the source is otherwise acceptable, but the answer is recorded as
 `status: human_review` and publication readiness stays `no_ship` until the
 review is recorded — either by `question_resolve.py approve` for a reviewer

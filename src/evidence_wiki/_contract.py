@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from . import __version__
 from ._script_host import load_packaged_script, shared_assets_root
@@ -104,6 +105,54 @@ def _pack_policy_vocabularies(root: Path, coverage_module: ModuleType, yaml_modu
     return result
 
 
+def _pack_policy_rules(
+    root: Path, policy_primitives_module: ModuleType, yaml_module: ModuleType
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Walk installed domain packs for deterministic ``policy_rules`` declarations.
+
+    Deliberately mirrors :func:`_pack_policy_vocabularies`: the same directory walk
+    and the same per-pack failure posture -- missing directory, ``OSError``,
+    ``YAMLError``, a non-dict document or ``domain_pack``, a blank name, and the
+    primitives module's own :class:`PolicyRuleError` all ``continue`` rather than
+    raise, so one broken pack never takes ``evidence-wiki contract`` down with it.
+    No coverage module is needed here: ``pack_policy_rules`` already cross-checks a
+    declared rule against the pack's own ``policy_vocabularies``, since both
+    sections live in the single ``domain_pack`` mapping this walk reads once.
+    """
+    domain_packs_root = root / "domain-packs"
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    if not domain_packs_root.is_dir():
+        return result
+    for overlay_path in sorted(domain_packs_root.glob("*/research.overlay.yml")):
+        try:
+            document = yaml_module.safe_load(overlay_path.read_text(encoding="utf-8")) or {}
+        except OSError:
+            continue
+        except yaml_module.YAMLError:
+            continue
+        if not isinstance(document, dict):
+            continue
+        domain_pack = document.get("domain_pack")
+        if not isinstance(domain_pack, dict):
+            continue
+        name = domain_pack.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        try:
+            rules = policy_primitives_module.pack_policy_rules({"domain_pack": domain_pack})
+        except policy_primitives_module.PolicyRuleError:
+            continue
+        if not rules:
+            continue
+        # Summarized by the primitives module itself, so `evidence-wiki contract` and
+        # `evidence-wiki pack validate` cannot drift into reporting the same pack
+        # differently.
+        result[name.strip()] = {
+            policy_id: policy_primitives_module.rule_summary(rule) for policy_id, rule in rules.items()
+        }
+    return result
+
+
 def contract() -> dict:
     """Return this installation's capability contract as a plain dict.
 
@@ -153,8 +202,10 @@ def contract() -> dict:
     coverage_manifest_module = load_packaged_script(root, "coverage_manifest")
     publication_readiness_module = load_packaged_script(root, "publication_readiness")
     fleet_status_module = load_packaged_script(root, "fleet_status")
+    policy_primitives_module = load_packaged_script(root, "_policy_primitives")
     base_policy_definitions = coverage_manifest_module.base_policy_vocabularies()
     installed_pack_policy_definitions = _pack_policy_vocabularies(root, coverage_manifest_module, yaml)
+    installed_pack_policy_rules = _pack_policy_rules(root, policy_primitives_module, yaml)
     merged_policy_definitions = coverage_manifest_module.base_policy_vocabularies()
     for pack_vocabularies in installed_pack_policy_definitions.values():
         for field, definitions in pack_vocabularies.items():
@@ -233,4 +284,5 @@ def contract() -> dict:
             "installed_domain_packs": installed_pack_policy_definitions,
             "merged": merged_policy_definitions,
         },
+        "policy_rules": installed_pack_policy_rules,
     }

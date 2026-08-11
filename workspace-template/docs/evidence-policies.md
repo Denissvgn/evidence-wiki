@@ -122,13 +122,15 @@ Supported sections are `evidence_paths`, `source_policy`, `freshness_policy`,
 and `identity_policy`. Every key must use `pack:<pack-name>/<policy-id>` and
 every value must be non-empty definition text. Declared namespaced source,
 freshness, and identity policies are accepted by coverage-template validation
-but evaluate as `manual_review` until the domain pack adds stronger local
-automation. Undeclared namespaced IDs still fail closed with
-`COVERAGE_POLICY_UNKNOWN`.
+and evaluate as `manual_review`: definition text tells a reviewer what to decide,
+and nothing in it tells this package how. A pack that wants one of its policies
+decided mechanically declares a rule for it under `domain_pack.policy_rules` —
+see [Policy Rules](#policy-rules). Undeclared namespaced IDs still fail closed
+with `COVERAGE_POLICY_UNKNOWN`.
 
 ### What Happens To A `manual_review` Verdict
 
-Because every pack-namespaced policy currently evaluates to `manual_review`,
+A pack-namespaced policy with no rule behind it evaluates to `manual_review`, so
 declaring one decides how the question is resolved. Three settings control the
 consequences, and they compose:
 
@@ -154,11 +156,24 @@ consequences, and they compose:
 
 Scoping and external recording change *where the reviewer sits and how far one
 pending review reaches* — never whether a manual-review policy needs a human.
-Reducing how often a human is needed is a separate problem: it requires
-deterministic primitives a pack can compose instead of falling back to
-`manual_review`, which is the subject of CR-9 in
-`docs/CR/evidence-wiki-change-requests.md`. Until such an evaluator exists,
-`manual_review` remains the correct fate of a policy this package cannot decide.
+Reducing how *often* a human is needed is a different lever, and
+[Policy Rules](#policy-rules) is that lever. A pack composes deterministic
+primitives — `max_age`, `equals`, `numeric_range`, `regex`,
+`one_of_provenance`, joined by `all_of` and `any_of` — over fields the workspace
+already holds, and the package decides the policy itself. "A supplier quote must
+be at most 48 hours old" is a subtraction, and a queue that holds subtractions is
+a queue nobody drains.
+
+`manual_review` remains the correct answer wherever the policy states a judgement
+rather than a computation. `pack:general-science/study-recency` — recent enough
+*for the scientific question* — has no threshold that is right across studies, so
+no rule can express it and none should be written: an approximation would replace
+a reviewer's judgement with a number nobody agreed on. The same holds for any
+definition that asks whether evidence is adequate, appropriate, comparable, or
+representative. A rule can also keep the human deliberately:
+`manual_review_required: true` runs the mechanical checks first and still routes
+to review, which narrows what the reviewer must look at without pretending the
+judgement was made.
 
 For `academic_method_existence`, a coverage facet may also carry
 `claim_probe` metadata when bounded arXiv and OpenAlex searches did not confirm
@@ -166,6 +181,148 @@ a named method or artifact. That metadata is exportable state for downstream
 agents, not accepted evidence. The facet still needs an accepted scholarly
 source to pass, and the probe limitation must state:
 `not found in configured providers for this bounded run; not a global nonexistence claim`.
+
+## Policy Rules
+
+A pack policy's definition text says what the policy *means*; it does not say how
+to decide it, which is why a namespaced policy on its own evaluates to
+`manual_review`. `domain_pack.policy_rules` is the vocabulary for saying the
+rest — for the part of a policy that is genuinely mechanical:
+
+```yaml
+domain_pack:
+  name: market-data
+  policy_vocabularies:            # what the policy means, to a reviewer
+    freshness_policy:
+      pack:market-data/quote-48h: A supplier quote must be at most 48 hours old.
+    identity_policy:
+      pack:market-data/sku-matches-candidate: The quoted SKU must match the candidate identity on the question.
+  policy_rules:                   # how this workspace decides it, unaided
+    pack:market-data/quote-48h:
+      all_of:
+        - max_age: {field: provenance/retrieved_at, hours: 48}
+    pack:market-data/sku-matches-candidate:
+      manual_review_required: false   # optional, default false
+      all_of:
+        - equals: {field: record/supplier_quote/sku, question_field: metadata/candidate_sku}
+        - one_of_provenance: {providers: [aliexpress-ds, partner-catalog]}
+```
+
+A rule is **data, never code**. There is no expression language, no callable, and
+no import hook: a pack names primitives from a closed set and this package
+evaluates them. That is what keeps "what does this workspace do?" answerable from
+the pack's own text, which is the property the rest of the evidence chain rests
+on.
+
+Each key must name a policy the same pack already declares under
+`policy_vocabularies.source_policy`, `.freshness_policy`, or `.identity_policy`,
+and its `pack:<pack-name>/` namespace must equal the pack's own
+`domain_pack.name`. `evidence_paths` carries no rules: an evidence path says
+*which facet* must be covered, which the coverage manifest resolves structurally
+before any policy runs. A rule body declares exactly one of `all_of` or `any_of`,
+plus the optional `manual_review_required` flag; any other key is reported as the
+typo it is rather than ignored.
+
+### Field References
+
+Every `field` is an RFC 6901 pointer — the same syntax anchor-form grounding
+uses, with the leading `/` optional — prefixed by the document it resolves
+against:
+
+| Reference | Document |
+|-----------|----------|
+| `record/...` | The source's structured-view sidecar, bound to its normalized record by hash. The same document an anchor resolves against; see [normalized-source-format.md](normalized-source-format.md). |
+| `provenance/...` | The source's merged delivery provenance, as inventoried from its `.provenance.yml` sidecar; see [source-delivery.md](source-delivery.md). |
+| `question_field: metadata/...` | The question page's whole frontmatter. Written as a bare pointer with no root segment, because there is only one such document to address. |
+
+One addressing scheme, three consumers. A pointer that reaches nothing, or that
+reaches a mapping or array rather than a single scalar, is a failure — see
+[Fail-Closed Evaluation](#fail-closed-evaluation).
+
+### Primitives
+
+| Primitive | Shape | Passes when |
+|-----------|-------|-------------|
+| `max_age` | `{field, hours}`, `hours` greater than zero | The field resolves to an ISO 8601 timestamp and `now − value` is at most `hours`. A timestamp more than five minutes in the future fails as clock skew rather than passing as brand new; that tolerance is fixed and not pack-configurable, because a pack able to widen it would be loosening a fail-closed bound from inside the thing being bounded. A value that names no UTC offset — a bare date, or a timestamp written without one — is valid ISO 8601 and reads as the earliest instant it could denote, its local time at the furthest offset any zone uses. That is conservative on purpose: the zone that stamped it is unknown, so reading it at that extreme can only make a source look older, never fresher. Deliver an explicit offset when you want the age measured exactly. |
+| `equals` | `{field, value}` or `{field, question_field}`, exactly one of the two | Field and expected value are equal as canonical scalars. The comparison rule is chosen by the value the *field* resolves to, since that is the evidence and the other side is the assertion about it: a number compares as a decimal on both sides, so a resolved `23.99` matches an expected `"23.990"` while `"23.99 EUR"` does not; a string compares through the workspace's one text normalization (NFKC, quote and dash folding, whitespace collapse, case folding). Equality, never containment. |
+| `numeric_range` | `{field, min, max}`; either bound may be written as `min_question_field` / `max_question_field` instead, never both forms of the same bound, and at least one bound is required | The field parses as a decimal and lies within the bounds. Both bounds are inclusive. |
+| `regex` | `{field, pattern}` | `pattern` **fully** matches the field's canonical text. Full match, never search: implicit containment is the weakness scalar equality exists to remove, so an author who wants a substring writes `.*B0.*` and says so. Patterns are capped at 512 characters, on the grounds that a pattern too long to read is long enough to hide catastrophic backtracking from the reviewer approving the pack. |
+| `one_of_provenance` | `{providers: [...]}`, `{domains: [...]}`, or both; each list non-empty | The source was delivered by one of the named providers, or its `origin_url` host matches one of the named domains. See [source-delivery.md](source-delivery.md) for which sidecar fields carry a provider identity, and which deliberately do not. |
+| `all_of` / `any_of` | a non-empty list of primitives | Every child passes / at least one child passes. Compositions nest at most three deep, which keeps a declaration readable and its evaluation cost bounded by the declaration rather than by the data. |
+
+`all_of` reports every failing child instead of stopping at the first, so one
+evaluation names the whole list of artifacts to fix; `any_of` stops at the branch
+that carried it. A facet accepts its sources jointly, so every accepted source
+must satisfy the rule — one stale quote among two is the facet's problem however
+fresh the other is.
+
+### Fail-Closed Evaluation
+
+A rule that cannot be decided evaluates to `fail`, never to `manual_review`. That
+covers a missing or corrupt structured view, a pointer that resolves to nothing, a
+target that is a mapping or array rather than a scalar, and a timestamp `max_age`
+cannot parse. Degrading to review instead would return exactly the least
+trustworthy sources to the queue rules exist to drain, and would do it silently.
+
+Every failure reason carries a stable prefix naming the source and the field that
+was read: `rule_field_unresolved`, `rule_value_mismatch`, `rule_out_of_range`,
+`rule_stale`, `rule_future_timestamp`, `rule_regex_mismatch`, and
+`rule_provenance_not_allowed`, plus `structured_view_missing` and
+`structured_view_corrupt` when the sidecar itself is the problem — the same two
+codes anchor grounding reports, so a host that already handles one handles the
+other.
+
+A **malformed declaration** fails earlier and louder than any single source can.
+`evidence-wiki pack validate` reports a `policy_rules` check failure before the
+pack ships, and at answer time evaluation refuses the command with
+`CONFIG_INVALID` rather than treating the pack as declaring no rules at all:
+silently dropping a pack's automation would send every one of its policies back to
+manual review without saying so.
+
+### Rule Verdicts
+
+| Rule outcome | `manual_review_required` | Facet policy verdict |
+|--------------|--------------------------|----------------------|
+| any check fails | either value | `fail` |
+| every check passes | `false` (the default) | `pass` |
+| every check passes | `true` | `manual_review` |
+
+`manual_review_required: true` keeps the human step **in addition** to the
+mechanical checks rather than instead of them, which is what a policy that is
+partly computable and partly a judgement call needs.
+
+Rollup is unchanged. A `fail` blocks a required facet exactly as any other failing
+policy does, and a `manual_review` still records
+`question_resolve.py answer --require-coverage` as `status: human_review`, with
+the escalation and review-recording consequences described above.
+
+### What The Tooling Reports
+
+`evidence-wiki pack validate` gains a `policy_rules` check, and summarizes each
+declared rule in its `domain_pack.policy_rules` payload as the primitive names the
+rule uses plus its `manual_review_required` flag. The autonomous-required-facets
+lint reads that summary: a rule-backed policy without `manual_review_required` is
+no longer counted as manual-only, because it now *is* a deterministic policy, so a
+required facet may use it without `domain_pack.human_gated: true`. One that sets
+the flag still counts as manual-only — the pack asked for the human on purpose.
+
+`evidence-wiki contract` publishes the same summary for every installed pack under
+an additive top-level `policy_rules` key:
+
+```json
+"policy_rules": {
+  "market-data": {
+    "pack:market-data/quote-48h": {
+      "primitives": ["all_of", "max_age"],
+      "manual_review_required": false
+    }
+  }
+}
+```
+
+`policy_vocabulary_definitions` keeps its existing shape. A host reads the
+definitions to learn what a policy means, and `policy_rules` to learn whether this
+installation can decide it without a human.
 
 ## Source Policies
 

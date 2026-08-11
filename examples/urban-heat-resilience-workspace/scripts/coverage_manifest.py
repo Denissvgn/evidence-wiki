@@ -997,9 +997,9 @@ def facet_scope_backfill_targets(
 ) -> list[str]:
     """Return the linked request ids whose scope still needs ``facet_id`` back-filled.
 
-    Read-only and deliberately lock-free: this is the pre-check of the sequencing in
-    docs/CR/cr4-backlog.md §2.5, so a conflicting request is refused *before* the facet
-    write and a refusal leaves the manifest untouched. Unknown request ids are left to
+    Read-only and deliberately lock-free: this is step one of the four-step sequence
+    ``run_set_facet`` runs, so a conflicting request is refused *before* the facet write
+    and a refusal leaves the manifest untouched. Unknown request ids are left to
     ``validate_request_ids``, which runs first and refuses them with ``REQUEST_UNKNOWN``.
 
     Every record is scanned rather than the first match per id, because the back-fill
@@ -1039,15 +1039,15 @@ def backfill_facet_scope(
 ) -> list[str]:
     """Write ``scope.facet_id`` into each named request that does not carry it yet.
 
-    Takes the source-requests lock alone — never nested inside another workspace lock
-    (docs/CR/cr4-backlog.md §2.5) — and writes through ``_write_requests_unlocked`` rather
-    than the public ``write_requests`` wrapper, which would re-acquire the same lock.
+    Takes the source-requests lock alone — never nested inside another workspace lock,
+    because two locks held at once by commands that acquire them in different orders is
+    how a deadlock is built. Writes through ``_write_requests_unlocked`` rather than the
+    public ``write_requests`` wrapper, which would re-acquire the same lock.
 
     Deliberately *not* gated by ``source_requests.require_in_order_request_mutation``:
     recording which facet a request already blocks is manifest bookkeeping, not
-    fulfilment, so it must stay available outside a delegated acquisition work order
-    (docs/CR/cr4-backlog.md T7). That gate wraps only ``fulfill`` and
-    ``record-attempt-failure``.
+    fulfilment, so it must stay available outside a delegated acquisition work order.
+    That gate wraps only ``fulfill`` and ``record-attempt-failure``.
 
     Idempotent: a request already scoped to ``facet_id`` is skipped, and when nothing
     needs writing the requests file is not rewritten at all.
@@ -1199,7 +1199,21 @@ def evaluate_policy_results_for_manifest(
     document: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     helper = load_sibling_module("_evidence_policies")
+    primitives = load_sibling_module("_policy_primitives")
+    try:
+        # Parsed here as well as inside the evaluator because sibling isolation gives every
+        # loaded copy its own PolicyRuleError class: this is the only copy whose refusal
+        # this command can catch, and turning it into CONFIG_INVALID is what makes a
+        # workspace with a malformed rule refuse to evaluate instead of silently treating
+        # the policy as manual review.
+        primitives.pack_policy_rules(config)
+    except primitives.PolicyRuleError as exc:
+        raise CoverageManifestError(
+            "CONFIG_INVALID", exc.message, remediation=exc.remediation, details=exc.details
+        ) from exc
     inputs = helper.load_policy_inputs(project_root, config)
+    slug = document.get("question_slug")
+    question_slug = slug.strip() if isinstance(slug, str) and slug.strip() else None
     facets: list[dict[str, Any]] = []
     by_facet: dict[str, list[dict[str, Any]]] = {}
     for facet in all_facets(document):
@@ -1207,7 +1221,10 @@ def evaluate_policy_results_for_manifest(
         accepted_source_ids = facet.get("accepted_source_ids")
         policy_results: list[dict[str, Any]] = []
         if isinstance(facet_id, str) and isinstance(accepted_source_ids, list) and accepted_source_ids:
-            policy_results = [result.to_dict() for result in helper.evaluate_facet_policies(facet, inputs)]
+            policy_results = [
+                result.to_dict()
+                for result in helper.evaluate_facet_policies(facet, inputs, question_slug=question_slug)
+            ]
             by_facet[facet_id] = policy_results
         facets.append(
             {
@@ -1358,6 +1375,13 @@ def coverage_summary_for_question(
     except CoverageManifestError as exc:
         summary["coverage_status"] = "invalid"
         summary["error"] = str(exc)
+        # Carried rather than raised. A malformed `domain_pack.policy_rules` block is a
+        # research.yml error, not a defect in this question's manifest, and a caller that
+        # refuses over it should say so — but this function has five callers and only one
+        # of them refuses at all. Raising past the other four left `export_answers` and
+        # `workspace_status` with an uncaught exception where an envelope belongs, so the
+        # code travels in the summary and each caller decides what to do with it.
+        summary["error_code"] = exc.error_code
         return summary
 
     blocking_request_ids = unique_blocking_request_ids(evaluated)
@@ -1447,10 +1471,10 @@ def run_set_facet(project_root: Path, config: dict[str, Any], args: argparse.Nam
     validate_source_ids(project_root, config, accepted_source_ids)
     validate_request_ids(project_root, config, slug, blocking_request_ids)
     facet = find_facet(document, facet_id)
-    # Step 1 of docs/CR/cr4-backlog.md §2.5: refuse a request that already answers a
-    # different facet before anything is written, so a conflict leaves the manifest as
-    # it was. --clear-blocking-request-ids drops only the manifest link, so an unlinked
-    # request keeps its scope and is never a back-fill target.
+    # Step 1: refuse a request that already answers a different facet before anything is
+    # written, so a conflict leaves the manifest as it was. --clear-blocking-request-ids
+    # drops only the manifest link, so an unlinked request keeps its scope and is never a
+    # back-fill target.
     backfill_targets = facet_scope_backfill_targets(project_root, config, facet_id, blocking_request_ids)
     facet["accepted_source_ids"] = merge_unique(
         facet["accepted_source_ids"],
