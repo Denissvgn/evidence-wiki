@@ -34,6 +34,7 @@ The JSON document has a fixed top-level shape. The current `schema_version` is `
 | `generated_at` | string | UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) of report generation. |
 | `project` | mapping | Project identity from `research.yml`. |
 | `contract` | mapping | Starter and contract versions from `workspace-system.yml`. |
+| `domain_pack` | mapping | Read-only lifecycle health for the workspace's installed domain pack. |
 | `run` | mapping | Per-run budgets for unattended loops. |
 | `run_controller` | mapping | PM run-controller summary when `runs/<run_id>/run-state.json` exists or `--run-id` is supplied. |
 | `orchestration` | mapping | Read-only summary of the newest active parent orchestration, or newest terminal parent when none is active. |
@@ -79,6 +80,30 @@ Required failures take precedence over optional degradation.
 | `starter_version` | string or null | Starter version recorded in `workspace-system.yml`. |
 | `schema_version` | string or null | Workspace metadata schema version. |
 | `compatible_research_yml_contract` | string or null | `research.yml` contract version this workspace was created against. |
+
+### `domain_pack`
+
+This block comes from the same read-only inspector used by doctor, upgrade
+warnings, and fleet aggregation. `current` means internally consistent with the
+tracked installation; status does not compare an upstream source and therefore
+does not mean “latest available.”
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `state` | string | `none`, `current`, `legacy_untracked`, `local_modifications`, `config_tree_skew`, `pack_missing`, `state_invalid`, or `transaction_incomplete`. |
+| `name` | string or null | Tracked/configured pack name. |
+| `installed_version` | string or null | Opaque display version of the tracked revision; no ordering is inferred. |
+| `overlay_sha256`, `tree_sha256` | string or null | Semantic overlay and complete pack-tree revision identities recorded in lifecycle state. |
+| `source_comparison_performed` | boolean | False for ordinary status because it inspects only the workspace. |
+| `local_override_count` | integer | Values/files explicitly released from pack ownership. |
+| `conflict_count` | integer | Bounded count of detected missing, changed, skewed, or invalid tracked items. |
+| `transaction_id` | string or null | Bounded transaction ID read from the incomplete journal when valid; otherwise null. |
+
+Run `evidence-wiki pack adopt --target PATH` for `legacy_untracked`. Preview a
+reviewed `pack refresh` for local modifications or skew. A write-mode pack
+command validates the journal and restores a recoverable interrupted
+transaction before replanning; status and doctor only report it. Preserve a
+journal and its backups for reviewed recovery if validation refuses it.
 
 ### `run`
 
@@ -433,6 +458,9 @@ cache keyed by workspace-relative file paths, mtimes, sizes, and invocation
 options. Corrupt or mismatched cache entries are ignored and replaced. Use
 `--no-cache` to force a fresh status document. `--append-log` bypasses the cache
 because it mutates `log.md`.
+The cache key includes the full `domain-packs/` tree, lifecycle state, and
+transaction journal, so a pack edit or interrupted refresh invalidates cached
+status immediately.
 
 ### Fleet Status
 
@@ -445,7 +473,10 @@ so an operator can see how much of a fleet is waiting on reviewers rather than
 on research — which the verdict alone no longer shows under
 `review.escalation_scope: question`. Unreadable targets are returned as
 per-target `WORKSPACE_UNREADABLE` errors without aborting the whole fleet
-report. The packaged CLI exposes the same command as:
+report. Each readable target also carries its `domain_pack` block;
+`counts.domain_pack_states` groups targets by lifecycle state and
+`counts.domain_pack_attention` counts every state except `none` and `current`.
+The packaged CLI exposes the same command as:
 
 ```bash
 evidence-wiki fleet-status --target workspace-a --target workspace-b --format json

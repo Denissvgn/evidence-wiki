@@ -69,6 +69,20 @@ class UpgradeCliTests(unittest.TestCase):
         _code, output = run_cli("--help")
         self.assertIn("--force-optional", output)
 
+    def test_both_help_surfaces_truthfully_describe_upgrade_locks_and_log_append(self):
+        code, root_help = run_cli("--help")
+        self.assertEqual(0, code)
+        upgrade_stdout = io.StringIO()
+        with contextlib.redirect_stdout(upgrade_stdout):
+            with self.assertRaises(SystemExit) as exited:
+                cli.main(["upgrade", "--help"])
+        self.assertEqual(0, exited.exception.code)
+        for output in (root_help, upgrade_stdout.getvalue()):
+            self.assertIn(".locks/", output)
+            self.assertIn("log.md", output)
+            self.assertIn("dry-run writes nothing", output)
+            self.assertNotIn("or log.md", output)
+
     def test_upgrade_refreshes_drifted_script(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = init_workspace(Path(tmpdir) / "workspace")
@@ -82,6 +96,7 @@ class UpgradeCliTests(unittest.TestCase):
             self.assertIn("scripts/query_index.py", output)
             self.assertEqual(drifted.read_bytes(), TEMPLATE_QUERY_INDEX.read_bytes())
             self.assertIn("] upgrade |", (target / "log.md").read_text())
+            self.assertTrue((target / ".locks").is_dir())
 
     def test_upgrade_noop_when_current(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -94,6 +109,7 @@ class UpgradeCliTests(unittest.TestCase):
             self.assertIn("no changes", output)
             # A no-op upgrade should not append an upgrade log entry.
             self.assertEqual((target / "log.md").read_text(), log_before)
+            self.assertTrue((target / ".locks").is_dir())
 
     def test_upgrade_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -108,6 +124,7 @@ class UpgradeCliTests(unittest.TestCase):
             self.assertIn("would update", output)
             self.assertEqual(drifted.read_text(), "# stale local copy\n")
             self.assertEqual((target / "log.md").read_text(), log_before)
+            self.assertFalse((target / ".locks").exists())
 
     def test_upgrade_preserves_user_content(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -351,7 +368,7 @@ class UpgradeUnitTests(unittest.TestCase):
             log_text = (workspace / "log.md").read_text(encoding="utf-8")
             self.assertIn(prior_log, log_text)
             self.assertIn("] upgrade |", log_text)
-            self.assertIn('starter_version: "0.5.5"', (workspace / "workspace-system.yml").read_text())
+            self.assertIn('starter_version: "0.6.0"', (workspace / "workspace-system.yml").read_text())
 
     def test_unsupported_contract_refuses_before_any_mutation(self):
         with tempfile.TemporaryDirectory() as tmpdir:

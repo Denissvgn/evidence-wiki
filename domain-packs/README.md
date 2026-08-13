@@ -139,3 +139,125 @@ uses valid `recommended_discovery` and `recommended_acquisition` providers when 
 `coverage_templates` and `policy_rules`, matches the starter `research.yml`
 contract, deep-merges with the starter configuration, and smoke-validates after
 initialization in a temporary workspace under `/tmp`.
+
+## Installed Pack Lifecycle
+
+Starter tooling and domain packs have separate lifecycles. The
+`evidence-wiki upgrade` command refreshes package-managed workspace tooling and
+never refreshes the installed pack or changes `research.yml`. Use the pack
+refresh command only when an operator has selected a candidate revision of the
+same pack:
+
+```bash
+evidence-wiki pack refresh \
+  --target ../my-research-workspace \
+  --path general-science \
+  --dry-run
+evidence-wiki pack refresh \
+  --target ../my-research-workspace \
+  --path general-science
+```
+
+`--path` accepts a bundled pack name or a filesystem path. Refresh validates
+the complete candidate before mutation and requires its declared name to match
+the installed pack and its `research.yml` contract to be compatible. Pack
+versions are display metadata: refresh uses normalized overlay and tree digests
+as revision identity, so an intentional downgrade is allowed and no version
+ordering is inferred.
+
+Lifecycle-aware initialization writes restrictive provenance state to
+`domain-packs/.evidence-wiki-state.yml`. It records the pack identity, contract,
+normalized overlay and tree digests, managed file hashes, and ownership of
+pack-written configuration. Each configuration ownership entry records an RFC
+6901 path, its last-applied value, and whether a pre-pack fallback existed.
+Project personalization, profile overrides, and CLI overrides remain unowned.
+Mappings are reconciled recursively only while both sides are mappings; lists,
+scalars, and mapping/scalar transitions are whole ownership units.
+
+### Three-Way Refresh
+
+Refresh compares the tracked pack revision, the current workspace, and the
+incoming revision. Unchanged pack-owned values and files take the incoming
+revision. A local-only change is preserved and released from ownership when the
+pack did not change the same unit. Matching local and incoming changes converge.
+If both changed differently, refresh reports a conflict. A retired unchanged
+configuration key restores its recorded fallback, or is deleted when it had no
+fallback; an unchanged retired file is removed. Locally changed retired files
+conflict, and untracked extra files are never removed implicitly. If a reported
+directory-to-file collision is explicitly resolved with `--accept-pack`, every
+displaced local file is retained in the transaction backup.
+
+New pack keys and files are installed only when their targets are absent. A new
+target that collides with local data is local by default, even if the values are
+semantically equal, unless the operator explicitly accepts the pack version.
+Without explicit resolution, any true conflict produces zero writes.
+
+Live `research.yml` updates use round-trip YAML handling so operator comments,
+key order, quoting, and the optional commented footer survive a refresh. Pack
+reconciliation does not rewrite `project`, unrelated configuration, `raw/`,
+`sources/`, `wiki/`, or `index.md`.
+
+Conflict targets are stable selectors:
+
+```text
+config:/rfc/6901/path
+file:pack-relative/path
+```
+
+Repeat `--keep-local TARGET` to preserve the current value or file and release
+pack ownership. Repeat `--accept-pack TARGET` to apply the incoming revision;
+the displaced workspace state remains in the transaction backup. Unknown,
+duplicate, and contradictory resolutions are refused. There is no global
+`--force` option.
+
+Use `--format json` for automation. Refresh JSON has schema `1.0` and contains
+`schema_version`, `operation`, `mode`, `target`, `status`, `pack`, `changes`,
+`conflicts`, `warnings`, and `log_appended`. `changes` contains sorted
+path/action records and never exposes configuration values.
+
+### Legacy Adoption
+
+A workspace whose installed pack predates lifecycle state reports
+`domain_pack.state: legacy_untracked`; refresh refuses it with
+`DOMAIN_PACK_UNTRACKED`. Adoption validates the installed pack and records the
+missing provenance before refresh is allowed:
+
+```bash
+evidence-wiki pack adopt --target ../legacy-workspace --dry-run
+evidence-wiki pack adopt --target ../legacy-workspace
+```
+
+The installed tree and `research.yml` must agree on pack name, version, and
+contract. Adoption writes only provenance state plus one audit entry; it does
+not rewrite the overlay, installed files, or live configuration. Project values
+are always excluded from inferred ownership. Exact normalized overlay matches
+can be tracked. Other differences require the operator to review the dry-run and
+repeat with `--accept-local-overrides`; accepted differences remain unowned.
+Because a legacy workspace has no reliable pre-pack snapshot, unknown fallbacks
+remain explicitly unknown. If a later revision retires such a key, refresh
+reports a path-specific conflict instead of guessing whether to delete it.
+
+### Transactions And Health
+
+Dry-run performs full validation and planning without acquiring locks or writing
+directories, state, backups, transactions, or logs. Write mode acquires
+`.locks/domain-pack-refresh.lock`, rechecks planned input hashes, stages output
+on the target filesystem, and records
+`domain-packs/.evidence-wiki-transaction.yml` before replacement. Prior state is
+retained under `.replaced/domain-packs/<transaction-id>/`. Ordinary failures
+roll back synchronously; after interruption, the next write-mode pack command
+restores the previous state before replanning. Dry-run and doctor only report an
+incomplete transaction.
+
+A successful adoption or material refresh appends exactly one audit entry to
+`log.md`; no-op and dry-run operations append none. Workspace status and doctor
+report lifecycle state, local modifications, configuration/tree skew, missing
+files, invalid state, and incomplete transactions. `state: current` means only
+that the workspace is internally consistent with its tracked installation. It
+does not mean that a newer upstream revision does not exist.
+
+The stable lifecycle refusal codes are `DOMAIN_PACK_INVALID`,
+`DOMAIN_PACK_UNTRACKED`, `DOMAIN_PACK_REFRESH_CONFLICT` (exit `3`),
+`DOMAIN_PACK_STATE_INVALID`, `DOMAIN_PACK_TRANSACTION_INCOMPLETE`, and
+`DOMAIN_PACK_WRITE_FAILED`. Lock contention continues to use
+`LOCK_UNAVAILABLE`.

@@ -50,7 +50,7 @@ def make_workspace(root: Path) -> Path:
         (workspace / relative).write_text(f"# {relative}\n", encoding="utf-8")
     (workspace / "workspace-system.yml").write_text(
         "workspace_system:\n"
-        "  starter_version: \"0.5.5\"\n"
+        "  starter_version: \"0.6.0\"\n"
         "  schema_version: \"0.1\"\n"
         "  compatible_research_yml_contract: \"0.1\"\n"
     )
@@ -64,10 +64,12 @@ class FakeEnvironment:
         python_version=(3, 11, 0),
         yaml_error: Exception | None = None,
         pypdf_error: Exception | None = None,
+        ruamel_yaml_error: Exception | None = None,
     ):
         self.python_version = python_version
         self.yaml_error = yaml_error
         self.pypdf_error = pypdf_error
+        self.ruamel_yaml_error = ruamel_yaml_error
 
     def import_yaml(self):
         if self.yaml_error is not None:
@@ -80,6 +82,11 @@ class FakeEnvironment:
         if self.pypdf_error is not None:
             raise self.pypdf_error
         return mock.Mock(__version__="6.14.0")
+
+    def import_ruamel_yaml(self):
+        if self.ruamel_yaml_error is not None:
+            raise self.ruamel_yaml_error
+        return mock.Mock(__version__="0.19.1")
 
     def which(self, name: str) -> str | None:
         return f"/usr/bin/{name}"
@@ -111,6 +118,8 @@ class DoctorScriptTests(unittest.TestCase):
         checks = {check["id"]: check for check in report["checks"]}
         self.assertEqual("ok", checks["python"]["status"])
         self.assertEqual("ok", checks["pyyaml"]["status"])
+        self.assertEqual("ok", checks["ruamel_yaml"]["status"])
+        self.assertTrue(checks["ruamel_yaml"]["required"])
         self.assertEqual("ok", checks["pypdf"]["status"])
         self.assertTrue(checks["pypdf"]["required"])
         self.assertEqual("ok", checks["pdftotext"]["status"])
@@ -119,7 +128,7 @@ class DoctorScriptTests(unittest.TestCase):
         self.assertEqual("ok", checks["contract"]["status"])
         self.assertEqual("ok", checks["semantic_retrieval"]["status"])
         self.assertEqual("ok", checks["secret_exposure"]["status"])
-        self.assertEqual("0.5.5", checks["contract"]["details"]["starter_version"])
+        self.assertEqual("0.6.0", checks["contract"]["details"]["starter_version"])
         self.assertEqual("0.1", checks["contract"]["details"]["schema_version"])
         self.assertEqual("0.1", checks["contract"]["details"]["compatible_research_yml_contract"])
         self.assertEqual(
@@ -284,6 +293,28 @@ class DoctorScriptTests(unittest.TestCase):
         self.assertTrue(checks["pypdf"]["required"])
         self.assertIn("pypdf", checks["pypdf"]["remediation"])
 
+    def test_missing_ruamel_yaml_is_required_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = make_workspace(Path(tmpdir))
+            stdout = io.StringIO()
+            env = FakeEnvironment(
+                ruamel_yaml_error=ImportError("No module named ruamel.yaml")
+            )
+
+            with contextlib.redirect_stdout(stdout):
+                exit_code = self.doctor.main(
+                    ["--project-root", str(workspace), "--format", "json"],
+                    env=env,
+                )
+
+        report = json.loads(stdout.getvalue())
+        checks = {check["id"]: check for check in report["checks"]}
+        self.assertEqual(1, exit_code)
+        self.assertEqual("missing", report["verdict"])
+        self.assertEqual("missing", checks["ruamel_yaml"]["status"])
+        self.assertTrue(checks["ruamel_yaml"]["required"])
+        self.assertIn("ruamel.yaml", checks["ruamel_yaml"]["remediation"])
+
     def test_python_too_old_is_required_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = make_workspace(Path(tmpdir))
@@ -426,11 +457,13 @@ class RegisteredProviderDoctorTests(unittest.TestCase):
     EXPECTED_CHECK_IDS = [
         "python",
         "pyyaml",
+        "ruamel_yaml",
         "pypdf",
         "pdftotext",
         "git",
         "workspace_write",
         "contract",
+        "domain_pack_lifecycle",
         "semantic_retrieval",
         "normalization_adapters",
         "acquisition_mode",
@@ -490,6 +523,48 @@ class RegisteredProviderDoctorTests(unittest.TestCase):
             report = self.report(self.workspace(tmpdir))
 
         self.assertEqual(self.EXPECTED_CHECK_IDS, [check["id"] for check in report["checks"]])
+
+    def test_domain_pack_lifecycle_check_reports_bounded_adoption_remediation(self):
+        lifecycle = mock.Mock()
+        lifecycle.inspect_workspace.return_value = {
+            "state": "legacy_untracked",
+            "name": "general-science",
+            "installed_version": "1.0",
+            "source_comparison_performed": False,
+            "local_override_count": 0,
+            "conflict_count": 0,
+            "transaction_id": None,
+        }
+        with mock.patch.object(self.doctor, "load_workspace_module", return_value=lifecycle):
+            check = self.doctor.domain_pack_lifecycle_check(Path("/workspace"))
+
+        self.assertEqual("degraded", check["status"])
+        self.assertFalse(check["required"])
+        self.assertIn("pack adopt", check["remediation"])
+        self.assertEqual("legacy_untracked", check["details"]["state"])
+
+    def test_domain_pack_lifecycle_check_does_not_claim_to_recover_a_transaction(self):
+        lifecycle = mock.Mock()
+        lifecycle.inspect_workspace.return_value = {
+            "state": "transaction_incomplete",
+            "name": None,
+            "installed_version": None,
+            "overlay_sha256": None,
+            "tree_sha256": None,
+            "source_comparison_performed": False,
+            "local_override_count": 0,
+            "conflict_count": 0,
+            "transaction_id": "txn-123",
+        }
+        with mock.patch.object(self.doctor, "load_workspace_module", return_value=lifecycle):
+            check = self.doctor.domain_pack_lifecycle_check(Path("/workspace"))
+
+        self.assertEqual("degraded", check["status"])
+        self.assertIn("without attempting recovery", check["message"])
+        self.assertIn("write mode", check["remediation"])
+        self.assertIn("dry-run and doctor only report", check["remediation"])
+        self.assertEqual("txn-123", check["details"]["transaction_id"])
+        self.assertEqual([mock.call.inspect_workspace(Path("/workspace"))], lifecycle.method_calls)
 
     def test_an_environment_with_no_registrations_reports_the_section_as_present_and_empty(self):
         # Present-but-empty rather than absent, deliberately: an absent section cannot be

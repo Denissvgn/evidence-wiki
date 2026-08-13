@@ -209,9 +209,10 @@ example.
 Required:
 
 - Python 3.10 or newer.
-- PyYAML 6.0 or newer and pypdf 6.14 or newer within major version 6. Both are
-  installed with `evidence-wiki`; the portable pypdf backend requires no
-  separate PDF tool.
+- PyYAML 6.0 or newer, ruamel.yaml 0.19.1 or newer within the 0.19 series, and
+  pypdf 6.14 or newer within major version 6. All are installed with
+  `evidence-wiki`; ruamel.yaml preserves live YAML comments and quoting during
+  pack refresh, while the portable pypdf backend requires no separate PDF tool.
 
 Optional capabilities include Codex CLI or Claude Code for managed runs, Git
 for snapshots, and the Poppler compatibility backend for explicitly configured
@@ -258,9 +259,32 @@ evidence-wiki upgrade --target ../my-research-workspace --dry-run
 evidence-wiki upgrade --target ../my-research-workspace
 ```
 
-`upgrade` does not touch `research.yml`, `raw/`, `sources/`, `wiki/`,
-`index.md`, or `log.md`. Optional skills and docs have additional conflict
-rules documented in [workspace initialization][workspace-initialization].
+Write-mode `upgrade` refreshes only starter-managed tooling, may update
+`workspace-system.yml`, uses `.locks/`, and conditionally appends one audit
+entry to `log.md` when it applies material changes. It preserves prior log
+history, `research.yml`, `raw/`, `sources/`, `wiki/`, `index.md`, and other user
+data. `--dry-run` writes nothing. Optional skills and docs have additional
+conflict rules documented in [workspace initialization][workspace-initialization].
+
+Domain packs have a separate, explicit lifecycle. Preview and apply a new
+revision of the already-installed pack with:
+
+```bash
+evidence-wiki pack refresh \
+  --target ../my-research-workspace \
+  --path general-science \
+  --dry-run
+evidence-wiki pack refresh \
+  --target ../my-research-workspace \
+  --path general-science
+```
+
+An older workspace whose pack predates lifecycle state must first run
+`evidence-wiki pack adopt --target ../my-research-workspace --dry-run`, review
+the result, and repeat without `--dry-run`. Refresh never switches pack names,
+and an unresolved local/pack conflict produces zero writes. See [domain
+packs][domain-packs] for adoption, path-specific conflict resolution, and
+transaction recovery.
 
 ## Validate A Created Workspace
 

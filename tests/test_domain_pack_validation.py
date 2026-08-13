@@ -2,6 +2,7 @@ import contextlib
 import importlib
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -81,6 +82,109 @@ class DomainPackValidationTests(unittest.TestCase):
         self.assertEqual(0, code, stderr)
         self.assertTrue(payload["ok"], payload)
         self.assertEqual(pack_path.resolve().as_posix(), payload["domain_pack"]["path"])
+
+    def test_required_metadata_rejects_each_noncanonical_identity_field(self):
+        validator = self.validator()
+        valid = {
+            "name": "example-pack",
+            "version": "1.2.3",
+            "compatible_research_yml_contract": "0.1",
+        }
+        invalid_values = (
+            ("name", None),
+            ("version", 1),
+            ("compatible_research_yml_contract", ""),
+            ("version", " 1.2.3 "),
+        )
+        for field, invalid_value in invalid_values:
+            with self.subTest(field=field, value=invalid_value):
+                metadata = dict(valid)
+                metadata[field] = invalid_value
+
+                info, checks = validator.metadata_check(metadata, "0.1")
+
+                required = next(item for item in checks if item["id"] == "required_metadata")
+                self.assertEqual("fail", required["status"])
+                self.assertIsNone(info[field])
+
+    def test_safe_yaml_non_json_scalar_is_a_structured_validation_failure(self):
+        source_pack = REPO_ROOT / "domain-packs" / "general-science"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_path = Path(tmpdir) / "general-science"
+            shutil.copytree(source_pack, pack_path)
+            overlay_path = pack_path / "research.overlay.yml"
+            overlay_path.write_text(
+                overlay_path.read_text(encoding="utf-8") + "\nreviewed_on: 2026-08-13\n",
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = self.run_validator("--path", str(pack_path))
+
+        payload = json.loads(stdout)
+        checks = {item["id"]: item for item in payload["checks"]}
+        self.assertEqual(1, code)
+        self.assertEqual("", stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("fail", checks["overlay_data_model"]["status"])
+        self.assertIn("date values are not supported", checks["overlay_data_model"]["message"])
+        self.assertEqual("fail", checks["smoke_validation"]["status"])
+
+    def test_recursive_yaml_alias_is_a_structured_validation_failure(self):
+        source_pack = REPO_ROOT / "domain-packs" / "general-science"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_path = Path(tmpdir) / "general-science"
+            shutil.copytree(source_pack, pack_path)
+            overlay_path = pack_path / "research.overlay.yml"
+            overlay_path.write_text(
+                overlay_path.read_text(encoding="utf-8") + "\nrecursive: &loop [*loop]\n",
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = self.run_validator("--path", str(pack_path))
+
+        payload = json.loads(stdout)
+        checks = {item["id"]: item for item in payload["checks"]}
+        self.assertEqual(1, code)
+        self.assertEqual("", stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("fail", checks["overlay_data_model"]["status"])
+        self.assertIn("recursive YAML aliases are not supported", checks["overlay_data_model"]["message"])
+
+    def test_initializer_rejects_non_json_pack_values_before_writing_a_target(self):
+        validator = self.validator()
+        source_pack = REPO_ROOT / "domain-packs" / "general-science"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pack_path = root / "general-science"
+            target = root / "workspace"
+            shutil.copytree(source_pack, pack_path)
+            overlay_path = pack_path / "research.overlay.yml"
+            overlay_path.write_text(
+                overlay_path.read_text(encoding="utf-8") + "\nreviewed_on: 2026-08-13\n",
+                encoding="utf-8",
+            )
+            scripts = validator.load_scripts(REPO_ROOT / "workspace-template")
+
+            with self.assertRaises(SystemExit) as caught:
+                scripts.initializer.main(
+                    [
+                        "--starter-root",
+                        str(REPO_ROOT / "workspace-template"),
+                        "--target",
+                        str(target),
+                        "--project-name",
+                        "non-json-pack",
+                        "--project-description",
+                        "Reject unsupported YAML values before writes.",
+                        "--owner-goal",
+                        "Keep lifecycle provenance deterministic.",
+                        "--domain-pack",
+                        str(pack_path),
+                    ]
+                )
+
+            self.assertIn("JSON-compatible YAML values", str(caught.exception))
+            self.assertFalse(target.exists())
 
     def test_legal_regulatory_pack_validates_by_name(self):
         code, stdout, stderr = self.run_validator("--path", "legal-regulatory")
@@ -941,6 +1045,33 @@ class DomainPackValidationTests(unittest.TestCase):
         checks = {check["id"]: check for check in payload["checks"]}
         self.assertEqual("fail", checks["pack_tree_safety"]["status"])
         self.assertIn("linked.md", checks["pack_tree_safety"]["files"])
+
+    @unittest.skipUnless(os.name == "posix", "literal backslashes are path characters on POSIX")
+    def test_pack_tree_rejects_backslashes_in_root_and_nested_names(self):
+        source_pack = REPO_ROOT / "domain-packs" / "general-science"
+        for location in ("root", "nested"):
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                pack_path = root / ("unsafe\\pack" if location == "root" else "portable-pack")
+                shutil.copytree(source_pack, pack_path)
+                overlay_path = pack_path / "research.overlay.yml"
+                overlay = yaml.safe_load(overlay_path.read_text(encoding="utf-8"))
+                overlay["domain_pack"]["name"] = pack_path.name
+                overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False), encoding="utf-8")
+                if location == "nested":
+                    unsafe_directory = pack_path / "unsafe\\component"
+                    unsafe_directory.mkdir()
+                    (unsafe_directory / "note.md").write_text("unsafe\n", encoding="utf-8")
+
+                code, stdout, stderr = self.run_validator("--path", str(pack_path))
+                payload = json.loads(stdout)
+
+                self.assertEqual(1, code)
+                self.assertEqual("", stderr)
+                checks = {item["id"]: item for item in payload["checks"]}
+                self.assertEqual("fail", checks["pack_tree_safety"]["status"])
+                self.assertIn("non-portable", checks["pack_tree_safety"]["message"])
+                self.assertIn("\\", checks["pack_tree_safety"]["message"])
 
     def test_pack_tree_rejects_portable_path_collision(self):
         source_pack = REPO_ROOT / "domain-packs" / "llm-research"

@@ -5,6 +5,8 @@ One unreadable target must never fail the whole command: an operator asking abou
 a fleet is asking which members are healthy, and a command that dies on the first
 broken one answers nothing. So ``target_summary`` catches everything a single
 target can throw and folds it into an ``ok: False`` entry beside the healthy ones.
+Healthy target summaries also retain the canonical domain-pack lifecycle block so
+operators can locate inconsistent or interrupted pack installations fleet-wide.
 
 That guarantee is why ``run_fleet_status`` is the one seam in this package that
 never raises ``ScriptRefusal``: this command has no refusal to raise. A sibling
@@ -43,12 +45,14 @@ def load_workspace_status() -> ModuleType:
 
 
 def target_summary(target: Path, status_module: ModuleType, *, no_cache: bool) -> dict[str, Any]:
-    resolved = target.expanduser().resolve()
+    display_path = str(target.expanduser())
+    resolved: Path | None = None
     try:
+        resolved = target.expanduser().resolve()
         document = status_module.cached_status_document(resolved, no_cache=no_cache)
     except SystemExit as exc:
         return {
-            "path": str(resolved),
+            "path": str(resolved) if resolved is not None else display_path,
             "ok": False,
             "error_code": "WORKSPACE_UNREADABLE",
             "message": str(exc),
@@ -59,7 +63,7 @@ def target_summary(target: Path, status_module: ModuleType, *, no_cache: bool) -
         if hasattr(exc, "error_code"):
             error_code = str(exc.error_code)
         return {
-            "path": str(resolved),
+            "path": str(resolved) if resolved is not None else display_path,
             "ok": False,
             "error_code": error_code,
             "message": message,
@@ -91,6 +95,9 @@ def target_summary(target: Path, status_module: ModuleType, *, no_cache: bool) -
             "has_debt": False,
         }
     )
+    domain_pack = document.get("domain_pack") if isinstance(document.get("domain_pack"), dict) else {
+        "state": "state_invalid"
+    }
     return {
         "path": str(resolved),
         "ok": True,
@@ -102,6 +109,7 @@ def target_summary(target: Path, status_module: ModuleType, *, no_cache: bool) -
         "questions_awaiting_review": int(readiness.get("questions_awaiting_review", 0) or 0),
         "budget_state": budget_state,
         "operational_debt": operational_debt,
+        "domain_pack": domain_pack,
         "active_run_count": 1 if has_active_run else 0,
         "stale_run_count": 1 if is_stale else 0,
         "run_controller": run_controller,
@@ -111,6 +119,13 @@ def target_summary(target: Path, status_module: ModuleType, *, no_cache: bool) -
 def build_report(targets: Sequence[str | Path], *, no_cache: bool) -> dict[str, Any]:
     status_module = load_workspace_status()
     summaries = [target_summary(Path(target), status_module, no_cache=no_cache) for target in targets]
+    domain_pack_states: dict[str, int] = {}
+    for summary in summaries:
+        if not summary.get("ok"):
+            continue
+        domain_pack = summary.get("domain_pack") if isinstance(summary.get("domain_pack"), dict) else {}
+        state = str(domain_pack.get("state") or "state_invalid")
+        domain_pack_states[state] = domain_pack_states.get(state, 0) + 1
     return {
         "schema_version": SCHEMA_VERSION,
         "targets": summaries,
@@ -139,6 +154,10 @@ def build_report(targets: Sequence[str | Path], *, no_cache: bool) -> dict[str, 
             "questions_awaiting_review": sum(
                 int(summary.get("questions_awaiting_review", 0) or 0) for summary in summaries
             ),
+            "domain_pack_attention": sum(
+                count for state, count in domain_pack_states.items() if state not in {"none", "current"}
+            ),
+            "domain_pack_states": dict(sorted(domain_pack_states.items())),
         },
     }
 
@@ -156,15 +175,18 @@ def render_text(report: dict[str, Any]) -> str:
         f"Operational warnings: {report['counts']['operational_warnings']}",
         f"Deferred items: {report['counts']['deferred_items']}",
         f"Questions awaiting review: {report['counts']['questions_awaiting_review']}",
+        f"Domain packs needing attention: {report['counts'].get('domain_pack_attention', 0)}",
     ]
     for summary in report["targets"]:
         if summary.get("ok"):
             debt = summary.get("operational_debt") if isinstance(summary.get("operational_debt"), dict) else {}
+            domain_pack = summary.get("domain_pack") if isinstance(summary.get("domain_pack"), dict) else {}
             lines.append(
                 f"- {summary['path']}: {summary.get('readiness_verdict')} "
                 f"(active={summary.get('active_run_count')}, stale={summary.get('stale_run_count')}, "
                 f"warnings={debt.get('warning_count', 0)}, deferred={debt.get('deferred_count', 0)}, "
-                f"awaiting_review={summary.get('questions_awaiting_review', 0)})"
+                f"awaiting_review={summary.get('questions_awaiting_review', 0)}, "
+                f"domain_pack={domain_pack.get('state', 'unknown')})"
             )
         else:
             lines.append(f"- {summary['path']}: {summary.get('error_code')} {summary.get('message')}")

@@ -18,6 +18,29 @@ _REMEDIATIONS = {
         "Restore write access and free space for the target workspace, preview the same command with "
         "--dry-run, then retry the upgrade."
     ),
+    "DOMAIN_PACK_INVALID": (
+        "Fix the domain pack so it passes evidence-wiki pack validate, then rerun the command."
+    ),
+    "DOMAIN_PACK_UNTRACKED": (
+        "Restore or align the installed pack tree and its research.yml name, version, and contract; "
+        "then run evidence-wiki pack adopt, and refresh only after adoption succeeds."
+    ),
+    "DOMAIN_PACK_REFRESH_CONFLICT": (
+        "Review the reported config: and file: targets, then rerun with a path-specific "
+        "--keep-local or --accept-pack resolution for each conflict."
+    ),
+    "DOMAIN_PACK_STATE_INVALID": (
+        "Restore domain-packs/.evidence-wiki-state.yml from a known-good backup or reinitialize "
+        "the workspace before refreshing its domain pack."
+    ),
+    "DOMAIN_PACK_TRANSACTION_INCOMPLETE": (
+        "Run a write-mode evidence-wiki pack command to recover the interrupted transaction; "
+        "dry-run and doctor only report it."
+    ),
+    "DOMAIN_PACK_WRITE_FAILED": (
+        "Restore write access and free space for the workspace, inspect any reported transaction, "
+        "then retry the pack command."
+    ),
     "MANIFEST_MISSING": "Run scripts/source_inventory.py --report to create sources/manifest.jsonl.",
     "MANIFEST_INVALID": "Fix malformed manifest JSONL or regenerate it with scripts/source_inventory.py --report.",
     "INVENTORY_CHECKSUM_REQUIRED": (

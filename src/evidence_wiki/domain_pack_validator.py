@@ -25,6 +25,7 @@ ALLOWED_RECOMMENDED_ACQUISITION = ("arxiv", "openalex")
 ALLOWED_RECOMMENDED_DISCOVERY = ("arxiv", "openalex")
 COVERAGE_TEMPLATE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 ALLOWED_PACK_FILE_SUFFIXES = {".csv", ".json", ".md", ".txt", ".yaml", ".yml"}
+FORBIDDEN_PACK_PATH_CHARACTERS = '<>:"|?*\\'
 WINDOWS_RESERVED_PACK_NAMES = {
     "aux",
     "con",
@@ -117,8 +118,8 @@ def load_overlay(overlay_path: Path) -> tuple[dict[str, Any] | None, dict[str, A
 
 def string_field(mapping: dict[str, Any], key: str) -> str | None:
     value = mapping.get(key)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
+    if isinstance(value, str) and value and value == value.strip():
+        return value
     return None
 
 
@@ -739,7 +740,7 @@ def pack_tree_safety_check(pack_path: Path) -> dict[str, Any]:
         )
     root_name = pack_path.name
     if (
-        any(ord(character) < 32 or character in '<>:"|?*' for character in root_name)
+        any(ord(character) < 32 or character in FORBIDDEN_PACK_PATH_CHARACTERS for character in root_name)
         or root_name.endswith((" ", "."))
         or root_name.split(".", 1)[0].casefold() in WINDOWS_RESERVED_PACK_NAMES
     ):
@@ -758,7 +759,7 @@ def pack_tree_safety_check(pack_path: Path) -> dict[str, Any]:
             portable_paths[portable_identity] = relative
         for part in relative_parts:
             if (
-                any(ord(character) < 32 or character in '<>:"|?*' for character in part)
+                any(ord(character) < 32 or character in FORBIDDEN_PACK_PATH_CHARACTERS for character in part)
                 or part.endswith((" ", "."))
                 or part.split(".", 1)[0].casefold() in WINDOWS_RESERVED_PACK_NAMES
             ):
@@ -848,6 +849,48 @@ def unsafe_pack_payload(pack_path: Path, tree_safety: dict[str, Any]) -> dict[st
         "checks": [
             tree_safety,
             check("overlay_parse", "fail", f"Overlay parsing skipped because {reason}.", []),
+            check("merged_config", "fail", f"Overlay cannot be merged because {reason}.", []),
+            check("smoke_validation", "fail", f"Smoke validation skipped because {reason}.", []),
+        ],
+        "smoke_validation": {"ok": False, "summary": {}, "issues": []},
+    }
+
+
+def invalid_overlay_data_payload(
+    pack_path: Path,
+    overlay: dict[str, Any],
+    overlay_parse: dict[str, Any],
+    tree_safety: dict[str, Any],
+    data_model: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a bounded report for safe YAML values outside the JSON model."""
+    pack = overlay.get("domain_pack") if isinstance(overlay.get("domain_pack"), dict) else {}
+
+    def text(key: str) -> str | None:
+        value = pack.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    reason = "the overlay data model is not lifecycle-serializable"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": False,
+        "domain_pack": {
+            "path": pack_path.as_posix(),
+            "name": text("name"),
+            "version": text("version"),
+            "compatible_research_yml_contract": text("compatible_research_yml_contract"),
+            "recommended_acquisition": [],
+            "recommended_discovery": [],
+            "coverage_templates": {},
+            "human_gated": False,
+            "policy_vocabularies": {},
+            "policy_rules": {},
+            "request_kinds": {},
+        },
+        "checks": [
+            overlay_parse,
+            tree_safety,
+            data_model,
             check("merged_config", "fail", f"Overlay cannot be merged because {reason}.", []),
             check("smoke_validation", "fail", f"Smoke validation skipped because {reason}.", []),
         ],
@@ -946,7 +989,34 @@ def validate_domain_pack(selection: str, *, root: Path | None = None) -> dict[st
         target_relative=f"domain-packs/{pack_path.name}",
     )
     overlay, overlay_check = load_overlay(pack_path / "research.overlay.yml")
-    checks = [overlay_check, tree_safety]
+    if overlay is not None:
+        data_model_issue = scripts.initializer.domain_pack_data_model_issue(overlay)
+        data_model_check = check(
+            "overlay_data_model",
+            "fail" if data_model_issue is not None else "pass",
+            (
+                "research.overlay.yml must use JSON-compatible YAML values: " + data_model_issue
+                if data_model_issue is not None
+                else "research.overlay.yml uses the JSON-compatible lifecycle data model."
+            ),
+            ["research.overlay.yml"],
+        )
+        if data_model_issue is not None:
+            return invalid_overlay_data_payload(
+                pack_path,
+                overlay,
+                overlay_check,
+                tree_safety,
+                data_model_check,
+            )
+    else:
+        data_model_check = check(
+            "overlay_data_model",
+            "fail",
+            "Overlay data-model validation skipped because research.overlay.yml did not parse.",
+            ["research.overlay.yml"],
+        )
+    checks = [overlay_check, tree_safety, data_model_check]
 
     domain_pack = copy.deepcopy(overlay.get("domain_pack")) if isinstance(overlay, dict) else None
     expected_contract = starter_contract(starter_root)

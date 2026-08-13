@@ -61,6 +61,7 @@ _NON_RECOVERABLE_CODES = frozenset({"CLAIM_HELD", "CLAIM_NOT_STALE"})
 _EXIT_CODE_OVERRIDES: dict[str, int] = {
     "CLAIM_HELD": EXIT_CONFLICT,
     "CLAIM_NOT_STALE": EXIT_CONFLICT,
+    "DOMAIN_PACK_REFRESH_CONFLICT": EXIT_CONFLICT,
     "ORCHESTRATION_DRIVER_BUSY": EXIT_DRIVER_BUSY,
 }
 
@@ -171,6 +172,11 @@ ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     # An upgrade that cannot write is a workspace-level filesystem problem, the
     # same family an operator is already checking when the workspace is unreadable.
     "UPGRADE_WRITE_FAILED": ConfigError,
+    # A domain-pack lifecycle refusal means the workspace's tracked pack state,
+    # candidate revision, or transaction cannot safely support the requested
+    # CLI mutation. Keep these in the existing workspace/configuration family:
+    # pack refresh/adopt are intentionally not an embeddable library API.
+    "DOMAIN_PACK_": ConfigError,
     # Concurrency.
     "LOCK_UNAVAILABLE": LockError,
     # Claim lifecycle.

@@ -170,7 +170,7 @@ def main() -> int:
     cli = str(args.cli.resolve())
 
     contract = json.loads(run([cli, "contract", "--format", "json"]).stdout)
-    if contract.get("starter_version") != "0.5.5":
+    if contract.get("starter_version") != "0.6.0":
         raise SystemExit(f"installed CLI reported an unexpected starter version: {contract.get('starter_version')}")
     schema_documents = contract.get("artifact_schema_documents")
     expected_schemas = {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose whether a runner can operate a research wiki workspace."""
+"""Diagnose runtime capabilities and domain-pack lifecycle health for a workspace."""
 
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ from _provider_plugins import (
 from _provider_registry import ACQUISITION_PROVIDER_IDS, DISCOVERY_ACCEPTED_IDS
 from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
 from _workspace_health import evaluate_workspace_health
+from _workspace_module_loader import load_workspace_module
 
 REGISTERED_PROVIDERS_CHECK_ID = "registered_providers"
 
@@ -65,6 +66,11 @@ class DoctorEnvironment:
         import pypdf
 
         return pypdf
+
+    def import_ruamel_yaml(self):
+        import ruamel.yaml
+
+        return ruamel.yaml
 
     def which(self, name: str) -> str | None:
         return shutil.which(name)
@@ -205,6 +211,32 @@ def pypdf_check(env: DoctorEnvironment) -> dict[str, Any]:
         "PDF-only records can use the portable Python normalization backend.",
         "No action required.",
         version=str(version),
+    )
+
+
+def ruamel_yaml_check(env: DoctorEnvironment) -> dict[str, Any]:
+    try:
+        module = env.import_ruamel_yaml()
+    except ImportError as exc:
+        return check_item(
+            "ruamel_yaml",
+            "ruamel.yaml import",
+            "missing",
+            True,
+            f"ruamel.yaml is not importable: {exc}",
+            "Comment-preserving domain-pack refresh cannot run.",
+            "Reinstall EvidenceWiki so its required ruamel.yaml dependency is present, for example with "
+            "`python3 -m pip install --upgrade evidence-wiki`.",
+        )
+    return check_item(
+        "ruamel_yaml",
+        "ruamel.yaml import",
+        "ok",
+        True,
+        "ruamel.yaml is importable.",
+        "Domain-pack refresh can preserve live YAML comments, ordering, and quoting.",
+        "No action required.",
+        version=str(getattr(module, "__version__", "unknown")),
     )
 
 
@@ -396,6 +428,72 @@ def contract_check(project_root: Path, yaml_module: Any | None) -> dict[str, Any
         ),
         "No action required." if not missing else "Restore missing workspace_system fields.",
         details=details | ({"missing": missing} if missing else {}),
+    )
+
+
+def domain_pack_lifecycle_check(project_root: Path) -> dict[str, Any]:
+    """Explain domain-pack lifecycle health without attempting recovery or mutation."""
+    try:
+        lifecycle = load_workspace_module(_SCRIPT_DIR, "_domain_pack_lifecycle")
+        details = lifecycle.inspect_workspace(project_root)
+        if not isinstance(details, dict):
+            raise TypeError("domain-pack lifecycle inspector returned a non-mapping result")
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - doctor reports a broken diagnostic surface
+        return check_item(
+            "domain_pack_lifecycle",
+            "Domain-pack lifecycle",
+            "degraded",
+            False,
+            f"Domain-pack lifecycle state could not be inspected: {exc}",
+            "Pack ownership, local modifications, and interrupted refreshes cannot be assessed.",
+            "Repair or upgrade the workspace tooling, then rerun `evidence-wiki doctor`.",
+        )
+
+    state = str(details.get("state") or "state_invalid")
+    messages = {
+        "none": "No domain pack is installed.",
+        "current": "The tracked domain-pack installation is internally consistent.",
+        "legacy_untracked": "The installed domain pack predates lifecycle ownership tracking.",
+        "local_modifications": "Tracked domain-pack configuration or files have local modifications.",
+        "config_tree_skew": "The configured domain pack and installed pack tree disagree.",
+        "pack_missing": "One or more tracked domain-pack files are missing.",
+        "state_invalid": "Domain-pack lifecycle state is invalid.",
+        "transaction_incomplete": (
+            "A domain-pack transaction marker exists for an incomplete write; "
+            "doctor reports it without attempting recovery."
+        ),
+    }
+    remediations = {
+        "none": "No action required.",
+        "current": "No action required; current means internally consistent, not latest upstream.",
+        "legacy_untracked": "Run `evidence-wiki pack adopt --target PATH` before attempting a refresh.",
+        "local_modifications": (
+            "Preview `evidence-wiki pack refresh --target PATH --path NAME_OR_PATH --dry-run` and resolve "
+            "each reported conflict explicitly."
+        ),
+        "config_tree_skew": "Restore the matching pack tree or preview a reviewed `evidence-wiki pack refresh`.",
+        "pack_missing": "Restore missing tracked files from backup or preview a reviewed domain-pack refresh.",
+        "state_invalid": "Restore the lifecycle state from a trusted backup before running a pack write command.",
+        "transaction_incomplete": (
+            "Run the intended `evidence-wiki pack adopt` or `evidence-wiki pack refresh` command in write mode "
+            "to validate and recover the interrupted transaction before replanning. Preserve the journal and "
+            "its backups for reviewed recovery if validation refuses it; dry-run and doctor only report it."
+        ),
+    }
+    healthy = state in {"none", "current"}
+    return check_item(
+        "domain_pack_lifecycle",
+        "Domain-pack lifecycle",
+        "ok" if healthy else "degraded",
+        False,
+        messages.get(state, f"Domain-pack lifecycle reported unknown state {state!r}."),
+        (
+            "No lifecycle repair is required."
+            if healthy
+            else "Pack refresh safety cannot be assumed until the reported lifecycle condition is resolved."
+        ),
+        remediations.get(state, "Upgrade the workspace tooling and rerun `evidence-wiki doctor`."),
+        details=details,
     )
 
 
@@ -1041,6 +1139,7 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
     project_root = project_root.expanduser().resolve()
     pyyaml, yaml_module = pyyaml_check(env)
     pypdf = pypdf_check(env)
+    ruamel_yaml = ruamel_yaml_check(env)
     config = load_research_config(project_root, yaml_module)
     sources = config.get("sources") if isinstance(config.get("sources"), dict) else {}
     poppler_required = sources.get("pdf_extractor", "pypdf") == "poppler"
@@ -1056,6 +1155,7 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
     checks = [
         python_check(env),
         pyyaml,
+        ruamel_yaml,
         pypdf,
         poppler_check(env, required=poppler_required),
         tool_check(
@@ -1069,6 +1169,7 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
         ),
         workspace_write_check(project_root, env),
         contract_check(project_root, yaml_module),
+        domain_pack_lifecycle_check(project_root),
         semantic_retrieval_check(project_root, yaml_module),
         normalization_adapters_check(project_root, yaml_module),
         acquisition_mode_check(project_root, yaml_module),

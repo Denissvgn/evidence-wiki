@@ -28,6 +28,7 @@ REQUIRED_STARTER_ASSETS = (
     "research.yml",
     "workspace-system.yml",
     "scripts/doctor.py",
+    "scripts/_domain_pack_lifecycle.py",
     "scripts/init_research_workspace.py",
     "scripts/lint.py",
     "scripts/_provider_accounting.py",

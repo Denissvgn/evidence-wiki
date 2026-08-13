@@ -136,8 +136,12 @@ jobs:
             --target "$smoke_root" \
             --project-name provider-workspace \
             --project-description "Installed wheel orchestration smoke" \
+            --domain-pack general-science \
             --discovery-provider arxiv \
             --acquisition-provider arxiv
+          .wheel-venv/bin/evidence-wiki pack refresh \
+            --target "$smoke_root" --path general-science \
+            --format json > /tmp/evidence-wiki-pack-refresh.json
           .wheel-venv/bin/evidence-wiki orchestrate start \
             --target "$smoke_root" \
             --orchestration-id wheel-smoke \
@@ -153,6 +157,7 @@ jobs:
             --orchestration-id wheel-smoke \
             --format json > /tmp/evidence-wiki-status.json
           .wheel-venv/bin/python - <<'PY'
+          import json
           from importlib.metadata import version
           from pathlib import Path
 
@@ -169,6 +174,12 @@ jobs:
           if not pypdf.__version__.startswith("6."):
               raise SystemExit(f"Installed wheel resolved unsupported pypdf version {pypdf.__version__!r}")
 
+          pack_refresh = json.loads(Path("/tmp/evidence-wiki-pack-refresh.json").read_text(encoding="utf-8"))
+          if pack_refresh.get("status") != "no_changes" or pack_refresh.get("log_appended") is not False:
+              raise SystemExit(f"Installed-wheel bundled pack refresh was not a no-op: {pack_refresh!r}")
+          if not (Path(pack_refresh["target"]) / "domain-packs" / ".evidence-wiki-state.yml").is_file():
+              raise SystemExit("Installed-wheel pack initialization did not create lifecycle state")
+
           properties = ORCHESTRATION_RESULT_SCHEMA["properties"]
           if properties["schema_version"] != {"type": "string", "enum": ["1.0"]}:
               raise SystemExit("Installed wheel contains an incompatible orchestration result schema")
@@ -180,6 +191,7 @@ jobs:
                   "workspace-template/docs/orchestration.md",
                   "workspace-template/docs/orchestrator-handoff.md",
                   "workspace-template/docs/run-controller.md",
+                  "workspace-template/scripts/_domain_pack_lifecycle.py",
                   "workspace-template/skills/research-run.md",
                   "workspace-template/skills/research-discover.md",
                   "workspace-template/skills/research-acquire.md",

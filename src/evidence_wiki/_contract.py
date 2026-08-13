@@ -18,6 +18,8 @@ leaves exactly one meaning for the public name.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -29,6 +31,10 @@ from .resources import STARTER_DIR, required_asset_manifest
 CONTRACT_SCHEMA_VERSION = "1.0"
 
 LIBRARY_API_VERSION = "1"
+
+DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
+DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
+DOMAIN_PACK_LIFECYCLE_COMMANDS = ("pack refresh", "pack adopt")
 
 # Operation names for the embeddable API, written as ``<namespace>.<operation>``:
 # ``workspace.*`` are operations on a workspace handle, ``coverage``,
@@ -74,6 +80,85 @@ LIBRARY_API_SURFACE = (
     "fleet_status",
     "contract",
 )
+
+
+def _normalized_overlay_sha256(overlay_path: Path, yaml_module: ModuleType) -> str:
+    """Hash an overlay's data model rather than its presentation.
+
+    Comments, key order, and quoting do not identify a pack revision. Refresh
+    therefore uses the same canonical JSON material for its overlay identity so
+    a presentation-only edit does not make a workspace appear out of date.
+    """
+    document = yaml_module.safe_load(overlay_path.read_text(encoding="utf-8"))
+    canonical = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _domain_pack_tree_sha256(pack_root: Path) -> str:
+    """Return the content identity of every regular, non-symlink pack file."""
+    digest = hashlib.sha256()
+    paths = sorted(
+        (
+            path
+            for path in pack_root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ),
+        key=lambda path: path.relative_to(pack_root).as_posix(),
+    )
+    for path in paths:
+        relative = path.relative_to(pack_root).as_posix()
+        file_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest.update(f"{relative}\0{file_sha256}\n".encode())
+    return digest.hexdigest()
+
+
+def _bundled_domain_pack_metadata(root: Path, yaml_module: ModuleType) -> dict[str, dict[str, str]]:
+    """Describe the revisions bundled with this installation.
+
+    The installed pack inventory used by policy discovery is deliberately left
+    unchanged. This is a separate lifecycle-oriented view whose digest fields
+    let tooling compare content without treating the display version as an
+    ordered upgrade number.
+    """
+    domain_packs_root = root / "domain-packs"
+    result: dict[str, dict[str, str]] = {}
+    if not domain_packs_root.is_dir():
+        return result
+    for overlay_path in sorted(domain_packs_root.glob("*/research.overlay.yml")):
+        try:
+            document = yaml_module.safe_load(overlay_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml_module.YAMLError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        domain_pack = document.get("domain_pack")
+        if not isinstance(domain_pack, dict):
+            continue
+        name = domain_pack.get("name")
+        version = domain_pack.get("version")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(version, str)
+            or not version.strip()
+        ):
+            continue
+        try:
+            overlay_sha256 = _normalized_overlay_sha256(overlay_path, yaml_module)
+            tree_sha256 = _domain_pack_tree_sha256(overlay_path.parent)
+        except (OSError, TypeError, ValueError):
+            continue
+        result[name.strip()] = {
+            "version": version.strip(),
+            "overlay_sha256": overlay_sha256,
+            "tree_sha256": tree_sha256,
+        }
+    return result
 
 
 def _pack_policy_vocabularies(root: Path, coverage_module: ModuleType, yaml_module: ModuleType) -> dict[str, dict[str, dict[str, str]]]:
@@ -206,6 +291,7 @@ def contract() -> dict:
     base_policy_definitions = coverage_manifest_module.base_policy_vocabularies()
     installed_pack_policy_definitions = _pack_policy_vocabularies(root, coverage_manifest_module, yaml)
     installed_pack_policy_rules = _pack_policy_rules(root, policy_primitives_module, yaml)
+    bundled_pack_metadata = _bundled_domain_pack_metadata(root, yaml)
     merged_policy_definitions = coverage_manifest_module.base_policy_vocabularies()
     for pack_vocabularies in installed_pack_policy_definitions.values():
         for field, definitions in pack_vocabularies.items():
@@ -226,6 +312,12 @@ def contract() -> dict:
         "upgrade_compatibility": {
             "workspace_schema_versions": list(initializer.SUPPORTED_WORKSPACE_SCHEMA_VERSIONS),
             "research_yml_contract_versions": list(initializer.SUPPORTED_RESEARCH_YML_CONTRACTS),
+        },
+        "domain_pack_lifecycle": {
+            "state_schema_version": DOMAIN_PACK_STATE_SCHEMA_VERSION,
+            "refresh_schema_version": DOMAIN_PACK_REFRESH_SCHEMA_VERSION,
+            "commands": list(DOMAIN_PACK_LIFECYCLE_COMMANDS),
+            "bundled_packs": bundled_pack_metadata,
         },
         "orchestration_capabilities": {
             "managed_runner_ids": list(orchestration.managed_runner_names()),

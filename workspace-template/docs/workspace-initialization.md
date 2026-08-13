@@ -202,10 +202,21 @@ When a domain pack is requested, the script:
 1. copies the pack to `domain-packs/<pack-name>/` inside the new workspace,
 2. deep-merges `research.overlay.yml` into `research.yml`,
 3. rewrites known domain-pack document paths so they are workspace-relative,
-4. keeps explicit CLI and profile project identity values as the final source of truth.
+4. keeps explicit CLI and profile project identity values as the final source
+   of truth,
 5. surfaces any `domain_pack.recommended_discovery` and
    `domain_pack.recommended_acquisition` IDs in the init report without enabling
-   either phase.
+   either phase, and
+6. records pack-owned configuration and file provenance in
+   `domain-packs/.evidence-wiki-state.yml` for later refreshes.
+
+The lifecycle state records only configuration whose last writer was the pack.
+Project personalization, profile overrides, and CLI overrides remain local and
+unowned even when their values happen to equal pack values. It also records the
+pre-pack fallback for each owned configuration unit so a later pack revision can
+retire a key without guessing what belonged to the workspace. State and pack
+artifacts are written with the same restrictive permissions as other generated
+workspace metadata.
 
 If no domain pack is requested, no domain-pack directory is created.
 
@@ -231,9 +242,11 @@ reports use owner-only file modes, and workspace-created directories use
 owner-only directory modes. On Windows, Python's `chmod` behavior is best effort.
 
 Concurrency contract: init and upgrade assume one trusted writer per target
-workspace. The validate-before-write checks are containment guards, not
-multi-writer transaction boundaries, so do not run init or upgrade while another
-process mutates the same target. Runtime mutation scripts use the shared
+workspace. Pack adoption and pack refresh use the same constraint. The
+validate-before-write checks are containment guards, not multi-writer
+transaction boundaries, so do not run init or upgrade while another process
+mutates the same target; do not run a write-mode pack command concurrently
+either. Runtime mutation scripts use the shared
 `_workspace_locks.py` helper for question claims, question resolution, discovery
 candidate writes, run-controller state updates, query-index builds, terminal-run
 archival, and log appends. Native `fcntl` or `msvcrt` advisory locks provide the
@@ -285,15 +298,18 @@ evidence-wiki upgrade --target ../my-research-workspace --dry-run   # preview ch
 evidence-wiki upgrade --target ../my-research-workspace             # apply
 ```
 
-`upgrade` refreshes only starter-managed paths. By default it refreshes
+`upgrade` refreshes only starter-managed paths; it does not refresh a domain
+pack. By default it refreshes
 `scripts/`; pass `--include skills` or `--include docs` to also refresh those
 reusable directories. Optional `skills/` and `docs/` files are user-editable:
 when an overlapping optional file has local edits, upgrade refuses unless
 `--force-optional` is set. Forced optional replacements preserve the displaced
 file under `.replaced/<path>` and refuse if that backup path already exists. It
-records the refreshed starter version in `workspace-system.yml`, appends an
-`upgrade` entry to `log.md`, and never modifies `research.yml`, `raw/`,
-`sources/`, `wiki/`, `index.md`, or existing `log.md` content.
+may update `workspace-system.yml`, uses `.locks/`, and conditionally appends one
+`upgrade` entry to `log.md` when write mode applies material changes. It
+preserves all prior log history, `research.yml`, `raw/`, `sources/`, `wiki/`,
+`index.md`, and other user data. `--dry-run` writes nothing, including lock,
+backup, metadata, and log artifacts.
 
 Filesystem write failures return exit code `2` with `UPGRADE_WRITE_FAILED`, a
 bounded remediation on stderr, and no Python traceback. The failing temporary
@@ -307,6 +323,82 @@ and module-global caches until they are restarted.
 
 Run it from a clean version-control state so the refreshed files are easy to
 review.
+
+## Adopting And Refreshing A Domain Pack
+
+Domain-pack maintenance is explicit and separate from starter `upgrade`. A
+workspace initialized by a lifecycle-aware package can preview and apply a new
+revision of its installed pack by name or filesystem path:
+
+```bash
+evidence-wiki pack refresh \
+  --target ../my-research-workspace \
+  --path llm-research \
+  --dry-run
+evidence-wiki pack refresh \
+  --target ../my-research-workspace \
+  --path llm-research
+```
+
+Refresh validates the candidate before mutation, requires the same pack name
+and a compatible `research.yml` contract, and compares content digests rather
+than ordering version strings. It reconciles pack-owned configuration and
+files with a three-way merge. Local-only configuration and untracked extra
+files are preserved. A locally changed value or file conflicts only when the
+incoming pack changed the same ownership unit differently; without an explicit
+resolution, any true conflict produces zero writes.
+
+When refresh changes `research.yml`, round-trip YAML handling preserves
+operator comments, key order, quoting, and the optional commented footer. Pack
+reconciliation does not rewrite project identity, unrelated configuration,
+`raw/`, `sources/`, `wiki/`, or `index.md`.
+
+Conflict targets reported by text and JSON output have one of these forms:
+
+```text
+config:/rfc/6901/path
+file:pack-relative/path
+```
+
+Resolve each reported target deliberately on a later run. `--keep-local
+TARGET` preserves the workspace value or file and releases pack ownership;
+`--accept-pack TARGET` applies the incoming pack revision and retains the
+displaced workspace state in the transaction backup. Both flags are repeatable.
+Unknown, duplicate, or contradictory resolutions are refused; there is no
+global force option. This includes directory-to-file collisions: untracked
+files are never displaced implicitly, and explicit acceptance retains each one
+in the transaction backup.
+
+Workspaces created before lifecycle state was introduced report
+`legacy_untracked`, and refresh refuses with a bounded instruction to adopt the
+installed pack first:
+
+```bash
+evidence-wiki pack adopt --target ../legacy-workspace --dry-run
+evidence-wiki pack adopt --target ../legacy-workspace
+```
+
+Adoption validates that the installed pack tree and `research.yml` agree on
+pack name, version, and contract, then writes provenance state without changing
+pack files or configuration. Project identity is never inferred as pack-owned.
+When a legacy workspace differs from its installed overlay, adoption refuses
+until the operator reviews the differences and repeats it with
+`--accept-local-overrides`; those differences remain local and unowned.
+
+Dry-run adoption and refresh perform validation and planning without locks,
+directories, state, backup, or log writes. Write mode serializes refreshes with
+`.locks/domain-pack-refresh.lock`, records recovery information before replacing
+files, and retains prior state under
+`.replaced/domain-packs/<transaction-id>/`. A successful adoption or material
+refresh appends exactly one audit entry; a no-op or dry-run appends none. If a
+process is interrupted, doctor and dry-run report the incomplete transaction
+without changing it, while the next write-mode pack command restores the old
+state before replanning.
+
+Workspace status reports lifecycle consistency, not upstream freshness:
+`domain_pack.state: current` means the tracked installation is internally
+consistent. It does not mean that the installed pack is the latest revision.
+Use an explicit refresh path when you want to compare with a candidate.
 
 ## Cross-Platform Installation Check
 

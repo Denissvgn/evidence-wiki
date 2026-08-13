@@ -94,6 +94,18 @@ class ErrorRegistryCoverageTests(unittest.TestCase):
         self.assertIs(errors.RequestError, errors.error_class_for("SOURCE_REQUEST_FULFILL_DELEGATED"))
         self.assertIs(errors.SourceError, errors.error_class_for("SOURCE_UNKNOWN"))
 
+    def test_domain_pack_lifecycle_codes_are_workspace_configuration_errors(self):
+        for code in (
+            "DOMAIN_PACK_INVALID",
+            "DOMAIN_PACK_UNTRACKED",
+            "DOMAIN_PACK_REFRESH_CONFLICT",
+            "DOMAIN_PACK_STATE_INVALID",
+            "DOMAIN_PACK_TRANSACTION_INCOMPLETE",
+            "DOMAIN_PACK_WRITE_FAILED",
+        ):
+            with self.subTest(error_code=code):
+                self.assertIs(errors.ConfigError, errors.error_class_for(code))
+
 
 class ErrorEnvelopeToleranceTests(unittest.TestCase):
     def test_unknown_code_degrades_to_the_base_class_with_the_code_preserved(self):
@@ -177,6 +189,17 @@ class ErrorEnvelopeToleranceTests(unittest.TestCase):
         self.assertEqual(errors.DEFAULT_REMEDIATION, error.remediation)
         self.assertEqual({}, error.details)
         self.assertEqual(errors.EXIT_INVALID, error.exit_code)
+
+    def test_domain_pack_refresh_conflict_reconstructs_exit_three(self):
+        error = errors.error_from_envelope(
+            {
+                "schema_version": "1.0",
+                "error_code": "DOMAIN_PACK_REFRESH_CONFLICT",
+                "message": "conflicting pack-owned paths",
+            }
+        )
+        self.assertIsInstance(error, errors.ConfigError)
+        self.assertEqual(errors.EXIT_CONFLICT, error.exit_code)
 
 
 if __name__ == "__main__":

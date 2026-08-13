@@ -104,8 +104,12 @@ jobs:
             --target "$smoke_root" \
             --project-name provider-workspace \
             --project-description "Release wheel orchestration smoke" \
+            --domain-pack general-science \
             --discovery-provider arxiv \
             --acquisition-provider arxiv
+          .wheel-venv/bin/evidence-wiki pack refresh \
+            --target "$smoke_root" --path general-science \
+            --format json > /tmp/evidence-wiki-pack-refresh.json
           .wheel-venv/bin/evidence-wiki orchestrate start \
             --target "$smoke_root" --orchestration-id wheel-smoke \
             --agent-id release-smoke --format json > /tmp/evidence-wiki-start.json
@@ -116,11 +120,14 @@ jobs:
             --target "$smoke_root" --orchestration-id wheel-smoke \
             --format json > /tmp/evidence-wiki-status.json
           .wheel-venv/bin/python - <<'PY'
+          import json
           import os
+          from io import StringIO
           from pathlib import Path
 
           import evidence_wiki
           import pypdf
+          import ruamel.yaml
           from evidence_wiki import resources
           from evidence_wiki.orchestration import ORCHESTRATION_RESULT_SCHEMA
 
@@ -134,6 +141,25 @@ jobs:
               raise SystemExit(f"EvidenceWiki was not imported from the installed wheel: {installed_path}")
           if not pypdf.__version__.startswith("6."):
               raise SystemExit(f"Installed wheel resolved unsupported pypdf version {pypdf.__version__!r}")
+          if not ruamel.yaml.__version__.startswith("0.19."):
+              raise SystemExit(
+                  f"Installed wheel resolved unsupported ruamel.yaml version {ruamel.yaml.__version__!r}"
+              )
+
+          round_trip_yaml = ruamel.yaml.YAML(typ="rt", pure=True)
+          round_trip_yaml.preserve_quotes = True
+          round_trip_source = '# operator note\nquoted: "preserve me"\n'
+          round_trip_document = round_trip_yaml.load(round_trip_source)
+          round_trip_output = StringIO()
+          round_trip_yaml.dump(round_trip_document, round_trip_output)
+          if round_trip_output.getvalue() != round_trip_source:
+              raise SystemExit("Installed ruamel.yaml dependency did not preserve YAML comments and quotes")
+
+          pack_refresh = json.loads(Path("/tmp/evidence-wiki-pack-refresh.json").read_text(encoding="utf-8"))
+          if pack_refresh.get("status") != "no_changes" or pack_refresh.get("log_appended") is not False:
+              raise SystemExit(f"Installed-wheel bundled pack refresh was not a no-op: {pack_refresh!r}")
+          if not (Path(pack_refresh["target"]) / "domain-packs" / ".evidence-wiki-state.yml").is_file():
+              raise SystemExit("Installed-wheel pack initialization did not create lifecycle state")
 
           properties = ORCHESTRATION_RESULT_SCHEMA["properties"]
           if properties["schema_version"] != {"type": "string", "enum": ["1.0"]}:
@@ -146,6 +172,7 @@ jobs:
                   "workspace-template/docs/orchestration.md",
                   "workspace-template/docs/orchestrator-handoff.md",
                   "workspace-template/docs/run-controller.md",
+                  "workspace-template/scripts/_domain_pack_lifecycle.py",
                   "workspace-template/skills/research-run.md",
                   "workspace-template/skills/research-discover.md",
                   "workspace-template/skills/research-acquire.md",

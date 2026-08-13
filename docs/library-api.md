@@ -50,9 +50,9 @@ contain `research.yml`. Two refusals, both `ConfigError`:
 | A directory with no `research.yml` | `CONFIG_MISSING` |
 
 Pointing at the wrong path is therefore a typed refusal, never a stray directory
-tree. There is no programmatic `init` or `upgrade`; use `evidence-wiki init` and
-`evidence-wiki upgrade` for those (see [what the API does not
-expose](#what-the-api-deliberately-omits)).
+tree. There is no programmatic `init`, `upgrade`, pack adoption, or pack refresh;
+use the corresponding `evidence-wiki` CLI commands for those (see [what the API
+does not expose](#what-the-api-deliberately-omits)).
 
 `Workspace` is a context manager, and `with` is the shape to prefer — see
 [handle lifetime](#handle-lifetime-and-close) for what `close()` does and,
@@ -440,8 +440,8 @@ beside what is deployed:
 
 ```python
 ws.versions()
-# {'package': '0.3.0',
-#  'workspace': {'starter_version': '0.5.5',
+# {'package': '0.3.1',
+#  'workspace': {'starter_version': '0.6.0',
 #                'schema_version': '0.1',
 #                'compatible_research_yml_contract': '0.1'}}
 ```
@@ -668,10 +668,12 @@ Absences worth stating, so they are not read as gaps:
   has no supported way to name the type it would have to construct; it exists for
   the doctor's own tests, which reach the seam directly. Exposing it would publish
   a parameter whose only legal value the public API cannot hand out.
-- **Programmatic `init` and `upgrade` are out of scope.** `Workspace.open`
-  validates and never creates. Workspace creation and starter upgrades stay with
-  `evidence-wiki init`, `evidence-wiki deploy`, and `evidence-wiki upgrade`, which
-  own their own dry-run, conflict, and preservation rules.
+- **Programmatic workspace and pack mutation are out of scope.**
+  `Workspace.open` validates and never creates. Workspace creation, starter
+  upgrades, domain-pack adoption, and domain-pack refresh stay with
+  `evidence-wiki init`, `evidence-wiki deploy`, `evidence-wiki upgrade`,
+  `evidence-wiki pack adopt`, and `evidence-wiki pack refresh`, which own their
+  own dry-run, conflict, transaction, and preservation rules.
 - **Managed orchestration runners are not on the API.** `orchestrate run` and
   `orchestrate resume` drive a package-managed Codex or Claude worker under an
   isolation boundary; the API exposes the model-neutral protocol
