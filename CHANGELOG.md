@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-08-13
+
+- Add an explicit, fail-closed domain-pack lifecycle for existing workspaces.
+  Fresh initialization now records pack-owned configuration and file provenance;
+  legacy 0.3.0 workspaces can opt into that boundary with `evidence-wiki pack
+  adopt`, and `evidence-wiki pack refresh` performs comment-preserving three-way
+  reconciliation with path-specific conflict resolution, dry-run reports,
+  workspace locking, retained backups, interruption journals, and deterministic
+  recovery. Status, doctor, fleet status, upgrade warnings, and the installation
+  contract expose the same additive lifecycle health and revision identities.
+  The compatible starter capability set advances from `0.5.5` to `0.6.0`.
+
+- Correct upgrade documentation and help: write mode uses `.locks/`, may update
+  `workspace-system.yml`, and appends `log.md` only after material managed-file or
+  starter-version changes while preserving prior history and user data. Dry-run
+  writes nothing.
+
 ## 0.3.0 - 2026-08-11
 
 - Close five spellings of catastrophic backtracking that a pack's `regex` rules could

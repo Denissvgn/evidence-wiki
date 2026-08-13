@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import math
 import os
 import re
 import shutil
@@ -50,8 +51,9 @@ from _provider_registry import (
     ProviderNotRegisteredError,
     validate_provider_ids,
 )
-from _script_errors import error_envelope
+from _script_errors import error_envelope, remediation_for
 from _workspace_locks import LockUnavailableError, workspace_lock
+from _workspace_module_loader import load_workspace_module
 from source_inventory import is_contained_nonsymlink
 
 REQUIRED_STARTER_FILES = (
@@ -86,6 +88,7 @@ PROFILE_CONFIG_SECTIONS = (
     "integrations",
 )
 ALLOWED_PACK_FILE_SUFFIXES = {".csv", ".json", ".md", ".txt", ".yaml", ".yml"}
+FORBIDDEN_PACK_PATH_CHARACTERS = '<>:"|?*\\'
 WINDOWS_RESERVED_PACK_NAMES = {
     "aux",
     "con",
@@ -216,6 +219,18 @@ WINDOWS_RESERVED_PATH_NAMES = {
 }
 RESTRICTIVE_FILE_MODE = 0o600
 RESTRICTIVE_DIR_MODE = 0o700
+DOMAIN_PACK_STATE_RELATIVE = Path("domain-packs/.evidence-wiki-state.yml")
+DOMAIN_PACK_TRANSACTION_RELATIVE = Path("domain-packs/.evidence-wiki-transaction.yml")
+DOMAIN_PACK_LIFECYCLE_ERROR_CODES = frozenset(
+    {
+        "DOMAIN_PACK_INVALID",
+        "DOMAIN_PACK_UNTRACKED",
+        "DOMAIN_PACK_REFRESH_CONFLICT",
+        "DOMAIN_PACK_STATE_INVALID",
+        "DOMAIN_PACK_TRANSACTION_INCOMPLETE",
+        "DOMAIN_PACK_WRITE_FAILED",
+    }
+)
 FORBIDDEN_CODEBASE_AUTOMATION_KEYS = (
     "hooks",
     "install_hooks",
@@ -289,6 +304,24 @@ class DomainPackSelection:
     name: str
     source_path: Path
     target_relative: str
+    source_kind: str = "path"
+
+
+class DomainPackInitFailure(RuntimeError):
+    """A bounded lifecycle refusal raised while initialization owns the write."""
+
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.remediation = remediation_for(error_code)
+        self.details = details or {}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1204,6 +1237,19 @@ def validate_target(options: InitOptions) -> None:
         raise SystemExit("Refusing to initialize a workspace inside the reusable starter root.")
     if options.target.exists() and not options.target.is_dir():
         raise SystemExit(f"Target exists and is not a directory: {options.target}")
+    transaction_path = options.target / DOMAIN_PACK_TRANSACTION_RELATIVE
+    if transaction_path.exists() or transaction_path.is_symlink():
+        raise DomainPackInitFailure(
+            "DOMAIN_PACK_TRANSACTION_INCOMPLETE",
+            (
+                "Refusing to initialize over the incomplete domain-pack transaction at "
+                f"{DOMAIN_PACK_TRANSACTION_RELATIVE.as_posix()}"
+            ),
+            details={
+                "transaction": DOMAIN_PACK_TRANSACTION_RELATIVE.as_posix(),
+                "preserved": "Initialization stopped before writing workspace files.",
+            },
+        )
     if options.target.exists() and any(options.target.iterdir()) and not options.force:
         raise SystemExit(f"Refusing to overwrite non-empty target without --force: {options.target}")
 
@@ -1269,9 +1315,28 @@ def write_private_text(path: Path, text: str, root: Path) -> None:
     apply_restrictive_mode(path, RESTRICTIVE_FILE_MODE)
 
 
-def copy_starter_tree(starter_root: Path, target: Path) -> None:
-    target.mkdir(parents=True, exist_ok=True)
-    target_resolved = target.resolve()
+def copy_starter_tree(
+    starter_root: Path,
+    target: Path,
+    *,
+    containment_root: Path | None = None,
+    restrictive: bool = False,
+) -> None:
+    """Copy a trusted tree without following a planted destination symlink.
+
+    ``containment_root`` matters when ``target`` is a nested managed subtree.
+    Resolving that nested target as its own root would bless a pre-existing
+    symlink such as ``workspace/domain-packs -> ../outside``. Domain-pack copies
+    pass the workspace itself here, while legacy callers retain the original
+    target-root boundary.
+    """
+    write_root = containment_root or target
+    validate_private_path(target, write_root)
+    if restrictive:
+        ensure_private_dir(target, write_root)
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+    root_resolved = write_root.resolve()
     for source in sorted(starter_root.rglob("*"), key=lambda path: path.as_posix()):
         relative = source.relative_to(starter_root)
         if should_skip(relative):
@@ -1284,21 +1349,29 @@ def copy_starter_tree(starter_root: Path, target: Path) -> None:
         # the workspace. Directories are visited before their children (sorted by
         # posix path), so a symlinked ancestor is caught at its own entry before any
         # child write. is_contained_nonsymlink is the shared containment definition.
-        if not is_contained_nonsymlink(destination, target_resolved):
+        if not is_contained_nonsymlink(destination, root_resolved):
             raise SystemExit(f"Refusing to write through symlink in workspace: {destination}")
         if source.is_dir():
             if destination.exists() and not destination.is_dir():
                 raise SystemExit(f"Cannot create directory over existing file: {destination}")
-            destination.mkdir(parents=True, exist_ok=True)
+            if restrictive:
+                ensure_private_dir(destination, write_root)
+            else:
+                destination.mkdir(parents=True, exist_ok=True)
             continue
         if source.is_file():
             if destination.exists() and destination.is_dir():
                 raise SystemExit(f"Cannot copy file over existing directory: {destination}")
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            if restrictive:
+                ensure_private_dir(destination.parent, write_root)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
             # follow_symlinks=False keeps a (trusted) starter symlink from being
             # traversed into a copied file; the destination symlink guard above is
             # what prevents writing *through* a planted link.
             shutil.copy2(source, destination, follow_symlinks=False)
+            if restrictive:
+                apply_restrictive_mode(destination, RESTRICTIVE_FILE_MODE)
 
 
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -1345,12 +1418,60 @@ def profile_config_overrides(profile: dict[str, Any]) -> dict[str, Any]:
     return overrides
 
 
+def domain_pack_data_model_issue(value: Any, path: str = "$") -> str | None:
+    """Return the first YAML value that cannot enter the lifecycle state.
+
+    Pack revision identities use canonical JSON bytes. PyYAML's safe loader can
+    also construct dates, byte strings, sets, non-string mapping keys, and
+    non-finite floats; accepting one would make validation succeed only for
+    initialization to fail while serializing provenance. Requiring the ordinary
+    JSON data model keeps validation, init, contract reporting, and refresh on
+    one deterministic representation.
+    """
+    def inspect(current: Any, current_path: str, ancestors: frozenset[int]) -> str | None:
+        if current is None or isinstance(current, (str, bool, int)):
+            return None
+        if isinstance(current, float):
+            return None if math.isfinite(current) else f"{current_path}: non-finite floats are not supported"
+        if isinstance(current, (list, dict)):
+            identity = id(current)
+            if identity in ancestors:
+                return f"{current_path}: recursive YAML aliases are not supported"
+            descendants = ancestors | {identity}
+            if isinstance(current, list):
+                for index, item in enumerate(current):
+                    issue = inspect(item, f"{current_path}[{index}]", descendants)
+                    if issue is not None:
+                        return issue
+                return None
+            for key, item in current.items():
+                if not isinstance(key, str):
+                    return f"{current_path}: mapping keys must be strings (found {type(key).__name__})"
+                child = f"{current_path}.{key}" if key.isidentifier() else f"{current_path}[{key!r}]"
+                issue = inspect(item, child, descendants)
+                if issue is not None:
+                    return issue
+            return None
+        return f"{current_path}: {type(current).__name__} values are not supported"
+
+    return inspect(value, path, frozenset())
+
+
+def validate_domain_pack_data_model(document: dict[str, Any]) -> None:
+    issue = domain_pack_data_model_issue(document)
+    if issue is not None:
+        raise SystemExit(
+            "research.overlay.yml must use JSON-compatible YAML values for lifecycle tracking: "
+            + issue
+        )
+
+
 def validate_domain_pack_tree(source_path: Path) -> None:
     """Reject active, binary, special, or linked content before a pack is copied."""
     findings: list[str] = []
     root_name = source_path.name
     if (
-        any(ord(character) < 32 or character in '<>:"|?*' for character in root_name)
+        any(ord(character) < 32 or character in FORBIDDEN_PACK_PATH_CHARACTERS for character in root_name)
         or root_name.endswith((" ", "."))
         or root_name.split(".", 1)[0].casefold() in WINDOWS_RESERVED_PACK_NAMES
     ):
@@ -1367,7 +1488,7 @@ def validate_domain_pack_tree(source_path: Path) -> None:
             portable_paths[portable_identity] = relative
         for part in relative_parts:
             if (
-                any(ord(character) < 32 or character in '<>:"|?*' for character in part)
+                any(ord(character) < 32 or character in FORBIDDEN_PACK_PATH_CHARACTERS for character in part)
                 or part.endswith((" ", "."))
                 or part.split(".", 1)[0].casefold() in WINDOWS_RESERVED_PACK_NAMES
             ):
@@ -1448,8 +1569,10 @@ def resolve_domain_pack(selection: str | None, starter_root: Path) -> DomainPack
         if candidate.is_symlink():
             raise SystemExit(f"Unsafe domain pack content: .: symbolic-link domain-pack roots are not allowed: {candidate}")
         source_path = candidate.resolve()
+        source_kind = "path"
     else:
         source_path = (starter_root.parent / "domain-packs" / selection).resolve()
+        source_kind = "bundled"
     if not source_path.is_dir():
         raise SystemExit(f"Domain pack not found: {selection}")
     validate_domain_pack_tree(source_path)
@@ -1457,7 +1580,35 @@ def resolve_domain_pack(selection: str | None, starter_root: Path) -> DomainPack
     if not overlay_path.exists():
         raise SystemExit(f"Domain pack is missing research.overlay.yml: {source_path}")
     validate_domain_pack_references(source_path)
-    return DomainPackSelection(name=source_path.name, source_path=source_path, target_relative=f"domain-packs/{source_path.name}")
+    overlay = load_yaml(overlay_path, "domain pack overlay")
+    validate_domain_pack_data_model(overlay)
+    metadata = overlay.get("domain_pack")
+    if not isinstance(metadata, dict):
+        raise SystemExit("domain pack overlay must declare a domain_pack mapping")
+    identity: dict[str, str] = {}
+    for field in ("name", "version", "compatible_research_yml_contract"):
+        value = metadata.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise SystemExit(f"domain_pack.{field} must be a non-empty string")
+        if value != value.strip():
+            raise SystemExit(
+                f"domain_pack.{field} must not contain leading or trailing whitespace"
+            )
+        identity[field] = value
+    declared_name = identity["name"]
+    if declared_name != source_path.name:
+        raise SystemExit(
+            f"domain_pack.name {declared_name!r} must match its directory name {source_path.name!r}"
+        )
+    contract = identity["compatible_research_yml_contract"]
+    if contract not in SUPPORTED_RESEARCH_YML_CONTRACTS:
+        raise SystemExit(f"Unsupported domain pack research.yml contract: {contract!r}")
+    return DomainPackSelection(
+        name=source_path.name,
+        source_path=source_path,
+        target_relative=f"domain-packs/{source_path.name}",
+        source_kind=source_kind,
+    )
 
 
 def prefix_domain_pack_path(value: Any, pack_relative: str) -> Any:
@@ -1557,6 +1708,44 @@ def build_config(options: InitOptions, domain_pack: DomainPackSelection | None) 
         config = normalize_domain_pack_paths(config, domain_pack.target_relative)
     validate_config_paths(config)
     return config
+
+
+def initial_domain_pack_state(
+    options: InitOptions,
+    domain_pack: DomainPackSelection,
+    final_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Build lifecycle provenance from the actual init layer writers.
+
+    Profile and explicit CLI writes stay operator-owned even when they happen to
+    equal the pack value. Project personalization is excluded by the lifecycle
+    helper itself, since it is always written after the reusable pack layer.
+    """
+    lifecycle = load_workspace_module(_SCRIPT_DIR, "_domain_pack_lifecycle")
+    base = load_yaml(options.starter_root / "research.yml", "starter research.yml")
+    raw_overlay = load_yaml(domain_pack.source_path / "research.overlay.yml", "domain pack overlay")
+    normalized_overlay = lifecycle.normalize_overlay_paths(raw_overlay, domain_pack.target_relative)
+    after_pack = deep_merge(base, raw_overlay)
+    profile_overrides = profile_config_overrides(options.profile)
+    unowned = set(lifecycle.overlay_write_pointers(after_pack, profile_overrides))
+    for phase, selected in (
+        ("discovery", options.discovery_providers),
+        ("acquisition", options.acquisition_providers),
+    ):
+        if selected is not None:
+            unowned.add(f"/integrations/{phase}/enabled")
+            unowned.add(f"/integrations/{phase}/providers")
+    installed_pack_root = options.target / domain_pack.target_relative
+    return lifecycle.create_initial_state(
+        base_config=base,
+        normalized_overlay=normalized_overlay,
+        final_config=final_config,
+        installed_pack_root=installed_pack_root,
+        source_pack_root=domain_pack.source_path,
+        target_relative=domain_pack.target_relative,
+        source_kind=domain_pack.source_kind,
+        unowned_pointers=unowned,
+    )
 
 
 def config_mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
@@ -2276,6 +2465,12 @@ def initialize_workspace(options: InitOptions) -> None:
     validate_target(options)
     domain_pack = resolve_domain_pack(options.domain_pack, options.starter_root)
     config = build_config(options, domain_pack)
+    if domain_pack is not None:
+        # Preflight the nested boundary before the starter copy makes any change.
+        # Rechecking during the pack copy protects the write itself; doing it here
+        # also keeps a planted ``domain-packs`` symlink a zero-write refusal.
+        validate_private_path(options.target / domain_pack.target_relative, options.target)
+        validate_private_path(options.target / DOMAIN_PACK_STATE_RELATIVE, options.target)
     print_plan(options, domain_pack, config)
     if options.dry_run:
         return
@@ -2284,8 +2479,36 @@ def initialize_workspace(options: InitOptions) -> None:
     ensure_private_dir(options.target, options.target)
     copy_starter_tree(options.starter_root, options.target)
     if domain_pack is not None:
-        copy_starter_tree(domain_pack.source_path, options.target / domain_pack.target_relative)
+        try:
+            copy_starter_tree(
+                domain_pack.source_path,
+                options.target / domain_pack.target_relative,
+                containment_root=options.target,
+                restrictive=True,
+            )
+        except OSError as exc:
+            raise DomainPackInitFailure(
+                "DOMAIN_PACK_WRITE_FAILED",
+                f"Could not install domain pack {domain_pack.name!r}: {exc}",
+                details={"path": domain_pack.target_relative},
+            ) from exc
     write_workspace_files(options.target, config, options, domain_pack)
+    if domain_pack is not None:
+        lifecycle = load_workspace_module(_SCRIPT_DIR, "_domain_pack_lifecycle")
+        try:
+            lifecycle.write_initial_state(
+                options.target,
+                initial_domain_pack_state(options, domain_pack, config),
+            )
+        except OSError as exc:
+            raise DomainPackInitFailure(
+                "DOMAIN_PACK_WRITE_FAILED",
+                (
+                    f"Could not write initial domain-pack lifecycle state at "
+                    f"{DOMAIN_PACK_STATE_RELATIVE.as_posix()}: {exc}"
+                ),
+                details={"path": DOMAIN_PACK_STATE_RELATIVE.as_posix()},
+            ) from exc
     print(f"Created research workspace: {options.target}")
 
 
@@ -2326,7 +2549,10 @@ def parse_upgrade_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="evidence-wiki upgrade",
         description=(
             "Refresh starter-managed tooling in an existing research workspace from the "
-            "current starter. Never touches research.yml, raw/, sources/, wiki/, index.md, or log.md."
+            "current starter. Write mode may update workspace-system.yml, uses .locks/, and "
+            "conditionally appends log.md after managed content or the starter version changes. "
+            "It preserves research.yml, raw/, sources/, wiki/, index.md, prior log history, and "
+            "user data; --dry-run writes nothing."
         ),
     )
     parser.add_argument("--target", help="Existing workspace path. Defaults to the current directory.")
@@ -2709,6 +2935,21 @@ def print_upgrade_summary(
         print("- no changes: workspace tooling already current")
     if result["starter_version"]:
         print(f"- {'would set' if dry_run else 'set'} starter version: {result['starter_version']}")
+    try:
+        lifecycle = load_workspace_module(_SCRIPT_DIR, "_domain_pack_lifecycle").inspect_workspace(target)
+        lifecycle_state = lifecycle.get("state") if isinstance(lifecycle, dict) else "state_invalid"
+    except (Exception, SystemExit):
+        lifecycle_state = "state_invalid"
+    if lifecycle_state == "legacy_untracked":
+        print(
+            "- warning: installed domain pack is legacy-untracked; "
+            f"run evidence-wiki pack adopt --target {target} before refreshing it"
+        )
+    elif lifecycle_state not in {"none", "current"}:
+        print(
+            f"- warning: domain-pack lifecycle state is {lifecycle_state or 'state_invalid'}; "
+            f"run evidence-wiki doctor --target {target} before refreshing it"
+        )
 
 
 def initializer_error_contract(
@@ -2798,6 +3039,18 @@ def main(argv: list[str] | None = None) -> int:
     except LockUnavailableError as exc:
         print(f"{exc.error_code}: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        error_code = getattr(exc, "error_code", None)
+        if error_code not in DOMAIN_PACK_LIFECYCLE_ERROR_CODES:
+            raise
+        details = getattr(exc, "details", None)
+        return emit_initializer_error(
+            str(getattr(exc, "message", str(exc))),
+            operation="initialization",
+            error_code=error_code,
+            remediation=getattr(exc, "remediation", None) or remediation_for(error_code),
+            details=details if isinstance(details, dict) else None,
+        )
 
 
 def entrypoint(argv: list[str] | None = None) -> int:

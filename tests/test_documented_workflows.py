@@ -59,6 +59,16 @@ TEMPLATE_README = REPO_ROOT / "workspace-template" / "README.md"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
 
 
+def test_upgrade_documentation_agrees_on_locks_conditional_log_and_dry_run():
+    for path in (README, WORKSPACE_INIT_DOC, ORCHESTRATE_SKILL):
+        text = path.read_text(encoding="utf-8")
+        assert ".locks/" in text, path
+        assert "log.md" in text, path
+        assert "conditionally appends" in text, path
+        assert "dry-run" in text and "writes nothing" in text, path
+        assert "or log.md" not in text, path
+
+
 def load_script_module(name: str, filename: str):
     path = SCRIPTS / filename
     spec = importlib.util.spec_from_file_location(name, path)

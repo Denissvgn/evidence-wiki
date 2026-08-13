@@ -229,7 +229,7 @@ evidence-wiki doctor --format json
 evidence-wiki contract
 ```
 
-`doctor` reports per-check `ok`/`degraded`/`missing` for Python, PyYAML, pypdf,
+`doctor` reports per-check `ok`/`degraded`/`missing` for Python, PyYAML, ruamel.yaml, pypdf,
 `pdftotext`, git, and write permissions; a required failure exits non-zero.
 pypdf is the required portable PDF backend. Missing `pdftotext` is
 informational unless `sources.pdf_extractor: poppler` explicitly selects the
@@ -547,23 +547,41 @@ pages or unknown source ids surface as `warnings[]`, never crashes.
   refreshing starter-managed tooling:
 
 ```bash
-python -m pip install --upgrade evidence-wiki==0.3.0
+python -m pip install --upgrade evidence-wiki==0.3.1
 evidence-wiki --version
 evidence-wiki upgrade --target my-research-workspace --dry-run
 evidence-wiki upgrade --target my-research-workspace
 ```
 
-  `upgrade` overwrites only starter-managed files. Only pass `--include skills`
-  or `--include docs` when you intend to refresh those optional reusable
+  Write-mode `upgrade` refreshes only starter-managed tooling, may update
+  `workspace-system.yml`, uses `.locks/`, and conditionally appends one audit
+  entry to `log.md` when it applies material changes. It preserves prior log
+  history, `research.yml`, `raw/`, `sources/`, `wiki/`, `index.md`, and other
+  user data. `--dry-run` writes nothing. Only pass `--include skills` or
+  `--include docs` when you intend to refresh those optional reusable
   directories; if an overlapping optional file has local edits, upgrade refuses
   unless `--force-optional` is set and preserves the displaced file under
-  `.replaced/<path>`. It never touches `research.yml`, `raw/`, `sources/`,
-  `wiki/`, `index.md`, or `log.md`.
+  `.replaced/<path>`.
 - To refresh the optional recovery guidance, run
   `evidence-wiki upgrade --target my-research-workspace --include skills --include docs --dry-run`
   first, then repeat it without `--dry-run` only after reviewing the planned
   replacements. Never add `--force-optional` without reviewing the preserved
   local edits and `.replaced/` backup paths.
+- Keep domain-pack maintenance separate from starter upgrade. For a tracked
+  installation, preview
+  `evidence-wiki pack refresh --target my-research-workspace --path NAME_OR_PATH --dry-run`,
+  review every change and conflict target, then repeat without `--dry-run`.
+  Refresh never switches the installed pack name. It preserves local-only data
+  and refuses all writes while a true conflict lacks a path-specific
+  `--keep-local TARGET` or `--accept-pack TARGET` resolution, where `TARGET` is
+  a reported `config:/...` or `file:...` selector.
+- If status reports `domain_pack.state: legacy_untracked`, preview
+  `evidence-wiki pack adopt --target my-research-workspace --dry-run` and then
+  adopt before refreshing. Do not add `--accept-local-overrides` unless the
+  preview identifies legacy differences that the operator has reviewed; the
+  acknowledged differences remain local and unowned. Treat `current` as
+  internally consistent with the tracked installation, not as proof that the
+  pack is the latest upstream revision.
 - For many parallel goals, deploy one workspace per scope and correlate them
   through distinct `handoff` IDs.
 

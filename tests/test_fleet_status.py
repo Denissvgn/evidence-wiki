@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -107,6 +108,25 @@ class FleetStatusTests(unittest.TestCase):
             self.assertTrue(first["run_controller"]["stale"])
             self.assertFalse(second["ok"])
             self.assertEqual("WORKSPACE_UNREADABLE", second["error_code"])
+
+    @unittest.skipUnless(hasattr(Path, "symlink_to"), "symlinks are unavailable")
+    def test_fleet_status_isolates_symlink_loop_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            good = self.init_workspace(root, "good-workspace")
+            loop_a = root / "loop-a"
+            loop_b = root / "loop-b"
+            loop_a.symlink_to(loop_b)
+            loop_b.symlink_to(loop_a)
+
+            code, document = self.run_fleet_status(
+                "--target", str(good), "--target", str(loop_a)
+            )
+
+            self.assertEqual(0, code)
+            self.assertTrue(document["targets"][0]["ok"])
+            self.assertFalse(document["targets"][1]["ok"])
+            self.assertEqual("WORKSPACE_UNREADABLE", document["targets"][1]["error_code"])
 
     def test_fleet_status_aggregates_visible_operational_debt(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -222,6 +242,28 @@ class FleetStatusTests(unittest.TestCase):
 
         self.assertIn("Questions awaiting review: 2", text)
         self.assertIn("awaiting_review=2", text)
+
+    def test_fleet_aggregates_domain_pack_lifecycle_states(self):
+        fleet_status = load_script_module("fleet_status_domain_pack_under_test", FLEET_STATUS_SCRIPT_PATH)
+
+        class FakeStatus:
+            @staticmethod
+            def cached_status_document(target: Path, *, no_cache: bool) -> dict:
+                state = "current" if target.name == "current" else "transaction_incomplete"
+                return {
+                    "workspace_health": {"materially_valid": True},
+                    "project": {"name": target.name},
+                    "readiness": {"verdict": "complete", "questions_awaiting_review": 0},
+                    "run_controller": {"present": False},
+                    "domain_pack": {"state": state, "transaction_id": "txn-1" if state != "current" else None},
+                }
+
+        with mock.patch.object(fleet_status, "load_workspace_status", return_value=FakeStatus()):
+            report = fleet_status.build_report([Path("/tmp/current"), Path("/tmp/interrupted")], no_cache=True)
+
+        self.assertEqual({"current": 1, "transaction_incomplete": 1}, report["counts"]["domain_pack_states"])
+        self.assertEqual(1, report["counts"]["domain_pack_attention"])
+        self.assertEqual("transaction_incomplete", report["targets"][1]["domain_pack"]["state"])
 
 
 if __name__ == "__main__":

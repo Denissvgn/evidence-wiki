@@ -185,6 +185,71 @@ class InitResearchWorkspaceTests(unittest.TestCase):
             self.assertEqual("preserve me\n", (target / "keep.txt").read_text())
             self.assertTrue((target / "research.yml").is_file())
 
+    def test_force_domain_pack_refuses_symlinked_nested_root_before_any_write(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "force-workspace"
+            outside = root / "outside"
+            target.mkdir()
+            outside.mkdir()
+            marker = target / "keep.txt"
+            marker.write_text("preserve me\n", encoding="utf-8")
+            try:
+                (target / "domain-packs").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlinks are unavailable on this platform: {exc}")
+
+            with self.assertRaises(SystemExit) as caught:
+                self.run_init(
+                    "--target",
+                    str(target),
+                    "--project-name",
+                    "force-workspace",
+                    "--project-description",
+                    "Must not escape through a nested pack root.",
+                    "--domain-pack",
+                    "general-science",
+                    "--force",
+                )
+
+            self.assertIn("symlink", str(caught.exception).lower())
+            self.assertEqual("preserve me\n", marker.read_text(encoding="utf-8"))
+            self.assertEqual([], list(outside.iterdir()))
+            self.assertFalse((target / "research.yml").exists())
+
+    def test_force_refuses_an_incomplete_domain_pack_transaction_without_writes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "force-workspace"
+            transaction = target / "domain-packs" / ".evidence-wiki-transaction.yml"
+            transaction.parent.mkdir(parents=True)
+            transaction.write_text(
+                "schema_version: '1.0'\ntransaction_id: interrupted\n",
+                encoding="utf-8",
+            )
+            marker = target / "keep.txt"
+            marker.write_text("preserve me\n", encoding="utf-8")
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                code = INIT.main(
+                    [
+                        "--target",
+                        str(target),
+                        "--project-name",
+                        "force-workspace",
+                        "--project-description",
+                        "Must not overwrite an interrupted pack transaction.",
+                        "--force",
+                    ]
+                )
+
+            self.assertEqual(2, code)
+            self.assertIn("DOMAIN_PACK_TRANSACTION_INCOMPLETE", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+            self.assertEqual("preserve me\n", marker.read_text(encoding="utf-8"))
+            self.assertTrue(transaction.is_file())
+            self.assertFalse((target / "research.yml").exists())
+
     @unittest.skipUnless(os.name == "posix", "POSIX file-mode checks")
     def test_init_generated_files_and_directories_are_private_under_open_umask(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1184,6 +1249,96 @@ class InitResearchWorkspaceTests(unittest.TestCase):
             )
             self.assertIn("Domain pack: llm-research", (target / "log.md").read_text())
 
+    def test_force_reinit_keeps_preexisting_pack_extras_untracked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "domain-workspace"
+            arguments = (
+                "--target",
+                str(target),
+                "--project-name",
+                "domain-workspace",
+                "--project-description",
+                "Workspace with a local pack-tree note.",
+                "--domain-pack",
+                "general-science",
+            )
+            self.run_init(*arguments)
+            local_extra = target / "domain-packs" / "general-science" / "operator-note.md"
+            local_extra.write_text("operator-owned\n", encoding="utf-8")
+
+            self.run_init(*arguments, "--force")
+
+            state = yaml.safe_load(
+                (target / "domain-packs" / ".evidence-wiki-state.yml").read_text(encoding="utf-8")
+            )
+            managed = {entry["path"] for entry in state["managed_files"]}
+            revision = {entry["path"] for entry in state["revision_files"]}
+            self.assertNotIn("operator-note.md", managed)
+            self.assertNotIn("operator-note.md", revision)
+            self.assertEqual("operator-owned\n", local_extra.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file-mode checks")
+    def test_domain_pack_files_state_and_directories_are_private_under_open_umask(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "private-pack-workspace"
+            old_umask = os.umask(0)
+            try:
+                self.run_init(
+                    "--target",
+                    str(target),
+                    "--project-name",
+                    "private-pack-workspace",
+                    "--project-description",
+                    "Workspace with restrictive domain-pack artifacts.",
+                    "--domain-pack",
+                    "general-science",
+                )
+            finally:
+                os.umask(old_umask)
+
+            pack_parent = target / "domain-packs"
+            pack_root = pack_parent / "general-science"
+            for directory in [pack_parent, pack_root, *(path for path in pack_root.rglob("*") if path.is_dir())]:
+                with self.subTest(path=directory.relative_to(target).as_posix()):
+                    self.assertEqual(0o700, self.file_mode(directory))
+            private_files = [
+                pack_parent / ".evidence-wiki-state.yml",
+                *(path for path in pack_root.rglob("*") if path.is_file()),
+            ]
+            for path in private_files:
+                with self.subTest(path=path.relative_to(target).as_posix()):
+                    self.assertEqual(0o600, self.file_mode(path))
+
+    def test_domain_pack_state_write_failure_is_a_bounded_initializer_refusal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "domain-workspace"
+            lifecycle = mock.Mock()
+            lifecycle.write_initial_state.side_effect = OSError("injected state write failure")
+            stderr = io.StringIO()
+
+            with (
+                mock.patch.object(INIT, "load_workspace_module", return_value=lifecycle),
+                mock.patch.object(INIT, "initial_domain_pack_state", return_value={}),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = INIT.main(
+                    [
+                        "--target",
+                        str(target),
+                        "--project-name",
+                        "domain-workspace",
+                        "--project-description",
+                        "Workspace with an injected state write failure.",
+                        "--domain-pack",
+                        "general-science",
+                    ]
+                )
+
+            self.assertEqual(2, code)
+            self.assertIn("DOMAIN_PACK_WRITE_FAILED", stderr.getvalue())
+            self.assertIn(".evidence-wiki-state.yml", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_custom_domain_pack_is_safety_validated_before_copy(self):
         source_pack = REPO_ROOT / "domain-packs" / "llm-research"
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1195,6 +1350,64 @@ class InitResearchWorkspaceTests(unittest.TestCase):
                 INIT.resolve_domain_pack(str(pack_path), REPO_ROOT / "workspace-template")
 
         self.assertIn("install.py", str(caught.exception))
+
+    @unittest.skipUnless(os.name == "posix", "literal backslashes are path characters on POSIX")
+    def test_custom_domain_pack_rejects_backslashes_in_root_and_nested_names(self):
+        source_pack = REPO_ROOT / "domain-packs" / "general-science"
+        for location in ("root", "nested"):
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                pack_path = root / ("unsafe\\pack" if location == "root" else "portable-pack")
+                shutil.copytree(source_pack, pack_path)
+                overlay_path = pack_path / "research.overlay.yml"
+                overlay = yaml.safe_load(overlay_path.read_text(encoding="utf-8"))
+                overlay["domain_pack"]["name"] = pack_path.name
+                overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False), encoding="utf-8")
+                if location == "nested":
+                    unsafe_directory = pack_path / "unsafe\\component"
+                    unsafe_directory.mkdir()
+                    (unsafe_directory / "note.md").write_text("unsafe\n", encoding="utf-8")
+
+                with self.assertRaises(SystemExit) as caught:
+                    INIT.resolve_domain_pack(str(pack_path), REPO_ROOT / "workspace-template")
+
+                self.assertIn("non-portable", str(caught.exception))
+                self.assertIn("\\", str(caught.exception))
+
+    def test_domain_pack_identity_is_validated_before_workspace_writes(self):
+        source_pack = REPO_ROOT / "domain-packs" / "general-science"
+        invalid_values = (
+            ("name", None),
+            ("version", 1),
+            ("compatible_research_yml_contract", ""),
+            ("version", " 0.1.0 "),
+        )
+        for field, invalid_value in invalid_values:
+            with self.subTest(field=field, value=invalid_value), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                pack_path = root / "identity-pack"
+                target = root / "workspace"
+                shutil.copytree(source_pack, pack_path)
+                overlay_path = pack_path / "research.overlay.yml"
+                overlay = yaml.safe_load(overlay_path.read_text(encoding="utf-8"))
+                overlay["domain_pack"]["name"] = pack_path.name
+                overlay["domain_pack"][field] = invalid_value
+                overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False), encoding="utf-8")
+
+                with self.assertRaises(SystemExit) as caught:
+                    self.run_init(
+                        "--target",
+                        str(target),
+                        "--project-name",
+                        "identity-workspace",
+                        "--project-description",
+                        "Reject invalid pack identity before writing.",
+                        "--domain-pack",
+                        str(pack_path),
+                    )
+
+                self.assertIn(f"domain_pack.{field}", str(caught.exception))
+                self.assertFalse(target.exists())
 
     def test_custom_domain_pack_rejects_symlinked_content(self):
         source_pack = REPO_ROOT / "domain-packs" / "llm-research"

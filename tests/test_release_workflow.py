@@ -4,6 +4,9 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "publish.yml"
+CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
+NOTICES_PATH = REPO_ROOT / "THIRD_PARTY_NOTICES.md"
 
 
 def load_workflow() -> dict:
@@ -57,6 +60,16 @@ def test_release_gate_checks_identity_quality_and_built_wheel() -> None:
         "pip install dist/*.whl",
         "import pypdf",
         "pypdf.__version__",
+        "import ruamel.yaml",
+        "ruamel.yaml.__version__",
+        'ruamel.yaml.YAML(typ="rt", pure=True)',
+        "round_trip_yaml.preserve_quotes = True",
+        "did not preserve YAML comments and quotes",
+        "--domain-pack general-science",
+        "evidence-wiki pack refresh",
+        "evidence-wiki-pack-refresh.json",
+        'pack_refresh.get("status") != "no_changes"',
+        "workspace-template/scripts/_domain_pack_lifecycle.py",
         "ORCHESTRATION_RESULT_SCHEMA",
         'properties["schema_version"]',
         "workspace-template/docs/orchestration.md",
@@ -65,6 +78,28 @@ def test_release_gate_checks_identity_quality_and_built_wheel() -> None:
         "--cli .wheel-venv/bin/evidence-wiki",
     ):
         assert required in text
+
+
+def test_ci_installed_wheel_smokes_domain_pack_initialization_and_refresh() -> None:
+    text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    for required in (
+        "pip install dist/*.whl",
+        "--domain-pack general-science",
+        "evidence-wiki pack refresh",
+        "evidence-wiki-pack-refresh.json",
+        'pack_refresh.get("status") != "no_changes"',
+        "workspace-template/scripts/_domain_pack_lifecycle.py",
+    ):
+        assert required in text
+
+
+def test_round_trip_yaml_runtime_dependency_is_pinned_and_noticed() -> None:
+    pyproject = PYPROJECT_PATH.read_text(encoding="utf-8")
+    notices = NOTICES_PATH.read_text(encoding="utf-8")
+
+    assert '"ruamel.yaml>=0.19.1,<0.20"' in pyproject
+    assert "ruamel.yaml (MIT)" in notices
 
 
 def test_workflow_uses_oidc_without_a_stored_pypi_credential() -> None:

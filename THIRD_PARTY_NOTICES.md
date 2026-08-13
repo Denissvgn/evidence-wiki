@@ -23,9 +23,10 @@ attribution, transformations, and every shipped path before the content lands.
 Runtime and development dependencies retain their own copyright and license
 terms. Dependency inventories and notices do not relicense those projects.
 
-The Python distribution declares PyYAML (MIT) and pypdf (BSD-3-Clause) as
-runtime dependencies. They are resolved and installed by the user's Python
-package installer; their source code is not vendored into this repository.
+The Python distribution declares PyYAML (MIT), ruamel.yaml (MIT), and pypdf
+(BSD-3-Clause) as runtime dependencies. They are resolved and installed by the
+user's Python package installer; their source code is not vendored into this
+repository.
 
 Poppler is an optional system dependency used only by the explicit
 `pdftotext` compatibility backend. The EvidenceWiki Python wheel does not

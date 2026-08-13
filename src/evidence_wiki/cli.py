@@ -551,9 +551,15 @@ def _print_pack_help() -> None:
     print(
         "evidence-wiki pack: domain pack utilities\n\n"
         "Usage:\n"
-        "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n\n"
+        "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
+        "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [--dry-run] [--format text|json]\n"
+        "      [--keep-local TARGET]... [--accept-pack TARGET]...\n"
+        "  evidence-wiki pack adopt --target PATH [--dry-run] [--accept-local-overrides]\n"
+        "      [--format text|json]\n\n"
         "`validate` checks a reusable domain pack overlay, declared pack files,\n"
-        "initializer compatibility, and smoke validation in a temporary workspace."
+        "initializer compatibility, and smoke validation in a temporary workspace.\n"
+        "`refresh` safely reconciles a tracked pack revision; `adopt` records\n"
+        "provenance for a reviewed legacy workspace without changing its config or tree."
     )
 
 
@@ -562,10 +568,15 @@ def _run_pack(args: list[str]) -> int:
         _print_pack_help()
         return 0
     subcommand = args.pop(0)
-    if subcommand != "validate":
+    if subcommand not in {"validate", "refresh", "adopt"}:
         parser = argparse.ArgumentParser(prog="evidence-wiki pack")
         parser.error(f"unknown pack subcommand: {subcommand}")
         return 2
+    if subcommand in {"refresh", "adopt"}:
+        from . import domain_pack_lifecycle
+
+        return int(domain_pack_lifecycle.main(subcommand, args) or 0)
+
     from . import domain_pack_validator
 
     return int(domain_pack_validator.main(args) or 0)
@@ -588,6 +599,8 @@ def _print_help() -> None:
         "  evidence-wiki export [--target PATH] [--format json]\n"
         "  evidence-wiki normalize verify [--target PATH] [--source-id ID] [--format json|text]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
+        "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [options]\n"
+        "  evidence-wiki pack adopt --target PATH [options]\n"
         "  evidence-wiki doctor [--target PATH] [--format text|json]\n"
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
@@ -606,9 +619,11 @@ def _print_help() -> None:
         "  --discovery-provider ID (repeatable)\n"
         "  --acquisition-provider ID (repeatable)\n"
         "  --dry-run\n\n"
-        "Upgrade refreshes starter-managed tooling (scripts/) in an existing\n"
-        "workspace from the installed package. It never touches research.yml,\n"
-        "raw/, sources/, wiki/, index.md, or log.md.\n\n"
+        "Write-mode upgrade refreshes starter-managed tooling (scripts/) in an\n"
+        "existing workspace, may update workspace-system.yml, uses .locks/, and\n"
+        "conditionally appends log.md when managed content or the starter version\n"
+        "changes. It preserves research.yml, raw/, sources/, wiki/, index.md,\n"
+        "prior log history, and all user data; --dry-run writes nothing.\n\n"
         "Common upgrade options:\n"
         "  --target PATH\n"
         "  --include skills|docs\n"
@@ -630,7 +645,9 @@ def _print_help() -> None:
         "contract, so a host writing records with its own normalizer can prove they\n"
         "conform instead of matching an internal format by inspection.\n\n"
         "Pack validation checks reusable domain packs before they are shipped or\n"
-        "used during deployment.\n\n"
+        "used during deployment. Pack refresh/adopt provide the explicit,\n"
+        "recoverable lifecycle for existing workspaces; ordinary upgrade never\n"
+        "mutates domain-pack configuration or files.\n\n"
         "Serve-mcp starts an optional stdio MCP server exposing read/append-only\n"
         "workspace tools while preserving the CLI scripts as the canonical contract.\n\n"
         "Orchestrate creates a durable parent session. Protocol subcommands let\n"

@@ -7,6 +7,7 @@ invocation combines, without shelling out:
 - project identity and the optional ``project.handoff`` correlation block
   from ``research.yml``,
 - contract versions from ``workspace-system.yml``,
+- tracked domain-pack lifecycle health, including interrupted transactions,
 - smoke validation results (``smoke_validate_workspace.py``),
 - question backlog counts (``question_status.py``),
 - source pipeline coverage from the manifest plus the unnormalized-source
@@ -77,6 +78,7 @@ from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
 
 SCHEMA_VERSION = "1.0"
+STATUS_CACHE_CONTRACT = 2
 VERDICT_COMPLETE = "complete"
 VERDICT_IN_PROGRESS = "in_progress"
 VERDICT_BLOCKED_ON_SOURCES = "blocked_on_sources"
@@ -333,6 +335,28 @@ def load_sibling_module(stem: str) -> ModuleType:
     if stem not in _SIBLING_CACHE:
         _SIBLING_CACHE[stem] = load_workspace_module(_SCRIPT_DIR, stem)
     return _SIBLING_CACHE[stem]
+
+
+def domain_pack_section(project_root: Path) -> dict[str, Any]:
+    """Return the canonical read-only domain-pack lifecycle diagnosis."""
+    try:
+        lifecycle = load_sibling_module("_domain_pack_lifecycle")
+        section = lifecycle.inspect_workspace(project_root)
+        if not isinstance(section, dict):
+            raise TypeError("domain-pack lifecycle inspector returned a non-mapping result")
+        return section
+    except (Exception, SystemExit):
+        return {
+            "state": "state_invalid",
+            "name": None,
+            "installed_version": None,
+            "overlay_sha256": None,
+            "tree_sha256": None,
+            "source_comparison_performed": False,
+            "local_override_count": 0,
+            "conflict_count": 0,
+            "transaction_id": None,
+        }
 
 
 def load_yaml_mapping(path: Path, label: str) -> dict[str, Any]:
@@ -2214,6 +2238,7 @@ def build_status_document(
     manual_url_deliveries_this_run: int | None = None,
     run_id: str | None = None,
 ) -> dict[str, Any]:
+    domain_pack = domain_pack_section(project_root)
     workspace_health = evaluate_workspace_health(project_root)
     if not workspace_health["materially_valid"]:
         reasons = [
@@ -2231,6 +2256,7 @@ def build_status_document(
                 "handoff_signature_status": "unavailable",
             },
             "contract": {field: None for field in CONTRACT_FIELDS},
+            "domain_pack": domain_pack,
             "run": run_section({}),
             "run_controller": {"present": False, "selection": "none"},
             "orchestration": {"present": False, "selection": "none"},
@@ -2333,6 +2359,7 @@ def build_status_document(
         "generated_at": timestamp_utc(),
         "project": project_section(config, project_root),
         "contract": contract_section(metadata),
+        "domain_pack": domain_pack,
         "run": run,
         "run_controller": run_controller,
         "orchestration": orchestration_section(project_root),
@@ -2351,11 +2378,13 @@ def build_status_document(
 def render_text(document: dict[str, Any]) -> str:
     workspace_health = document.get("workspace_health")
     if isinstance(workspace_health, dict) and not workspace_health.get("materially_valid", False):
+        domain_pack = document.get("domain_pack") if isinstance(document.get("domain_pack"), dict) else {}
         lines = [
             "Workspace Status Report",
             "=======================",
             f"Project root: {workspace_health.get('project_root')}",
             f"Workspace health: {workspace_health.get('status')}",
+            f"Domain pack: {domain_pack.get('state') or 'unknown'}",
             "",
         ]
         for item in workspace_health.get("findings", []):
@@ -2365,6 +2394,7 @@ def render_text(document: dict[str, Any]) -> str:
         return "\n".join(lines)
     project = document["project"]
     contract = document["contract"]
+    domain_pack = document.get("domain_pack") if isinstance(document.get("domain_pack"), dict) else {}
     run_controller = document["run_controller"]
     orchestration = document.get("orchestration") if isinstance(document.get("orchestration"), dict) else {}
     smoke = document["smoke"]
@@ -2382,6 +2412,8 @@ def render_text(document: dict[str, Any]) -> str:
         f"Project: {project.get('name') or '(unset)'}",
         f"Starter version: {contract.get('starter_version') or 'unknown'}"
         f" (contract {contract.get('compatible_research_yml_contract') or 'unknown'})",
+        f"Domain pack: {domain_pack.get('state') or 'unknown'}"
+        + (f" ({domain_pack.get('name')})" if domain_pack.get("name") else ""),
     ]
     handoff = project.get("handoff")
     if isinstance(handoff, dict) and handoff:
@@ -2565,15 +2597,14 @@ def cache_key_paths(project_root: Path) -> list[Path]:
         project_root / "sources",
         project_root / "wiki",
         project_root / "raw",
+        project_root / "domain-packs",
     ]
     paths: list[Path] = []
     for root in roots:
-        if root.is_file():
+        if root.is_symlink() or root.is_file():
             paths.append(root)
         elif root.is_dir():
             for path in root.rglob("*"):
-                if not path.is_file():
-                    continue
                 try:
                     relative = path.relative_to(project_root)
                 except ValueError:
@@ -2588,13 +2619,35 @@ def status_cache_key(project_root: Path, options: dict[str, Any]) -> str:
     records: list[dict[str, Any]] = []
     for path in cache_key_paths(project_root):
         try:
-            stat = path.stat()
+            stat_result = path.lstat()
             relative = path.relative_to(project_root).as_posix()
         except OSError:
             continue
-        records.append({"path": relative, "mtime_ns": stat.st_mtime_ns, "size": stat.st_size})
+        mode = stat_result.st_mode
+        kind = (
+            "symlink"
+            if stat.S_ISLNK(mode)
+            else "file"
+            if stat.S_ISREG(mode)
+            else "directory"
+            if stat.S_ISDIR(mode)
+            else "special"
+        )
+        record: dict[str, Any] = {
+            "path": relative,
+            "kind": kind,
+            "mtime_ns": stat_result.st_mtime_ns,
+            "size": stat_result.st_size,
+        }
+        if kind == "symlink":
+            try:
+                record["link_target"] = os.readlink(path)
+            except OSError:
+                record["link_target"] = None
+        records.append(record)
     material = {
         "schema_version": SCHEMA_VERSION,
+        "status_cache_contract": STATUS_CACHE_CONTRACT,
         "options": options,
         "files": records,
     }
@@ -2610,10 +2663,16 @@ def read_cached_status(project_root: Path, cache_key: str) -> dict[str, Any] | N
         cached = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(cached, dict) or cached.get("cache_key") != cache_key:
+    if (
+        not isinstance(cached, dict)
+        or cached.get("cache_key") != cache_key
+        or cached.get("status_cache_contract") != STATUS_CACHE_CONTRACT
+    ):
         return None
     document = cached.get("document")
-    return document if isinstance(document, dict) else None
+    if not isinstance(document, dict) or not isinstance(document.get("domain_pack"), dict):
+        return None
+    return document
 
 
 def write_cached_status(project_root: Path, cache_key: str, document: dict[str, Any]) -> None:
@@ -2621,6 +2680,7 @@ def write_cached_status(project_root: Path, cache_key: str, document: dict[str, 
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": SCHEMA_VERSION,
+        "status_cache_contract": STATUS_CACHE_CONTRACT,
         "cache_key": cache_key,
         "generated_at": timestamp_utc(),
         "document": document,

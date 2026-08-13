@@ -42,6 +42,31 @@ PACK_REQUEST_KIND = "pack:market-data/supplier_quote"
 
 
 class WorkspaceStatusTests(unittest.TestCase):
+    def test_domain_pack_section_uses_the_canonical_read_only_inspector(self):
+        expected = {
+            "state": "current",
+            "name": "general-science",
+            "installed_version": "1.0",
+            "source_comparison_performed": False,
+            "local_override_count": 0,
+            "conflict_count": 0,
+            "transaction_id": None,
+        }
+        lifecycle = mock.Mock()
+        lifecycle.inspect_workspace.return_value = expected
+        with mock.patch.object(STATUS, "load_sibling_module", return_value=lifecycle):
+            actual = STATUS.domain_pack_section(Path("/workspace"))
+
+        self.assertEqual(expected, actual)
+        lifecycle.inspect_workspace.assert_called_once_with(Path("/workspace"))
+
+    def test_domain_pack_section_degrades_when_the_inspector_is_unavailable(self):
+        with mock.patch.object(STATUS, "load_sibling_module", side_effect=SystemExit("missing helper")):
+            actual = STATUS.domain_pack_section(Path("/workspace"))
+
+        self.assertEqual("state_invalid", actual["state"])
+        self.assertFalse(actual["source_comparison_performed"])
+
     def init_workspace(
         self,
         root: Path,
@@ -1795,6 +1820,66 @@ question: Does cache invalidation work?
             self.assertEqual(0, code)
             self.assertEqual("1.0", document["schema_version"])
             self.assertTrue(cache_path.is_file())
+
+    def test_status_cache_rejects_legacy_payload_without_domain_pack_block(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            code, document = self.status_json(target)
+            self.assertEqual(0, code)
+            cache_path = target / ".research-cache" / "workspace-status.json"
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            cached.pop("status_cache_contract", None)
+            cached["document"].pop("domain_pack", None)
+            cached["document"]["generated_at"] = "legacy-cache-sentinel"
+            cache_path.write_text(
+                json.dumps(cached, indent=2, sort_keys=False) + "\n",
+                encoding="utf-8",
+            )
+
+            code, refreshed = self.status_json(target)
+
+            self.assertEqual(0, code)
+            self.assertNotEqual("legacy-cache-sentinel", refreshed["generated_at"])
+            self.assertIn("domain_pack", refreshed)
+            rewritten = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(STATUS.STATUS_CACHE_CONTRACT, rewritten["status_cache_contract"])
+
+    def test_status_cache_key_covers_pack_tree_state_and_transaction_journal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir)
+            pack_root = target / "domain-packs"
+            pack_tree = pack_root / "general-science"
+            pack_tree.mkdir(parents=True)
+            state = pack_root / ".evidence-wiki-state.yml"
+            journal = pack_root / ".evidence-wiki-transaction.yml"
+            pack_file = pack_tree / "taxonomy.md"
+            state.write_text("schema_version: '1.0'\n", encoding="utf-8")
+            journal.write_text("transaction_id: txn-1\n", encoding="utf-8")
+            pack_file.write_text("revision one\n", encoding="utf-8")
+            baseline = STATUS.status_cache_key(target, {})
+
+            state.write_text("schema_version: '1.0'\nname: pack\n", encoding="utf-8")
+            state_key = STATUS.status_cache_key(target, {})
+            journal.write_text("transaction_id: transaction-two\n", encoding="utf-8")
+            journal_key = STATUS.status_cache_key(target, {})
+            pack_file.write_text("revision two is different\n", encoding="utf-8")
+            tree_key = STATUS.status_cache_key(target, {})
+
+        self.assertEqual(4, len({baseline, state_key, journal_key, tree_key}))
+
+    @unittest.skipUnless(hasattr(Path, "symlink_to"), "symlinks are unavailable")
+    def test_status_cache_key_invalidates_for_unsafe_pack_symlink(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir)
+            pack_tree = target / "domain-packs/general-science"
+            pack_tree.mkdir(parents=True)
+            (pack_tree / "taxonomy.md").write_text("tracked\n", encoding="utf-8")
+            baseline = STATUS.status_cache_key(target, {})
+
+            (pack_tree / "unsafe.md").symlink_to(target / "missing-target.md")
+            unsafe = STATUS.status_cache_key(target, {})
+
+        self.assertNotEqual(baseline, unsafe)
 
     def test_budget_counter_flags_reject_negative_values(self):
         for flag in (

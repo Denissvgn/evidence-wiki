@@ -93,6 +93,21 @@ class PackageCliTests(unittest.TestCase):
             },
             payload["upgrade_compatibility"],
         )
+        lifecycle = payload["domain_pack_lifecycle"]
+        self.assertEqual("1.0", lifecycle["state_schema_version"])
+        self.assertEqual("1.0", lifecycle["refresh_schema_version"])
+        self.assertEqual(["pack refresh", "pack adopt"], lifecycle["commands"])
+        self.assertEqual(set(resources.REQUIRED_DOMAIN_PACKS), set(lifecycle["bundled_packs"]))
+        for name, revision in lifecycle["bundled_packs"].items():
+            with self.subTest(domain_pack=name):
+                self.assertEqual({"version", "overlay_sha256", "tree_sha256"}, set(revision))
+                self.assertIsInstance(revision["version"], str)
+                self.assertTrue(revision["version"])
+                for digest_field in ("overlay_sha256", "tree_sha256"):
+                    digest = revision[digest_field]
+                    self.assertEqual(64, len(digest))
+                    self.assertEqual(digest, digest.lower())
+                    int(digest, 16)
         required_assets = payload["required_asset_manifest"]
         self.assertIn("workspace-template/AGENTS.md", required_assets["starter"])
         self.assertIn("workspace-template/CLAUDE.md", required_assets["starter"])
@@ -105,6 +120,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertIn("workspace-template/docs/source-delivery.md", required_assets["starter"])
         self.assertIn("workspace-template/docs/workspace-status.md", required_assets["starter"])
         self.assertIn("workspace-template/docs/workspace-system.md", required_assets["starter"])
+        self.assertIn("workspace-template/scripts/_domain_pack_lifecycle.py", required_assets["starter"])
         self.assertIn("workspace-template/scripts/discover_sources.py", required_assets["starter"])
         self.assertIn("workspace-template/scripts/fetch_sources.py", required_assets["starter"])
         self.assertIn("workspace-template/scripts/run_controller.py", required_assets["starter"])
