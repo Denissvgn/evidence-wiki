@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
 import stat
 import sys
@@ -1475,7 +1476,7 @@ class DomainPackLifecycleTests(unittest.TestCase):
             self.assertEqual("immutable evidence\n", raw_file.read_text(encoding="utf-8"))
             self.assertTrue(journal.exists())
 
-    def test_log_change_invalidates_plan_and_successful_state_stays_restrictive_and_complete(self):
+    def test_log_change_invalidates_plan_and_successful_state_stays_complete(self):
         lifecycle = cli._packaged_script("_domain_pack_lifecycle")
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1500,7 +1501,10 @@ class DomainPackLifecycleTests(unittest.TestCase):
             state_path = workspace / "domain-packs/.evidence-wiki-state.yml"
             state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
             self.assertIsNone(state["transaction_id"])
-            self.assertEqual(0o600, stat.S_IMODE(state_path.stat().st_mode))
+            # Windows chmod only maps write bits to the read-only attribute;
+            # exact owner/group/other modes are a POSIX contract.
+            if os.name == "posix":
+                self.assertEqual(0o600, stat.S_IMODE(state_path.stat().st_mode))
 
     def test_new_pack_path_with_local_file_ancestor_is_a_zero_write_conflict(self):
         with tempfile.TemporaryDirectory() as tmpdir:
