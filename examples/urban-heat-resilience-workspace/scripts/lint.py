@@ -184,7 +184,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(config_path.read_text()) or {}
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -352,7 +352,7 @@ def safe_source_id(source_id: str) -> str:
 
 def load_frontmatter(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         return None, f"cannot read file: {exc}"
     # Normalize line endings so CRLF (Windows) and legacy CR files parse correctly.
@@ -383,7 +383,7 @@ def read_manifest(
     if not manifest_path.exists():
         return []
     try:
-        lines = manifest_path.read_text().splitlines()
+        lines = manifest_path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
         issue(
             results,
@@ -799,7 +799,7 @@ def check_links(project_root: Path, files: list[Path], results: dict[str, Any]) 
     for path in files:
         label = project_relative(project_root, path)
         try:
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
         except OSError as exc:
             issue(
                 results,
@@ -870,7 +870,7 @@ def check_wikilinks(project_root: Path, wiki_root: Path, files: list[Path], resu
     names, rel_paths = build_wiki_note_index(project_root, wiki_root, files)
     for path in files:
         try:
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
         except OSError:
             continue  # unreadable files are already reported by check_links
         label = project_relative(project_root, path)
@@ -1000,7 +1000,7 @@ def check_index_coverage(
         return
 
     try:
-        index_text = index_path.read_text()
+        index_text = index_path.read_text(encoding="utf-8")
     except OSError as exc:
         issue(
             results,
@@ -3498,7 +3498,7 @@ def check_prompt_injection_patterns(
     for path in normalized_files:
         label = project_relative(project_root, path)
         try:
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             issue(
                 results,
@@ -3533,7 +3533,7 @@ def check_prompt_injection_patterns(
     for path in question_files:
         label = project_relative(project_root, path)
         try:
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             issue(
                 results,

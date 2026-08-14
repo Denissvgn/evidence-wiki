@@ -109,6 +109,51 @@ def load_structured_view():
     return module
 
 
+def structured_view_bytes(document: Any) -> bytes:
+    """The exact bytes a structured-view sidecar holds for ``document``.
+
+    Mirrors ``normalize_sources.render_structured_view``: sorted keys, two-space indent,
+    one trailing newline, UTF-8, no ASCII escaping. A record binds these bytes by digest,
+    so a fixture that renders them its own way is setting up a document the package
+    itself would never have written.
+    """
+    return (
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            separators=(",", ": "),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def write_structured_view(structured: Any, sidecar: Path, payload: bytes) -> str:
+    """Write a sidecar's bytes and return the digest a record must bind them with.
+
+    ``write_bytes``, never ``write_text``. The binding covers these exact bytes, and
+    ``write_text`` rewrites ``\\n`` to the platform line ending -- CRLF on Windows --
+    while a digest taken over the untranslated payload does not. The two agree
+    everywhere except Windows, where the mismatch surfaces far downstream as a corrupt
+    structured view rather than as whatever state the fixture meant to build.
+    ``normalize_sources.sync_structured_view`` writes bytes for the same reason.
+
+    The read-back is the guard: it fails here, naming the cause, instead of leaving a
+    record bound to bytes its sidecar does not hold.
+    """
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_bytes(payload)
+    written = sidecar.read_bytes()
+    if written != payload:
+        raise AssertionError(
+            f"{sidecar} holds {len(written)} bytes but the binding would cover "
+            f"{len(payload)}: something translated the payload on the way to disk "
+            "(newline translation is the usual cause)."
+        )
+    return structured.content_hash(payload)
+
+
 def load_intake_questions():
     """The supported intake writer used by the cross-CR integration fixtures."""
     path = SCRIPTS / "intake_questions.py"

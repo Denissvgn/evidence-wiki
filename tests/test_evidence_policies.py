@@ -28,6 +28,8 @@ from tests._pack_policy_rule_fixture import (  # noqa: E402
     SOURCE_RULE,
     declare_pack,
     deliver_quote,
+    structured_view_bytes,
+    write_structured_view,
 )
 
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -1433,13 +1435,13 @@ class PackPolicyRuleTests(unittest.TestCase):
         structured = helper._structured_view
         safe = structured.safe_source_id(source_id)
         sidecar = structured.sidecar_path(workspace / "sources" / "normalized", source_id)
-        content = json.dumps(document, indent=2, sort_keys=True) + "\n"
-        sidecar.write_text(content, encoding="utf-8")
+        payload = structured_view_bytes(document)
+        digest = write_structured_view(structured, sidecar, payload)
         record = workspace / "sources" / "normalized" / f"{safe}.md"
         frontmatter = helper.read_frontmatter(record)
         frontmatter["structured_view"] = {
             "path": f"sources/normalized/{sidecar.name}",
-            "content_hash": structured.content_hash(content.encode("utf-8")),
+            "content_hash": digest,
         }
         write_frontmatter(record, frontmatter, "# Supplier quote\n")
 

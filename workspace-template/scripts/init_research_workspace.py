@@ -394,7 +394,7 @@ def load_yaml(path: Path, label: str) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(f"Missing {label}: {path}")
     try:
-        document = yaml.safe_load(path.read_text()) or {}
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise SystemExit(f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(document, dict):
@@ -2814,7 +2814,7 @@ def sync_starter_version(target: Path, starter_root: Path, dry_run: bool) -> str
     if new_version is None or new_version == starter_version_value(target_meta):
         return None
     if not dry_run:
-        text = target_meta.read_text()
+        text = target_meta.read_text(encoding="utf-8")
         # Line-targeted replacement preserves the file's comments and formatting.
         updated = re.sub(
             r'(?m)^(\s*starter_version:\s*)"[^"]*"\s*$',
@@ -2823,7 +2823,7 @@ def sync_starter_version(target: Path, starter_root: Path, dry_run: bool) -> str
             count=1,
         )
         if updated != text:
-            target_meta.write_text(updated)
+            target_meta.write_text(updated, encoding="utf-8", newline="\n")
     return new_version
 
 

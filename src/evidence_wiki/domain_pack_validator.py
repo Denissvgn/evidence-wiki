@@ -98,7 +98,7 @@ def load_overlay(overlay_path: Path) -> tuple[dict[str, Any] | None, dict[str, A
             ["research.overlay.yml"],
         )
     try:
-        document = yaml.safe_load(overlay_path.read_text()) or {}
+        document = yaml.safe_load(overlay_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         return None, check(
             "overlay_parse",
@@ -126,7 +126,7 @@ def string_field(mapping: dict[str, Any], key: str) -> str | None:
 def starter_contract(starter_root: Path) -> str | None:
     metadata_path = starter_root / "workspace-system.yml"
     try:
-        metadata = yaml.safe_load(metadata_path.read_text()) or {}
+        metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise SystemExit(f"Invalid workspace-system.yml: {exc}") from exc
     workspace_system = metadata.get("workspace_system") if isinstance(metadata, dict) else {}

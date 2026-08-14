@@ -709,6 +709,8 @@ def _darwin_process_group_is_quiescent(process_group_id: int) -> bool:
             shell=False,
             text=True,
             timeout=5,
+            encoding="utf-8",
+            errors="replace",
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -884,6 +886,8 @@ def _invoke_controller(root: Path, command: str, arguments: list[str]) -> subpro
         check=False,
         shell=False,
         env=controller_environment,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -2780,7 +2784,7 @@ def _probe_codex_permission_profile(executable: str, runtime_read_paths: tuple[s
         protected = probe_root / "protected"
         protected.mkdir()
         sentinel = protected / "sentinel.txt"
-        sentinel.write_text("trusted\n", encoding="utf-8")
+        sentinel.write_text("trusted\n", encoding="utf-8", newline="\n")
         if os.name == "nt":  # pragma: no cover - exercised on Windows CI
             system_root = os.environ.get("SystemRoot")
             command_interpreter = (
@@ -2911,7 +2915,7 @@ def _probe_claude_sandbox_primitives() -> None:
         protected_root.mkdir()
         marker = allowed_root / "sandbox-ok"
         sentinel = protected_root / "sentinel.txt"
-        sentinel.write_text("trusted", encoding="utf-8")
+        sentinel.write_text("trusted", encoding="utf-8", newline="\n")
         probe_script = (
             "from pathlib import Path; "
             "marker=Path('allowed/sandbox-ok'); protected=Path('protected/sentinel.txt'); "
@@ -3168,7 +3172,7 @@ def execute_work_order(
         temporary_root = Path(tmpdir)
         schema_path = temporary_root / "orchestration-result.schema.json"
         result_path = temporary_root / "result.json"
-        schema_path.write_text(json.dumps(ORCHESTRATION_RESULT_SCHEMA), encoding="utf-8")
+        schema_path.write_text(json.dumps(ORCHESTRATION_RESULT_SCHEMA), encoding="utf-8", newline="\n")
         invocation = adapter.build_invocation(
             prepared=prepared,
             root=root,
@@ -4312,7 +4316,7 @@ def _reconcile_accepted_staged_results(
 def _submit_result(root: Path, orchestration_id: str, agent_id: str, result: dict[str, Any]) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-submit-") as tmpdir:
         path = Path(tmpdir) / "result.json"
-        path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8", newline="\n")
         return protocol_submit(
             root,
             orchestration_id,

@@ -263,7 +263,7 @@ def contract() -> dict:
     # no path from the root reaches the payload, so stdout is unchanged either way.
     root = shared_assets_root()
     starter_root = root / STARTER_DIR
-    metadata = yaml.safe_load((starter_root / "workspace-system.yml").read_text()) or {}
+    metadata = yaml.safe_load((starter_root / "workspace-system.yml").read_text(encoding="utf-8")) or {}
     workspace_system = metadata.get("workspace_system") if isinstance(metadata, dict) else {}
     if not isinstance(workspace_system, dict):
         workspace_system = {}

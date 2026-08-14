@@ -260,7 +260,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(config_path.read_text()) or {}
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -1001,6 +1001,8 @@ def query_retrieval_provider(
             text=True,
             timeout=provider.timeout_seconds,
             check=False,
+            encoding="utf-8",
+            errors="replace",
         )
     except subprocess.TimeoutExpired:
         warn_provider_failure(provider.name, f"timed out after {provider.timeout_seconds:g}s")
@@ -1046,6 +1048,8 @@ def query_semantic_retrieval_provider(
                 text=True,
                 timeout=provider.timeout_seconds,
                 check=False,
+                encoding="utf-8",
+                errors="replace",
             )
             if completed.returncode != 0:
                 stderr = completed.stderr.strip()
@@ -1140,7 +1144,7 @@ def write_semantic_cache_artifact(project_root: Path, provider: SemanticRetrieva
         "scope": scope,
         "indexed_documents": indexed,
     }
-    (cache_dir / "last-query.json").write_text(json.dumps(artifact, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    (cache_dir / "last-query.json").write_text(json.dumps(artifact, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
 
 
 def add_engine(results: list[dict[str, Any]], engine: str) -> list[dict[str, Any]]:

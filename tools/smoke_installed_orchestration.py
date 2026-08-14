@@ -83,6 +83,8 @@ def run(
         capture_output=True,
         text=True,
         env=env,
+        encoding="utf-8",
+        errors="replace",
     )
     if process.returncode != expected:
         raise SystemExit(
@@ -132,6 +134,7 @@ def verify_installed_pdf_backend(cli: str, workspace: Path) -> None:
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     normalized = run(
         [
@@ -235,6 +238,7 @@ def main() -> int:
             "    id: managed-resume-smoke\n"
             "    priority: high\n",
             encoding="utf-8",
+            newline="\n",
         )
         run([cli, "questions", "add", "--target", str(workspace), "--from-file", str(batch)])
 
@@ -372,7 +376,7 @@ def main() -> int:
             ]
         )
         tampered_batch = tampered_workspace / "batch.yaml"
-        tampered_batch.write_text(batch.read_text(encoding="utf-8"), encoding="utf-8")
+        tampered_batch.write_text(batch.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
         run(
             [
                 cli,

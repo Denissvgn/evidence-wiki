@@ -55,7 +55,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests._pack_policy_rule_fixture import intake_question  # noqa: E402
+from tests._pack_policy_rule_fixture import (  # noqa: E402
+    intake_question,
+    structured_view_bytes,
+    write_structured_view,
+)
 
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "policy-primitives-workspace"
@@ -413,17 +417,10 @@ class PolicyPrimitivesWorkspace:
             supplier_quote.pop("sku", None)
         else:
             supplier_quote["sku"] = sku
-        rendered = json.dumps(
-            document,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-            separators=(",", ": "),
-        ) + "\n"
-        sidecar.write_text(rendered, encoding="utf-8")
+        payload = structured_view_bytes(document)
+        new_digest = write_structured_view(PRIMITIVES._structured_view, sidecar, payload)
         if keep_binding_valid:
             old_digest = binding["content_hash"]
-            new_digest = f"sha256:{hashlib.sha256(rendered.encode('utf-8')).hexdigest()}"
             self.assertEqual(1, record_text.count(old_digest))
             record_path.write_text(record_text.replace(old_digest, new_digest, 1), encoding="utf-8")
 

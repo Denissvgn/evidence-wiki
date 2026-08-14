@@ -326,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         return int(exc.code) if isinstance(exc.code, int) else EXIT_USAGE
     rendered = render_report(report, args.format)
     if args.output:
-        Path(args.output).expanduser().write_text(rendered, encoding="utf-8")
+        Path(args.output).expanduser().write_text(rendered, encoding="utf-8", newline="\n")
     else:
         sys.stdout.write(rendered)
     return EXIT_OK

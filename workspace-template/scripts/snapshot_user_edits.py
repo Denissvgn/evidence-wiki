@@ -57,7 +57,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(config_path.read_text()) or {}
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -155,6 +155,8 @@ def run_git(project_root: Path, args: list[str], *, check: bool = True) -> subpr
         text=True,
         capture_output=True,
         check=False,
+        encoding="utf-8",
+        errors="replace",
     )
     if check and result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or f"git {' '.join(args)} failed"

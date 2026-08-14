@@ -696,7 +696,7 @@ def update_index_questions(index_path: Path, config: dict[str, Any], created: li
         lines[last_row : last_row + 1] = rows
     else:
         lines[last_row + 1 : last_row + 1] = rows
-    index_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    index_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8", newline="\n")
     return True
 
 
@@ -861,7 +861,7 @@ def run_intake_document(
     if not dry_run and new_items:
         questions_dir.mkdir(parents=True, exist_ok=True)
         for item in new_items:
-            (questions_dir / f"{item['slug']}.md").write_text(rendered_pages[item["slug"]], encoding="utf-8")
+            (questions_dir / f"{item['slug']}.md").write_text(rendered_pages[item["slug"]], encoding="utf-8", newline="\n")
         index_updated = update_index_questions(project_root / "index.md", config, new_items)
         init.append_log_entry(
             project_root / "log.md",

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-08-15
 
 - Make question-scoped policy parameters writable through every supported
   intake route and add a narrow, fail-closed review path for mechanically
@@ -23,6 +23,27 @@
   fields are optional or additive. The mapping-only array rule is an explicit
   fail-closed hardening exception: packs that previously traversed arrays must
   normalize those inputs to mappings before upgrading.
+
+- Pin the text encoding and line ending on every file the package reads, writes,
+  or decodes from a child process, fixing silent Windows corruption. Text I/O
+  previously fell back to `locale.getpreferredencoding(False)`, which is UTF-8 on
+  macOS and Linux but the ANSI code page (typically cp1252) on Windows outside
+  UTF-8 mode, while every reader in the package decodes UTF-8 explicitly. On a
+  Windows workspace this meant normalizing a source whose text left cp1252 raised
+  `UnicodeEncodeError` mid-write, and text cp1252 could encode was written as
+  cp1252 bytes the UTF-8 readers then refused; `research.yml` was read with the
+  locale in eight scripts and as UTF-8 in six others. `write_text` also rewrote
+  `\n` to `os.linesep`, so generated artifacts differed byte-for-byte between
+  platforms even though they are hashed, diffed, and line-compared. All shipped
+  scripts, the library, and the repository tools now pass `encoding="utf-8"` and
+  `newline="\n"`, and text-mode subprocess calls decode as UTF-8 with
+  `errors="replace"`, matching the convention `_normalizer_adapter.py` already
+  used. A new contract test scans the shipped sources and fails on any
+  unqualified text read, write, or text-mode subprocess, so the class cannot
+  return; CI could not have caught it, because `PYTHONUTF8: "1"` masks it there.
+  Behavior on macOS and Linux is unchanged. Exception handling is deliberately
+  untouched: readers that convert `OSError` into a diagnostic still do not catch
+  `UnicodeDecodeError`, which remains a separate robustness question.
 
 ## 0.3.1 - 2026-08-13
 

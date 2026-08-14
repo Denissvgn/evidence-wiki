@@ -806,7 +806,7 @@ def build_readiness_document(
 
 def write_json(path: Path, document: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
 
 
 def build_bundle(project_root: Path, run_id: str) -> dict[str, Any]:
@@ -894,7 +894,7 @@ def main(argv: list[str] | None = None) -> int:
 
     output = render(document)
     if args.output:
-        Path(args.output).expanduser().resolve().write_text(output, encoding="utf-8")
+        Path(args.output).expanduser().resolve().write_text(output, encoding="utf-8", newline="\n")
     else:
         sys.stdout.write(output)
     return exit_code

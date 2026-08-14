@@ -672,7 +672,7 @@ and inspect the retained phase before deciding whether it is safe to resume.
 Preview both steps first:
 
 ```bash
-python -m pip install --upgrade evidence-wiki==0.3.1
+python -m pip install --upgrade evidence-wiki==0.4.0
 evidence-wiki --version
 evidence-wiki upgrade --target . --dry-run
 evidence-wiki upgrade --target .
