@@ -160,6 +160,7 @@ class FleetStatusTests(unittest.TestCase):
         self.assertGreaterEqual(document["counts"]["operational_warnings"], 1)
 
     def park_question_for_review(self, target: Path, slug: str) -> None:
+        requested_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         (target / "wiki" / "synthesis").mkdir(parents=True, exist_ok=True)
         (target / "wiki" / "synthesis" / f"{slug}-answer.md").write_text(
             "---\ntype: synthesis\ncreated: 2026-08-07\nupdated: 2026-08-07\nsource_ids: []\n---\n# A\n",
@@ -176,7 +177,7 @@ class FleetStatusTests(unittest.TestCase):
             f"answer_page: ../synthesis/{slug}-answer.md\n"
             "human_review_required: true\n"
             "human_review_status: pending\n"
-            'human_review_requested_at: "2026-08-07T09:00:00Z"\n'
+            f'human_review_requested_at: "{requested_at}"\n'
             "human_review_policies:\n"
             "  - manual_review_required\n"
             "source_ids: []\n"

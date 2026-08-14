@@ -22,14 +22,16 @@ Batch schema (version 1.0)::
         summary: One-line restatement.      # optional, used in index/frontmatter
         context: |                          # optional, stored in the page body
           Free-text constraints supplied with the request.
+        metadata:                           # optional bounded JSON-shaped mapping
+          candidate_sku: ACME-1
 
 Behavior:
 
 - The whole batch is validated before anything is written; any schema error
   rejects the batch (no partial intake).
-- Questions are deduplicated against the existing backlog by normalized
-  question text (case- and whitespace-insensitive). Duplicates are reported
-  as skipped, never overwritten, so re-running a batch is idempotent.
+- Metadata-less questions retain legacy normalized-text dedupe. Metadata-bearing
+  questions use normalized text plus canonical metadata identity, so the same
+  question can target distinct candidates while exact replay stays idempotent.
 - Created pages are validated against ``research.yml`` frontmatter rules
   (allowed priorities, allowed ``open`` status, required fields) before
   writing.
@@ -48,7 +50,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -65,13 +69,16 @@ SUPPORTED_BATCH_SCHEMA_VERSIONS = ("1.0",)
 BATCH_TOP_LEVEL_KEYS = frozenset(("schema_version", "handoff", "handoff_signature", "questions"))
 HANDOFF_FIELDS = ("task_id", "requested_by", "chain_run_id")
 INTAKE_QUESTION_ITEM_KEYS = frozenset(
-    ("id", "question", "text", "priority", "origin", "summary", "context")
+    ("id", "question", "text", "priority", "origin", "summary", "context", "metadata")
 )
 INTAKE_PAGE_INTRO = "Recorded via the question intake API (`scripts/intake_questions.py`)."
 INDEX_PLACEHOLDER_ROW = "| (none yet) | | | |"
 MAX_INTAKE_QUESTION_BYTES = 1024
 MAX_INTAKE_SUMMARY_BYTES = 1024
 MAX_INTAKE_CONTEXT_BYTES = 8192
+MAX_INTAKE_METADATA_BYTES = 8192
+MAX_INTAKE_METADATA_DEPTH = 8
+MAX_INTAKE_METADATA_NODES = 128
 EXIT_OK = 0
 EXIT_INVALID = 2
 
@@ -204,12 +211,16 @@ def read_batch_document(from_file: str) -> dict[str, Any]:
     if from_file != "-" and Path(from_file).suffix.lower() == ".json":
         try:
             document = json.loads(text)
-        except json.JSONDecodeError as exc:
+        # ``json.loads`` also raises plain ``ValueError`` when Python's bounded
+        # integer-string conversion refuses an excessively long numeric token.
+        # Treat every parser-owned value/recursion refusal as an invalid batch,
+        # rather than letting a resource guard escape as a traceback.
+        except (ValueError, RecursionError) as exc:
             raise SystemExit(f"Invalid JSON batch in {label}: {exc}") from exc
     else:
         try:
             document = yaml.safe_load(text)
-        except yaml.YAMLError as exc:
+        except (yaml.YAMLError, RecursionError, ValueError) as exc:
             raise SystemExit(f"Invalid batch document in {label}: {exc}") from exc
     if not isinstance(document, dict):
         raise SystemExit(f"Batch document must be a mapping: {label}")
@@ -269,6 +280,130 @@ def utf8_len(value: str) -> int:
     return len(value.encode("utf-8"))
 
 
+def canonical_intake_metadata(metadata: Mapping[str, Any]) -> str:
+    """Return the deterministic persistence/dedupe representation."""
+    return json.dumps(
+        metadata,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def normalize_intake_metadata(
+    value: Any,
+    *,
+    label: str,
+    item_index: int,
+) -> dict[str, Any]:
+    """Validate and defensively copy one bounded JSON-shaped metadata mapping.
+
+    The walk is iterative so hostile in-memory graphs cannot make application
+    recursion the enforcement mechanism. Mapping identities are globally unique
+    within the value: both cycles and YAML mapping aliases are refused.
+    """
+    if not isinstance(value, Mapping) or not value:
+        raise SystemExit(f"question batch {label} must be a non-empty mapping")
+
+    normalized: dict[str, Any] = {}
+    stack: list[tuple[Mapping[Any, Any], dict[str, Any], int]] = [(value, normalized, 1)]
+    seen_mappings: set[int] = set()
+    nodes = 0
+
+    while stack:
+        source, target, depth = stack.pop()
+        source_identity = id(source)
+        if source_identity in seen_mappings:
+            raise SystemExit(
+                f"question batch {label} must not contain cyclic or shared mapping containers"
+            )
+        seen_mappings.add(source_identity)
+        if not source:
+            raise SystemExit(f"question batch {label} nested mappings must be non-empty")
+        if depth > MAX_INTAKE_METADATA_DEPTH:
+            raise SystemExit(
+                f"question batch {label} exceeds maximum mapping depth "
+                f"{MAX_INTAKE_METADATA_DEPTH}"
+            )
+
+        for key, child in source.items():
+            if not isinstance(key, str) or not key:
+                raise SystemExit(f"question batch {label} keys must be non-empty strings")
+            try:
+                key.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise SystemExit(f"question batch {label} keys must be valid UTF-8 strings") from exc
+            nodes += 1  # mapping key
+            if nodes > MAX_INTAKE_METADATA_NODES:
+                raise SystemExit(
+                    f"question batch {label} exceeds maximum node count "
+                    f"{MAX_INTAKE_METADATA_NODES}"
+                )
+
+            if isinstance(child, Mapping):
+                child_target: dict[str, Any] = {}
+                target[key] = child_target
+                stack.append((child, child_target, depth + 1))
+                continue
+
+            if child is None or type(child) in (str, bool, int, float):
+                if isinstance(child, float) and not math.isfinite(child):
+                    raise SystemExit(f"question batch {label} numbers must be finite")
+                if isinstance(child, str):
+                    try:
+                        child.encode("utf-8")
+                    except UnicodeEncodeError as exc:
+                        raise SystemExit(
+                            f"question batch {label} strings must be valid UTF-8"
+                        ) from exc
+                nodes += 1  # scalar leaf
+                if nodes > MAX_INTAKE_METADATA_NODES:
+                    raise SystemExit(
+                        f"question batch {label} exceeds maximum node count "
+                        f"{MAX_INTAKE_METADATA_NODES}"
+                    )
+                target[key] = child
+                continue
+
+            raise SystemExit(
+                f"question batch {label} values must be JSON scalars or nested mappings; "
+                "arrays and YAML-native values are not supported"
+            )
+
+    try:
+        canonical = canonical_intake_metadata(normalized)
+    except (ValueError, RecursionError) as exc:
+        # Python protects integer-to-decimal conversion with its own digit
+        # ceiling. A caller can still construct such an int in memory, so keep
+        # that runtime guard inside the same structured invalid-metadata path as
+        # parser-side resource refusals.
+        raise SystemExit(
+            f"question batch {label} cannot be encoded as bounded canonical JSON: {exc}"
+        ) from exc
+    actual_bytes = utf8_len(canonical)
+    if actual_bytes > MAX_INTAKE_METADATA_BYTES:
+        raise IntakeFieldTooLong(
+            "Intake field length exceeded: 1 field exceeds the intake byte limit.",
+            error_code="INTAKE_FIELD_TOO_LONG",
+            details={
+                "violations": [
+                    {
+                        "item_index": item_index,
+                        "field": "metadata",
+                        "actual_bytes": actual_bytes,
+                        "max_bytes": MAX_INTAKE_METADATA_BYTES,
+                    }
+                ],
+                "max_question_bytes": MAX_INTAKE_QUESTION_BYTES,
+                "max_summary_bytes": MAX_INTAKE_SUMMARY_BYTES,
+                "max_context_bytes": MAX_INTAKE_CONTEXT_BYTES,
+                "max_metadata_bytes": MAX_INTAKE_METADATA_BYTES,
+            },
+        )
+    return normalized
+
+
 def validate_intake_field_lengths(raw_questions: list[Any]) -> None:
     field_limits = (
         ("question", MAX_INTAKE_QUESTION_BYTES),
@@ -307,6 +442,7 @@ def validate_intake_field_lengths(raw_questions: list[Any]) -> None:
             "max_question_bytes": MAX_INTAKE_QUESTION_BYTES,
             "max_summary_bytes": MAX_INTAKE_SUMMARY_BYTES,
             "max_context_bytes": MAX_INTAKE_CONTEXT_BYTES,
+            "max_metadata_bytes": MAX_INTAKE_METADATA_BYTES,
         },
     )
 
@@ -318,7 +454,7 @@ def question_frontmatter_rules(config: dict[str, Any]) -> dict[str, Any]:
     return question_rules
 
 
-def validate_against_config(config: dict[str, Any], items: list[dict[str, str]], init: ModuleType) -> None:
+def validate_against_config(config: dict[str, Any], items: list[dict[str, Any]], init: ModuleType) -> None:
     """Reject the batch when generated pages would violate research.yml rules."""
     wiki = config.get("wiki") if isinstance(config.get("wiki"), dict) else {}
     required_dirs = wiki.get("required_dirs") if isinstance(wiki.get("required_dirs"), list) else []
@@ -338,6 +474,23 @@ def validate_against_config(config: dict[str, Any], items: list[dict[str, str]],
             f"the intake page template does not generate: {', '.join(missing)}"
         )
     rules = question_frontmatter_rules(config)
+    conditional_keys = set(init.QUESTION_PAGE_CONDITIONAL_FRONTMATTER_KEYS)
+    type_required_fields = (
+        rules.get("required_fields") if isinstance(rules.get("required_fields"), list) else []
+    )
+    # Only the conditional `metadata` key gets a strict per-item presence check here.
+    # Other type_required_fields entries (e.g. lifecycle fields populated after intake,
+    # such as answer_page or human_review_status) are legitimately absent at intake time
+    # and are not intake's concern -- lint.py's non-blocking check_frontmatter covers them.
+    for field in conditional_keys:
+        if field not in type_required_fields:
+            continue
+        missing_items = [str(index) for index, item in enumerate(items) if field not in item]
+        if missing_items:
+            raise SystemExit(
+                "Cannot intake questions: research.yml question required_fields requires "
+                f"'{field}' for every item; missing from item(s): {', '.join(missing_items)}"
+            )
     allowed_values = rules.get("allowed_values") if isinstance(rules.get("allowed_values"), dict) else {}
     allowed_statuses = allowed_values.get("status") if isinstance(allowed_values.get("status"), list) else []
     if allowed_statuses and "open" not in allowed_statuses:
@@ -363,15 +516,25 @@ def wiki_root_value(config: dict[str, Any]) -> str:
     return root if isinstance(root, str) and root.strip() else "wiki"
 
 
-def collect_existing_questions(questions_dir: Path, question_status: ModuleType) -> tuple[set[str], dict[str, str]]:
-    """Return (existing slugs, normalized question text -> slug)."""
+def collect_existing_questions(
+    questions_dir: Path,
+    question_status: ModuleType,
+) -> tuple[set[str], dict[str, str], dict[tuple[str, str], str]]:
+    """Return slugs plus wildcard and valid metadata-aware dedupe indexes."""
     slugs: set[str] = set()
     texts: dict[str, str] = {}
+    metadata_texts: dict[tuple[str, str], str] = {}
     if not questions_dir.is_dir():
-        return slugs, texts
+        return slugs, texts, metadata_texts
     for path in sorted(questions_dir.glob("*.md")):
         slugs.add(path.stem)
-        frontmatter = question_status.load_frontmatter(path)
+        try:
+            frontmatter = question_status.load_frontmatter(path)
+        except (RecursionError, ValueError):
+            # Older or independently supplied status readers may not yet map
+            # parser resource guards to ``None``. Existing malformed pages must
+            # never turn an otherwise valid intake batch into a traceback.
+            frontmatter = None
         if frontmatter is None or frontmatter.get("type") != "question":
             continue
         text = frontmatter.get("question")
@@ -380,37 +543,64 @@ def collect_existing_questions(questions_dir: Path, question_status: ModuleType)
         normalized = normalize_question_text(text) if text else ""
         if normalized and normalized not in texts:
             texts[normalized] = path.stem
-    return slugs, texts
+        if normalized and "metadata" in frontmatter:
+            try:
+                valid_metadata = normalize_intake_metadata(
+                    frontmatter["metadata"],
+                    label="existing question metadata",
+                    item_index=-1,
+                )
+            except SystemExit:
+                # Hand-authored legacy metadata can be outside the supported
+                # intake schema. It remains a wildcard target for an incoming
+                # metadata-less item but never aliases a valid metadata value.
+                valid_metadata = None
+            if valid_metadata is None:
+                continue
+            identity = canonical_intake_metadata(valid_metadata)
+            metadata_texts.setdefault((normalized, identity), path.stem)
+    return slugs, texts, metadata_texts
 
 
 def partition_new_questions(
-    items: list[dict[str, str]],
+    items: list[dict[str, Any]],
     existing_texts: dict[str, str],
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    new_items: list[dict[str, str]] = []
-    duplicates: list[dict[str, str]] = []
-    seen_in_batch: dict[str, str] = {}
+    existing_metadata_texts: dict[tuple[str, str], str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    new_items: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    seen_any_in_batch: dict[str, str] = {}
+    seen_metadata_in_batch: dict[tuple[str, str], str] = {}
     for item in items:
         normalized = normalize_question_text(item["question"])
-        if normalized in existing_texts:
+        metadata_identity = (
+            canonical_intake_metadata(item["metadata"]) if "metadata" in item else None
+        )
+        if metadata_identity is None:
+            duplicate_of = existing_texts.get(normalized) or seen_any_in_batch.get(normalized)
+        else:
+            identity_key = (normalized, metadata_identity)
+            duplicate_of = existing_metadata_texts.get(identity_key) or seen_metadata_in_batch.get(
+                identity_key
+            )
+        if duplicate_of is not None:
             duplicates.append(
                 {
+                    "item_index": item["item_index"],
                     "question": item["question"],
-                    "duplicate_of": existing_texts[normalized],
-                    "reason": "matches an existing question page",
+                    "duplicate_of": duplicate_of,
+                    "reason": (
+                        "matches an existing question page"
+                        if duplicate_of in existing_texts.values()
+                        or duplicate_of in existing_metadata_texts.values()
+                        else "duplicates an earlier question in this batch"
+                    ),
                 }
             )
             continue
-        if normalized in seen_in_batch:
-            duplicates.append(
-                {
-                    "question": item["question"],
-                    "duplicate_of": seen_in_batch[normalized],
-                    "reason": "duplicates an earlier question in this batch",
-                }
-            )
-            continue
-        seen_in_batch[normalized] = item["slug"]
+        seen_any_in_batch.setdefault(normalized, item["slug"])
+        if metadata_identity is not None:
+            seen_metadata_in_batch[(normalized, metadata_identity)] = item["slug"]
         new_items.append(item)
     return new_items, duplicates
 
@@ -428,7 +618,7 @@ def enforce_intake_limits(
     config: dict[str, Any],
     questions_dir: Path,
     question_status: ModuleType,
-    new_items: list[dict[str, str]],
+    new_items: list[dict[str, Any]],
     now: datetime,
 ) -> None:
     if not new_items:
@@ -472,7 +662,7 @@ def enforce_intake_limits(
         )
 
 
-def update_index_questions(index_path: Path, config: dict[str, Any], created: list[dict[str, str]]) -> bool:
+def update_index_questions(index_path: Path, config: dict[str, Any], created: list[dict[str, Any]]) -> bool:
     """Insert created question rows into the index.md Questions table."""
     if not created or not index_path.is_file():
         return False
@@ -511,8 +701,8 @@ def update_index_questions(index_path: Path, config: dict[str, Any], created: li
 
 
 def render_log_entry(
-    created: list[dict[str, str]],
-    duplicates: list[dict[str, str]],
+    created: list[dict[str, Any]],
+    duplicates: list[dict[str, Any]],
     handoff: dict[str, str],
     batch_label: str,
     created_at: datetime,
@@ -539,8 +729,8 @@ def render_log_entry(
 def build_report(
     *,
     questions_dir_label: str,
-    created: list[dict[str, str]],
-    duplicates: list[dict[str, str]],
+    created: list[dict[str, Any]],
+    duplicates: list[dict[str, Any]],
     handoff: dict[str, str],
     submitted: int,
     dry_run: bool,
@@ -553,6 +743,7 @@ def build_report(
     created_records = []
     for item in created:
         record: dict[str, Any] = {
+            "item_index": item["item_index"],
             "slug": item["slug"],
             "path": f"{questions_dir_label}/{item['slug']}.md",
             "question": item["question"],
@@ -628,7 +819,9 @@ def run_intake_document(
         )
 
     questions_dir = question_status.questions_directory(project_root, config)
-    existing_slugs, existing_texts = collect_existing_questions(questions_dir, question_status)
+    existing_slugs, existing_texts, existing_metadata_texts = collect_existing_questions(
+        questions_dir, question_status
+    )
 
     validate_intake_field_lengths(batch["questions"])
     items = init.normalize_question_items(
@@ -636,9 +829,12 @@ def run_intake_document(
         allowed_keys=INTAKE_QUESTION_ITEM_KEYS,
         error_prefix="question batch",
         used_slugs=existing_slugs,
+        metadata_normalizer=normalize_intake_metadata,
     )
+    for item_index, item in enumerate(items):
+        item["item_index"] = item_index
     validate_against_config(config, items, init)
-    new_items, duplicates = partition_new_questions(items, existing_texts)
+    new_items, duplicates = partition_new_questions(items, existing_texts, existing_metadata_texts)
     now = datetime.now(timezone.utc)
     enforce_intake_limits(
         project_root=project_root,

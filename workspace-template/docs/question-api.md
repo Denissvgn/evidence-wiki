@@ -64,7 +64,34 @@ questions:                     # required, non-empty list
     summary: One-line restatement for the index.  # optional; <= 1024 UTF-8 bytes
     context: |                 # optional free text stored in the page body; <= 8192 UTF-8 bytes
       Constraints supplied with the request.
+    metadata:                  # optional bounded policy-input namespace
+      candidate_sku: B0ABC12345
+      candidate:
+        version: "2026-08"
 ```
+
+`metadata` is persisted under that one top-level frontmatter key; it is never
+flattened into managed fields such as `status` or `type`. It must be a non-empty
+mapping with non-empty string keys. Values may be JSON scalars (string, finite
+number, boolean, or null) or non-empty nested mappings governed by the same
+key/value rules; arrays and YAML-native values such as dates, tags, sets, and
+binary data are rejected rather than coerced. The
+canonical mapping is limited to 8192 UTF-8 bytes, depth 8 (including the
+top-level mapping), and 128 mapping keys plus scalar leaves. Cyclic or shared
+mapping containers are rejected. Keys containing `/` or `~` remain valid and
+use RFC 6901 escaping when a policy reads them: `metadata/a~1b` addresses `a/b`,
+and `metadata/a~0b` addresses `a~b`.
+
+Metadata is caller-controlled policy input describing what the question asks
+about. It is not evidence, an authorization decision, or a place for secrets;
+it is persisted in Markdown and may appear in policy diagnostics. The intake
+schema remains `1.0` because the member is optional and additive.
+
+Workspaces created before starter `0.7.0` must be upgraded with
+`evidence-wiki upgrade --target PATH` before using `metadata`; restart any MCP
+server or other long-lived process afterward so it reloads the managed scripts.
+A pre-0.7 intake script rejects the unknown member rather than silently dropping
+it.
 
 ### Intake Behavior
 
@@ -80,17 +107,23 @@ questions:                     # required, non-empty list
 - **Field-size limited.** Before normalization, `question` and its `text`
   alias are capped at 1024 UTF-8 bytes, `summary` is capped at 1024 UTF-8
   bytes, and `context` is capped at 8192 UTF-8 bytes after surrounding
-  whitespace is stripped. Over-limit batches are rejected atomically with
-  `INTAKE_FIELD_TOO_LONG`.
+  whitespace is stripped. Canonical `metadata` is capped at 8192 UTF-8 bytes,
+  depth 8, and 128 nodes as described above. Over-limit batches are rejected
+  atomically with `INTAKE_FIELD_TOO_LONG` for byte caps or the invalid-batch
+  refusal for shape/depth/node violations.
 - **Config-aware.** Generated frontmatter is checked against `research.yml`
   rules before writing: `questions` must be a required wiki directory, the
   `question` page type and `open` status must be allowed, priorities must be
   in the configured allowed values, and every config-required frontmatter
-  field must be covered by the page template.
-- **Idempotent.** Questions are deduplicated against the existing backlog by
-  normalized question text (case- and whitespace-insensitive). Duplicates are
-  reported as skipped and never overwrite existing pages, so re-running the
-  same batch is a no-op.
+  field must be covered by the page template. A question-type
+  `required_fields: [metadata]` declaration requires every submitted item to
+  carry valid metadata; it does not make metadata global to other page types.
+- **Idempotent and candidate-aware.** An item without metadata preserves the
+  legacy normalized-text identity and matches any same-text question. An item
+  with metadata matches only the same normalized text plus the same canonical
+  valid mapping; different candidate metadata creates a separate suffixed
+  question page, while an exact retry is skipped. Submitted order pins this
+  intentionally asymmetric compatibility rule.
 - **Intake-limited.** After deduplication and before any page is rendered or
   written, the script enforces `run.max_open_questions_total` and
   `run.max_intake_per_hour`. Duplicates do not count as new intake. A batch
@@ -124,8 +157,8 @@ questions:                     # required, non-empty list
 | `counts.submitted` | Valid items in the batch. |
 | `counts.created` | Pages written (or planned, in dry-run). |
 | `counts.skipped_duplicates` | Items skipped as duplicates. |
-| `created[]` | `slug`, `path`, `question`, `priority`, `origin` per page; plus full rendered `content` in dry-run. |
-| `skipped_duplicates[]` | `question`, `duplicate_of` (existing or in-batch slug), `reason`. |
+| `created[]` | Zero-based `item_index`, then `slug`, `path`, `question`, `priority`, `origin` per page; plus full rendered `content` in dry-run. |
+| `skipped_duplicates[]` | Zero-based `item_index`, `question`, `duplicate_of` (existing or in-batch slug), `reason`. Metadata values are not echoed. |
 | `index_updated` | Whether `index.md` rows were inserted. |
 | `log_appended` | Whether a `log.md` entry was appended. |
 
@@ -133,7 +166,10 @@ Exit codes: `0` batch accepted (including a fully-duplicate no-op), `2`
 invalid batch, unreadable workspace, config violation, or intake limit
 exceeded. In JSON mode, limit failures use `INTAKE_FIELD_TOO_LONG`,
 `INTAKE_TOTAL_CAP_EXCEEDED`, or `INTAKE_RATE_LIMITED` and include field or
-count details.
+count details. Parser recursion and runtime resource refusals (such as an
+overlong integer token) are reported as invalid batches rather than uncaught
+tracebacks; direct file/stdin allocation and duplicate-key behavior are
+otherwise unchanged.
 
 ## Question Resolution
 

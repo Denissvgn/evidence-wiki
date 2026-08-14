@@ -2,6 +2,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_PYTHON_ENV = "EVIDENCE_WIKI_FAKE_CODEX_WORKSPACE_PYTHON"
 
@@ -29,6 +31,14 @@ def test_smoke_passes_its_python_to_the_fake_managed_runner() -> None:
     environment = SMOKE.fake_codex_environment()
 
     assert environment[WORKSPACE_PYTHON_ENV] == sys.executable
+
+
+def test_smoke_expected_starter_version_matches_authoritative_metadata() -> None:
+    document = yaml.safe_load(
+        (REPO_ROOT / "workspace-template" / "workspace-system.yml").read_text(encoding="utf-8")
+    )
+
+    assert SMOKE.EXPECTED_STARTER_VERSION == document["workspace_system"]["starter_version"]
 
 
 def test_fake_managed_runner_uses_the_pinned_workspace_python(monkeypatch) -> None:

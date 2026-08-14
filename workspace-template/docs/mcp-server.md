@@ -146,6 +146,14 @@ MCP intake applies a transport-level batch cap before delegating to
 `run.max_mcp_intake_batch_questions` (default 100), the tool returns
 `INTAKE_BATCH_TOO_LARGE` and writes nothing.
 
+The `batch` object otherwise uses the same question-intake schema as the CLI,
+including bounded optional `metadata`, candidate-aware deduplication, and
+zero-based `item_index` correlation in created/skipped report records. Metadata
+is caller-controlled persisted policy input and must not contain secrets. The
+stdio request-line cap remains the transport boundary; parser recursion and
+parser resource refusals are returned as JSON-RPC parse errors before tool
+dispatch.
+
 Fatal workspace-script failures are returned as MCP tool results with
 `isError: true` and the shared error envelope in `structuredContent`. Protocol
 errors such as malformed JSON-RPC, unknown methods, or unknown tools are
@@ -189,5 +197,5 @@ Example status call:
 Example question intake call:
 
 ```json
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"intake_questions","arguments":{"batch":{"schema_version":"1.0","questions":[{"question":"What benchmarks matter?","priority":"high"}]},"dry_run":true}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"intake_questions","arguments":{"batch":{"schema_version":"1.0","questions":[{"question":"Does this identifier match?","priority":"high","metadata":{"candidate_sku":"B0ABC12345"}}]},"dry_run":true}}}
 ```

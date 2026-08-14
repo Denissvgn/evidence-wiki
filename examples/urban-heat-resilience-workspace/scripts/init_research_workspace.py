@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import unicodedata
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -156,6 +157,11 @@ QUESTION_PAGE_FRONTMATTER_KEYS = (
     "summary",
     "question",
 )
+# Optional keys the renderer understands but does not emit for every question.
+# Intake config validation uses this separately from the always-emitted tuple so
+# a type-specific required field can require metadata without pretending the
+# global, every-page frontmatter contract is satisfied conditionally.
+QUESTION_PAGE_CONDITIONAL_FRONTMATTER_KEYS = ("metadata",)
 PROJECT_LOCAL_GUIDANCE_DEFAULT_PATH = "docs/project-domain-guidance.md"
 PROJECT_LOCAL_GUIDANCE_LIST_FIELDS = (
     "extraction_targets",
@@ -1035,7 +1041,8 @@ def normalize_question_items(
     allowed_keys: frozenset[str] = SEED_QUESTION_ITEM_KEYS,
     error_prefix: str = "setup profile",
     used_slugs: set[str] | None = None,
-) -> list[dict[str, str]]:
+    metadata_normalizer: Callable[..., dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Validate and normalize question items into page-creation dicts.
 
     Shared by profile-driven seeding and the batch question intake API
@@ -1044,7 +1051,7 @@ def normalize_question_items(
     """
     if not isinstance(raw, list):
         raise SystemExit(f"{error_prefix} questions must be a list")
-    normalized: list[dict[str, str]] = []
+    normalized: list[dict[str, Any]] = []
     used = set(used_slugs) if used_slugs is not None else set()
     for index, item in enumerate(raw):
         label = f"questions[{index}]"
@@ -1091,6 +1098,14 @@ def normalize_question_items(
                 raise SystemExit(f"{error_prefix} {label}.context must be a string")
             if isinstance(context, str) and context.strip():
                 normalized_item["context"] = context.strip()
+        if "metadata" in allowed_keys and "metadata" in item:
+            if metadata_normalizer is None:
+                raise SystemExit(f"{error_prefix} {label}.metadata is not supported by this caller")
+            normalized_item["metadata"] = metadata_normalizer(
+                item["metadata"],
+                label=f"{label}.metadata",
+                item_index=index,
+            )
         normalized.append(normalized_item)
     return normalized
 
@@ -2300,7 +2315,7 @@ def render_untrusted_evidence_block(label: str, value: str) -> str:
     )
 
 
-def render_question_page(question: dict[str, str]) -> str:
+def render_question_page(question: dict[str, Any]) -> str:
     timestamp = datetime.now(timezone.utc).date().isoformat()
     text = question["question"]
     summary = question.get("summary") or text
@@ -2316,6 +2331,11 @@ def render_question_page(question: dict[str, str]) -> str:
         "summary": escape_table_cell(summary),
         "question": text,
     }
+    if "metadata" in question:
+        # Metadata has already passed the intake validator. Keeping it under one
+        # namespaced key prevents caller-controlled values from replacing any
+        # lifecycle/frontmatter field above.
+        frontmatter["metadata"] = copy.deepcopy(question["metadata"])
     rendered = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).strip()
     intro = question.get("intro") or QUESTION_PAGE_DEFAULT_INTRO
     context = question.get("context")

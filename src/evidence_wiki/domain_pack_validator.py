@@ -469,12 +469,21 @@ def policy_rules_check(scripts: LoadedScripts, domain_pack: Any) -> tuple[dict[s
             "No domain-pack policy rules declared.",
             ["research.overlay.yml"],
         )
-    return declared, check(
-        "policy_rules",
-        "pass",
-        f"Domain pack declares {len(declared)} deterministic policy rule(s).",
-        ["research.overlay.yml"],
+    review_capable = sum(
+        1
+        for summary in declared.values()
+        if summary.get("manual_review_required", False) or summary.get("manual_review_on_absence", False)
     )
+    if review_capable:
+        # A rule that can route to manual review is not deterministic: keep the message
+        # honest about that instead of reusing the all-deterministic wording below.
+        message = (
+            f"Domain pack declares {len(declared)} policy rule(s), "
+            f"{review_capable} of which can route to manual review."
+        )
+    else:
+        message = f"Domain pack declares {len(declared)} deterministic policy rule(s)."
+    return declared, check("policy_rules", "pass", message, ["research.overlay.yml"])
 
 
 def coverage_templates_check(
@@ -546,7 +555,7 @@ def coverage_templates_check(
     )
 
 
-def manual_only_policies_by_field(
+def review_capable_policies_by_field(
     scripts: LoadedScripts,
     pack_policy_vocabularies: dict[str, dict[str, str]] | None,
     pack_policy_rules: dict[str, dict[str, Any]] | None = None,
@@ -555,16 +564,16 @@ def manual_only_policies_by_field(
 
     A pack-declared policy is manual-only because a pack had no vocabulary in which to
     say how to decide it. A ``policy_rules`` declaration is that vocabulary, so a
-    rule-backed id is deterministic and leaves the set -- otherwise the gate would keep
-    refusing exactly the automation the declaration exists to supply. An id whose rule
-    sets ``manual_review_required`` stays: the pack asked for the human on purpose.
+    rule-backed id is autonomous only when every result is pass/fail. A rule that sets
+    ``manual_review_required`` or declares ``manual_review`` for eligible absence stays
+    in the set: either rule can place a real evaluation in a human review queue.
 
     ``pack_policy_rules`` is the summary :func:`policy_rules_check` returns, and is
     empty whenever that check failed, so a malformed declaration excludes nothing.
     """
     pack_policy_vocabularies = pack_policy_vocabularies or {}
 
-    def deterministic_in(field: str) -> set[str]:
+    def autonomous_in(field: str) -> set[str]:
         # Per field, not one flat set: a rule decides only the section it was declared
         # under, so subtracting an id from every field would exempt an identity policy
         # from the gate on the strength of a rule written for the source policy -- a
@@ -572,12 +581,14 @@ def manual_only_policies_by_field(
         return {
             policy_id
             for policy_id, summary in (pack_policy_rules or {}).items()
-            if not summary.get("manual_review_required", False) and summary.get("section") == field
+            if not summary.get("manual_review_required", False)
+            and not summary.get("manual_review_on_absence", False)
+            and summary.get("section") == field
         }
 
     return {
         field: set(getattr(scripts.evidence, constant, ()))
-        | (set(pack_policy_vocabularies.get(field, {})) - deterministic_in(field))
+        | (set(pack_policy_vocabularies.get(field, {})) - autonomous_in(field))
         for field, constant in (
             ("source_policy", "MANUAL_ONLY_SOURCE_POLICIES"),
             ("freshness_policy", "MANUAL_ONLY_FRESHNESS_POLICIES"),
@@ -615,11 +626,21 @@ def autonomous_required_facets_check(
         return check(
             "autonomous_required_facets",
             "pass",
-            "domain_pack.human_gated is true; manual-only required facets are explicit.",
+            "domain_pack.human_gated is true; required facets that can require manual review are explicit.",
             ["research.overlay.yml", *coverage_templates.values()],
         )
 
-    manual_by_field = manual_only_policies_by_field(scripts, pack_policy_vocabularies, pack_policy_rules)
+    review_capable_by_field = review_capable_policies_by_field(
+        scripts, pack_policy_vocabularies, pack_policy_rules
+    )
+    conditional_review_by_field = {
+        field: {
+            policy_id
+            for policy_id, summary in (pack_policy_rules or {}).items()
+            if summary.get("manual_review_on_absence", False) and summary.get("section") == field
+        }
+        for field in review_capable_by_field
+    }
     errors: list[str] = []
     files = ["research.overlay.yml"]
     for _slug, relative in sorted(coverage_templates.items()):
@@ -635,14 +656,22 @@ def autonomous_required_facets_check(
         for facet in template.get("required_facets", []):
             facet_id = facet.get("facet_id") if isinstance(facet, dict) else None
             label = facet_id if isinstance(facet_id, str) and facet_id else "<unknown>"
-            for field, manual_values in manual_by_field.items():
+            for field, review_capable_values in review_capable_by_field.items():
                 value = facet.get(field) if isinstance(facet, dict) else None
-                if isinstance(value, str) and value in manual_values:
-                    errors.append(
-                        f"{relative} required facet {label!r} uses manual-only {field} {value!r}; "
-                        "declare domain_pack.human_gated: true, move the facet to optional_facets, "
-                        "or use a deterministic policy."
-                    )
+                if isinstance(value, str) and value in review_capable_values:
+                    if value in conditional_review_by_field[field]:
+                        errors.append(
+                            f"{relative} required facet {label!r} uses {field} {value!r}, which can "
+                            "require manual review when an optional record field is absent; declare "
+                            "domain_pack.human_gated: true, move the facet to optional_facets, or use "
+                            "a policy that always reaches an autonomous pass/fail verdict."
+                        )
+                    else:
+                        errors.append(
+                            f"{relative} required facet {label!r} uses manual-only {field} {value!r}; "
+                            "declare domain_pack.human_gated: true, move the facet to optional_facets, "
+                            "or use a deterministic policy."
+                        )
 
     if errors:
         return check("autonomous_required_facets", "fail", "; ".join(errors), sorted(set(files)))

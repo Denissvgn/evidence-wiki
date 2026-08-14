@@ -16,14 +16,16 @@ if str(REPO_ROOT) not in sys.path:
 
 from tests._pack_policy_rule_fixture import (  # noqa: E402
     ALL_RULES,
+    ALL_RULES_WITH_ABSENCE_REVIEW,
+    CANDIDATE_SKU,
     FRESHNESS_POLICY,
     IDENTITY_POLICY,
     PRIMITIVE_RULES_ONLY,
     SOURCE_POLICY,
-    add_question_metadata,
     coverage_manifest_document,
     declare_pack,
     deliver_quote,
+    intake_question,
     write_coverage_manifest,
 )
 
@@ -1476,12 +1478,11 @@ class PackPolicyRuleCoverageTests(unittest.TestCase):
         return load_script_module("research_coverage_manifest_pack_rules", COVERAGE_SCRIPT_PATH)
 
     def init_workspace(self, root: Path) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
         target = root / "pack-rule-coverage-workspace"
         profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text(encoding="utf-8"))
         profile["workspace_init"]["target_path"] = str(target)
-        profile["workspace_init"]["questions"] = [
-            {"id": self.SLUG, "question": "What does the supplier quote for B0ABC12345?", "priority": "high"}
-        ]
+        profile["workspace_init"].pop("questions", None)
         profile_path = root / "profile.yml"
         profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1498,17 +1499,49 @@ class PackPolicyRuleCoverageTests(unittest.TestCase):
         raw = stdout.getvalue() if stdout.getvalue().strip() else stderr.getvalue()
         return int(code or 0), json.loads(raw), stderr.getvalue()
 
-    def prepare(self, root: Path, *, age_hours: float, rules: dict[str, Any] | None) -> Path:
+    def prepare(
+        self,
+        root: Path,
+        *,
+        age_hours: float,
+        rules: dict[str, Any] | None,
+        sku: str | None = CANDIDATE_SKU,
+        structured_view: str = "bound",
+        question_metadata: dict[str, Any] | None = None,
+        conditional_review: bool = False,
+    ) -> Path:
         target = self.init_workspace(root)
-        declare_pack(target, rules=rules)
-        add_question_metadata(target, self.SLUG)
-        source_id = deliver_quote(target, "quote:supplier", age_hours=age_hours)
+        declare_pack(target, rules=rules, human_gated=True if conditional_review else None)
+        metadata = (
+            {"candidate_sku": CANDIDATE_SKU}
+            if question_metadata is None and not conditional_review
+            else question_metadata
+        )
+        report = intake_question(
+            target,
+            self.SLUG,
+            question="What does the supplier quote for B0ABC12345?",
+            metadata=metadata,
+        )
+        self.assertEqual(1, report["counts"]["created"])
+        self.assertEqual(0, report["created"][0]["item_index"])
+        source_id = deliver_quote(
+            target,
+            "quote:supplier",
+            age_hours=age_hours,
+            sku=sku,
+            structured_view=structured_view,
+        )
         write_coverage_manifest(
             target,
             self.SLUG,
             coverage_manifest_document(self.SLUG, source_ids=[source_id], identity_policy=IDENTITY_POLICY),
         )
         return target
+
+    def identity_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        results = payload["policy_results"]["facets"][0]["policy_results"]
+        return next(result for result in results if result["policy"] == IDENTITY_POLICY)
 
     def test_rule_backed_pack_policies_pass_the_facet_and_the_coverage_verdict(self):
         coverage = self.load_coverage()
@@ -1561,6 +1594,142 @@ class PackPolicyRuleCoverageTests(unittest.TestCase):
             self.assertEqual("pass", payload["coverage_verdict"])
             results = payload["policy_results"]["facets"][0]["policy_results"]
             self.assertEqual(["pass", "pass", "manual_review"], [r["verdict"] for r in results])
+
+    def test_supported_intake_metadata_drives_match_mismatch_and_absent_review_rollup(self):
+        coverage = self.load_coverage()
+        cases = (
+            ("match", CANDIDATE_SKU, "pass", "pass", None),
+            ("mismatch", "B0DIFFERENT", "fail", "blocked", "rule_value_mismatch"),
+            ("eligible terminal absence", None, "manual_review", "pass", "rule_field_absent"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for label, sku, policy_verdict, coverage_verdict, reason_prefix in cases:
+                with self.subTest(case=label):
+                    target = self.prepare(
+                        root / label.replace(" ", "-"),
+                        age_hours=2,
+                        rules=ALL_RULES_WITH_ABSENCE_REVIEW,
+                        sku=sku,
+                        question_metadata={"candidate_sku": CANDIDATE_SKU},
+                        conditional_review=True,
+                    )
+
+                    code, payload, stderr = self.run_evaluate(coverage, target)
+
+                    self.assertEqual(0, code, stderr)
+                    identity = self.identity_result(payload)
+                    self.assertEqual(policy_verdict, identity["verdict"], identity)
+                    self.assertEqual(coverage_verdict, payload["coverage_verdict"])
+                    self.assertEqual(
+                        coverage_verdict,
+                        payload["manifest"]["required_facets"][0]["facet_verdict"],
+                    )
+                    if reason_prefix is not None:
+                        self.assertTrue(
+                            identity["reasons"][0].startswith(reason_prefix), identity["reasons"]
+                        )
+                    frontmatter = yaml.safe_load(
+                        (
+                            target / "wiki" / "questions" / f"{self.SLUG}.md"
+                        ).read_text(encoding="utf-8").split("---\n", 2)[1]
+                    )
+                    self.assertEqual({"candidate_sku": CANDIDATE_SKU}, frontmatter["metadata"])
+
+    def test_optional_facet_retains_conditional_review_without_blocking_coverage(self):
+        coverage = self.load_coverage()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.prepare(
+                Path(tmpdir),
+                age_hours=2,
+                rules=ALL_RULES_WITH_ABSENCE_REVIEW,
+                sku=None,
+                question_metadata={"candidate_sku": CANDIDATE_SKU},
+                conditional_review=True,
+            )
+            manifest_path = target / "sources" / "coverage" / f"{self.SLUG}.yml"
+            document = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            optional = document["required_facets"].pop()
+            optional["required"] = False
+            optional["facet_id"] = "optional-supplier-quote"
+            document["optional_facets"].append(optional)
+            write_coverage_manifest(target, self.SLUG, document)
+
+            code, payload, stderr = self.run_evaluate(coverage, target)
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual("pending", payload["coverage_verdict"])
+        self.assertEqual([], payload["manifest"]["required_facets"])
+        self.assertEqual("pass", payload["manifest"]["optional_facets"][0]["facet_verdict"])
+        identity = self.identity_result(payload)
+        self.assertEqual("manual_review", identity["verdict"])
+        self.assertTrue(identity["reasons"][0].startswith("rule_field_absent"))
+
+    def test_supported_intake_metadata_pointer_escapes_resolve_slash_and_tilde_keys(self):
+        coverage = self.load_coverage()
+        cases = (
+            ("slash", "metadata/a~1b", {"a/b": CANDIDATE_SKU}),
+            ("tilde", "metadata/a~0b", {"a~b": CANDIDATE_SKU}),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for label, question_field, metadata in cases:
+                with self.subTest(case=label):
+                    rules = json.loads(json.dumps(ALL_RULES_WITH_ABSENCE_REVIEW))
+                    rules[IDENTITY_POLICY]["all_of"][0]["equals"][
+                        "question_field"
+                    ] = question_field
+                    target = self.prepare(
+                        root / label,
+                        age_hours=2,
+                        rules=rules,
+                        question_metadata=metadata,
+                        conditional_review=True,
+                    )
+
+                    code, payload, stderr = self.run_evaluate(coverage, target)
+
+                    self.assertEqual(0, code, stderr)
+                    identity = self.identity_result(payload)
+                    self.assertEqual("pass", identity["verdict"], identity)
+                    self.assertIn(f"question/{question_field}", "\n".join(identity["reasons"]))
+                    frontmatter = yaml.safe_load(
+                        (
+                            target / "wiki" / "questions" / f"{self.SLUG}.md"
+                        ).read_text(encoding="utf-8").split("---\n", 2)[1]
+                    )
+                    self.assertEqual(metadata, frontmatter["metadata"])
+
+    def test_absence_review_never_masks_missing_or_corrupt_evidence_or_question_metadata(self):
+        coverage = self.load_coverage()
+        cases = (
+            ("missing structured view", "absent", {"candidate_sku": CANDIDATE_SKU}, "structured_view_missing"),
+            ("corrupt structured view", "corrupt", {"candidate_sku": CANDIDATE_SKU}, "structured_view_corrupt"),
+            ("missing question metadata", "bound", {}, "rule_field_unresolved"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for label, structured_view, metadata, reason_prefix in cases:
+                with self.subTest(case=label):
+                    target = self.prepare(
+                        root / label.replace(" ", "-"),
+                        age_hours=2,
+                        rules=ALL_RULES_WITH_ABSENCE_REVIEW,
+                        structured_view=structured_view,
+                        question_metadata=metadata or None,
+                        conditional_review=True,
+                    )
+
+                    code, payload, stderr = self.run_evaluate(coverage, target)
+
+                    self.assertEqual(0, code, stderr)
+                    identity = self.identity_result(payload)
+                    self.assertEqual("fail", identity["verdict"], identity)
+                    self.assertEqual("blocked", payload["coverage_verdict"])
+                    self.assertTrue(
+                        identity["reasons"][0].startswith(reason_prefix), identity["reasons"]
+                    )
+                    self.assertNotIn("rule_field_absent", "\n".join(identity["reasons"]))
 
     def test_evaluate_refuses_a_malformed_policy_rules_block_and_writes_nothing(self):
         coverage = self.load_coverage()

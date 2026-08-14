@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
@@ -66,6 +66,25 @@ RESULT_STRUCTURED_VIEW_CORRUPT = "structured_view_corrupt"
 RESULT_ANCHOR_POINTER_NOT_FOUND = "anchor_pointer_not_found"
 RESULT_ANCHOR_TARGET_NOT_SCALAR = "anchor_target_not_scalar"
 RESULT_ANCHOR_VALUE_MISMATCH = "anchor_value_mismatch"
+
+# Internal pointer-walk failure kinds.  ``PointerResolution.result`` remains the
+# public anchor result above; these additive values let internal consumers distinguish
+# a genuinely absent object member from malformed or otherwise unresolvable traversal
+# without parsing the human-readable ``detail`` string.
+POINTER_FAILURE_INVALID_POINTER = "invalid_pointer"
+POINTER_FAILURE_INVALID_ESCAPE = "invalid_escape"
+POINTER_FAILURE_MISSING_MEMBER = "missing_mapping_member"
+POINTER_FAILURE_INVALID_INDEX = "invalid_array_index"
+POINTER_FAILURE_INDEX_OUT_OF_RANGE = "array_index_out_of_range"
+POINTER_FAILURE_NON_CONTAINER = "non_container_traversal"
+PointerFailureKind = Literal[
+    "invalid_pointer",
+    "invalid_escape",
+    "missing_mapping_member",
+    "invalid_array_index",
+    "array_index_out_of_range",
+    "non_container_traversal",
+]
 
 ANCHOR_RESULTS = (
     RESULT_STRUCTURED_VIEW_MISSING,
@@ -118,6 +137,10 @@ class PointerResolution:
     ``pointer`` is always the normalized form of what was asked for, so a report can
     echo the pointer that was actually walked rather than the author's shorthand.
     ``value`` is meaningful only when ``ok``: ``None`` is itself a resolvable value.
+    Failure metadata is additive and internal-facing: it identifies the failed token
+    and container without changing the public anchor result or human detail.
+    ``traversed_array`` remains true after any successful array step, including when a
+    later mapping step is where the walk ultimately fails.
     """
 
     ok: bool
@@ -125,6 +148,11 @@ class PointerResolution:
     value: Any = None
     result: str | None = None
     detail: str | None = None
+    failure_kind: PointerFailureKind | None = None
+    failed_token_index: int | None = None
+    container_path: str | None = None
+    container_kind: str | None = None
+    traversed_array: bool = False
 
 
 @dataclass(frozen=True)
@@ -299,12 +327,26 @@ def _pointer_prefix(tokens: list[str], depth: int) -> str:
     return "/" + "/".join(tokens[:depth])
 
 
-def _pointer_not_found(pointer: str, detail: str) -> PointerResolution:
+def _pointer_not_found(
+    pointer: str,
+    detail: str,
+    *,
+    failure_kind: PointerFailureKind,
+    failed_token_index: int | None,
+    container_path: str | None,
+    container_kind: str | None,
+    traversed_array: bool,
+) -> PointerResolution:
     return PointerResolution(
         ok=False,
         pointer=pointer,
         result=RESULT_ANCHOR_POINTER_NOT_FOUND,
         detail=detail,
+        failure_kind=failure_kind,
+        failed_token_index=failed_token_index,
+        container_path=container_path,
+        container_kind=container_kind,
+        traversed_array=traversed_array,
     )
 
 
@@ -321,11 +363,20 @@ def resolve_pointer(obj: Any, pointer: str) -> PointerResolution:
     if not isinstance(pointer, str):
         # Entry parsing rejects a non-string pointer outright; reaching here means a
         # caller skipped it. Say so rather than silently reading it as the root pointer.
-        return _pointer_not_found(normalized, f"A pointer must be a string; got a {_json_type_name(pointer)}.")
+        return _pointer_not_found(
+            normalized,
+            f"A pointer must be a string; got a {_json_type_name(pointer)}.",
+            failure_kind=POINTER_FAILURE_INVALID_POINTER,
+            failed_token_index=None,
+            container_path=None,
+            container_kind=_json_type_name(obj),
+            traversed_array=False,
+        )
     if normalized == "":
         return PointerResolution(ok=True, pointer=normalized, value=obj)
     tokens = normalized.split("/")[1:]
     current = obj
+    traversed_array = False
     for depth, raw_token in enumerate(tokens):
         token = unescape_token(raw_token)
         location = _pointer_prefix(tokens, depth)
@@ -334,27 +385,48 @@ def resolve_pointer(obj: Any, pointer: str) -> PointerResolution:
                 normalized,
                 f"Reference token {raw_token!r} is not valid RFC 6901 escaping: "
                 "inside a token, ~ is written ~0 and / is written ~1.",
+                failure_kind=POINTER_FAILURE_INVALID_ESCAPE,
+                failed_token_index=depth,
+                container_path=location,
+                container_kind=_json_type_name(current),
+                traversed_array=traversed_array,
             )
         if isinstance(current, dict):
             if token not in current:
                 return _pointer_not_found(
                     normalized,
                     f"The structured view has no key {token!r} at {location}.",
+                    failure_kind=POINTER_FAILURE_MISSING_MEMBER,
+                    failed_token_index=depth,
+                    container_path=location,
+                    container_kind="object",
+                    traversed_array=traversed_array,
                 )
             current = current[token]
             continue
         if isinstance(current, list):
+            traversed_array = True
             if _ARRAY_INDEX_RE.fullmatch(token) is None:
                 return _pointer_not_found(
                     normalized,
                     f"{location} is a JSON array, so step {token!r} must be a decimal index "
                     "without a sign or leading zeros.",
+                    failure_kind=POINTER_FAILURE_INVALID_INDEX,
+                    failed_token_index=depth,
+                    container_path=location,
+                    container_kind="array",
+                    traversed_array=traversed_array,
                 )
             index = int(token)
             if index >= len(current):
                 return _pointer_not_found(
                     normalized,
                     f"{location} is a JSON array of {len(current)} entries, so index {index} has no referent.",
+                    failure_kind=POINTER_FAILURE_INDEX_OUT_OF_RANGE,
+                    failed_token_index=depth,
+                    container_path=location,
+                    container_kind="array",
+                    traversed_array=traversed_array,
                 )
             current = current[index]
             continue
@@ -362,8 +434,18 @@ def resolve_pointer(obj: Any, pointer: str) -> PointerResolution:
             normalized,
             f"{location} resolves to a JSON {_json_type_name(current)}, "
             f"so step {token!r} has nothing to resolve against.",
+            failure_kind=POINTER_FAILURE_NON_CONTAINER,
+            failed_token_index=depth,
+            container_path=location,
+            container_kind=_json_type_name(current),
+            traversed_array=traversed_array,
         )
-    return PointerResolution(ok=True, pointer=normalized, value=current)
+    return PointerResolution(
+        ok=True,
+        pointer=normalized,
+        value=current,
+        traversed_array=traversed_array,
+    )
 
 
 def is_scalar(value: Any) -> bool:

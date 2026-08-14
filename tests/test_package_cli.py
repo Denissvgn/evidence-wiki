@@ -489,6 +489,7 @@ class PackageCliTests(unittest.TestCase):
                             {
                                 "question": "Which deterministic interface parity checks are required?",
                                 "priority": "high",
+                                "metadata": {"candidate_id": "package-cli-candidate-1"},
                             }
                         ],
                     }
@@ -533,6 +534,88 @@ class PackageCliTests(unittest.TestCase):
         direct_document.pop("generated_at", None)
         self.assertEqual(direct_document, cli_document)
         self.assertEqual(cli_page, direct_page)
+        self.assertEqual(
+            {"candidate_id": "package-cli-candidate-1"},
+            yaml.safe_load(cli_page.split("---\n", 2)[1])["metadata"],
+        )
+
+    def test_questions_add_invalid_metadata_matches_copied_script_refusal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cli_target = root / "cli-intake-invalid"
+            script_target = root / "script-intake-invalid"
+            for target in (cli_target, script_target):
+                self.run_cli(
+                    "init",
+                    "--target",
+                    str(target),
+                    "--project-name",
+                    target.name,
+                    "--project-description",
+                    "Invalid metadata parity workspace.",
+                )
+            batch = root / "invalid-question-batch.json"
+            batch.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "questions": [
+                            {
+                                "question": "Can metadata contain an array?",
+                                "metadata": {"candidate_ids": ["one"]},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cli_code, cli_stdout, cli_stderr = self.run_cli_result(
+                "questions",
+                "add",
+                "--target",
+                str(cli_target),
+                "--from-file",
+                str(batch),
+                "--format",
+                "json",
+            )
+            direct = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_target / "scripts" / "intake_questions.py"),
+                    "--project-root",
+                    str(script_target),
+                    "--from-file",
+                    str(batch),
+                    "--format",
+                    "json",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(2, cli_code)
+            self.assertEqual(direct.returncode, cli_code)
+            self.assertEqual("", cli_stdout)
+            self.assertEqual("", direct.stdout)
+            cli_error = json.loads(cli_stderr)
+            direct_error = json.loads(direct.stderr)
+            self.assertEqual(direct_error["error_code"], cli_error["error_code"])
+            self.assertEqual(direct_error["message"], cli_error["message"])
+            self.assertNotIn("Traceback", cli_stderr + direct.stderr)
+            self.assertFalse(
+                (cli_target / "wiki" / "questions" / "can-metadata-contain-an-array.md").exists()
+            )
+            self.assertFalse(
+                (
+                    script_target
+                    / "wiki"
+                    / "questions"
+                    / "can-metadata-contain-an-array.md"
+                ).exists()
+            )
 
     def test_status_invalid_target_returns_machine_document_and_unreadable_exit(self):
         with tempfile.TemporaryDirectory() as tmpdir:

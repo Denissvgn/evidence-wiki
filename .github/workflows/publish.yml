@@ -60,7 +60,7 @@ jobs:
               raise SystemExit(f"Release tag {release_tag!r} must equal {expected_tag!r}")
 
           init_text = (root / "src/evidence_wiki/__init__.py").read_text(encoding="utf-8")
-          version_match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']\s*$', init_text, re.MULTILINE)
+          version_match = re.search(r'^__version__\s*=\s*(?:["\'])([^"\']+)["\']\s*$', init_text, re.MULTILINE)
           if version_match is None:
               raise SystemExit("Could not find evidence_wiki.__version__")
           if version_match.group(1) != version:

@@ -186,7 +186,23 @@ class LibraryOperationFixture(unittest.TestCase):
 
         # A second batch the ``add_batch`` case injects, distinct from the fixture's own.
         cls.second_batch_path = cls.scratch / "second-batch.yaml"
-        cls.second_batch_path.write_text(batch_document("late-arrival"), encoding="utf-8")
+        cls.second_batch_path.write_text(
+            'schema_version: "1.0"\nquestions:\n'
+            "  - question: Library API question late-arrival?\n"
+            "    id: late-arrival\n"
+            "    priority: high\n"
+            "    metadata:\n"
+            "      candidate_id: library-candidate-1\n",
+            encoding="utf-8",
+        )
+        cls.invalid_metadata_batch_path = cls.scratch / "invalid-metadata-batch.json"
+        cls.invalid_metadata_batch_path.write_text(
+            '{"schema_version":"1.0","questions":[{"question":"Huge integer?",'
+            '"metadata":{"huge_integer":'
+            + "9" * 9000
+            + "}}]}",
+            encoding="utf-8",
+        )
 
         cls.grounding_path = cls.scratch / "grounding.yml"
         cls.grounding_path.write_text(GROUNDING_DOCUMENT, encoding="utf-8")
@@ -477,6 +493,16 @@ def cases() -> tuple[ApiCase, ...]:
             call=lambda ws, paths: ws.questions.add_batch(from_file=paths["missing_batch"]),
             expect=REFUSAL,
         ),
+        ApiCase(
+            name="questions_add_batch_refuses_invalid_metadata",
+            surface="questions.add_batch",
+            script="intake_questions.py",
+            argv=("--from-file", "{invalid_metadata_batch}", "--format", "json"),
+            call=lambda ws, paths: ws.questions.add_batch(
+                from_file=paths["invalid_metadata_batch"]
+            ),
+            expect=REFUSAL,
+        ),
     )
 
 
@@ -492,6 +518,7 @@ class ApiDocumentEqualityTests(LibraryOperationFixture):
         return {
             "grounding_file": str(self.grounding_path),
             "second_batch": str(self.second_batch_path),
+            "invalid_metadata_batch": str(self.invalid_metadata_batch_path),
             "missing_batch": str(self.scratch / "definitely-absent.yaml"),
         }
 

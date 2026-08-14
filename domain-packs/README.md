@@ -73,10 +73,18 @@ domain_pack:
   policy_vocabularies:
     freshness_policy:
       pack:market-data/quote-48h: A supplier quote must be at most 48 hours old.
+    identity_policy:
+      pack:market-data/sku-matches-candidate: The quote SKU must match the question candidate.
   policy_rules:
     pack:market-data/quote-48h:
       all_of:
         - max_age: {field: provenance/retrieved_at, hours: 48}
+    pack:market-data/sku-matches-candidate:
+      all_of:
+        - equals:
+            field: record/supplier_quote/sku
+            question_field: metadata/candidate_sku
+            when_absent: manual_review
 ```
 
 Keep judgement calls manual. `pack:general-science/study-recency` asks a reviewer
@@ -90,11 +98,21 @@ representative. Where a policy is partly mechanical, add the rule and set
 human, which narrows what the reviewer must inspect without pretending the
 judgement was made.
 
+`when_absent: manual_review` is available only on the primary `record/...` field
+of `max_age`, `equals`, `numeric_range`, and `regex`. It applies only when a
+valid structured view contains every mapping parent but omits the terminal
+member. Missing parents, arrays, corrupt evidence, provenance, and missing
+question operands still fail. Null and blank values are present, never absence:
+they follow the primitive's ordinary comparison/parsing semantics (so an
+explicit equals-null comparison may pass). The data normalizer must preserve
+that distinction.
+
 `evidence-wiki pack validate` reports a `policy_rules` check before the pack
-ships, and a rule-backed policy that does not set `manual_review_required` counts
-as deterministic, so a required coverage facet may use it without the pack
-declaring `domain_pack.human_gated: true`. Rule syntax, field references, and
-verdicts are documented in
+ships. A rule-backed policy with neither `manual_review_required` nor
+`when_absent: manual_review` counts as deterministic, so a required coverage
+facet may use it without the pack declaring `domain_pack.human_gated: true`.
+Either review route on a required facet requires `human_gated: true`. Rule
+syntax, field references, and verdicts are documented in
 `workspace-template/docs/evidence-policies.md`.
 
 ## Reference Packs

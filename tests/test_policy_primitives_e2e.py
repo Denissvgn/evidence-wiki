@@ -52,6 +52,11 @@ from typing import Any
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tests._pack_policy_rule_fixture import intake_question  # noqa: E402
+
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "policy-primitives-workspace"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
@@ -349,6 +354,100 @@ class PolicyPrimitivesWorkspace:
     def question_frontmatter(self, workspace: Path, slug: str) -> dict[str, Any]:
         text = (workspace / "wiki" / "questions" / f"{slug}.md").read_text(encoding="utf-8")
         return yaml.safe_load(text.split("---\n", 2)[1])
+
+    def recreate_question_through_intake(
+        self,
+        workspace: Path,
+        slug: str,
+        *,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Replace the committed fixture page with one written by the supported API."""
+        fixture_path = FIXTURE / "wiki" / "questions" / f"{slug}.md"
+        fixture_frontmatter = yaml.safe_load(
+            fixture_path.read_text(encoding="utf-8").split("---\n", 2)[1]
+        )
+        staged_path = workspace / "wiki" / "questions" / f"{slug}.md"
+        staged_path.unlink()
+        report = intake_question(
+            workspace,
+            slug,
+            question=fixture_frontmatter["question"],
+            priority=fixture_frontmatter["priority"],
+            metadata=metadata,
+        )
+        self.assertEqual(
+            {"submitted": 1, "created": 1, "skipped_duplicates": 0}, report["counts"]
+        )
+        self.assertEqual(0, report["created"][0]["item_index"])
+        self.assertNotIn("metadata", report["created"][0])
+        return report
+
+    def enable_identity_absence_review(self, workspace: Path) -> None:
+        config_path = workspace / "research.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        domain_pack = config["domain_pack"]
+        identity = domain_pack["policy_rules"][IDENTITY_POLICY]
+        identity["all_of"][0]["equals"]["when_absent"] = "manual_review"
+        domain_pack["human_gated"] = True
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def rewrite_quote_sku(
+        self,
+        workspace: Path,
+        source_id: str,
+        *,
+        sku: str | None,
+        keep_binding_valid: bool,
+    ) -> None:
+        """Rewrite the fixture view to a mismatch or an eligible terminal absence."""
+        safe = PRIMITIVES._structured_view.safe_source_id(source_id)
+        record_path = workspace / "sources" / "normalized" / f"{safe}.md"
+        record_text = record_path.read_text(encoding="utf-8")
+        frontmatter = yaml.safe_load(record_text.split("---\n", 2)[1])
+        binding = frontmatter["structured_view"]
+        sidecar = workspace / binding["path"]
+        document = json.loads(sidecar.read_text(encoding="utf-8"))
+        supplier_quote = document["supplier_quote"]
+        if sku is None:
+            supplier_quote.pop("sku", None)
+        else:
+            supplier_quote["sku"] = sku
+        rendered = json.dumps(
+            document,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            separators=(",", ": "),
+        ) + "\n"
+        sidecar.write_text(rendered, encoding="utf-8")
+        if keep_binding_valid:
+            old_digest = binding["content_hash"]
+            new_digest = f"sha256:{hashlib.sha256(rendered.encode('utf-8')).hexdigest()}"
+            self.assertEqual(1, record_text.count(old_digest))
+            record_path.write_text(record_text.replace(old_digest, new_digest, 1), encoding="utf-8")
+
+    def grounding_file(self, workspace: Path, slug: str, source_id: str) -> Path:
+        path = workspace / f".{slug}-grounding.yml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "grounding": [
+                        {
+                            "claim": "The supplier quote records a unit price of 23.99 EUR.",
+                            "source_id": source_id,
+                            "anchor": {
+                                "pointer": "supplier_quote/unit_price_eur",
+                                "expected": "23.99",
+                            },
+                        }
+                    ]
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
 
     def high_findings(self, results: dict[str, Any]) -> list[str]:
         return sorted(issue["category"] for issue in results["issues"] if issue["severity"] == "HIGH")
@@ -964,6 +1063,205 @@ class CrNineAcceptanceCriteriaTests(PolicyPrimitivesWorkspace, unittest.TestCase
             sorted([PROVIDER_POLICY, FRESHNESS_POLICY, IDENTITY_POLICY]),
             sorted(parked_frontmatter["human_review_policies"]),
         )
+
+
+class WritableMetadataAbsenceReviewE2ETests(PolicyPrimitivesWorkspace, unittest.TestCase):
+    """CR-10 and CR-11 meet at the supported question and answer lifecycle."""
+
+    def prepare_cross_cr_workspace(
+        self,
+        root: Path,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> Path:
+        workspace = self.stage_workspace(root, slugs=(RULE_SLUG,))
+        self.enable_identity_absence_review(workspace)
+        self.recreate_question_through_intake(
+            workspace,
+            RULE_SLUG,
+            metadata=(
+                {"candidate_sku": CANDIDATE_SKU}
+                if metadata is None
+                else metadata
+            ),
+        )
+        return workspace
+
+    def identity_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return next(
+            result
+            for result in self.facet_results(payload)
+            if result["policy"] == IDENTITY_POLICY
+        )
+
+    def assert_candidate_metadata(self, workspace: Path) -> None:
+        self.assertEqual(
+            {"candidate_sku": CANDIDATE_SKU},
+            self.question_frontmatter(workspace, RULE_SLUG)["metadata"],
+        )
+
+    def test_supported_intake_metadata_match_passes_and_answers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.prepare_cross_cr_workspace(Path(tmpdir))
+            self.assert_candidate_metadata(workspace)
+
+            code, evaluated, stderr = self.run_evaluate(workspace, RULE_SLUG)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("pass", self.identity_result(evaluated)["verdict"])
+            self.assertEqual("pass", evaluated["coverage_verdict"])
+            self.assert_candidate_metadata(workspace)
+
+            self.run_claim(workspace, RULE_SLUG)
+            self.assertEqual("in_progress", self.question_frontmatter(workspace, RULE_SLUG)["status"])
+            self.assert_candidate_metadata(workspace)
+            grounding = self.grounding_file(workspace, RULE_SLUG, FRESH_SOURCE)
+            code, answered, stderr = self.run_answer(
+                workspace,
+                RULE_SLUG,
+                "--grounding-file",
+                str(grounding),
+            )
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("answered", answered["status"])
+            frontmatter = self.question_frontmatter(workspace, RULE_SLUG)
+            self.assertEqual("answered", frontmatter["status"])
+            self.assertEqual({"candidate_sku": CANDIDATE_SKU}, frontmatter["metadata"])
+            self.assertIs(True, frontmatter["coverage_required"])
+            self.assertEqual(
+                [], [key for key in frontmatter if key.startswith("human_review")], frontmatter
+            )
+
+    def test_metadata_mismatch_blocks_coverage_and_answer_without_status_transition(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.prepare_cross_cr_workspace(Path(tmpdir))
+            self.rewrite_quote_sku(
+                workspace,
+                FRESH_SOURCE,
+                sku="B0DIFFERENT",
+                keep_binding_valid=True,
+            )
+
+            code, evaluated, stderr = self.run_evaluate(workspace, RULE_SLUG)
+            self.assertEqual(0, code, stderr)
+            identity = self.identity_result(evaluated)
+            self.assertEqual("fail", identity["verdict"])
+            self.assertTrue(identity["reasons"][0].startswith("rule_value_mismatch"))
+            self.assertEqual("blocked", evaluated["coverage_verdict"])
+            self.assertEqual(
+                "blocked", evaluated["manifest"]["required_facets"][0]["facet_verdict"]
+            )
+
+            self.run_claim(workspace, RULE_SLUG)
+            before = self.question_frontmatter(workspace, RULE_SLUG)
+            self.assertEqual("in_progress", before["status"])
+            code, refused, stderr = self.run_answer(workspace, RULE_SLUG)
+
+            self.assertEqual(2, code, stderr)
+            self.assertEqual("COVERAGE_BLOCKED", refused["error_code"])
+            after = self.question_frontmatter(workspace, RULE_SLUG)
+            self.assertEqual(before, after)
+            self.assertEqual("in_progress", after["status"])
+            self.assertEqual({"candidate_sku": CANDIDATE_SKU}, after["metadata"])
+            self.assertNotIn("blocked_reason", after)
+
+    def test_absent_terminal_sku_parks_for_review_and_accepted_review_resolves(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.prepare_cross_cr_workspace(Path(tmpdir))
+            self.rewrite_quote_sku(
+                workspace,
+                FRESH_SOURCE,
+                sku=None,
+                keep_binding_valid=True,
+            )
+
+            code, evaluated, stderr = self.run_evaluate(workspace, RULE_SLUG)
+            self.assertEqual(0, code, stderr)
+            identity = self.identity_result(evaluated)
+            self.assertEqual("manual_review", identity["verdict"])
+            self.assertTrue(identity["reasons"][0].startswith("rule_field_absent"))
+            self.assertEqual("pass", evaluated["coverage_verdict"])
+
+            self.run_claim(workspace, RULE_SLUG)
+            grounding = self.grounding_file(workspace, RULE_SLUG, FRESH_SOURCE)
+            code, parked, stderr = self.run_answer(
+                workspace,
+                RULE_SLUG,
+                "--grounding-file",
+                str(grounding),
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("human_review", parked["status"])
+            frontmatter = self.question_frontmatter(workspace, RULE_SLUG)
+            self.assertEqual("human_review", frontmatter["status"])
+            self.assertEqual([IDENTITY_POLICY], frontmatter["human_review_policies"])
+            self.assertEqual({"candidate_sku": CANDIDATE_SKU}, frontmatter["metadata"])
+
+            code, reviewed, stderr = self.run_review(workspace, RULE_SLUG, IDENTITY_POLICY)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("answered", reviewed["status"])
+            self.assertEqual([], reviewed["pending_policies"])
+            frontmatter = self.question_frontmatter(workspace, RULE_SLUG)
+            self.assertEqual("answered", frontmatter["status"])
+            self.assertEqual("approved", frontmatter["human_review_status"])
+            self.assertEqual(
+                [(IDENTITY_POLICY, "accepted", REVIEWER, REVIEW_REF)],
+                [
+                    (
+                        entry["policy"],
+                        entry["verdict"],
+                        entry["reviewed_by"],
+                        entry["review_ref"],
+                    )
+                    for entry in frontmatter["human_reviews"]
+                ],
+            )
+            self.assertEqual({"candidate_sku": CANDIDATE_SKU}, frontmatter["metadata"])
+
+    def test_absence_review_keeps_corrupt_evidence_and_missing_question_metadata_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            corrupt = self.prepare_cross_cr_workspace(root / "corrupt")
+            self.rewrite_quote_sku(
+                corrupt,
+                FRESH_SOURCE,
+                sku="B0TAMPERED",
+                keep_binding_valid=False,
+            )
+            code, corrupt_result, stderr = self.run_evaluate(corrupt, RULE_SLUG)
+            self.assertEqual(0, code, stderr)
+            corrupt_identity = self.identity_result(corrupt_result)
+            self.assertEqual("fail", corrupt_identity["verdict"])
+            self.assertTrue(
+                corrupt_identity["reasons"][0].startswith("structured_view_corrupt"),
+                corrupt_identity["reasons"],
+            )
+            self.assertNotIn("rule_field_absent", "\n".join(corrupt_identity["reasons"]))
+            self.assertEqual("blocked", corrupt_result["coverage_verdict"])
+            self.assert_candidate_metadata(corrupt)
+
+            missing_operand = self.stage_workspace(root / "missing-operand", slugs=(RULE_SLUG,))
+            self.enable_identity_absence_review(missing_operand)
+            self.recreate_question_through_intake(
+                missing_operand,
+                RULE_SLUG,
+                metadata=None,
+            )
+            code, missing_result, stderr = self.run_evaluate(missing_operand, RULE_SLUG)
+            self.assertEqual(0, code, stderr)
+            missing_identity = self.identity_result(missing_result)
+            self.assertEqual("fail", missing_identity["verdict"])
+            self.assertTrue(
+                missing_identity["reasons"][0].startswith("rule_field_unresolved"),
+                missing_identity["reasons"],
+            )
+            self.assertIn(
+                "question/metadata/candidate_sku", "\n".join(missing_identity["reasons"])
+            )
+            self.assertNotIn("rule_field_absent", "\n".join(missing_identity["reasons"]))
+            self.assertEqual("blocked", missing_result["coverage_verdict"])
+            self.assertNotIn("metadata", self.question_frontmatter(missing_operand, RULE_SLUG))
 
 
 if __name__ == "__main__":

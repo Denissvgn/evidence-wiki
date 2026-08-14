@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Make question-scoped policy parameters writable through every supported
+  intake route and add a narrow, fail-closed review path for mechanically
+  optional evidence fields. Question batch schema `1.0` now accepts bounded
+  JSON-shaped `metadata`, persists it below the question frontmatter namespace,
+  distinguishes same-text candidate questions by canonical metadata, and adds
+  `item_index` correlation without echoing values; omitted metadata retains the
+  legacy text-only behavior. Domain-pack field primitives may declare
+  `when_absent: manual_review` for a missing terminal `record/...` member under
+  fully resolved mapping parents in a valid hash-bound structured view. Missing
+  parents, arrays, corrupt evidence, provenance fields, and missing question
+  operands remain hard failures; null and blank values are present and retain
+  each primitive's ordinary semantics. Tri-state composition and multi-source
+  rollup keep failure dominant. Record rules are mapping-only in this runtime,
+  including present values previously reached through array indices. Pack
+  validation and the installation contract expose `manual_review_on_absence`, and required facets
+  that can take that route require `domain_pack.human_gated: true`. The starter
+  advances from `0.6.0` to `0.7.0`; workspace/research, intake, installation,
+  coverage, and policy-result schema versions remain unchanged because their new
+  fields are optional or additive. The mapping-only array rule is an explicit
+  fail-closed hardening exception: packs that previously traversed arrays must
+  normalize those inputs to mappings before upgrading.
+
 ## 0.3.1 - 2026-08-13
 
 - Add an explicit, fail-closed domain-pack lifecycle for existing workspaces.

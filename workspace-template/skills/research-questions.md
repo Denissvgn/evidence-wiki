@@ -36,11 +36,18 @@ questions:
   - question: What evaluation benchmarks matter for reasoning?
     priority: high
     origin: parent_agent
+    metadata:
+      candidate_sku: B0ABC12345
 ```
 
 `question` and its `text` alias are capped at 1024 UTF-8 bytes; optional
 `summary` is also capped at 1024 UTF-8 bytes, and optional `context` is capped
-at 8192 UTF-8 bytes. Oversized batches are rejected atomically.
+at 8192 UTF-8 bytes. Optional `metadata` is a non-empty mapping of JSON scalars
+and non-empty nested mappings governed by the same rules, capped at 8192
+canonical UTF-8 bytes, depth 8, and 128 nodes; arrays and YAML-native values are
+refused. Metadata describes the
+question for policy comparison, is persisted in Markdown, and must not contain
+secrets or be treated as evidence.
 
 2. Preview, then apply:
 
@@ -49,7 +56,12 @@ python3 scripts/intake_questions.py --from-file batch.yaml --dry-run
 python3 scripts/intake_questions.py --from-file batch.yaml --format json
 ```
 
-3. Review the report: created pages, skipped duplicates, and whether `index.md` and `log.md` were updated. The script already performed steps 1-6 of the manual workflow below.
+3. Review the report: `item_index` correlates each created or skipped result to
+   its submitted item without echoing metadata; also inspect whether `index.md`
+   and `log.md` were updated. The script already performed steps 1-6 of the
+   manual workflow below. Candidate-specific items with metadata deduplicate on
+   normalized text plus canonical metadata; an omitted-metadata item keeps the
+   legacy text-only wildcard behavior.
 
 ## Manual Intake Workflow (ad hoc human questions)
 

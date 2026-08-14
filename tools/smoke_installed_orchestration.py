@@ -15,6 +15,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_CODEX = REPO_ROOT / "tests" / "fixtures" / "fake_codex_cli.py"
 FAKE_CODEX_WORKSPACE_PYTHON = "EVIDENCE_WIKI_FAKE_CODEX_WORKSPACE_PYTHON"
+EXPECTED_STARTER_VERSION = "0.7.0"
 
 
 def tiny_pdf_bytes() -> bytes:
@@ -170,7 +171,7 @@ def main() -> int:
     cli = str(args.cli.resolve())
 
     contract = json.loads(run([cli, "contract", "--format", "json"]).stdout)
-    if contract.get("starter_version") != "0.6.0":
+    if contract.get("starter_version") != EXPECTED_STARTER_VERSION:
         raise SystemExit(f"installed CLI reported an unexpected starter version: {contract.get('starter_version')}")
     schema_documents = contract.get("artifact_schema_documents")
     expected_schemas = {

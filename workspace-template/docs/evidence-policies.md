@@ -197,14 +197,17 @@ domain_pack:
       pack:market-data/quote-48h: A supplier quote must be at most 48 hours old.
     identity_policy:
       pack:market-data/sku-matches-candidate: The quoted SKU must match the candidate identity on the question.
-  policy_rules:                   # how this workspace decides it, unaided
+  policy_rules:                   # how this workspace evaluates it
     pack:market-data/quote-48h:
       all_of:
         - max_age: {field: provenance/retrieved_at, hours: 48}
     pack:market-data/sku-matches-candidate:
       manual_review_required: false   # optional, default false
       all_of:
-        - equals: {field: record/supplier_quote/sku, question_field: metadata/candidate_sku}
+        - equals:
+            field: record/supplier_quote/sku
+            question_field: metadata/candidate_sku
+            when_absent: manual_review
         - one_of_provenance: {providers: [aliexpress-ds, partner-catalog]}
 ```
 
@@ -233,7 +236,7 @@ against:
 |-----------|----------|
 | `record/...` | The source's structured-view sidecar, bound to its normalized record by hash. The same document an anchor resolves against; see [normalized-source-format.md](normalized-source-format.md). |
 | `provenance/...` | The source's merged delivery provenance, as inventoried from its `.provenance.yml` sidecar; see [source-delivery.md](source-delivery.md). |
-| `question_field: metadata/...` | The question page's whole frontmatter. Written as a bare pointer with no root segment, because there is only one such document to address. |
+| `question_field: metadata/...` | The question page's whole frontmatter. Written as a bare pointer with no root segment, because there is only one such document to address. Supported question intake persists bounded caller-controlled values below `metadata`; `/` and `~` in keys use RFC 6901 `~1` and `~0` escaping. |
 
 One addressing scheme, three consumers. A pointer that reaches nothing, or that
 reaches a mapping or array rather than a single scalar, is a failure — see
@@ -243,31 +246,96 @@ reaches a mapping or array rather than a single scalar, is a failure — see
 
 | Primitive | Shape | Passes when |
 |-----------|-------|-------------|
-| `max_age` | `{field, hours}`, `hours` greater than zero | The field resolves to an ISO 8601 timestamp and `now − value` is at most `hours`. A timestamp more than five minutes in the future fails as clock skew rather than passing as brand new; that tolerance is fixed and not pack-configurable, because a pack able to widen it would be loosening a fail-closed bound from inside the thing being bounded. A value that names no UTC offset — a bare date, or a timestamp written without one — is valid ISO 8601 and reads as the earliest instant it could denote, its local time at the furthest offset any zone uses. That is conservative on purpose: the zone that stamped it is unknown, so reading it at that extreme can only make a source look older, never fresher. Deliver an explicit offset when you want the age measured exactly. |
-| `equals` | `{field, value}` or `{field, question_field}`, exactly one of the two | Field and expected value are equal as canonical scalars. The comparison rule is chosen by the value the *field* resolves to, since that is the evidence and the other side is the assertion about it: a number compares as a decimal on both sides, so a resolved `23.99` matches an expected `"23.990"` while `"23.99 EUR"` does not; a string compares through the workspace's one text normalization (NFKC, quote and dash folding, whitespace collapse, case folding). Equality, never containment. |
-| `numeric_range` | `{field, min, max}`; either bound may be written as `min_question_field` / `max_question_field` instead, never both forms of the same bound, and at least one bound is required | The field parses as a decimal and lies within the bounds. Both bounds are inclusive. |
-| `regex` | `{field, pattern}` | `pattern` **fully** matches the field's canonical text. Full match, never search: implicit containment is the weakness scalar equality exists to remove, so an author who wants a substring writes `.*B0.*` and says so. Patterns are capped at 512 characters, on the grounds that a pattern too long to read is long enough to hide catastrophic backtracking from the reviewer approving the pack. |
+| `max_age` | `{field, hours[, when_absent]}`, `hours` greater than zero | The field resolves to an ISO 8601 timestamp and `now − value` is at most `hours`. A timestamp more than five minutes in the future fails as clock skew rather than passing as brand new; that tolerance is fixed and not pack-configurable, because a pack able to widen it would be loosening a fail-closed bound from inside the thing being bounded. A value that names no UTC offset — a bare date, or a timestamp written without one — is valid ISO 8601 and reads as the earliest instant it could denote, its local time at the furthest offset any zone uses. That is conservative on purpose: the zone that stamped it is unknown, so reading it at that extreme can only make a source look older, never fresher. Deliver an explicit offset when you want the age measured exactly. |
+| `equals` | `{field, value}` or `{field, question_field}`, exactly one of the two, plus optional `when_absent` | Field and expected value are equal as canonical scalars. The comparison rule is chosen by the value the *field* resolves to, since that is the evidence and the other side is the assertion about it: a number compares as a decimal on both sides, so a resolved `23.99` matches an expected `"23.990"` while `"23.99 EUR"` does not; a string compares through the workspace's one text normalization (NFKC, quote and dash folding, whitespace collapse, case folding). Equality, never containment. |
+| `numeric_range` | `{field, min, max[, when_absent]}`; either bound may be written as `min_question_field` / `max_question_field` instead, never both forms of the same bound, and at least one bound is required | The field parses as a decimal and lies within the bounds. Both bounds are inclusive. |
+| `regex` | `{field, pattern[, when_absent]}` | `pattern` **fully** matches the field's canonical text. Full match, never search: implicit containment is the weakness scalar equality exists to remove, so an author who wants a substring writes `.*B0.*` and says so. Patterns are capped at 512 characters, on the grounds that a pattern too long to read is long enough to hide catastrophic backtracking from the reviewer approving the pack. |
 | `one_of_provenance` | `{providers: [...]}`, `{domains: [...]}`, or both; each list non-empty | The source was delivered by one of the named providers, or its `origin_url` host matches one of the named domains. See [source-delivery.md](source-delivery.md) for which sidecar fields carry a provider identity, and which deliberately do not. |
 | `all_of` / `any_of` | a non-empty list of primitives | Every child passes / at least one child passes. Compositions nest at most three deep, which keeps a declaration readable and its evaluation cost bounded by the declaration rather than by the data. |
 
-`all_of` reports every failing child instead of stopping at the first, so one
-evaluation names the whole list of artifacts to fix; `any_of` stops at the branch
-that carried it. A facet accepts its sources jointly, so every accepted source
-must satisfy the rule — one stale quote among two is the facet's problem however
-fresh the other is.
+`all_of` reports every failing child instead of stopping at the first. `any_of`
+may stop on a passing branch, but not on a review branch because a later
+alternative may pass. A facet accepts its sources jointly, so every accepted
+source must satisfy the rule — one stale quote among two is the facet's problem
+however fresh the other is.
+
+### Conditional Terminal Absence
+
+The four field-bearing primitives accept optional `when_absent: fail | manual_review`.
+Omission defaults to `fail`; `pass` is deliberately unsupported. The key is
+valid only when the primitive's primary `field` starts with `record/`. It never
+applies to `question_field`, numeric question bounds, provenance, composition
+nodes, or `one_of_provenance`.
+
+`manual_review` applies only when a valid hash-bound structured-view mapping was
+loaded, every parent token resolved through mappings, and the final mapping
+member is absent. This is a known optional leaf, not a general pointer failure.
+The following remain hard failures:
+
+- missing, unreadable, corrupt, hash-mismatched, or non-mapping structured views;
+- a missing parent mapping, invalid pointer escape, scalar traversal, or any
+  array traversal/index;
+- a present mapping/array terminal value;
+- missing question operands or provenance values; and
+- unparseable, stale, out-of-range, or mismatching values.
+
+The mapping-only record rule is deliberate in v1: even a present terminal
+scalar reached through an array index is a hard failure. Packs upgrading an
+older array-backed declaration must normalize the rule input into mapping
+parents before relying on the new runtime.
+
+Null and blank values are present, so they never invoke conditional absence and
+instead keep each primitive's existing semantics; for example, `equals` may
+explicitly compare null with null. A normalizer that knows an optional
+identifier is absent must emit the valid parent mapping and omit only the
+terminal member. It must never encode extraction failure as optional absence.
+
+Evaluation is tri-state. `all_of` fails if any child fails, otherwise reviews if
+any child reviews. `any_of` passes if any child passes, otherwise reviews if any
+child reviews. Across accepted sources, any failure dominates review; otherwise
+any review produces review. `manual_review_required: true` cannot redeem a hard
+failure and otherwise keeps the final verdict in review.
+
+| Composition | Child outcomes | Mechanical outcome |
+|---|---|---|
+| `all_of` | one or more `fail` | `fail` |
+| `all_of` | no `fail`, one or more `manual_review` | `manual_review` |
+| `all_of` | all `pass` | `pass` |
+| `any_of` | one or more `pass` | `pass` |
+| `any_of` | no `pass`, one or more `manual_review` | `manual_review` |
+| `any_of` | all `fail` | `fail` |
+
+| Accepted-source outcomes | Policy outcome | Retained reasons |
+|---|---|---|
+| one or more `fail` | `fail` | failing sources only, in accepted-source order |
+| no `fail`, one or more `manual_review` | `manual_review` | passing and review sources, in accepted-source order |
+| all `pass` | `pass` | passing sources, in accepted-source order |
+
+Before authoring `when_absent`, upgrade the workspace tooling to starter `0.7.0`
+with `evidence-wiki upgrade --target PATH`, then restart any running MCP server
+or other process that has workspace scripts loaded. Installing the declaration
+is a separate pack lifecycle step: preview
+`evidence-wiki pack refresh --target PATH --path NAME_OR_PATH --dry-run`, then
+repeat without `--dry-run` to apply; a
+`legacy_untracked` pack must first be previewed and adopted with
+`evidence-wiki pack adopt --target PATH`. Older evaluators reject the unknown
+key rather than silently changing its meaning.
 
 ### Fail-Closed Evaluation
 
-A rule that cannot be decided evaluates to `fail`, never to `manual_review`. That
-covers a missing or corrupt structured view, a pointer that resolves to nothing, a
-target that is a mapping or array rather than a scalar, and a timestamp `max_age`
-cannot parse. Degrading to review instead would return exactly the least
-trustworthy sources to the queue rules exist to drain, and would do it silently.
+A rule that cannot be decided evaluates to `fail`, never to `manual_review`.
+Conditional review is the single explicit exception above: a pack may classify
+only an eligible missing terminal record member as reviewable. Missing parents,
+missing or corrupt structured views, arrays, non-scalar targets, missing
+operands, and values a primitive cannot parse remain hard failures. Degrading
+those to review would return exactly the least trustworthy sources to the queue
+rules exist to drain, and would do it silently.
 
-Every failure reason carries a stable prefix naming the source and the field that
+Every evaluation reason carries a stable prefix naming the source and the field that
 was read: `rule_field_unresolved`, `rule_value_mismatch`, `rule_out_of_range`,
 `rule_stale`, `rule_future_timestamp`, `rule_regex_mismatch`, and
-`rule_provenance_not_allowed`, plus `structured_view_missing` and
+`rule_provenance_not_allowed`, plus `rule_field_absent` for the declared
+conditional-review case and `structured_view_missing` and
 `structured_view_corrupt` when the sidecar itself is the problem — the same two
 codes anchor grounding reports, so a host that already handles one handles the
 other.
@@ -281,15 +349,19 @@ manual review without saying so.
 
 ### Rule Verdicts
 
-| Rule outcome | `manual_review_required` | Facet policy verdict |
-|--------------|--------------------------|----------------------|
-| any check fails | either value | `fail` |
-| every check passes | `false` (the default) | `pass` |
-| every check passes | `true` | `manual_review` |
+| Mechanical outcome | `manual_review_required` | Facet policy verdict |
+|--------------------|--------------------------|----------------------|
+| any hard failure | either value | `fail` |
+| pass | `false` (the default) | `pass` |
+| pass | `true` | `manual_review` |
+| eligible absence with `when_absent: manual_review` | either value | `manual_review` |
 
 `manual_review_required: true` keeps the human step **in addition** to the
 mechanical checks rather than instead of them, which is what a policy that is
-partly computable and partly a judgement call needs.
+partly computable and partly a judgement call needs. Its legacy
+“satisfied every declared rule check” reason is retained only for a true
+mechanical pass; a conditional-review outcome uses an outcome-neutral recorded-
+review reason and never claims the absent check passed.
 
 Rollup is unchanged. A `fail` blocks a required facet exactly as any other failing
 policy does, and a `manual_review` still records
@@ -300,11 +372,11 @@ the escalation and review-recording consequences described above.
 
 `evidence-wiki pack validate` gains a `policy_rules` check, and summarizes each
 declared rule in its `domain_pack.policy_rules` payload as the primitive names the
-rule uses plus its `manual_review_required` flag. The autonomous-required-facets
-lint reads that summary: a rule-backed policy without `manual_review_required` is
-no longer counted as manual-only, because it now *is* a deterministic policy, so a
-required facet may use it without `domain_pack.human_gated: true`. One that sets
-the flag still counts as manual-only — the pack asked for the human on purpose.
+rule uses plus `manual_review_required` and `manual_review_on_absence` booleans.
+The autonomous-required-facets lint reads that summary: a required facet whose
+rule can require either kind of review needs `domain_pack.human_gated: true`.
+A rule with both flags false remains deterministic and may be required by an
+autonomous pack.
 
 `evidence-wiki contract` publishes the same summary for every installed pack under
 an additive top-level `policy_rules` key:
@@ -314,7 +386,9 @@ an additive top-level `policy_rules` key:
   "market-data": {
     "pack:market-data/quote-48h": {
       "primitives": ["all_of", "max_age"],
-      "manual_review_required": false
+      "section": "freshness_policy",
+      "manual_review_required": false,
+      "manual_review_on_absence": false
     }
   }
 }
