@@ -319,6 +319,119 @@ class PrimitiveValidationTests(unittest.TestCase):
         message = self.only_error({"max_age": {"field": "record/bad~2token", "hours": 1}})
         self.assertIn("RFC 6901", message)
 
+    def test_when_absent_is_accepted_only_on_record_field_leaves(self):
+        leaves = (
+            {"max_age": {"field": "record/published_at", "hours": 1}},
+            {"equals": {"field": "record/sku", "value": "A"}},
+            {"numeric_range": {"field": "record/price", "min": 1}},
+            {"regex": {"field": "record/sku", "pattern": "A"}},
+        )
+        for leaf in leaves:
+            with self.subTest(leaf=next(iter(leaf))):
+                body = next(iter(leaf.values()))
+                body["when_absent"] = "manual_review"
+                rule = parse_one(leaf)
+                self.assertEqual(
+                    RULES.WHEN_ABSENT_MANUAL_REVIEW,
+                    rule.composition.children[0].when_absent,
+                )
+
+        explicit_fail = parse_one(
+            {
+                "equals": {
+                    "field": "record/sku",
+                    "value": "A",
+                    "when_absent": "fail",
+                }
+            }
+        )
+        self.assertEqual(RULES.WHEN_ABSENT_FAIL, explicit_fail.composition.children[0].when_absent)
+
+    def test_when_absent_defaults_to_fail_and_rejects_unknown_or_pass_values(self):
+        default = parse_one({"equals": {"field": "record/sku", "value": "A"}})
+        self.assertEqual(RULES.WHEN_ABSENT_FAIL, default.composition.children[0].when_absent)
+
+        for value in ("pass", "review", True, None, ["manual_review"]):
+            with self.subTest(value=value):
+                message = self.only_error(
+                    {
+                        "equals": {
+                            "field": "record/sku",
+                            "value": "A",
+                            "when_absent": value,
+                        }
+                    }
+                )
+                self.assertIn("pack:market-data/quote-48h", message)
+                self.assertIn(".equals.when_absent", message)
+                self.assertIn("fail, manual_review", message)
+
+    def test_when_absent_rejects_provenance_and_non_field_primitives(self):
+        provenance = self.only_error(
+            {
+                "max_age": {
+                    "field": "provenance/retrieved_at",
+                    "hours": 1,
+                    "when_absent": "manual_review",
+                }
+            }
+        )
+        self.assertIn("only when", provenance)
+        self.assertIn("record/", provenance)
+
+        one_of = self.only_error(
+            {
+                "one_of_provenance": {
+                    "providers": ["supplier"],
+                    "when_absent": "manual_review",
+                }
+            }
+        )
+        self.assertIn("unknown key(s): when_absent", one_of)
+
+        top_level = RULES.declaration_errors(
+            pack(
+                freshness_rule(
+                    {"equals": {"field": "record/sku", "value": "A"}},
+                    when_absent="manual_review",
+                )
+            )
+        )
+        self.assertEqual(1, len(top_level), top_level)
+        self.assertIn("unknown key(s): when_absent", top_level[0])
+
+    def test_rule_summary_reports_nested_manual_review_on_absence(self):
+        deterministic = parse_one({"equals": {"field": "record/sku", "value": "A"}})
+        self.assertEqual(
+            {
+                "primitives": ["all_of", "equals"],
+                "manual_review_required": False,
+                "manual_review_on_absence": False,
+                "section": "freshness_policy",
+            },
+            RULES.rule_summary(deterministic),
+        )
+
+        conditional = parse_one(
+            {
+                "any_of": [
+                    {"equals": {"field": "record/sku", "value": "A"}},
+                    {
+                        "all_of": [
+                            {
+                                "regex": {
+                                    "field": "record/gtin",
+                                    "pattern": "[0-9]+",
+                                    "when_absent": "manual_review",
+                                }
+                            }
+                        ]
+                    },
+                ]
+            }
+        )
+        self.assertTrue(RULES.rule_summary(conditional)["manual_review_on_absence"])
+
     def test_equals_needs_exactly_one_of_value_and_question_field(self):
         both = self.only_error(
             {"equals": {"field": "record/sku", "value": "A", "question_field": "metadata/sku"}}
@@ -1079,6 +1192,288 @@ class StructuredViewFailureTests(unittest.TestCase):
         self.assertIsInstance(failure, RULES.ResolutionFailure)
         self.assertEqual(RULES.REASON_FIELD_UNRESOLVED, failure.code)
 
+    def test_a_present_record_scalar_reached_through_an_array_is_unresolved_in_v1(self):
+        ref = RULES.FieldRef("record", "/rows/0/gtin")
+        resolved = RULES.resolve_field(
+            context(structured_view={"rows": [{"gtin": "123"}]}), ref
+        )
+
+        self.assertIsInstance(resolved, RULES.ResolutionFailure)
+        self.assertEqual(RULES.REASON_FIELD_UNRESOLVED, resolved.code)
+        self.assertFalse(resolved.eligible_absence)
+        self.assertIn("traverses a JSON array", resolved.detail)
+
+
+class AbsenceEvaluationTests(unittest.TestCase):
+    def equals_rule(
+        self,
+        field: str = "record/supplier_quote/gtin",
+        *,
+        value: Any = "1234567890123",
+        question_field: str | None = None,
+        when_absent: str | None = "manual_review",
+    ):
+        body: dict[str, Any] = {"field": field}
+        if question_field is None:
+            body["value"] = value
+        else:
+            body["question_field"] = question_field
+        if when_absent is not None:
+            body["when_absent"] = when_absent
+        return parse_one({"equals": body})
+
+    def test_every_field_leaf_can_review_an_eligible_terminal_absence(self):
+        leaves = (
+            {
+                "max_age": {
+                    "field": "record/supplier_quote/retrieved_at",
+                    "hours": 48,
+                    "when_absent": "manual_review",
+                }
+            },
+            {
+                "equals": {
+                    "field": "record/supplier_quote/gtin",
+                    "value": "123",
+                    "when_absent": "manual_review",
+                }
+            },
+            {
+                "numeric_range": {
+                    "field": "record/supplier_quote/price",
+                    "min": 1,
+                    "when_absent": "manual_review",
+                }
+            },
+            {
+                "regex": {
+                    "field": "record/supplier_quote/sku",
+                    "pattern": ".+",
+                    "when_absent": "manual_review",
+                }
+            },
+        )
+        for leaf in leaves:
+            with self.subTest(leaf=next(iter(leaf))):
+                evaluation = RULES.evaluate_rule(
+                    parse_one(leaf),
+                    context(structured_view={"supplier_quote": {}}),
+                )
+
+                self.assertEqual(RULES.OUTCOME_MANUAL_REVIEW, evaluation.outcome)
+                self.assertFalse(evaluation.passed)
+                self.assertTrue(evaluation.requires_manual_review)
+                self.assertEqual(1, len(evaluation.reasons))
+                self.assertTrue(
+                    evaluation.reasons[0].startswith(
+                        f"{RULES.REASON_FIELD_ABSENT}: src-x record/supplier_quote/"
+                    ),
+                    evaluation.reasons[0],
+                )
+                self.assertIn("terminal member as optional", evaluation.reasons[0])
+                self.assertIn("reviewer", evaluation.reasons[0])
+
+    def test_omitted_and_explicit_fail_retain_the_existing_reason_exactly(self):
+        view = {"supplier_quote": {}}
+        omitted = RULES.evaluate_rule(
+            self.equals_rule(when_absent=None), context(structured_view=view)
+        )
+        explicit = RULES.evaluate_rule(
+            self.equals_rule(when_absent="fail"), context(structured_view=view)
+        )
+
+        self.assertEqual(RULES.OUTCOME_FAIL, omitted.outcome)
+        self.assertEqual(omitted.reasons, explicit.reasons)
+        self.assertTrue(omitted.reasons[0].startswith(RULES.REASON_FIELD_UNRESOLVED))
+
+    def test_only_a_terminal_missing_member_reached_through_mappings_can_review(self):
+        cases = (
+            (
+                "missing sidecar",
+                self.equals_rule(),
+                context(structured_view=None),
+            ),
+            (
+                "corrupt sidecar",
+                self.equals_rule(),
+                context(
+                    structured_view=None,
+                    structured_view_error=(
+                        RULES.RESULT_STRUCTURED_VIEW_CORRUPT,
+                        "the structured view hash does not match",
+                    ),
+                ),
+            ),
+            (
+                "missing parent",
+                self.equals_rule(),
+                context(structured_view={}),
+            ),
+            (
+                "successful array traversal",
+                self.equals_rule("record/rows/0/gtin"),
+                context(structured_view={"rows": [{}]}),
+            ),
+            (
+                "invalid array index",
+                self.equals_rule("record/rows/no/gtin"),
+                context(structured_view={"rows": [{}]}),
+            ),
+            (
+                "array index out of range",
+                self.equals_rule("record/rows/1/gtin"),
+                context(structured_view={"rows": [{}]}),
+            ),
+            (
+                "scalar traversal",
+                self.equals_rule(),
+                context(structured_view={"supplier_quote": "not an object"}),
+            ),
+            (
+                "non-scalar terminal",
+                self.equals_rule(),
+                context(structured_view={"supplier_quote": {"gtin": {}}}),
+            ),
+        )
+        for label, rule, rule_context in cases:
+            with self.subTest(case=label):
+                evaluation = RULES.evaluate_rule(rule, rule_context)
+
+                self.assertEqual(RULES.OUTCOME_FAIL, evaluation.outcome, evaluation.reasons)
+                self.assertFalse(evaluation.requires_manual_review)
+                self.assertFalse(
+                    evaluation.reasons[0].startswith(RULES.REASON_FIELD_ABSENT),
+                    evaluation.reasons,
+                )
+
+    def test_question_operand_absence_never_inherits_the_primary_field_behavior(self):
+        evaluation = RULES.evaluate_rule(
+            self.equals_rule(question_field="metadata/candidate_gtin"),
+            context(
+                structured_view={"supplier_quote": {"gtin": "1234567890123"}},
+                question_frontmatter={"metadata": {}},
+            ),
+        )
+
+        self.assertEqual(RULES.OUTCOME_FAIL, evaluation.outcome)
+        self.assertIn("question/metadata/candidate_gtin", evaluation.reasons[0])
+        self.assertTrue(evaluation.reasons[0].startswith(RULES.REASON_FIELD_UNRESOLVED))
+
+    def test_missing_question_operand_dominates_simultaneous_primary_absence(self):
+        evaluation = RULES.evaluate_rule(
+            self.equals_rule(question_field="metadata/candidate_gtin"),
+            context(
+                structured_view={"supplier_quote": {}},
+                question_frontmatter={"metadata": {}},
+            ),
+        )
+
+        self.assertEqual(RULES.OUTCOME_FAIL, evaluation.outcome)
+        self.assertFalse(evaluation.requires_manual_review)
+        self.assertTrue(evaluation.reasons[0].startswith(RULES.REASON_FIELD_UNRESOLVED))
+        self.assertIn("question/metadata/candidate_gtin", evaluation.reasons[0])
+        self.assertFalse(evaluation.reasons[0].startswith(RULES.REASON_FIELD_ABSENT))
+
+    def test_missing_numeric_bound_dominates_simultaneous_primary_absence(self):
+        rule = parse_one(
+            {
+                "numeric_range": {
+                    "field": "record/supplier_quote/price",
+                    "min_question_field": "metadata/min_price",
+                    "when_absent": "manual_review",
+                }
+            }
+        )
+        evaluation = RULES.evaluate_rule(
+            rule,
+            context(
+                structured_view={"supplier_quote": {}},
+                question_frontmatter={"metadata": {}},
+            ),
+        )
+
+        self.assertEqual(RULES.OUTCOME_FAIL, evaluation.outcome)
+        self.assertFalse(evaluation.requires_manual_review)
+        self.assertTrue(evaluation.reasons[0].startswith(RULES.REASON_FIELD_UNRESOLVED))
+        self.assertIn("question/metadata/min_price", evaluation.reasons[0])
+
+    def test_invalid_numeric_bound_dominates_simultaneous_primary_absence(self):
+        rule = parse_one(
+            {
+                "numeric_range": {
+                    "field": "record/supplier_quote/price",
+                    "max_question_field": "metadata/max_price",
+                    "when_absent": "manual_review",
+                }
+            }
+        )
+        evaluation = RULES.evaluate_rule(
+            rule,
+            context(
+                structured_view={"supplier_quote": {}},
+                question_frontmatter={"metadata": {"max_price": "lots"}},
+            ),
+        )
+
+        self.assertEqual(RULES.OUTCOME_FAIL, evaluation.outcome)
+        self.assertFalse(evaluation.requires_manual_review)
+        self.assertTrue(evaluation.reasons[0].startswith(RULES.REASON_OUT_OF_RANGE))
+        self.assertIn("not a decimal number", evaluation.reasons[0])
+
+    def test_a_present_matching_record_value_through_an_array_still_hard_fails(self):
+        evaluation = RULES.evaluate_rule(
+            self.equals_rule("record/rows/0/gtin", value="123"),
+            context(structured_view={"rows": [{"gtin": "123"}]}),
+        )
+
+        self.assertEqual(RULES.OUTCOME_FAIL, evaluation.outcome)
+        self.assertFalse(evaluation.requires_manual_review)
+        self.assertTrue(evaluation.reasons[0].startswith(RULES.REASON_FIELD_UNRESOLVED))
+        self.assertIn("traverses a JSON array", evaluation.reasons[0])
+
+    def test_present_values_never_invoke_absence_handling(self):
+        equals_null = RULES.evaluate_rule(
+            self.equals_rule(value=None),
+            context(structured_view={"supplier_quote": {"gtin": None}}),
+        )
+        self.assertEqual(RULES.OUTCOME_PASS, equals_null.outcome)
+
+        empty_mismatch = RULES.evaluate_rule(
+            self.equals_rule(),
+            context(structured_view={"supplier_quote": {"gtin": ""}}),
+        )
+        self.assertEqual(RULES.OUTCOME_FAIL, empty_mismatch.outcome)
+        self.assertTrue(empty_mismatch.reasons[0].startswith(RULES.REASON_VALUE_MISMATCH))
+
+    def test_invalid_runtime_pointer_escaping_fails_instead_of_reviewing(self):
+        leaf = RULES.Primitive(
+            name="equals",
+            field=RULES.FieldRef("record", "/supplier_quote/bad~2token"),
+            operand=RULES.Operand(literal="x"),
+            when_absent=RULES.WHEN_ABSENT_MANUAL_REVIEW,
+        )
+        rule = RULES.Rule(
+            policy_id="pack:market-data/direct-construction",
+            composition=RULES.Primitive(name="all_of", children=(leaf,)),
+        )
+
+        evaluation = RULES.evaluate_rule(
+            rule, context(structured_view={"supplier_quote": {}})
+        )
+        self.assertEqual(RULES.OUTCOME_FAIL, evaluation.outcome)
+        self.assertIn("RFC 6901", evaluation.reasons[0])
+
+    def test_rule_evaluation_has_one_validated_outcome_and_conservative_properties(self):
+        passed = RULES.RuleEvaluation(RULES.OUTCOME_PASS, ["ok"])
+        failed = RULES.RuleEvaluation(RULES.OUTCOME_FAIL, ["no"])
+        review = RULES.RuleEvaluation(RULES.OUTCOME_MANUAL_REVIEW, ["review"])
+
+        self.assertEqual((True, False), (passed.passed, passed.requires_manual_review))
+        self.assertEqual((False, False), (failed.passed, failed.requires_manual_review))
+        self.assertEqual((False, True), (review.passed, review.requires_manual_review))
+        with self.assertRaises(ValueError):
+            RULES.RuleEvaluation("unknown", [])
+
 
 class CompositionTests(unittest.TestCase):
     def price_between(self, minimum: int, maximum: int) -> dict[str, Any]:
@@ -1113,6 +1508,46 @@ class CompositionTests(unittest.TestCase):
         for reason in evaluation.reasons:
             self.assertFalse(reason.startswith(RULES.RULE_REASON_PREFIXES), reason)
 
+    def test_all_of_review_retains_review_and_satisfied_reasons_in_declaration_order(self):
+        rule = parse_one(
+            {"equals": {"field": "record/sku", "value": "A"}},
+            {
+                "equals": {
+                    "field": "record/gtin",
+                    "value": "123",
+                    "when_absent": "manual_review",
+                }
+            },
+            {"regex": {"field": "record/sku", "pattern": "A"}},
+        )
+
+        evaluation = RULES.evaluate_rule(rule, context(structured_view={"sku": "A"}))
+
+        self.assertEqual(RULES.OUTCOME_MANUAL_REVIEW, evaluation.outcome)
+        self.assertEqual(3, len(evaluation.reasons))
+        self.assertFalse(evaluation.reasons[0].startswith(RULES.RULE_REASON_PREFIXES))
+        self.assertTrue(evaluation.reasons[1].startswith(RULES.REASON_FIELD_ABSENT))
+        self.assertFalse(evaluation.reasons[2].startswith(RULES.RULE_REASON_PREFIXES))
+
+    def test_all_of_hard_failure_dominates_and_suppresses_review_and_pass_reasons(self):
+        rule = parse_one(
+            {"equals": {"field": "record/sku", "value": "A"}},
+            {
+                "equals": {
+                    "field": "record/gtin",
+                    "value": "123",
+                    "when_absent": "manual_review",
+                }
+            },
+            {"regex": {"field": "record/sku", "pattern": "Z+"}},
+        )
+
+        evaluation = RULES.evaluate_rule(rule, context(structured_view={"sku": "A"}))
+
+        self.assertEqual(RULES.OUTCOME_FAIL, evaluation.outcome)
+        self.assertEqual(1, len(evaluation.reasons))
+        self.assertTrue(evaluation.reasons[0].startswith(RULES.REASON_REGEX_MISMATCH))
+
     def test_any_of_short_circuits_and_records_the_winning_branch(self):
         declaration = pack(
             {
@@ -1131,6 +1566,96 @@ class CompositionTests(unittest.TestCase):
         self.assertTrue(evaluation.passed)
         self.assertEqual(1, len(evaluation.reasons))
         self.assertIn("B0ABC123", evaluation.reasons[0])
+
+    def test_any_of_does_not_stop_on_review_when_a_later_branch_passes(self):
+        declaration = pack(
+            {
+                "pack:market-data/quote-48h": {
+                    "any_of": [
+                        {
+                            "equals": {
+                                "field": "record/gtin",
+                                "value": "123",
+                                "when_absent": "manual_review",
+                            }
+                        },
+                        {"equals": {"field": "record/sku", "value": "A"}},
+                    ]
+                }
+            }
+        )
+        rule = RULES.pack_policy_rules({"domain_pack": declaration})[
+            "pack:market-data/quote-48h"
+        ]
+
+        evaluation = RULES.evaluate_rule(rule, context(structured_view={"sku": "A"}))
+
+        self.assertEqual(RULES.OUTCOME_PASS, evaluation.outcome)
+        self.assertEqual(1, len(evaluation.reasons))
+        self.assertFalse(evaluation.reasons[0].startswith(RULES.REASON_FIELD_ABSENT))
+        self.assertIn("record/sku", evaluation.reasons[0])
+
+    def test_any_of_review_suppresses_failed_alternative_reasons(self):
+        declaration = pack(
+            {
+                "pack:market-data/quote-48h": {
+                    "any_of": [
+                        {"equals": {"field": "record/sku", "value": "NEVER"}},
+                        {
+                            "equals": {
+                                "field": "record/gtin",
+                                "value": "123",
+                                "when_absent": "manual_review",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+        rule = RULES.pack_policy_rules({"domain_pack": declaration})[
+            "pack:market-data/quote-48h"
+        ]
+
+        evaluation = RULES.evaluate_rule(rule, context(structured_view={"sku": "A"}))
+
+        self.assertEqual(RULES.OUTCOME_MANUAL_REVIEW, evaluation.outcome)
+        self.assertEqual(1, len(evaluation.reasons))
+        self.assertTrue(evaluation.reasons[0].startswith(RULES.REASON_FIELD_ABSENT))
+
+    def test_any_of_retains_every_review_branch_when_none_passes(self):
+        rule = parse_one(
+            {
+                "any_of": [
+                    {
+                        "equals": {
+                            "field": "record/gtin",
+                            "value": "123",
+                            "when_absent": "manual_review",
+                        }
+                    },
+                    {
+                        "equals": {
+                            "field": "record/upc",
+                            "value": "456",
+                            "when_absent": "manual_review",
+                        }
+                    },
+                ]
+            }
+        )
+
+        evaluation = RULES.evaluate_rule(rule, context(structured_view={}))
+
+        self.assertEqual(RULES.OUTCOME_MANUAL_REVIEW, evaluation.outcome)
+        self.assertEqual(
+            [
+                RULES.REASON_FIELD_ABSENT,
+                RULES.REASON_FIELD_ABSENT,
+            ],
+            [reason.split(":", 1)[0] for reason in evaluation.reasons],
+        )
+        self.assertIn("record/gtin", evaluation.reasons[0])
+        self.assertIn("record/upc", evaluation.reasons[1])
 
     def test_a_failing_any_of_reports_every_branch(self):
         declaration = pack(
@@ -1170,6 +1695,36 @@ class CompositionTests(unittest.TestCase):
                     ),
                 )
                 self.assertEqual(expected, evaluation.passed, evaluation.reasons)
+
+    def test_manual_review_propagates_at_the_maximum_composition_depth(self):
+        rule = parse_one(
+            {"equals": {"field": "record/sku", "value": "A"}},
+            {
+                "any_of": [
+                    {
+                        "all_of": [
+                            {
+                                "equals": {
+                                    "field": "record/gtin",
+                                    "value": "123",
+                                    "when_absent": "manual_review",
+                                }
+                            },
+                            {"regex": {"field": "record/sku", "pattern": "A"}},
+                        ]
+                    },
+                    {"equals": {"field": "record/sku", "value": "NEVER"}},
+                ]
+            },
+        )
+
+        evaluation = RULES.evaluate_rule(rule, context(structured_view={"sku": "A"}))
+
+        self.assertEqual(RULES.OUTCOME_MANUAL_REVIEW, evaluation.outcome)
+        self.assertEqual(3, len(evaluation.reasons))
+        self.assertIn("record/sku", evaluation.reasons[0])
+        self.assertTrue(evaluation.reasons[1].startswith(RULES.REASON_FIELD_ABSENT))
+        self.assertIn("record/sku", evaluation.reasons[2])
 
     def test_every_failure_reason_carries_a_stable_prefix(self):
         rule = parse_one(

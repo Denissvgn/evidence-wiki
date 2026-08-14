@@ -243,12 +243,17 @@ pack's definition text says what the policy means and not how to decide it. When
 the pack also declares a rule for that id under `domain_pack.policy_rules`, the
 policy is decided here instead: the rule reads the accepted source's
 structured-view sidecar, its merged provenance, and the question's frontmatter,
-and returns `pass` or `fail` like any base policy. Every accepted source on the
-facet must satisfy the rule, and a `fail` blocks a required facet exactly as any
-other failing policy does — including when the rule could not be decided at all,
-since rule evaluation is fail-closed. Failing reasons carry stable prefixes such
-as `rule_stale`, `rule_value_mismatch`, and `rule_provenance_not_allowed`. See
-[Evidence Policy Vocabulary](evidence-policies.md).
+and returns `pass`, `fail`, or an explicitly declared conditional
+`manual_review` like any base policy. Every accepted source on the facet must
+satisfy the rule; any hard failure across its sources dominates review and
+blocks a required facet. `when_absent: manual_review` is limited to a missing
+terminal `record/...` member under valid mapping parents. Missing parents,
+arrays, corrupt structured evidence, provenance values, and question operands
+remain fail-closed. Null and blank are present, never conditional absence, and
+retain ordinary primitive comparison/parsing semantics. Failing/review reasons
+carry stable prefixes such as `rule_stale`, `rule_value_mismatch`,
+`rule_field_absent`, and
+`rule_provenance_not_allowed`. See [Evidence Policy Vocabulary](evidence-policies.md).
 
 ## Resolver Gate
 
@@ -279,9 +284,12 @@ On success it records `coverage_required: true` and
 status, lint, and export can identify covered high-stakes answers after the
 resolver command has finished.
 Facet policy results can still require human review. A pack policy backed by a
-rule under `domain_pack.policy_rules` never reaches that path unless its rule
-sets `manual_review_required: true`, which keeps the reviewer in addition to the
-mechanical checks rather than instead of them. `manual_review` can pass
+rule under `domain_pack.policy_rules` reaches that path only when it sets
+`manual_review_required: true` or a field leaf declares
+`when_absent: manual_review` and encounters an eligible terminal absence. Either
+keeps the reviewer in addition to the mechanically settled checks. A required
+facet that can take either path requires a pack with
+`domain_pack.human_gated: true`. `manual_review` can pass
 coverage when the source is otherwise acceptable, but the answer is recorded as
 `status: human_review` and publication readiness stays `no_ship` until the
 review is recorded — either by `question_resolve.py approve` for a reviewer

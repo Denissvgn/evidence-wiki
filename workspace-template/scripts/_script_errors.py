@@ -121,7 +121,9 @@ _REMEDIATIONS = {
         "Resolve, defer, reject, or raise run.max_open_questions_total after reviewing the workspace backlog."
     ),
     "INTAKE_RATE_LIMITED": "Retry after the intake window expires or raise run.max_intake_per_hour deliberately.",
-    "INTAKE_FIELD_TOO_LONG": "Shorten question, text, summary, or context fields before retrying intake.",
+    "INTAKE_FIELD_TOO_LONG": (
+        "Shorten question, text, summary, context, or metadata fields before retrying intake."
+    ),
     "INTAKE_BATCH_TOO_LARGE": "Submit a smaller MCP intake batch or raise run.max_mcp_intake_batch_questions deliberately.",
     "HANDOFF_SIGNATURE_INVALID": (
         "Use the configured handoff secret to sign the handoff block, or unset the secret to keep unsigned mode."

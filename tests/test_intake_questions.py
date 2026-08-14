@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -19,6 +20,8 @@ INTAKE_SCRIPT_PATH = SCRIPTS / "intake_questions.py"
 INIT_SCRIPT_PATH = SCRIPTS / "init_research_workspace.py"
 LINT_SCRIPT_PATH = SCRIPTS / "lint.py"
 STATUS_SCRIPT_PATH = SCRIPTS / "question_status.py"
+CLAIM_SCRIPT_PATH = SCRIPTS / "question_claim.py"
+RESOLVE_SCRIPT_PATH = SCRIPTS / "question_resolve.py"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
 
 
@@ -36,6 +39,8 @@ INTAKE = load_script_module("research_intake_questions", INTAKE_SCRIPT_PATH)
 INIT = load_script_module("research_intake_questions_init", INIT_SCRIPT_PATH)
 LINT = load_script_module("research_intake_questions_lint", LINT_SCRIPT_PATH)
 QUESTION_STATUS = load_script_module("research_intake_questions_status", STATUS_SCRIPT_PATH)
+QUESTION_CLAIM = load_script_module("research_intake_questions_claim", CLAIM_SCRIPT_PATH)
+QUESTION_RESOLVE = load_script_module("research_intake_questions_resolve", RESOLVE_SCRIPT_PATH)
 
 
 VALID_BATCH = {
@@ -144,6 +149,7 @@ class IntakeQuestionsTests(unittest.TestCase):
                 "max_question_bytes": 1024,
                 "max_summary_bytes": 1024,
                 "max_context_bytes": 8192,
+                "max_metadata_bytes": 8192,
             },
             envelope["details"],
         )
@@ -191,6 +197,516 @@ class IntakeQuestionsTests(unittest.TestCase):
             self.assertIn("intake | Injected question batch", log_text)
             self.assertRegex(log_text, r"- Created at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\.")
             self.assertIn("task_id: chain-task-0042", log_text)
+
+    def test_metadata_round_trips_namespaced_with_item_correlation_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            metadata = {
+                "candidate_sku": "ACME-1",
+                "candidate": {
+                    "version": "2026-08",
+                    "score": 3.5,
+                    "available": True,
+                    "note": None,
+                    "status": "nested-only",
+                },
+                "a/b": "slash",
+                "a~b": "tilde",
+                "type": "cannot-replace-question",
+            }
+            batch_path = self.write_batch(
+                root,
+                {
+                    "schema_version": "1.0",
+                    "questions": [{"question": "Does this candidate match?", "metadata": metadata}],
+                },
+            )
+
+            dry_code, dry_report, dry_stderr = self.intake_json(target, batch_path, "--dry-run")
+            self.assertEqual(0, dry_code, dry_stderr)
+            self.assertEqual(0, dry_report["created"][0]["item_index"])
+            self.assertNotIn("metadata", dry_report["created"][0])
+            dry_content = dry_report["created"][0]["content"]
+
+            code, report, stderr = self.intake_json(target, batch_path)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(0, report["created"][0]["item_index"])
+            self.assertNotIn("metadata", report["created"][0])
+            page = target / "wiki" / "questions" / "does-this-candidate-match.md"
+            self.assertEqual(dry_content, page.read_text(encoding="utf-8"))
+            frontmatter = QUESTION_STATUS.load_frontmatter(page)
+            self.assertEqual(metadata, frontmatter["metadata"])
+            self.assertEqual("question", frontmatter["type"])
+            self.assertEqual("open", frontmatter["status"])
+
+    def test_metadata_survives_claim_and_release_lifecycle_mutations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            metadata = {"candidate": {"sku": "ACME-1", "active": True}, "rank": 2}
+            batch_path = self.write_batch(
+                root,
+                {
+                    "schema_version": "1.0",
+                    "questions": [{"id": "candidate", "question": "Candidate?", "metadata": metadata}],
+                },
+            )
+            code, _, stderr = self.intake_json(target, batch_path)
+            self.assertEqual(0, code, stderr)
+            page = target / "wiki" / "questions" / "candidate.md"
+
+            QUESTION_CLAIM.run_claim(target, slug="candidate", agent_id="agent-a")
+            self.assertEqual(metadata, QUESTION_STATUS.load_frontmatter(page)["metadata"])
+            QUESTION_CLAIM.run_release(target, slug="candidate", agent_id="agent-a")
+            self.assertEqual(metadata, QUESTION_STATUS.load_frontmatter(page)["metadata"])
+            QUESTION_RESOLVE.run_block(
+                target,
+                slug="candidate",
+                agent_id="agent-a",
+                blocked_reason="Optional evidence is unavailable.",
+                allow_unclaimed=True,
+            )
+            self.assertEqual(metadata, QUESTION_STATUS.load_frontmatter(page)["metadata"])
+
+    def test_metadata_shape_depth_nodes_and_size_are_refused_atomically(self):
+        too_deep: dict = {"leaf": "ok"}
+        for level in range(INTAKE.MAX_INTAKE_METADATA_DEPTH):
+            too_deep = {f"level_{level}": too_deep}
+        invalid_metadata = [
+            {},
+            [],
+            {"items": ["array"]},
+            {"native_date": date(2026, 8, 14)},
+            {"native_set": {"not-json"}},
+            {"native_binary": b"not-json"},
+            {"nan": float("nan")},
+            {"infinite": float("inf")},
+            {"negative_infinite": float("-inf")},
+            {"nested": {}},
+            {"": "empty key"},
+            {1: "non-string key"},
+            {"bad_utf8": "\ud800"},
+            {f"key_{index}": index for index in range(65)},
+            too_deep,
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            before = {
+                path.relative_to(target).as_posix(): path.read_bytes()
+                for path in target.rglob("*")
+                if path.is_file()
+            }
+            for index, metadata in enumerate(invalid_metadata):
+                with self.subTest(case=index):
+                    batch = {
+                        "schema_version": "1.0",
+                        "questions": [{"question": f"Invalid metadata {index}?", "metadata": metadata}],
+                    }
+                    with self.assertRaises(SystemExit):
+                        INTAKE.run_intake_document(target, batch, dry_run=False, from_file_label="memory")
+                    self.assertEqual(
+                        before,
+                        {
+                            path.relative_to(target).as_posix(): path.read_bytes()
+                            for path in target.rglob("*")
+                            if path.is_file()
+                        },
+                    )
+
+            mixed_batch = {
+                "schema_version": "1.0",
+                "questions": [
+                    {"question": "Would otherwise be valid?", "metadata": {"candidate": "A"}},
+                    {"question": "Invalid second item?", "metadata": {"items": ["array"]}},
+                ],
+            }
+            with self.assertRaises(SystemExit):
+                INTAKE.run_intake_document(
+                    target, mixed_batch, dry_run=False, from_file_label="memory"
+                )
+            self.assertEqual(
+                before,
+                {
+                    path.relative_to(target).as_posix(): path.read_bytes()
+                    for path in target.rglob("*")
+                    if path.is_file()
+                },
+            )
+
+            oversized = {
+                "schema_version": "1.0",
+                "questions": [{"question": "Too much metadata?", "metadata": {"value": "x" * 8192}}],
+            }
+            result = self.write_batch(root, oversized, name="oversized-metadata.json")
+            code, _, stderr = self.run_intake(
+                "--project-root", str(target), "--from-file", str(result), "--format", "json"
+            )
+            self.assertEqual(2, code)
+            envelope = json.loads(stderr)
+            self.assertEqual("INTAKE_FIELD_TOO_LONG", envelope["error_code"])
+            self.assertEqual("metadata", envelope["details"]["violations"][0]["field"])
+            self.assertEqual(8192, envelope["details"]["max_metadata_bytes"])
+
+    def test_exact_metadata_bounds_are_accepted(self):
+        canonical_overhead = len(b'{"value":""}')
+        value = "x" * (INTAKE.MAX_INTAKE_METADATA_BYTES - canonical_overhead)
+        metadata = {"value": value}
+        self.assertEqual(
+            INTAKE.MAX_INTAKE_METADATA_BYTES,
+            len(INTAKE.canonical_intake_metadata(metadata).encode("utf-8")),
+        )
+        normalized = INTAKE.normalize_intake_metadata(metadata, label="metadata", item_index=0)
+        self.assertEqual(metadata, normalized)
+
+        raw = {"nested": {"value": "original"}}
+        copied = INTAKE.normalize_intake_metadata(raw, label="metadata", item_index=0)
+        raw["nested"]["value"] = "mutated"
+        self.assertEqual({"nested": {"value": "original"}}, copied)
+
+        exact_nodes = {f"key_{index}": index for index in range(64)}
+        self.assertEqual(
+            exact_nodes,
+            INTAKE.normalize_intake_metadata(exact_nodes, label="metadata", item_index=0),
+        )
+
+        depth_limited: dict = {"leaf": "ok"}
+        for level in range(INTAKE.MAX_INTAKE_METADATA_DEPTH - 1):
+            depth_limited = {f"level_{level}": depth_limited}
+        normalized_depth = INTAKE.normalize_intake_metadata(
+            depth_limited, label="metadata", item_index=0
+        )
+        self.assertEqual(depth_limited, normalized_depth)
+
+    def test_metadata_byte_and_node_limits_refuse_exactly_one_over(self):
+        canonical_overhead = len(b'{"value":""}')
+        one_over_bytes = {
+            "value": "x" * (INTAKE.MAX_INTAKE_METADATA_BYTES - canonical_overhead + 1)
+        }
+        self.assertEqual(
+            INTAKE.MAX_INTAKE_METADATA_BYTES + 1,
+            len(INTAKE.canonical_intake_metadata(one_over_bytes).encode("utf-8")),
+        )
+        with self.assertRaises(INTAKE.IntakeFieldTooLong) as oversized:
+            INTAKE.normalize_intake_metadata(one_over_bytes, label="metadata", item_index=3)
+        self.assertEqual(
+            {
+                "item_index": 3,
+                "field": "metadata",
+                "actual_bytes": INTAKE.MAX_INTAKE_METADATA_BYTES + 1,
+                "max_bytes": INTAKE.MAX_INTAKE_METADATA_BYTES,
+            },
+            oversized.exception.details["violations"][0],
+        )
+
+        # Sixty-three scalar pairs are 126 nodes. The nested mapping key plus
+        # its key/scalar pair brings the total to exactly 129.
+        one_over_nodes = {f"key_{index}": index for index in range(63)}
+        one_over_nodes["nested"] = {"leaf": "value"}
+        with self.assertRaisesRegex(SystemExit, "maximum node count 128"):
+            INTAKE.normalize_intake_metadata(one_over_nodes, label="metadata", item_index=0)
+
+        with self.assertRaisesRegex(SystemExit, "bounded canonical JSON"):
+            INTAKE.normalize_intake_metadata(
+                {"huge_integer": 10**5000}, label="metadata", item_index=0
+            )
+
+    def test_metadata_cycles_and_shared_mappings_refuse_but_scalar_aliases_and_duplicate_keys_remain(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            refused_documents = {
+                "cycle.yaml": (
+                    'schema_version: "1.0"\nquestions:\n  - question: Cycle?\n'
+                    "    metadata: &metadata\n      self: *metadata\n"
+                ),
+                "shared.yaml": (
+                    'schema_version: "1.0"\nquestions:\n  - question: Shared?\n'
+                    "    metadata:\n      one: &shared\n        value: x\n      two: *shared\n"
+                ),
+                "timestamp.yaml": (
+                    'schema_version: "1.0"\nquestions:\n  - question: Timestamp?\n'
+                    "    metadata:\n      observed_at: 2026-08-14T12:34:56Z\n"
+                ),
+                "binary.yaml": (
+                    'schema_version: "1.0"\nquestions:\n  - question: Binary?\n'
+                    "    metadata:\n      payload: !!binary eA==\n"
+                ),
+                "tagged.yaml": (
+                    'schema_version: "1.0"\nquestions:\n  - question: Tagged?\n'
+                    "    metadata:\n      candidate: !candidate ACME-1\n"
+                ),
+            }
+            for name, document in refused_documents.items():
+                with self.subTest(name=name):
+                    path = root / name
+                    path.write_text(document, encoding="utf-8")
+                    code, _, stderr = self.run_intake(
+                        "--project-root", str(target), "--from-file", str(path), "--format", "json"
+                    )
+                    self.assertEqual(2, code)
+                    self.assertNotIn("Traceback", stderr)
+
+            accepted = root / "aliases.yaml"
+            accepted.write_text(
+                'schema_version: "1.0"\nquestions:\n  - question: Alias?\n'
+                "    metadata:\n      first: &value ACME-1\n      second: *value\n"
+                "      duplicate: old\n      duplicate: new\n",
+                encoding="utf-8",
+            )
+            code, report, stderr = self.intake_json(target, accepted)
+            self.assertEqual(0, code, stderr)
+            page = target / "wiki" / "questions" / f"{report['created'][0]['slug']}.md"
+            self.assertEqual(
+                {"first": "ACME-1", "second": "ACME-1", "duplicate": "new"},
+                QUESTION_STATUS.load_frontmatter(page)["metadata"],
+            )
+
+            duplicate_json = root / "duplicate.json"
+            duplicate_json.write_text(
+                '{"schema_version":"1.0","questions":[{"question":"JSON duplicate?",'
+                '"metadata":{"candidate":"old","candidate":"new"}}]}',
+                encoding="utf-8",
+            )
+            code, report, stderr = self.intake_json(target, duplicate_json)
+            self.assertEqual(0, code, stderr)
+            page = target / "wiki" / "questions" / f"{report['created'][0]['slug']}.md"
+            self.assertEqual(
+                {"candidate": "new"},
+                QUESTION_STATUS.load_frontmatter(page)["metadata"],
+            )
+
+    def test_metadata_dedupe_is_canonical_asymmetric_and_reports_item_indexes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            metadata_first = self.init_workspace(root, name="metadata-first")
+            first_batch = self.write_batch(
+                root,
+                {
+                    "schema_version": "1.0",
+                    "questions": [
+                        {"question": "Same candidate?", "metadata": {"sku": "A", "rank": 1}},
+                        {"question": "Same candidate?"},
+                    ],
+                },
+                name="metadata-first.yaml",
+            )
+            code, first, stderr = self.intake_json(metadata_first, first_batch)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual([0], [item["item_index"] for item in first["created"]])
+            self.assertEqual([1], [item["item_index"] for item in first["skipped_duplicates"]])
+
+            omitted_first = self.init_workspace(root, name="omitted-first")
+            second_batch = self.write_batch(
+                root,
+                {
+                    "schema_version": "1.0",
+                    "questions": [
+                        {"question": "Same candidate?"},
+                        {"question": "Same candidate?", "metadata": {"sku": "A", "rank": 1}},
+                        {"question": "Same candidate?", "metadata": {"rank": 1, "sku": "A"}},
+                        {"question": "Same candidate?", "metadata": {"sku": "B", "rank": 1}},
+                    ],
+                },
+                name="omitted-first.yaml",
+            )
+            code, second, stderr = self.intake_json(omitted_first, second_batch)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual([0, 1, 3], [item["item_index"] for item in second["created"]])
+            self.assertEqual([2], [item["item_index"] for item in second["skipped_duplicates"]])
+            self.assertEqual(
+                ["same-candidate", "same-candidate-2", "same-candidate-4"],
+                [item["slug"] for item in second["created"]],
+            )
+
+            replay = self.write_batch(
+                root,
+                {
+                    "schema_version": "1.0",
+                    "questions": [{"question": "Same candidate?", "metadata": {"rank": 1, "sku": "A"}}],
+                },
+                name="replay.yaml",
+            )
+            code, replay_report, stderr = self.intake_json(omitted_first, replay)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(0, replay_report["counts"]["created"])
+            self.assertEqual("same-candidate-2", replay_report["skipped_duplicates"][0]["duplicate_of"])
+
+    def test_metadata_bearing_item_does_not_match_legacy_or_malformed_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(
+                root,
+                questions=[{"id": "legacy", "question": "Which candidate?"}],
+            )
+            legacy = target / "wiki" / "questions" / "legacy.md"
+            text = legacy.read_text(encoding="utf-8")
+            legacy.write_text(text.replace("question: Which candidate?", "question: Which candidate?\nmetadata:\n  - invalid"))
+            batch = self.write_batch(
+                root,
+                {
+                    "schema_version": "1.0",
+                    "questions": [{"question": "Which candidate?", "metadata": {"sku": "A"}}],
+                },
+            )
+
+            code, report, stderr = self.intake_json(target, batch)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(1, report["counts"]["created"])
+            self.assertEqual("which-candidate", report["created"][0]["slug"])
+
+            wildcard = self.write_batch(
+                root,
+                {"schema_version": "1.0", "questions": [{"question": "Which candidate?"}]},
+                name="wildcard.yaml",
+            )
+            code, report, stderr = self.intake_json(target, wildcard)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(0, report["counts"]["created"])
+            self.assertEqual("legacy", report["skipped_duplicates"][0]["duplicate_of"])
+
+    def test_question_type_required_metadata_requires_every_item(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["wiki"]["frontmatter_type_rules"]["question"]["required_fields"].append("metadata")
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            batch = self.write_batch(
+                root,
+                {
+                    "schema_version": "1.0",
+                    "questions": [
+                        {"question": "Has metadata?", "metadata": {"candidate": "A"}},
+                        {"question": "Missing metadata?"},
+                    ],
+                },
+            )
+            before = (target / "log.md").read_bytes()
+
+            code, _, stderr = self.run_intake(
+                "--project-root", str(target), "--from-file", str(batch), "--format", "json"
+            )
+            self.assertEqual(2, code)
+            self.assertIn("requires 'metadata' for every item", json.loads(stderr)["message"])
+            self.assertEqual(before, (target / "log.md").read_bytes())
+            self.assertEqual([], list((target / "wiki" / "questions").glob("*.md")))
+
+            # The global list applies to every maintained page type; metadata
+            # support is conditional and must not be used to satisfy it.
+            config["wiki"]["frontmatter_type_rules"]["question"]["required_fields"].remove("metadata")
+            config["wiki"]["frontmatter_required"].append("metadata")
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            all_metadata = self.write_batch(
+                root,
+                {
+                    "schema_version": "1.0",
+                    "questions": [{"question": "Still conditional?", "metadata": {"candidate": "A"}}],
+                },
+                name="global-required.yaml",
+            )
+            code, _, stderr = self.run_intake(
+                "--project-root", str(target), "--from-file", str(all_metadata), "--format", "json"
+            )
+            self.assertEqual(2, code)
+            self.assertIn("wiki.frontmatter_required", json.loads(stderr)["message"])
+            self.assertEqual([], list((target / "wiki" / "questions").glob("*.md")))
+
+    def test_question_type_required_fields_unrelated_to_metadata_do_not_block_intake(self):
+        # research.yml may legitimately require lifecycle-only fields (populated after
+        # intake, e.g. by claim/resolution) in the question type's required_fields.
+        # Intake must not police fields it never generates and does not own; only the
+        # conditional `metadata` key gets a strict per-item presence check.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            config_path = target / "research.yml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["wiki"]["frontmatter_type_rules"]["question"]["required_fields"].append(
+                "human_review_status"
+            )
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            batch = self.write_batch(
+                root,
+                {"schema_version": "1.0", "questions": [{"question": "No metadata involved?"}]},
+            )
+
+            code, stdout, stderr = self.run_intake(
+                "--project-root", str(target), "--from-file", str(batch), "--format", "json"
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(1, json.loads(stdout)["counts"]["created"])
+            self.assertEqual(1, len(list((target / "wiki" / "questions").glob("*.md"))))
+
+    def test_parser_recursion_is_a_bounded_invalid_batch_refusal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            json_batch = root / "recursive.json"
+            json_batch.write_text("{}", encoding="utf-8")
+            with mock.patch.object(INTAKE.json, "loads", side_effect=RecursionError("too deep")):
+                with self.assertRaises(INTAKE.ScriptRefusal) as raised:
+                    INTAKE.run_intake(target, from_file=str(json_batch))
+            self.assertEqual("WORKSPACE_UNREADABLE", raised.exception.error_code)
+            self.assertIn("Invalid JSON batch", raised.exception.message)
+
+            yaml_batch = root / "recursive.yaml"
+            yaml_batch.write_text("questions: []", encoding="utf-8")
+            with mock.patch.object(INTAKE.yaml, "safe_load", side_effect=RecursionError("too deep")):
+                with self.assertRaises(INTAKE.ScriptRefusal) as raised:
+                    INTAKE.run_intake(target, from_file=str(yaml_batch))
+            self.assertEqual("WORKSPACE_UNREADABLE", raised.exception.error_code)
+            self.assertIn("Invalid batch document", raised.exception.message)
+
+            for batch_path, parser in (
+                (json_batch, INTAKE.json),
+                (yaml_batch, INTAKE.yaml),
+            ):
+                parser_method = "loads" if parser is INTAKE.json else "safe_load"
+                with self.subTest(parser=parser_method):
+                    with mock.patch.object(
+                        parser,
+                        parser_method,
+                        side_effect=ValueError("integer token exceeds parser resource limit"),
+                    ):
+                        with self.assertRaises(INTAKE.ScriptRefusal) as raised:
+                            INTAKE.run_intake(target, from_file=str(batch_path))
+                    self.assertEqual("WORKSPACE_UNREADABLE", raised.exception.error_code)
+                    self.assertIn("Invalid", raised.exception.message)
+
+    def test_deep_or_huge_numeric_legacy_frontmatter_does_not_crash_intake_scan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root)
+            questions_dir = target / "wiki" / "questions"
+            deep_mapping = "{a:" * 1500 + "1" + "}" * 1500
+            huge_integer = "9" * 5000
+            malformed_pages = {
+                "deep-legacy.md": deep_mapping,
+                "huge-integer-legacy.md": f"{{candidate: {huge_integer}}}",
+            }
+            for name, metadata_yaml in malformed_pages.items():
+                (questions_dir / name).write_text(
+                    "---\n"
+                    "type: question\n"
+                    f"question: {name}?\n"
+                    f"metadata: {metadata_yaml}\n"
+                    "---\n\n# Legacy question\n",
+                    encoding="utf-8",
+                )
+
+            batch = self.write_batch(
+                root,
+                {"schema_version": "1.0", "questions": [{"question": "Fresh question?"}]},
+            )
+            code, report, stderr = self.intake_json(target, batch)
+
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(1, report["counts"]["created"])
+            self.assertTrue((questions_dir / "fresh-question.md").is_file())
 
     def test_secret_configured_rejects_unsigned_handoff_batch_atomically(self):
         with tempfile.TemporaryDirectory() as tmpdir:

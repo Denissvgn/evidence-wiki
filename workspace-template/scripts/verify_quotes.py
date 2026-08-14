@@ -992,7 +992,7 @@ def main(argv: list[str] | None = None) -> int:
         return emit_refusal(refusal, json_mode=json_mode)
     rendered = render_report(report, args.format)
     if args.output:
-        Path(args.output).expanduser().resolve().write_text(rendered, encoding="utf-8")
+        Path(args.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
     else:
         sys.stdout.write(rendered)
     return EXIT_OK if report.get("overall_result") == RESULT_VERIFIED else EXIT_NOT_VERIFIED

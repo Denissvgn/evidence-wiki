@@ -336,6 +336,13 @@ class ErrorEnvelopeTests(unittest.TestCase):
             )
         )
 
+    def test_intake_field_length_remediation_names_metadata(self):
+        helper = load_helper()
+
+        remediation = helper.remediation_for("INTAKE_FIELD_TOO_LONG")
+
+        self.assertIn("metadata", remediation)
+
     def test_question_claim_json_conflict_uses_error_envelope_with_details(self):
         claim = load_script_module("error_envelope_question_claim", "question_claim.py")
         with tempfile.TemporaryDirectory() as tmpdir:

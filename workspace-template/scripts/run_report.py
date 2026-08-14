@@ -744,7 +744,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             document = build_baseline_snapshot(project_root)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+            output_path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
         except SystemExit as exc:
             return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
         if args.format == "json":
@@ -787,7 +787,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report_path = report_path_for(project_root, document["generated_at"])
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(render_markdown(document), encoding="utf-8")
+    report_path.write_text(render_markdown(document), encoding="utf-8", newline="\n")
     try:
         document["report_path"] = report_path.relative_to(project_root).as_posix()
     except ValueError:

@@ -2686,7 +2686,7 @@ def write_cached_status(project_root: Path, cache_key: str, document: dict[str, 
         "document": document,
     }
     tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
     tmp_path.replace(path)
 
 

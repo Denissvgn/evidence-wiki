@@ -458,7 +458,7 @@ def _run_questions_export(forwarded: list[str]) -> int:
     # ``--output`` only chooses where the rendered bytes go.
     rendered = script.render_output(document, parsed.format)
     if parsed.output:
-        Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8")
+        Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
     else:
         sys.stdout.write(rendered)
     return int(script.EXIT_OK)
@@ -507,7 +507,7 @@ def _run_normalize_verify(forwarded: list[str]) -> int:
         return _refuse(exc, json_mode=json_mode)
     rendered = script.render_report(report, parsed.format)
     if parsed.output:
-        Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8")
+        Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
     else:
         sys.stdout.write(rendered)
     # A record that breaches the contract is a verdict, not a refusal: the full

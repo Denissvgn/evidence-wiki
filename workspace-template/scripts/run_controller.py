@@ -445,7 +445,7 @@ def write_json(path: Path, document: dict[str, Any]) -> None:
     tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        tmp_path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
         tmp_path.replace(path)
     except OSError as exc:
         raise mutation_write_error(path, "json_atomic_replace", exc) from exc
@@ -455,7 +455,7 @@ def write_run_state_atomic(path: Path, document: dict[str, Any]) -> None:
     tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        tmp_path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
         tmp_path.replace(path)
     except OSError as exc:
         raise mutation_write_error(path, "run_state_atomic_replace", exc) from exc
@@ -480,7 +480,7 @@ def append_event(path: Path, event: dict[str, Any]) -> bool:
     tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.write_text(content, encoding="utf-8", newline="\n")
         tmp_path.replace(path)
     except OSError as exc:
         raise mutation_write_error(path, "event_log_atomic_replace", exc) from exc

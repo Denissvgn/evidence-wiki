@@ -171,7 +171,7 @@ def sanitized_error_content(
     )
 
 
-def jsonrpc_parse_error_response(exc: json.JSONDecodeError) -> dict[str, Any]:
+def jsonrpc_parse_error_response(exc: ValueError | RecursionError) -> dict[str, Any]:
     correlation_id = uuid.uuid4().hex
     print(f"MCP parse error {correlation_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
     return jsonrpc_error(None, ERR_PARSE, "Parse error", {"correlation_id": correlation_id})
@@ -799,7 +799,9 @@ class ResearchWikiMcpServer:
                 else:
                     try:
                         message = json.loads(line)
-                    except json.JSONDecodeError as exc:
+                    # Plain ``ValueError`` covers Python's bounded integer-token
+                    # refusal in addition to ``JSONDecodeError`` (its subclass).
+                    except (ValueError, RecursionError) as exc:
                         response = jsonrpc_parse_error_response(exc)
                     else:
                         message_id = jsonrpc_safe_response_id(message)

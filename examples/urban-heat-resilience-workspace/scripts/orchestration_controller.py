@@ -1400,7 +1400,7 @@ def write_json_atomic(path: Path, document: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        temporary.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        temporary.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
         temporary.replace(path)
     except OSError as exc:
         raise OrchestrationControllerError(
@@ -1660,7 +1660,7 @@ def append_event(project_root: Path, orchestration_id: str, event: dict[str, Any
     path.parent.mkdir(parents=True, exist_ok=True)
     event["event_id"] = f"evt-{len(existing) + 1:04d}"
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text("".join(compact_json(item) + "\n" for item in [*existing, event]), encoding="utf-8")
+    temporary.write_text("".join(compact_json(item) + "\n" for item in [*existing, event]), encoding="utf-8", newline="\n")
     temporary.replace(path)
 
 

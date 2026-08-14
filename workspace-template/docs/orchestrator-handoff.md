@@ -255,8 +255,8 @@ The output is JSON. This abridged example omits the large
 {
   "schema_version": "1.0",
   "package": "evidence-wiki",
-  "package_version": "0.3.1",
-  "starter_version": "0.6.0",
+  "package_version": "0.4.0",
+  "starter_version": "0.7.0",
   "starter_schema_version": "0.1",
   "compatible_research_yml_contract": "0.1",
   "profile_schema_versions": ["0.1"],
@@ -509,7 +509,7 @@ Stable error codes:
 | `CANDIDATE_UNKNOWN` | Referenced discovery candidate id is unknown. | List candidates with `discover_sources.py candidates list` and choose an existing id. |
 | `SOURCE_UNKNOWN` | Referenced manifest source id is unknown. | Inventory sources and choose an existing source id. |
 | `TOOLING_MISSING` | A packaged or sibling script is missing. | Restore or upgrade workspace scripts. |
-| `INTAKE_FIELD_TOO_LONG` | A question batch includes an over-limit `question`, `text`, `summary`, or `context` field. | Shorten oversized intake fields before retrying. |
+| `INTAKE_FIELD_TOO_LONG` | A question batch includes an over-limit `question`, `text`, `summary`, `context`, or canonical `metadata` field. | Shorten oversized intake fields or metadata before retrying. |
 | `INTAKE_TOTAL_CAP_EXCEEDED` | A question batch would exceed `run.max_open_questions_total`. | Resolve, defer, reject, or raise the total cap after reviewing the backlog. |
 | `INTAKE_RATE_LIMITED` | A question batch would exceed `run.max_intake_per_hour`. | Retry after the intake window expires or raise the hourly cap deliberately. |
 | `INTAKE_BATCH_TOO_LARGE` | An MCP intake call exceeds `run.max_mcp_intake_batch_questions`. | Submit a smaller MCP batch or raise the MCP batch cap deliberately. |
@@ -978,7 +978,7 @@ Or through the package CLI from outside the workspace:
 evidence-wiki questions add --target my-research-workspace --from-file batch.yaml
 ```
 
-The batch document carries `schema_version`, an optional `handoff` correlation block, optional `handoff_signature`, and a `questions[]` list (`question` required; `text` alias, `id`, `priority`, `origin`, `summary`, `context` optional). When a handoff secret is configured, any batch with a `handoff` must include a valid `handoff_signature`; unsigned or tampered batches fail with `HANDOFF_SIGNATURE_INVALID` before anything is written. The whole batch is validated before anything is written; `question`/`text` and `summary` are capped at 1024 UTF-8 bytes, and `context` is capped at 8192 UTF-8 bytes. Duplicates against the existing backlog are skipped, never overwritten, so re-submitting a batch is idempotent. After deduplication, intake enforces `run.max_open_questions_total` and `run.max_intake_per_hour`; cap failures return `INTAKE_FIELD_TOO_LONG`, `INTAKE_TOTAL_CAP_EXCEEDED`, or `INTAKE_RATE_LIMITED` and write nothing. MCP intake also rejects oversized transport batches before delegation with `INTAKE_BATCH_TOO_LARGE` when `questions[]` exceeds `run.max_mcp_intake_batch_questions`. Created pages pass lint and appear in `question_status.py` and `workspace_status.py` immediately. The full batch and report schemas are in [question-api.md](question-api.md).
+The batch document carries `schema_version`, an optional `handoff` correlation block, optional `handoff_signature`, and a `questions[]` list (`question` required; `text` alias, `id`, `priority`, `origin`, `summary`, `context`, and bounded `metadata` optional). `metadata` is a non-empty JSON-scalar/nested-mapping namespace capped at 8192 canonical UTF-8 bytes, depth 8, and 128 nodes; it is persisted caller-controlled policy input, not evidence or a place for secrets. When a handoff secret is configured, any batch with a `handoff` must include a valid `handoff_signature`; unsigned or tampered batches fail with `HANDOFF_SIGNATURE_INVALID` before anything is written. The handoff signature covers the correlation block, not question fields. The whole batch is validated before anything is written; `question`/`text` and `summary` are capped at 1024 UTF-8 bytes, and `context` is capped at 8192 UTF-8 bytes. Metadata-bearing items deduplicate by normalized question text plus canonical metadata, while omitted metadata keeps the legacy text-only wildcard; every created/skipped result carries `item_index` for correlation without echoing metadata. After deduplication, intake enforces `run.max_open_questions_total` and `run.max_intake_per_hour`; cap failures return `INTAKE_FIELD_TOO_LONG`, `INTAKE_TOTAL_CAP_EXCEEDED`, or `INTAKE_RATE_LIMITED` and write nothing. MCP intake also rejects oversized transport batches before delegation with `INTAKE_BATCH_TOO_LARGE` when `questions[]` exceeds `run.max_mcp_intake_batch_questions`. Created pages pass lint and appear in `question_status.py` and `workspace_status.py` immediately. The full batch and report schemas are in [question-api.md](question-api.md).
 
 ## Step 5: Poll Status And Detect Completion
 

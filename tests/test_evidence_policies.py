@@ -28,6 +28,8 @@ from tests._pack_policy_rule_fixture import (  # noqa: E402
     SOURCE_RULE,
     declare_pack,
     deliver_quote,
+    structured_view_bytes,
+    write_structured_view,
 )
 
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -1427,6 +1429,22 @@ class PackPolicyRuleTests(unittest.TestCase):
     def add_quote_source(self, workspace: Path, source_id: str, **kwargs: Any) -> str:
         return deliver_quote(workspace, source_id, **kwargs)
 
+    def rewrite_quote_view(self, workspace: Path, source_id: str, document: dict[str, Any]) -> None:
+        """Replace one fixture view while keeping its normalized-record hash binding valid."""
+        helper = load_policy_helper()
+        structured = helper._structured_view
+        safe = structured.safe_source_id(source_id)
+        sidecar = structured.sidecar_path(workspace / "sources" / "normalized", source_id)
+        payload = structured_view_bytes(document)
+        digest = write_structured_view(structured, sidecar, payload)
+        record = workspace / "sources" / "normalized" / f"{safe}.md"
+        frontmatter = helper.read_frontmatter(record)
+        frontmatter["structured_view"] = {
+            "path": f"sources/normalized/{sidecar.name}",
+            "content_hash": digest,
+        }
+        write_frontmatter(record, frontmatter, "# Supplier quote\n")
+
     def load_inputs(self, workspace: Path):
         helper = load_policy_helper()
         return helper, helper.load_policy_inputs(workspace)
@@ -1725,6 +1743,194 @@ class PackPolicyRuleTests(unittest.TestCase):
         self.assertEqual(["quote:fresh", "quote:stale"], freshness.source_ids)
         self.assertIn("quote:stale", self.reason_text(freshness))
         self.assertNotIn("quote:fresh", self.reason_text(freshness))
+
+    def test_multi_source_absent_review_retains_review_and_pass_reasons_in_source_order(self):
+        rule = {
+            "all_of": [
+                {
+                    "equals": {
+                        "field": "record/supplier_quote/sku",
+                        "value": CANDIDATE_SKU,
+                        "when_absent": "manual_review",
+                    }
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: rule})
+            self.add_quote_source(workspace, "quote:review", age_hours=2)
+            self.rewrite_quote_view(workspace, "quote:review", {"supplier_quote": {"price": "23.99 EUR"}})
+            self.add_quote_source(workspace, "quote:pass", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            decided = helper.evaluate_identity_policy(
+                IDENTITY_POLICY,
+                ["quote:review", "quote:pass"],
+                inputs,
+                question_slug=QUESTION_SLUG,
+            )
+
+        self.assertEqual("manual_review", decided.verdict)
+        self.assertEqual(
+            [
+                "rule_field_absent: quote:review record/supplier_quote/sku is absent from a valid "
+                "structured view; the domain pack classifies this terminal member as optional and "
+                "requires a reviewer to record the policy decision.",
+                "quote:pass record/supplier_quote/sku resolves to 'B0ABC12345', equal to the expected "
+                "'B0ABC12345' (declared in the rule).",
+            ],
+            decided.reasons,
+        )
+        self.assertEqual(
+            f"The pack explicitly classifies the absent terminal record member in "
+            f"domain_pack.policy_rules[{IDENTITY_POLICY}] as optional; a reviewer must inspect the "
+            "accepted source and record the policy decision.",
+            decided.remediation,
+        )
+
+    def test_multi_source_absent_review_hard_failure_suppresses_nonfailure_reasons(self):
+        rule = {
+            "all_of": [
+                {
+                    "equals": {
+                        "field": "record/supplier_quote/sku",
+                        "value": CANDIDATE_SKU,
+                        "when_absent": "manual_review",
+                    }
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: rule})
+            self.add_quote_source(workspace, "quote:review", age_hours=2)
+            self.rewrite_quote_view(workspace, "quote:review", {"supplier_quote": {"price": "23.99 EUR"}})
+            self.add_quote_source(workspace, "quote:fail-one", age_hours=2, sku="B0MISMATCH1")
+            self.add_quote_source(workspace, "quote:fail-two", age_hours=2, sku="B0MISMATCH2")
+            self.add_quote_source(workspace, "quote:pass", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            decided = helper.evaluate_identity_policy(
+                IDENTITY_POLICY,
+                ["quote:review", "quote:fail-one", "quote:fail-two", "quote:pass"],
+                inputs,
+                question_slug=QUESTION_SLUG,
+            )
+
+        self.assertEqual("fail", decided.verdict)
+        self.assertEqual(
+            [
+                "rule_value_mismatch: quote:fail-one record/supplier_quote/sku resolves to "
+                "'B0MISMATCH1', which does not equal the expected 'B0ABC12345' (declared in the rule).",
+                "rule_value_mismatch: quote:fail-two record/supplier_quote/sku resolves to "
+                "'B0MISMATCH2', which does not equal the expected 'B0ABC12345' (declared in the rule).",
+            ],
+            decided.reasons,
+        )
+
+    def test_top_level_manual_review_over_mechanical_pass_preserves_exact_reason_sequence(self):
+        rule = {
+            "manual_review_required": True,
+            "all_of": [
+                {
+                    "equals": {
+                        "field": "record/supplier_quote/sku",
+                        "value": CANDIDATE_SKU,
+                        "when_absent": "manual_review",
+                    }
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: rule})
+            self.add_quote_source(workspace, "quote:pass", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            decided = helper.evaluate_identity_policy(
+                IDENTITY_POLICY, ["quote:pass"], inputs, question_slug=QUESTION_SLUG
+            )
+
+        self.assertEqual("manual_review", decided.verdict)
+        self.assertEqual(
+            [
+                f"Domain-pack policy {IDENTITY_POLICY} satisfied every declared rule check, but its "
+                f"definition still requires a recorded domain review: {IDENTITY_DEFINITION}",
+                "quote:pass record/supplier_quote/sku resolves to 'B0ABC12345', equal to the expected "
+                "'B0ABC12345' (declared in the rule).",
+            ],
+            decided.reasons,
+        )
+
+    def test_top_level_manual_review_over_absent_review_uses_outcome_neutral_reason(self):
+        rule = {
+            "manual_review_required": True,
+            "all_of": [
+                {
+                    "equals": {
+                        "field": "record/supplier_quote/sku",
+                        "value": CANDIDATE_SKU,
+                        "when_absent": "manual_review",
+                    }
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: rule})
+            self.add_quote_source(workspace, "quote:review", age_hours=2)
+            self.rewrite_quote_view(workspace, "quote:review", {"supplier_quote": {"price": "23.99 EUR"}})
+            self.add_quote_source(workspace, "quote:pass", age_hours=2)
+            helper, inputs = self.load_inputs(workspace)
+
+            decided = helper.evaluate_identity_policy(
+                IDENTITY_POLICY,
+                ["quote:review", "quote:pass"],
+                inputs,
+                question_slug=QUESTION_SLUG,
+            )
+
+        self.assertEqual("manual_review", decided.verdict)
+        self.assertEqual(
+            [
+                f"Domain-pack policy {IDENTITY_POLICY} requires a recorded domain review by definition: "
+                f"{IDENTITY_DEFINITION}",
+                "rule_field_absent: quote:review record/supplier_quote/sku is absent from a valid "
+                "structured view; the domain pack classifies this terminal member as optional and "
+                "requires a reviewer to record the policy decision.",
+                "quote:pass record/supplier_quote/sku resolves to 'B0ABC12345', equal to the expected "
+                "'B0ABC12345' (declared in the rule).",
+            ],
+            decided.reasons,
+        )
+
+    def test_top_level_manual_review_never_masks_a_hard_rule_failure(self):
+        rule = {
+            "manual_review_required": True,
+            "all_of": [
+                {
+                    "equals": {
+                        "field": "record/supplier_quote/sku",
+                        "value": CANDIDATE_SKU,
+                        "when_absent": "manual_review",
+                    }
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.build_workspace(Path(tmpdir), rules={IDENTITY_POLICY: rule})
+            self.add_quote_source(workspace, "quote:mismatch", age_hours=2, sku="B0MISMATCH")
+            helper, inputs = self.load_inputs(workspace)
+
+            decided = helper.evaluate_identity_policy(
+                IDENTITY_POLICY,
+                ["quote:mismatch"],
+                inputs,
+                question_slug=QUESTION_SLUG,
+            )
+
+        self.assertEqual("fail", decided.verdict)
+        self.assertEqual(1, len(decided.reasons))
+        self.assertTrue(decided.reasons[0].startswith("rule_value_mismatch"))
+        self.assertNotIn("requires a recorded domain review", "\n".join(decided.reasons))
+        self.assertEqual(helper.pack_rule_fail_remediation(IDENTITY_POLICY), decided.remediation)
 
     def test_manual_review_required_keeps_a_passing_rule_in_the_review_queue(self):
         """A pack may automate the mechanical half and still insist on a human for the rest."""

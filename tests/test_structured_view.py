@@ -172,6 +172,61 @@ class PointerResolutionTests(unittest.TestCase):
         self.assertIn("'vat'", resolution.detail)
         self.assertIn("/supplier_quote", resolution.detail)
 
+    def test_missing_members_carry_typed_location_without_changing_public_result(self):
+        resolution = self.resolve("/supplier_quote/vat")
+
+        self.assertFalse(resolution.ok)
+        self.assertEqual(STRUCTURED_VIEW.RESULT_ANCHOR_POINTER_NOT_FOUND, resolution.result)
+        self.assertEqual(STRUCTURED_VIEW.POINTER_FAILURE_MISSING_MEMBER, resolution.failure_kind)
+        self.assertEqual(1, resolution.failed_token_index)
+        self.assertEqual("/supplier_quote", resolution.container_path)
+        self.assertEqual("object", resolution.container_kind)
+        self.assertFalse(resolution.traversed_array)
+
+    def test_a_missing_parent_is_located_before_the_terminal_token(self):
+        resolution = self.resolve("/missing_parent/value")
+
+        self.assertFalse(resolution.ok)
+        self.assertEqual(STRUCTURED_VIEW.POINTER_FAILURE_MISSING_MEMBER, resolution.failure_kind)
+        self.assertEqual(0, resolution.failed_token_index)
+        self.assertEqual("the document root", resolution.container_path)
+        self.assertFalse(resolution.traversed_array)
+
+    def test_pointer_failure_kinds_distinguish_every_invalid_walk(self):
+        cases = {
+            "/~2": STRUCTURED_VIEW.POINTER_FAILURE_INVALID_ESCAPE,
+            "/rows/01": STRUCTURED_VIEW.POINTER_FAILURE_INVALID_INDEX,
+            "/rows/2": STRUCTURED_VIEW.POINTER_FAILURE_INDEX_OUT_OF_RANGE,
+            "/supplier_quote/price/cents": STRUCTURED_VIEW.POINTER_FAILURE_NON_CONTAINER,
+        }
+        for pointer, expected in cases.items():
+            with self.subTest(pointer=pointer):
+                resolution = self.resolve(pointer)
+
+                self.assertFalse(resolution.ok)
+                self.assertEqual(STRUCTURED_VIEW.RESULT_ANCHOR_POINTER_NOT_FOUND, resolution.result)
+                self.assertEqual(expected, resolution.failure_kind)
+                self.assertIsNotNone(resolution.failed_token_index)
+                self.assertIsNotNone(resolution.container_path)
+                self.assertIsNotNone(resolution.container_kind)
+
+    def test_successful_array_traversal_is_remembered_on_a_later_mapping_miss(self):
+        resolution = self.resolve("/rows/0/gtin")
+
+        self.assertFalse(resolution.ok)
+        self.assertEqual(STRUCTURED_VIEW.POINTER_FAILURE_MISSING_MEMBER, resolution.failure_kind)
+        self.assertEqual(2, resolution.failed_token_index)
+        self.assertEqual("/rows/0", resolution.container_path)
+        self.assertEqual("object", resolution.container_kind)
+        self.assertTrue(resolution.traversed_array)
+
+    def test_successful_array_traversal_is_also_visible_on_success(self):
+        resolution = self.resolve("/rows/0/date")
+
+        self.assertTrue(resolution.ok)
+        self.assertTrue(resolution.traversed_array)
+        self.assertIsNone(resolution.failure_kind)
+
     def test_deep_pointer_walks_objects_and_arrays_together(self):
         resolution = self.resolve("rows/1/price")
 

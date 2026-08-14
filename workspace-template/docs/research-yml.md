@@ -420,6 +420,14 @@ domain_pack:
   expression language and no callable. See [evidence-policies.md](evidence-policies.md)
   for each primitive's arguments, the field-reference syntax, and what each outcome means
   for a facet verdict.
+- `max_age`, `equals`, `numeric_range`, and `regex` may declare
+  `when_absent: fail | manual_review` only for their primary `record/...` field.
+  Omission defaults to fail. Manual review applies only to a missing terminal member
+  under fully resolved mapping parents in a valid hash-bound structured view; missing
+  parents, arrays, corrupt evidence, provenance, and question operands remain hard
+  failures. Null and blank are present, never conditional absence, and retain each
+  primitive's ordinary comparison/parsing semantics. A required facet using a rule that
+  can take this path requires `domain_pack.human_gated: true`.
 - Declarations are validated in one module that both consumers read, so they can never
   disagree about what a pack declared: `evidence-wiki pack validate` reports a
   `policy_rules` check before the pack ships, and evaluation refuses a malformed block at

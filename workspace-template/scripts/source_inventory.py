@@ -257,7 +257,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(config_path.read_text()) or {}
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -292,7 +292,7 @@ def existing_detected_at(manifest_path: Path) -> dict[str, str]:
     detected: dict[str, str] = {}
     if not manifest_path.exists():
         return detected
-    for line_number, line in enumerate(manifest_path.read_text().splitlines(), start=1):
+    for line_number, line in enumerate(manifest_path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -323,7 +323,7 @@ def looks_like_link_file(path: Path, raw_root: Path) -> bool:
     if path.suffix.lower() != ".txt":
         return False
     try:
-        sample = path.read_text(errors="ignore")[:8192].splitlines()
+        sample = path.read_text(encoding="utf-8", errors="ignore")[:8192].splitlines()
     except OSError:
         return False
     non_empty = [line.strip() for line in sample if line.strip()]
@@ -458,7 +458,7 @@ def read_bundle_readme(project_root: Path, bundle_dir: Path) -> tuple[dict[str, 
         return None, []
     readme_rel = readme_path.relative_to(project_root).as_posix()
     try:
-        readme = json.loads(readme_path.read_text())
+        readme = json.loads(readme_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         return None, [f"{readme_rel}: invalid JSON: {exc}"]
     except OSError as exc:
@@ -494,7 +494,7 @@ def fallback_entrypoint(bundle_dir: Path) -> tuple[str | None, str | None]:
     documentclass_candidates: list[str] = []
     for path in sorted(bundle_dir.glob("*.tex"), key=lambda value: value.name):
         try:
-            sample = path.read_text(errors="ignore")[:20000]
+            sample = path.read_text(encoding="utf-8", errors="ignore")[:20000]
         except OSError:
             continue
         if DOCUMENTCLASS_RE.search(sample):
@@ -787,7 +787,7 @@ def parse_webloc_file(text: str) -> list[dict[str, Any]]:
 
 def parse_link_file(path: Path, relative_path: str) -> tuple[list[dict[str, Any]], list[str]]:
     try:
-        text = path.read_text(errors="ignore")
+        text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError as exc:
         return [], [f"{relative_path}: cannot read link file: {exc}"]
 
@@ -1450,7 +1450,7 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
     """Parse one provenance sidecar; malformed content degrades to warnings, never failure."""
     warnings: list[str] = []
     try:
-        document = yaml.safe_load(path.read_text())
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         return {}, [f"{relative_path}: malformed provenance sidecar: {exc}"]
     if not isinstance(document, dict):
@@ -2049,7 +2049,7 @@ def write_manifest(manifest_path: Path, records: list[dict[str, Any]]) -> None:
     # Unique temp name so concurrent runs cannot steal each other's temp file;
     # the final rename stays atomic on POSIX (same filesystem).
     tmp_path = manifest_path.with_name(f"{manifest_path.name}.{uuid.uuid4().hex}.tmp")
-    tmp_path.write_text(content)
+    tmp_path.write_text(content, encoding="utf-8", newline="\n")
     tmp_path.replace(manifest_path)
 
 

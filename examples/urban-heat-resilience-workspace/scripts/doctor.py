@@ -77,7 +77,7 @@ class DoctorEnvironment:
 
     def command_version(self, command: list[str]) -> str | None:
         try:
-            result = subprocess.run(command, text=True, capture_output=True, timeout=10)  # noqa: S603
+            result = subprocess.run(command, text=True, capture_output=True, timeout=10, encoding="utf-8", errors="replace")  # noqa: S603
         except (OSError, subprocess.TimeoutExpired):
             return None
         text = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())

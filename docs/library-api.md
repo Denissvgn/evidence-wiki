@@ -124,6 +124,14 @@ have produced; it is the supported way to preview intake, since the page writes,
 the `index.md` update, and the `log.md` entry are otherwise part of the same
 operation as the report.
 
+Question batches may carry bounded optional `metadata` mappings under each
+item. The library delegates to the workspace script, so validation, canonical
+candidate-aware deduplication, persistence, and zero-based `item_index` report
+correlation are identical to CLI and MCP intake. Metadata is caller-controlled
+policy input persisted in the question page; it is not trusted evidence and
+must not contain secrets. Older workspaces must be upgraded before using the
+additive member.
+
 **`ws.orchestrate`** — the protocol, one work order at a time:
 
 | Operation | Signature |
@@ -440,8 +448,8 @@ beside what is deployed:
 
 ```python
 ws.versions()
-# {'package': '0.3.1',
-#  'workspace': {'starter_version': '0.6.0',
+# {'package': '0.4.0',
+#  'workspace': {'starter_version': '0.7.0',
 #                'schema_version': '0.1',
 #                'compatible_research_yml_contract': '0.1'}}
 ```

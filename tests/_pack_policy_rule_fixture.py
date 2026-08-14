@@ -47,6 +47,18 @@ IDENTITY_RULE = {
         {"one_of_provenance": {"providers": list(ALLOWED_PROVIDERS)}},
     ]
 }
+IDENTITY_RULE_WITH_ABSENCE_REVIEW = {
+    "all_of": [
+        {
+            "equals": {
+                "field": "record/supplier_quote/sku",
+                "question_field": "metadata/candidate_sku",
+                "when_absent": "manual_review",
+            }
+        },
+        {"one_of_provenance": {"providers": list(ALLOWED_PROVIDERS)}},
+    ]
+}
 
 #: Vocabulary sections keyed exactly as ``domain_pack.policy_vocabularies`` writes them.
 POLICY_VOCABULARIES = {
@@ -60,6 +72,12 @@ ALL_RULES = {
     FRESHNESS_POLICY: FRESHNESS_RULE,
     IDENTITY_POLICY: IDENTITY_RULE,
 }
+ALL_RULES_WITH_ABSENCE_REVIEW = {
+    SOURCE_POLICY: SOURCE_RULE,
+    FRESHNESS_POLICY: FRESHNESS_RULE,
+    IDENTITY_POLICY: IDENTITY_RULE_WITH_ABSENCE_REVIEW,
+}
+
 #: The mixed pack: the identity policy stays definition-only and keeps needing a human.
 PRIMITIVE_RULES_ONLY = {SOURCE_POLICY: SOURCE_RULE, FRESHNESS_POLICY: FRESHNESS_RULE}
 
@@ -91,13 +109,102 @@ def load_structured_view():
     return module
 
 
-def declare_pack(workspace: Path, *, rules: dict[str, Any] | None = None) -> None:
+def structured_view_bytes(document: Any) -> bytes:
+    """The exact bytes a structured-view sidecar holds for ``document``.
+
+    Mirrors ``normalize_sources.render_structured_view``: sorted keys, two-space indent,
+    one trailing newline, UTF-8, no ASCII escaping. A record binds these bytes by digest,
+    so a fixture that renders them its own way is setting up a document the package
+    itself would never have written.
+    """
+    return (
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            separators=(",", ": "),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def write_structured_view(structured: Any, sidecar: Path, payload: bytes) -> str:
+    """Write a sidecar's bytes and return the digest a record must bind them with.
+
+    ``write_bytes``, never ``write_text``. The binding covers these exact bytes, and
+    ``write_text`` rewrites ``\\n`` to the platform line ending -- CRLF on Windows --
+    while a digest taken over the untranslated payload does not. The two agree
+    everywhere except Windows, where the mismatch surfaces far downstream as a corrupt
+    structured view rather than as whatever state the fixture meant to build.
+    ``normalize_sources.sync_structured_view`` writes bytes for the same reason.
+
+    The read-back is the guard: it fails here, naming the cause, instead of leaving a
+    record bound to bytes its sidecar does not hold.
+    """
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_bytes(payload)
+    written = sidecar.read_bytes()
+    if written != payload:
+        raise AssertionError(
+            f"{sidecar} holds {len(written)} bytes but the binding would cover "
+            f"{len(payload)}: something translated the payload on the way to disk "
+            "(newline translation is the usual cause)."
+        )
+    return structured.content_hash(payload)
+
+
+def load_intake_questions():
+    """The supported intake writer used by the cross-CR integration fixtures."""
+    path = SCRIPTS / "intake_questions.py"
+    spec = importlib.util.spec_from_file_location("intake_questions_for_pack_fixture", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def intake_question(
+    workspace: Path,
+    slug: str,
+    *,
+    question: str,
+    metadata: dict[str, Any] | None,
+    priority: str = "high",
+) -> dict[str, Any]:
+    """Create one question through ``run_intake_document``, optionally with metadata."""
+    item: dict[str, Any] = {
+        "id": slug,
+        "question": question,
+        "priority": priority,
+        "origin": "pack-policy-e2e",
+    }
+    if metadata is not None:
+        item["metadata"] = metadata
+    return load_intake_questions().run_intake_document(
+        workspace,
+        {"schema_version": "1.0", "questions": [item]},
+        dry_run=False,
+        from_file_label="pack-policy-e2e-memory",
+    )
+
+
+def declare_pack(
+    workspace: Path,
+    *,
+    rules: dict[str, Any] | None = None,
+    human_gated: bool | None = None,
+) -> None:
     """Add the pack's vocabularies, and optionally its rules, to an existing research.yml."""
     config_path = workspace / "research.yml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     domain_pack: dict[str, Any] = {"name": PACK_NAME, "policy_vocabularies": POLICY_VOCABULARIES}
     if rules is not None:
         domain_pack["policy_rules"] = rules
+    if human_gated is not None:
+        domain_pack["human_gated"] = human_gated
     config["domain_pack"] = domain_pack
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
@@ -107,7 +214,7 @@ def deliver_quote(
     source_id: str,
     *,
     age_hours: float,
-    sku: str = CANDIDATE_SKU,
+    sku: str | None = CANDIDATE_SKU,
     provider_id: str | None = PROVIDER_ID,
     structured_view: str = "bound",
     usable: bool = True,
@@ -123,14 +230,20 @@ def deliver_quote(
     raw_relative = f"raw/data/{safe}.json"
     (workspace / "raw" / "data").mkdir(parents=True, exist_ok=True)
     (workspace / "sources" / "normalized").mkdir(parents=True, exist_ok=True)
+    raw_sku = sku if sku is not None else CANDIDATE_SKU
     (workspace / raw_relative).write_text(
-        json.dumps({"asin": sku, "supplier_quote": f"{sku} 23.99 EUR"}, indent=2, sort_keys=True) + "\n",
+        json.dumps(
+            {"asin": raw_sku, "supplier_quote": f"{raw_sku} 23.99 EUR"},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
     retrieved_at = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     provenance: dict[str, Any] = {
-        "origin_url": f"https://api.supplier.test/product/{sku}",
+        "origin_url": f"https://api.supplier.test/product/{raw_sku}",
         "retrieved_at": retrieved_at,
         # Path-shaped on purpose: this names the fetching *agent*, and no rule may read it
         # as the provider that delivered the evidence.
@@ -173,12 +286,18 @@ def deliver_quote(
         frontmatter["evidence_usable"] = False
     if structured_view != "absent":
         sidecar = structured.sidecar_path(workspace / "sources" / "normalized", source_id)
-        document = json.dumps({"supplier_quote": {"sku": sku, "price": "23.99 EUR"}}, indent=2, sort_keys=True) + "\n"
+        supplier_quote = {"price": "23.99 EUR"}
+        if sku is not None:
+            supplier_quote["sku"] = sku
+        document = json.dumps(
+            {"supplier_quote": supplier_quote}, indent=2, sort_keys=True
+        ) + "\n"
         digest = structured.content_hash(document.encode("utf-8"))
         if structured_view == "corrupt":
             # Rewritten after the digest was taken, so the record binds a view that no
             # longer describes these bytes: tampering, not a missing file.
-            document = document.replace(sku, "B0TAMPERED")
+            tampered = document.replace(raw_sku, "B0TAMPERED")
+            document = tampered if tampered != document else document.rstrip("\n") + " \n"
         sidecar.write_bytes(document.encode("utf-8"))
         frontmatter["structured_view"] = {
             "path": f"sources/normalized/{sidecar.name}",

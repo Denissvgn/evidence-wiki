@@ -364,7 +364,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(config_path.read_text()) or {}
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -447,7 +447,7 @@ def load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
     if not manifest_path.exists():
         raise SystemExit(f"Missing manifest: {manifest_path}")
     records: list[dict[str, Any]] = []
-    for line_number, line in enumerate(manifest_path.read_text().splitlines(), start=1):
+    for line_number, line in enumerate(manifest_path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -481,7 +481,7 @@ def timestamp_utc() -> str:
 def read_output_frontmatter(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    text = path.read_text(errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+    text = path.read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return {}
@@ -1114,7 +1114,7 @@ def read_latex_with_includes(
     visited.add(resolved_path)
     included_paths.append(rel_label)
     try:
-        text = path.read_text(errors="ignore")
+        text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError as exc:
         return IncludeResult(
             text=f"\n\n[Unreadable include: {rel_label}]\n\n",
@@ -1746,7 +1746,7 @@ def matched_reference_source_ids(
         if bib_path is None or not bib_path.is_file():
             continue
         try:
-            entries = bibtex_entries(bib_path.read_text(errors="ignore"))
+            entries = bibtex_entries(bib_path.read_text(encoding="utf-8", errors="ignore"))
         except OSError:
             continue
         for entry in entries:
@@ -1901,6 +1901,8 @@ def poppler_version(pdftotext_path: str) -> str:
             capture_output=True,
             text=True,
             timeout=5,
+            encoding="utf-8",
+            errors="replace",
         )
     except (OSError, subprocess.TimeoutExpired):
         return "unknown"
@@ -2105,6 +2107,8 @@ def run_pdftotext(
             capture_output=True,
             text=True,
             timeout=120,
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError as exc:
         return "", [f"{pdf_label}: cannot run pdftotext: {exc}"], False
@@ -3955,7 +3959,7 @@ def write_normalized_source(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(f".{output_path.name}.tmp")
-    temporary_path.write_text(render_markdown(source, frontmatter))
+    temporary_path.write_text(render_markdown(source, frontmatter), encoding="utf-8", newline="\n")
     temporary_path.replace(output_path)
     return output_path, "updated" if existed else "created"
 

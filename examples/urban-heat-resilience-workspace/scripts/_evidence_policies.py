@@ -1528,6 +1528,14 @@ def pack_rule_fail_remediation(policy: str) -> str:
     )
 
 
+def pack_rule_review_remediation(policy: str) -> str:
+    return (
+        f"The pack explicitly classifies the absent terminal record member in "
+        f"domain_pack.policy_rules[{policy}] as optional; a reviewer must inspect the "
+        "accepted source and record the policy decision."
+    )
+
+
 def pack_policy_rule_result(
     policy: str,
     rule: Any,
@@ -1550,33 +1558,55 @@ def pack_policy_rule_result(
     # One clock for the whole policy, so two sources cannot be aged against two instants
     # and report ages that do not add up in the same list of reasons.
     moment = now if now is not None else datetime.now(timezone.utc)
-    pass_reasons: list[str] = []
+    nonfailure_reasons: list[str] = []
     fail_reasons: list[str] = []
+    requires_manual_review = False
     for source_id in present:
         evaluation = _policy_primitives.evaluate_rule(
             rule, rule_context(inputs, source_id, question_slug=question_slug, now=moment)
         )
-        if evaluation.passed:
-            pass_reasons.extend(evaluation.reasons)
-        else:
+        if evaluation.outcome == _policy_primitives.OUTCOME_FAIL:
             fail_reasons.extend(evaluation.reasons)
+            continue
+        nonfailure_reasons.extend(evaluation.reasons)
+        if evaluation.outcome == _policy_primitives.OUTCOME_MANUAL_REVIEW:
+            requires_manual_review = True
     if fail_reasons:
         return result(policy, VERDICT_FAIL, ids, fail_reasons, pack_rule_fail_remediation(policy))
     if missing:
-        pass_reasons.append(f"Ignored missing non-qualifying source id(s): {', '.join(missing)}.")
+        nonfailure_reasons.append(f"Ignored missing non-qualifying source id(s): {', '.join(missing)}.")
     if rule.manual_review_required:
-        # The mechanical half is settled and says so; the pack still asked for a human, so
-        # the verdict stays manual_review rather than passing on the rule alone.
-        return manual_result(
-            policy,
-            ids,
-            [
+        # A conditional review means that not every mechanical check passed, so the
+        # established sentence is retained only for a mechanically passing rule. Both
+        # branches keep the pack-level reason first for stable review-queue rendering.
+        first_reason = (
+            f"Domain-pack policy {policy} requires a recorded domain review by definition: {definition}"
+            if requires_manual_review
+            else (
                 f"Domain-pack policy {policy} satisfied every declared rule check, but its "
-                f"definition still requires a recorded domain review: {definition}",
-                *pass_reasons,
-            ],
+                f"definition still requires a recorded domain review: {definition}"
+            )
         )
-    return result(policy, VERDICT_OK, ids, pass_reasons)
+        return result(
+            policy,
+            VERDICT_MANUAL_REVIEW,
+            ids,
+            [first_reason, *nonfailure_reasons],
+            (
+                pack_rule_review_remediation(policy)
+                if requires_manual_review
+                else "Review the accepted local source metadata and record a stronger source, provenance, or manual decision."
+            ),
+        )
+    if requires_manual_review:
+        return result(
+            policy,
+            VERDICT_MANUAL_REVIEW,
+            ids,
+            nonfailure_reasons,
+            pack_rule_review_remediation(policy),
+        )
+    return result(policy, VERDICT_OK, ids, nonfailure_reasons)
 
 
 def pack_policy_result(

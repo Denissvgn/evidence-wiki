@@ -174,7 +174,7 @@ def load_yaml_file(project_root: Path, relative_path: str, label: str, results: 
         )
         return None
     try:
-        document = yaml.safe_load(path.read_text()) or {}
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         issue(
             results,
@@ -797,7 +797,7 @@ def require_relative_file(
 def read_text(project_root: Path, relative_path: str, results: dict[str, Any]) -> str | None:
     path = project_root / relative_path
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         issue(
             results,

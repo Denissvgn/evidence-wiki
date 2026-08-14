@@ -2147,7 +2147,7 @@ def rewrite_candidates(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "".join(compact_json(apply_candidate_schema_defaults(record)) + "\n" for record in records)
     tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.write_text(content, encoding="utf-8", newline="\n")
     try:
         replace_candidate_store(tmp_path, path)
     finally:
@@ -3945,6 +3945,8 @@ def command_search_results(search_cfg: dict[str, Any], query: str) -> list[dict[
             text=True,
             timeout=SEARCH_COMMAND_TIMEOUT_SECONDS,
             check=False,
+            encoding="utf-8",
+            errors="replace",
         )
     except FileNotFoundError as exc:
         raise search_provider_failed(f"Search command not found: {argv[0]}") from exc
@@ -7795,7 +7797,7 @@ def _read_normalized_body(path: Path) -> str:
     """Read the body text beneath a normalized record's frontmatter (or '' )."""
     if not path.is_file():
         return ""
-    text = path.read_text(errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+    text = path.read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return text

@@ -516,7 +516,7 @@ def _write_requests_unlocked(path: Path, records: list[dict[str, Any]]) -> None:
     # Unique temp name so concurrent writers cannot steal each other's temp file;
     # the final rename stays atomic on POSIX (same filesystem).
     tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.write_text(content, encoding="utf-8", newline="\n")
     tmp_path.replace(path)
 
 

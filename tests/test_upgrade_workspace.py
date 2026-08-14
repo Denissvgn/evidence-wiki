@@ -1,12 +1,16 @@
 import contextlib
 import importlib.util
 import io
+import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -17,6 +21,8 @@ from evidence_wiki import cli  # noqa: E402
 
 INIT_PATH = REPO_ROOT / "workspace-template" / "scripts" / "init_research_workspace.py"
 TEMPLATE_QUERY_INDEX = REPO_ROOT / "workspace-template" / "scripts" / "query_index.py"
+TEMPLATE_INTAKE = REPO_ROOT / "workspace-template" / "scripts" / "intake_questions.py"
+TEMPLATE_INIT = REPO_ROOT / "workspace-template" / "scripts" / "init_research_workspace.py"
 
 
 def load_script_module(name: str, path: Path):
@@ -97,6 +103,77 @@ class UpgradeCliTests(unittest.TestCase):
             self.assertEqual(drifted.read_bytes(), TEMPLATE_QUERY_INDEX.read_bytes())
             self.assertIn("] upgrade |", (target / "log.md").read_text())
             self.assertTrue((target / ".locks").is_dir())
+
+    def test_upgrade_refreshes_metadata_intake_siblings_and_accepts_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = init_workspace(root / "workspace")
+            intake = target / "scripts" / "intake_questions.py"
+            initializer = target / "scripts" / "init_research_workspace.py"
+            intake.write_text("# stale intake\n", encoding="utf-8")
+            initializer.write_text("# stale initializer\n", encoding="utf-8")
+
+            code, output = run_cli("upgrade", "--target", str(target))
+
+            self.assertEqual(0, code)
+            self.assertIn("scripts/intake_questions.py", output)
+            self.assertIn("scripts/init_research_workspace.py", output)
+            self.assertEqual(TEMPLATE_INTAKE.read_bytes(), intake.read_bytes())
+            self.assertEqual(TEMPLATE_INIT.read_bytes(), initializer.read_bytes())
+
+            batch = root / "metadata-batch.json"
+            batch.write_text(
+                '{"schema_version":"1.0","questions":[{"question":"Upgraded metadata?",'
+                '"metadata":{"candidate_id":"upgrade-1"}}]}',
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(intake),
+                    "--project-root",
+                    str(target),
+                    "--from-file",
+                    str(batch),
+                    "--format",
+                    "json",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            page = target / "wiki" / "questions" / "upgraded-metadata.md"
+            frontmatter = yaml.safe_load(page.read_text(encoding="utf-8").split("---\n", 2)[1])
+            self.assertEqual({"candidate_id": "upgrade-1"}, frontmatter["metadata"])
+
+            invalid_batch = root / "invalid-metadata-batch.json"
+            invalid_batch.write_text(
+                '{"schema_version":"1.0","questions":[{"question":"Invalid upgraded metadata?",'
+                '"metadata":{"candidate_ids":["upgrade-1"]}}]}',
+                encoding="utf-8",
+            )
+            refused = subprocess.run(
+                [
+                    sys.executable,
+                    str(intake),
+                    "--project-root",
+                    str(target),
+                    "--from-file",
+                    str(invalid_batch),
+                    "--format",
+                    "json",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(2, refused.returncode)
+            self.assertEqual("WORKSPACE_UNREADABLE", json.loads(refused.stderr)["error_code"])
+            self.assertNotIn("Traceback", refused.stderr)
+            self.assertFalse(
+                (target / "wiki" / "questions" / "invalid-upgraded-metadata.md").exists()
+            )
 
     def test_upgrade_noop_when_current(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -368,7 +445,7 @@ class UpgradeUnitTests(unittest.TestCase):
             log_text = (workspace / "log.md").read_text(encoding="utf-8")
             self.assertIn(prior_log, log_text)
             self.assertIn("] upgrade |", log_text)
-            self.assertIn('starter_version: "0.6.0"', (workspace / "workspace-system.yml").read_text())
+            self.assertIn('starter_version: "0.7.0"', (workspace / "workspace-system.yml").read_text())
 
     def test_unsupported_contract_refuses_before_any_mutation(self):
         with tempfile.TemporaryDirectory() as tmpdir:

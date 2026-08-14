@@ -472,6 +472,8 @@ class DomainPackValidationTests(unittest.TestCase):
         policy_vocabularies,
         policy_rules,
         required_facet: dict | None = None,
+        *,
+        human_gated: bool = False,
     ) -> tuple[int, dict]:
         """Validate a throwaway copy of a shipped pack whose overlay declares ``policy_rules``.
 
@@ -487,6 +489,7 @@ class DomainPackValidationTests(unittest.TestCase):
             overlay_path = pack_path / "research.overlay.yml"
             overlay = yaml.safe_load(overlay_path.read_text())
             overlay["domain_pack"]["name"] = pack_name
+            overlay["domain_pack"]["human_gated"] = human_gated
             overlay["domain_pack"]["policy_vocabularies"] = policy_vocabularies
             if policy_rules is not None:
                 overlay["domain_pack"]["policy_rules"] = policy_rules
@@ -565,7 +568,7 @@ class DomainPackValidationTests(unittest.TestCase):
         checks = {check["id"]: check for check in payload["checks"]}
         self.assertEqual("pass", checks["policy_rules"]["status"])
         self.assertEqual(
-            "Domain pack declares 2 deterministic policy rule(s).",
+            "Domain pack declares 2 policy rule(s), 1 of which can route to manual review.",
             checks["policy_rules"]["message"],
         )
         self.assertEqual(
@@ -573,11 +576,13 @@ class DomainPackValidationTests(unittest.TestCase):
                 self.QUOTE_POLICY: {
                     "primitives": ["all_of", "max_age"],
                     "manual_review_required": False,
+                    "manual_review_on_absence": False,
                     "section": "freshness_policy",
                 },
                 "pack:market-data/sku-matches": {
                     "primitives": ["any_of", "equals", "one_of_provenance"],
                     "manual_review_required": True,
+                    "manual_review_on_absence": False,
                     "section": "identity_policy",
                 },
             },
@@ -736,6 +741,65 @@ class DomainPackValidationTests(unittest.TestCase):
         autonomy = checks["autonomous_required_facets"]
         self.assertEqual("fail", autonomy["status"], autonomy)
         self.assertIn(self.QUOTE_POLICY, autonomy["message"])
+
+    def test_conditional_review_rule_requires_a_human_capable_pack_for_required_facet(self):
+        rule = {
+            "all_of": [
+                {
+                    "equals": {
+                        "field": "record/supplier_quote/sku",
+                        "value": "B0ABC12345",
+                        "when_absent": "manual_review",
+                    }
+                }
+            ]
+        }
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            self.QUOTE_VOCABULARY,
+            {self.QUOTE_POLICY: rule},
+            required_facet=self.rule_backed_required_facet(self.QUOTE_POLICY),
+        )
+
+        self.assertEqual(1, code)
+        summary = payload["domain_pack"]["policy_rules"][self.QUOTE_POLICY]
+        self.assertFalse(summary["manual_review_required"])
+        self.assertTrue(summary["manual_review_on_absence"])
+        autonomy = {check["id"]: check for check in payload["checks"]}["autonomous_required_facets"]
+        self.assertEqual("fail", autonomy["status"], autonomy)
+        self.assertIn("can require manual review", autonomy["message"])
+        self.assertIn("human_gated: true", autonomy["message"])
+        self.assertNotIn("manual-only", autonomy["message"])
+        self.assertNotIn("use a deterministic policy", autonomy["message"])
+
+    def test_conditional_review_rule_is_allowed_when_required_facet_is_human_gated(self):
+        rule = {
+            "all_of": [
+                {
+                    "equals": {
+                        "field": "record/supplier_quote/sku",
+                        "value": "B0ABC12345",
+                        "when_absent": "manual_review",
+                    }
+                }
+            ]
+        }
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            self.QUOTE_VOCABULARY,
+            {self.QUOTE_POLICY: rule},
+            required_facet=self.rule_backed_required_facet(self.QUOTE_POLICY),
+            human_gated=True,
+        )
+
+        self.assertEqual(0, code, payload)
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(payload["domain_pack"]["human_gated"])
+        summary = payload["domain_pack"]["policy_rules"][self.QUOTE_POLICY]
+        self.assertTrue(summary["manual_review_on_absence"])
+        autonomy = {check["id"]: check for check in payload["checks"]}["autonomous_required_facets"]
+        self.assertEqual("pass", autonomy["status"], autonomy)
+        self.assertIn("can require manual review", autonomy["message"])
 
     def test_recommended_acquisition_rejects_unknown_provider(self):
         source_pack = REPO_ROOT / "domain-packs" / "llm-research"

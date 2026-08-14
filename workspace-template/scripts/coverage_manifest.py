@@ -575,7 +575,7 @@ def load_manifest(project_root: Path, config: dict[str, Any], slug: str) -> tupl
 def write_manifest(path: Path, document: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    tmp_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    tmp_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8", newline="\n")
     tmp_path.replace(path)
 
 

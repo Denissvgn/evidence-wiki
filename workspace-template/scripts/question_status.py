@@ -60,7 +60,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(config_path.read_text()) or {}
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -101,7 +101,11 @@ def load_frontmatter(path: Path) -> dict[str, Any] | None:
     block = text[4:end]
     try:
         data = yaml.safe_load(block)
-    except yaml.YAMLError:
+    # Deep aliases/mappings can exhaust the parser recursion budget, and Python's
+    # integer conversion guard raises plain ValueError for an enormous numeric
+    # scalar. An unreadable legacy page is skipped just like malformed YAML; it
+    # must not crash question listing or a later intake dedupe scan.
+    except (yaml.YAMLError, RecursionError, ValueError):
         return None
     return data if isinstance(data, dict) else None
 

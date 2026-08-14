@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -225,13 +226,14 @@ class McpServerTests(unittest.TestCase):
             config["review"] = {"escalation_scope": "question"}
             config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
             page = target / "wiki" / "questions" / "parked.md"
+            requested_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             page.write_text(
                 page.read_text(encoding="utf-8").replace(
                     "status: open",
                     "status: human_review\n"
                     "human_review_required: true\n"
                     "human_review_status: pending\n"
-                    'human_review_requested_at: "2026-08-07T09:00:00Z"\n'
+                    f'human_review_requested_at: "{requested_at}"\n'
                     "human_review_policies:\n"
                     "  - manual_review_required",
                     1,
@@ -577,7 +579,13 @@ class McpServerTests(unittest.TestCase):
             dry_target = self.init_workspace(root, name="dry-run-workspace")
             batch = {
                 "schema_version": "1.0",
-                "questions": [{"question": "Which benchmarks are robust?", "priority": "high"}],
+                "questions": [
+                    {
+                        "question": "Which benchmarks are robust?",
+                        "priority": "high",
+                        "metadata": {"candidate": {"suite": "robust-v1"}},
+                    }
+                ],
             }
 
             server = MCP.ResearchWikiMcpServer(dry_target)
@@ -594,7 +602,37 @@ class McpServerTests(unittest.TestCase):
             apply_result = self.call_tool(apply_server, "intake_questions", {"batch": batch})
             self.assertFalse(apply_result["isError"])
             self.assertEqual(1, apply_result["structuredContent"]["counts"]["created"])
-            self.assertTrue((apply_target / "wiki" / "questions" / "which-benchmarks-are-robust.md").is_file())
+            self.assertEqual(0, apply_result["structuredContent"]["created"][0]["item_index"])
+            page = apply_target / "wiki" / "questions" / "which-benchmarks-are-robust.md"
+            self.assertTrue(page.is_file())
+            self.assertEqual(
+                {"candidate": {"suite": "robust-v1"}},
+                QUESTION_STATUS.load_frontmatter(page)["metadata"],
+            )
+            self.assertNotIn("metadata", apply_result["structuredContent"]["created"][0])
+
+    def test_intake_questions_refuses_in_memory_metadata_canonicalization_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            server = MCP.ResearchWikiMcpServer(target)
+            before = self.workspace_snapshot(target)
+            batch = {
+                "schema_version": "1.0",
+                "questions": [
+                    {
+                        "question": "Can this integer be canonicalized?",
+                        "metadata": {"huge_integer": 10**5000},
+                    }
+                ],
+            }
+
+            result = self.call_tool(server, "intake_questions", {"batch": batch})
+
+            self.assertTrue(result["isError"])
+            payload = result["structuredContent"]
+            self.assertEqual("WORKSPACE_UNREADABLE", payload["error_code"])
+            self.assert_error_payload_has_correlation_id(result)
+            self.assertEqual(before, self.workspace_snapshot(target))
 
     def test_intake_questions_limit_failure_uses_shared_error_envelope(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1223,6 +1261,72 @@ class McpServerTests(unittest.TestCase):
                 self.assert_jsonrpc_error_does_not_leak(leaked_parse_error, "bad")
 
             tools_response = json.loads(lines[1])
+            self.assertEqual(2, tools_response["id"])
+            self.assertIn("tools", tools_response["result"])
+
+    def test_stdio_loop_maps_json_parser_recursion_to_parse_error_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            protocol_server = MCP.ResearchWikiMcpServer(target)
+            valid_message = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+            inbound = io.StringIO("{}\n" + json.dumps(valid_message) + "\n")
+            outbound = io.StringIO()
+            stderr = io.StringIO()
+            real_loads = json.loads
+            parse_calls = iter((RecursionError("too deeply nested"), valid_message))
+
+            def recursive_then_valid(_line):
+                outcome = next(parse_calls)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+
+            with mock.patch.object(MCP.json, "loads", side_effect=recursive_then_valid):
+                with contextlib.redirect_stderr(stderr):
+                    protocol_server.serve(inbound, outbound)
+
+            lines = outbound.getvalue().splitlines()
+            self.assertEqual(2, len(lines))
+            parse_error = real_loads(lines[0])
+            self.assertEqual(MCP.ERR_PARSE, parse_error["error"]["code"])
+            self.assertEqual("Parse error", parse_error["error"]["message"])
+            self.assertIsNone(parse_error["id"])
+            self.assertIn("RecursionError", stderr.getvalue())
+            tools_response = real_loads(lines[1])
+            self.assertEqual(2, tools_response["id"])
+            self.assertIn("tools", tools_response["result"])
+
+    def test_stdio_loop_maps_json_parser_value_error_to_parse_error_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            protocol_server = MCP.ResearchWikiMcpServer(target)
+            valid_message = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+            inbound = io.StringIO("{}\n" + json.dumps(valid_message) + "\n")
+            outbound = io.StringIO()
+            stderr = io.StringIO()
+            real_loads = json.loads
+            parse_calls = iter(
+                (ValueError("integer token exceeds parser resource limit"), valid_message)
+            )
+
+            def value_error_then_valid(_line):
+                outcome = next(parse_calls)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+
+            with mock.patch.object(MCP.json, "loads", side_effect=value_error_then_valid):
+                with contextlib.redirect_stderr(stderr):
+                    protocol_server.serve(inbound, outbound)
+
+            lines = outbound.getvalue().splitlines()
+            self.assertEqual(2, len(lines))
+            parse_error = real_loads(lines[0])
+            self.assertEqual(MCP.ERR_PARSE, parse_error["error"]["code"])
+            self.assertEqual("Parse error", parse_error["error"]["message"])
+            self.assertIsNone(parse_error["id"])
+            self.assertIn("ValueError", stderr.getvalue())
+            tools_response = real_loads(lines[1])
             self.assertEqual(2, tools_response["id"])
             self.assertIn("tools", tools_response["result"])
 

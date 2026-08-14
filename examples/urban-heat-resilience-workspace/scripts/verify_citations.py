@@ -826,7 +826,7 @@ def build_report(project_root: Path, args: argparse.Namespace) -> dict[str, Any]
 def write_report(report: dict[str, Any], output: str | None) -> None:
     rendered = compact_json(redact_secrets(report))
     if output:
-        Path(output).expanduser().resolve().write_text(rendered, encoding="utf-8")
+        Path(output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
     else:
         sys.stdout.write(rendered)
 

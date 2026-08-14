@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -27,7 +28,7 @@ if str(SRC_ROOT) not in sys.path:
 
 import evidence_wiki
 from evidence_wiki import _contract as contract_module
-from evidence_wiki import cli, resources
+from evidence_wiki import cli, domain_pack_validator, resources
 from evidence_wiki._script_host import load_packaged_script
 
 
@@ -272,6 +273,7 @@ class PackPolicyRulesTests(unittest.TestCase):
                     "pack:temp-pack/quote-48h": {
                         "primitives": ["all_of", "max_age"],
                         "manual_review_required": True,
+                        "manual_review_on_absence": False,
                         "section": "freshness_policy",
                     },
                 },
@@ -314,6 +316,80 @@ class PackPolicyRulesTests(unittest.TestCase):
         entry = result["temp-pack"]["pack:temp-pack/sku-matches"]
         self.assertEqual(["all_of", "any_of", "equals", "one_of_provenance"], entry["primitives"])
         self.assertFalse(entry["manual_review_required"])
+        self.assertFalse(entry["manual_review_on_absence"])
+
+    def test_conditional_review_summary_is_published_by_the_installation_contract(self):
+        policy = "pack:temp-pack/sku-optional"
+        overlay = {
+            "domain_pack": {
+                "name": "temp-pack",
+                "policy_vocabularies": {
+                    "identity_policy": {policy: "Compare the optional quoted SKU when present."},
+                },
+                "policy_rules": {
+                    policy: {
+                        "all_of": [
+                            {
+                                "equals": {
+                                    "field": "record/supplier_quote/sku",
+                                    "value": "B0ABC12345",
+                                    "when_absent": "manual_review",
+                                }
+                            }
+                        ]
+                    },
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root_with_pack(Path(tmpdir), overlay)
+            result = contract_module._pack_policy_rules(root, self.policy_primitives_module, yaml)
+
+        self.assertEqual(
+            {
+                "primitives": ["all_of", "equals"],
+                "manual_review_required": False,
+                "manual_review_on_absence": True,
+                "section": "identity_policy",
+            },
+            result["temp-pack"][policy],
+        )
+
+    def test_pack_validator_and_installation_contract_publish_the_same_rule_summary(self):
+        policy = "pack:temp-pack/sku-optional"
+        overlay = {
+            "domain_pack": {
+                "name": "temp-pack",
+                "policy_vocabularies": {
+                    "identity_policy": {policy: "Compare the optional quoted SKU when present."},
+                },
+                "policy_rules": {
+                    policy: {
+                        "all_of": [
+                            {
+                                "equals": {
+                                    "field": "record/supplier_quote/sku",
+                                    "value": "B0ABC12345",
+                                    "when_absent": "manual_review",
+                                }
+                            }
+                        ]
+                    },
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root_with_pack(Path(tmpdir), overlay)
+            contract_rules = contract_module._pack_policy_rules(
+                root, self.policy_primitives_module, yaml
+            )["temp-pack"]
+        validator_rules, validator_check = domain_pack_validator.policy_rules_check(
+            SimpleNamespace(policy_primitives=self.policy_primitives_module),
+            overlay["domain_pack"],
+        )
+
+        self.assertEqual("pass", validator_check["status"], validator_check)
+        self.assertEqual(validator_rules, contract_rules)
 
     def test_a_malformed_rule_is_skipped_rather_than_raised(self):
         # `not_a_real_primitive` is not in `PRIMITIVE_NAMES`, so `pack_policy_rules`

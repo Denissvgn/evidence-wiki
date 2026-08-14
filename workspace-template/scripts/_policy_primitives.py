@@ -43,11 +43,11 @@ exists to drain, and would do it without saying so.
 
 Evaluation is **fail-closed and performs no filesystem I/O whatsoever**. Callers assemble
 a :class:`RuleContext` from the workspace — the structured-view sidecar, the merged
-provenance, the question's frontmatter, the clock — and this module only reads it. Every
-resolution failure (no structured view, pointer not found, target is a subtree, timestamp
-unparseable) evaluates to ``fail`` with a typed reason, never to ``manual_review``: a rule
-that could degrade to review under adverse conditions would recreate the queue on exactly
-the sources least likely to deserve the benefit of the doubt.
+provenance, the question's frontmatter, the clock — and this module only reads it. A pack
+may explicitly route one narrow state to review: the missing terminal member of a
+record-rooted, mappings-only path in an otherwise valid structured view. Every other
+resolution failure (no structured view, missing parent, array traversal, target subtree,
+bad operand or unparseable value) remains a hard ``fail`` with a typed reason.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
@@ -127,6 +127,7 @@ MAX_AGE_FUTURE_SKEW_MINUTES = 5
 # `standard_reference_missing:` codes _evidence_policies.py already emits. Hosts switch on
 # them, so they are never renamed, only added to.
 REASON_FIELD_UNRESOLVED = "rule_field_unresolved"
+REASON_FIELD_ABSENT = "rule_field_absent"
 REASON_VALUE_MISMATCH = "rule_value_mismatch"
 REASON_OUT_OF_RANGE = "rule_out_of_range"
 REASON_STALE = "rule_stale"
@@ -154,6 +155,11 @@ RULE_REASON_PREFIXES = (
     RESULT_STRUCTURED_VIEW_CORRUPT,
 )
 
+# Review reasons are deliberately separate from ``RULE_REASON_PREFIXES``: callers use
+# that older tuple to recognize hard failures, and a manual-review outcome must not be
+# misclassified as one merely because its reason is also machine-readable.
+RULE_REVIEW_REASON_PREFIXES = (REASON_FIELD_ABSENT,)
+
 POLICY_RULE_REMEDIATION = (
     "Declare the rule under domain_pack.policy_rules as documented in docs/research-yml.md, "
     "or remove it so the policy falls back to recorded manual review."
@@ -174,6 +180,17 @@ _SECONDS_PER_HOUR = Decimal(3600)
 _MINUTES_PER_HOUR = Decimal(60)
 
 _JSON_KINDS = {dict: "object", list: "array"}
+
+WHEN_ABSENT_FAIL = "fail"
+WHEN_ABSENT_MANUAL_REVIEW = "manual_review"
+WHEN_ABSENT_VALUES = (WHEN_ABSENT_FAIL, WHEN_ABSENT_MANUAL_REVIEW)
+WhenAbsent = Literal["fail", "manual_review"]
+
+OUTCOME_PASS = "pass"  # noqa: S105 - policy verdict, not a credential
+OUTCOME_FAIL = "fail"
+OUTCOME_MANUAL_REVIEW = "manual_review"
+EVALUATION_OUTCOMES = (OUTCOME_PASS, OUTCOME_FAIL, OUTCOME_MANUAL_REVIEW)
+EvaluationOutcome = Literal["pass", "fail", "manual_review"]
 
 
 class PolicyRuleError(Exception):
@@ -260,15 +277,17 @@ class Primitive:
     providers: tuple[str, ...] = ()
     domains: tuple[str, ...] = ()
     children: tuple[Primitive, ...] = ()
+    when_absent: WhenAbsent = WHEN_ABSENT_FAIL
 
 
 @dataclass(frozen=True)
 class Rule:
     """One policy id's deterministic rule: a single composition, plus a review flag.
 
-    ``manual_review_required`` is carried, never acted on here. Whether a policy that
-    *passes* its rule still needs a human is the evaluator's verdict to render;
-    :func:`evaluate_rule` answers only "does the evidence satisfy the declaration".
+    ``manual_review_required`` is carried, never acted on here. Whether a policy whose
+    mechanical evaluation did not fail still needs a human is the policy renderer's
+    verdict to decide; :func:`evaluate_rule` returns only this rule tree's tri-state
+    outcome.
 
     ``section`` is the ``policy_vocabularies`` section the id was declared under, kept
     rather than discarded because a facet names one policy per section and the same id
@@ -299,11 +318,15 @@ class ResolutionFailure:
     ``code`` is ``rule_field_unresolved`` for an ordinary miss, or the structured view's
     own ``structured_view_missing`` / ``structured_view_corrupt`` when the sidecar itself
     is the problem — so the reason names the real cause instead of blaming the pointer.
+    ``eligible_absence`` is true only for the primary record field's final mapping member
+    being absent after mappings-only traversal; callers must not infer that state from
+    ``detail`` text.
     """
 
     ref: FieldRef
     code: str
     detail: str
+    eligible_absence: bool = False
 
     def reason(self, source_id: str) -> str:
         return f"{self.code}: {source_id} {self.ref.display} does not resolve: {self.detail}"
@@ -356,14 +379,33 @@ class RuleContext:
 class RuleEvaluation:
     """The verdict on one rule for one source, with the reasons that decided it.
 
-    Every failure reason begins with one of :data:`RULE_REASON_PREFIXES`; a reason
-    recorded on a pass never does. ``all_of`` reports *every* failing leaf rather than
-    stopping at the first, because a pack author fixing a source wants the whole list in
-    one pass; ``any_of`` short-circuits and reports the branch that carried it.
+    ``outcome`` is the one source of truth; compatibility properties are derived so an
+    older caller checking only ``passed`` treats review conservatively as non-passing.
+    Every hard-failure reason begins with one of :data:`RULE_REASON_PREFIXES`, while a
+    conditional-review reason begins with one of :data:`RULE_REVIEW_REASON_PREFIXES`.
+    ``all_of`` reports every hard failure; ``any_of`` continues past review because a
+    later branch may pass and short-circuit with only its winning reasons.
     """
 
-    passed: bool
+    outcome: EvaluationOutcome
     reasons: list[str]
+
+    def __post_init__(self) -> None:
+        if self.outcome not in EVALUATION_OUTCOMES:
+            raise ValueError(
+                f"RuleEvaluation.outcome must be one of {', '.join(EVALUATION_OUTCOMES)}; "
+                f"got {self.outcome!r}"
+            )
+
+    @property
+    def passed(self) -> bool:
+        """Compatibility verdict; review remains conservatively non-passing."""
+        return self.outcome == OUTCOME_PASS
+
+    @property
+    def requires_manual_review(self) -> bool:
+        """Whether this mechanical evaluation must be completed by a reviewer."""
+        return self.outcome == OUTCOME_MANUAL_REVIEW
 
 
 #: The largest UTC offset any zone uses (+14:00, Kiritimati). A timestamp that names no
@@ -947,13 +989,42 @@ def _parse_operand(
     return Operand(literal=literal), []
 
 
+def _parse_when_absent(
+    body: dict[str, Any], label: str, ref: FieldRef
+) -> tuple[WhenAbsent, list[str]]:
+    """Parse the opt-in terminal-absence behavior for one primary field.
+
+    Omission is the legacy fail-closed behavior.  Even an explicit ``fail`` is refused
+    outside ``record``: accepting the key on provenance would imply that the declared
+    absence contract applies there when provenance loading does not yet distinguish an
+    absent member from unreadable input.
+    """
+    if "when_absent" not in body:
+        return WHEN_ABSENT_FAIL, []
+    behavior = body.get("when_absent")
+    if behavior not in WHEN_ABSENT_VALUES:
+        return WHEN_ABSENT_FAIL, [
+            f"{label}.when_absent must be one of {', '.join(WHEN_ABSENT_VALUES)}; "
+            f"got {behavior!r}"
+        ]
+    if ref.root != "record":
+        return WHEN_ABSENT_FAIL, [
+            f"{label}.when_absent is allowed only when {label}.field starts with 'record/'; "
+            f"got {ref.display!r}"
+        ]
+    return behavior, []
+
+
 def _parse_max_age(body: dict[str, Any], label: str) -> tuple[Primitive | None, list[str]]:
-    errors = _key_errors(body, label, required=("field", "hours"))
+    errors = _key_errors(body, label, required=("field", "hours"), optional=("when_absent",))
     if errors:
         return None, errors
     ref, error = _parse_field_ref(body.get("field"), rooted=True, label=f"{label}.field")
     if error is not None:
         return None, [error]
+    when_absent, absence_errors = _parse_when_absent(body, label, ref)
+    if absence_errors:
+        return None, absence_errors
     hours = body.get("hours")
     if isinstance(hours, bool) or not isinstance(hours, (int, float)):
         return None, [f"{label}.hours must be a positive number of hours; got {hours!r}"]
@@ -962,20 +1033,28 @@ def _parse_max_age(body: dict[str, Any], label: str) -> tuple[Primitive | None, 
     bound = Decimal(str(hours))
     if bound <= 0:
         return None, [f"{label}.hours must be greater than zero; got {hours!r}"]
-    return Primitive(name="max_age", field=ref, hours=bound), []
+    return Primitive(name="max_age", field=ref, hours=bound, when_absent=when_absent), []
 
 
 def _parse_equals(body: dict[str, Any], label: str) -> tuple[Primitive | None, list[str]]:
-    errors = _key_errors(body, label, required=("field",), optional=("value", "question_field"))
+    errors = _key_errors(
+        body,
+        label,
+        required=("field",),
+        optional=("value", "question_field", "when_absent"),
+    )
     if errors:
         return None, errors
     ref, error = _parse_field_ref(body.get("field"), rooted=True, label=f"{label}.field")
     if error is not None:
         return None, [error]
+    when_absent, absence_errors = _parse_when_absent(body, label, ref)
+    if absence_errors:
+        return None, absence_errors
     operand, operand_errors = _parse_operand(body, label, "value", "question_field", required=True)
     if operand_errors:
         return None, operand_errors
-    return Primitive(name="equals", field=ref, operand=operand), []
+    return Primitive(name="equals", field=ref, operand=operand, when_absent=when_absent), []
 
 
 def _parse_numeric_range(body: dict[str, Any], label: str) -> tuple[Primitive | None, list[str]]:
@@ -983,13 +1062,16 @@ def _parse_numeric_range(body: dict[str, Any], label: str) -> tuple[Primitive | 
         body,
         label,
         required=("field",),
-        optional=("min", "max", "min_question_field", "max_question_field"),
+        optional=("min", "max", "min_question_field", "max_question_field", "when_absent"),
     )
     if errors:
         return None, errors
     ref, error = _parse_field_ref(body.get("field"), rooted=True, label=f"{label}.field")
     if error is not None:
         return None, [error]
+    when_absent, absence_errors = _parse_when_absent(body, label, ref)
+    if absence_errors:
+        return None, absence_errors
     minimum, min_errors = _parse_operand(
         body, label, "min", "min_question_field", required=False, numeric=True
     )
@@ -1004,16 +1086,27 @@ def _parse_numeric_range(body: dict[str, Any], label: str) -> tuple[Primitive | 
         return None, [
             f"{label} must declare at least one bound: min, max, min_question_field or max_question_field"
         ]
-    return Primitive(name="numeric_range", field=ref, minimum=minimum, maximum=maximum), []
+    return Primitive(
+        name="numeric_range",
+        field=ref,
+        minimum=minimum,
+        maximum=maximum,
+        when_absent=when_absent,
+    ), []
 
 
 def _parse_regex(body: dict[str, Any], label: str) -> tuple[Primitive | None, list[str]]:
-    errors = _key_errors(body, label, required=("field", "pattern"))
+    errors = _key_errors(
+        body, label, required=("field", "pattern"), optional=("when_absent",)
+    )
     if errors:
         return None, errors
     ref, error = _parse_field_ref(body.get("field"), rooted=True, label=f"{label}.field")
     if error is not None:
         return None, [error]
+    when_absent, absence_errors = _parse_when_absent(body, label, ref)
+    if absence_errors:
+        return None, absence_errors
     pattern = body.get("pattern")
     if not isinstance(pattern, str) or not pattern:
         return None, [f"{label}.pattern must be a non-empty regular expression string"]
@@ -1037,7 +1130,13 @@ def _parse_regex(body: dict[str, Any], label: str) -> tuple[Primitive | None, li
         compiled = re.compile(pattern)
     except (re.error, OverflowError, RecursionError) as exc:
         return None, [f"{label}.pattern is not a valid regular expression: {exc}"]
-    return Primitive(name="regex", field=ref, pattern=pattern, compiled=compiled), []
+    return Primitive(
+        name="regex",
+        field=ref,
+        pattern=pattern,
+        compiled=compiled,
+        when_absent=when_absent,
+    ), []
 
 
 def _parse_one_of_provenance(body: dict[str, Any], label: str) -> tuple[Primitive | None, list[str]]:
@@ -1252,6 +1351,7 @@ def rule_summary(rule: Rule) -> dict[str, Any]:
     return {
         "primitives": sorted(_primitive_names(rule.composition)),
         "manual_review_required": rule.manual_review_required,
+        "manual_review_on_absence": _manual_review_on_absence(rule.composition),
         # The vocabulary section the rule decides. A consumer reasoning about which fields
         # a pack automates cannot infer it from the policy id alone.
         "section": rule.section,
@@ -1264,6 +1364,13 @@ def _primitive_names(primitive: Primitive) -> set[str]:
     for child in primitive.children:
         names |= _primitive_names(child)
     return names
+
+
+def _manual_review_on_absence(primitive: Primitive) -> bool:
+    """Whether any leaf in a rule tree can route terminal absence to review."""
+    if primitive.when_absent == WHEN_ABSENT_MANUAL_REVIEW:
+        return True
+    return any(_manual_review_on_absence(child) for child in primitive.children)
 
 
 def declaration_errors(domain_pack: Any) -> list[str]:
@@ -1302,7 +1409,9 @@ def resolve_field(context: RuleContext, ref: FieldRef) -> ResolvedValue | Resolu
 
     A reference that reaches a subtree rather than a scalar is a failure here rather than
     at each primitive, because "the pointer cites an object" is one mistake with one fix
-    however the value was going to be compared.
+    however the value was going to be compared. Record-rooted fields also reject a
+    successful array traversal in v1; mapping-only record paths keep optional terminal
+    absence distinct from row/index shape failures.
     """
     if ref.root == "record":
         if not isinstance(context.structured_view, dict):
@@ -1324,7 +1433,17 @@ def resolve_field(context: RuleContext, ref: FieldRef) -> ResolvedValue | Resolu
     resolution = _structured_view.resolve_pointer(document, ref.pointer)
     if not resolution.ok:
         return ResolutionFailure(
-            ref, REASON_FIELD_UNRESOLVED, _reworded(resolution.detail, ref.document_label)
+            ref,
+            REASON_FIELD_UNRESOLVED,
+            _reworded(resolution.detail, ref.document_label),
+            eligible_absence=_eligible_record_absence(ref, resolution),
+        )
+    if ref.root == "record" and resolution.traversed_array:
+        return ResolutionFailure(
+            ref,
+            REASON_FIELD_UNRESOLVED,
+            "the field path traverses a JSON array, and v1 record rules require "
+            "mapping-only paths",
         )
     value = _canonical_operand(resolution.value)
     if not _structured_view.is_scalar(value):
@@ -1336,6 +1455,19 @@ def resolve_field(context: RuleContext, ref: FieldRef) -> ResolvedValue | Resolu
     return ResolvedValue(ref, value)
 
 
+def _eligible_record_absence(ref: FieldRef, resolution: Any) -> bool:
+    """True only for a missing terminal member reached through mappings alone."""
+    if ref.root != "record" or resolution.ok:
+        return False
+    tokens = resolution.pointer.split("/")[1:]
+    return (
+        resolution.failure_kind == _structured_view.POINTER_FAILURE_MISSING_MEMBER
+        and resolution.container_kind == "object"
+        and resolution.failed_token_index == len(tokens) - 1
+        and not resolution.traversed_array
+    )
+
+
 def _operand_value(operand: Operand, context: RuleContext) -> tuple[Any, ResolutionFailure | None]:
     if operand.ref is None:
         return operand.literal, None
@@ -1345,14 +1477,34 @@ def _operand_value(operand: Operand, context: RuleContext) -> tuple[Any, Resolut
     return resolved.value, None
 
 
-def _evaluate_max_age(primitive: Primitive, context: RuleContext) -> tuple[bool, str]:
+def _absent_or_failed(
+    primitive: Primitive, failure: ResolutionFailure, context: RuleContext
+) -> tuple[EvaluationOutcome, str]:
+    """Apply a leaf's absence declaration, or preserve its existing hard failure."""
+    if (
+        primitive.when_absent == WHEN_ABSENT_MANUAL_REVIEW
+        and failure.eligible_absence
+    ):
+        return OUTCOME_MANUAL_REVIEW, _reason(
+            REASON_FIELD_ABSENT,
+            context.source_id,
+            "is absent from a valid structured view; the domain pack classifies this "
+            "terminal member as optional and requires a reviewer to record the policy decision.",
+            primitive.field,
+        )
+    return OUTCOME_FAIL, failure.reason(context.source_id)
+
+
+def _evaluate_max_age(
+    primitive: Primitive, context: RuleContext
+) -> tuple[EvaluationOutcome, str]:
     resolved = resolve_field(context, primitive.field)
     if isinstance(resolved, ResolutionFailure):
-        return False, resolved.reason(context.source_id)
+        return _absent_or_failed(primitive, resolved, context)
     rendered = _structured_view.canonical_scalar(resolved.value)
     moment = datetime_from_value(resolved.value)
     if moment is None:
-        return False, _reason(
+        return OUTCOME_FAIL, _reason(
             REASON_FIELD_UNRESOLVED,
             context.source_id,
             f"{rendered!r} is not an ISO 8601 timestamp, so max_age cannot decide it.",
@@ -1362,7 +1514,7 @@ def _evaluate_max_age(primitive: Primitive, context: RuleContext) -> tuple[bool,
     age = Decimal(str((context.now - moment).total_seconds())) / _SECONDS_PER_HOUR
     skew = Decimal(MAX_AGE_FUTURE_SKEW_MINUTES) / _MINUTES_PER_HOUR
     if age < -skew:
-        return False, _reason(
+        return OUTCOME_FAIL, _reason(
             REASON_FUTURE_TIMESTAMP,
             context.source_id,
             f"{rendered} is {format(-age, '.1f')}h in the future; max_age tolerates at most "
@@ -1370,37 +1522,48 @@ def _evaluate_max_age(primitive: Primitive, context: RuleContext) -> tuple[bool,
             primitive.field,
         )
     if age > primitive.hours:
-        return False, _reason(
+        return OUTCOME_FAIL, _reason(
             REASON_STALE,
             context.source_id,
             f"{rendered} is {format(age, '.1f')}h old; max_age allows {bound}h.",
             primitive.field,
         )
-    return True, _satisfied(
+    return OUTCOME_PASS, _satisfied(
         context.source_id,
         f"{rendered} is {format(age, '.1f')}h old; max_age allows {bound}h.",
         primitive.field,
     )
 
 
-def _evaluate_equals(primitive: Primitive, context: RuleContext) -> tuple[bool, str]:
+def _evaluate_equals(
+    primitive: Primitive, context: RuleContext
+) -> tuple[EvaluationOutcome, str]:
     resolved = resolve_field(context, primitive.field)
     if isinstance(resolved, ResolutionFailure):
-        return False, resolved.reason(context.source_id)
+        outcome, reason = _absent_or_failed(primitive, resolved, context)
+        if outcome == OUTCOME_FAIL:
+            return outcome, reason
+        # A primary absence may review only after every operand needed to decide the
+        # comparison has resolved.  Otherwise a missing question assertion would be
+        # hidden behind the more permissive primary-field behavior.
+        _, failure = _operand_value(primitive.operand, context)
+        if failure is not None:
+            return OUTCOME_FAIL, failure.reason(context.source_id)
+        return outcome, reason
     expected, failure = _operand_value(primitive.operand, context)
     if failure is not None:
-        return False, failure.reason(context.source_id)
+        return OUTCOME_FAIL, failure.reason(context.source_id)
     target_text = _structured_view.canonical_scalar(resolved.value)
     expected_text = _structured_view.canonical_scalar(expected)
     if not _structured_view.expected_matches(resolved.value, expected):
-        return False, _reason(
+        return OUTCOME_FAIL, _reason(
             REASON_VALUE_MISMATCH,
             context.source_id,
             f"resolves to {target_text!r}, which does not equal the expected {expected_text!r} "
             f"({primitive.operand.description}).",
             primitive.field,
         )
-    return True, _satisfied(
+    return OUTCOME_PASS, _satisfied(
         context.source_id,
         f"resolves to {target_text!r}, equal to the expected {expected_text!r} "
         f"({primitive.operand.description}).",
@@ -1408,30 +1571,61 @@ def _evaluate_equals(primitive: Primitive, context: RuleContext) -> tuple[bool, 
     )
 
 
-def _evaluate_numeric_range(primitive: Primitive, context: RuleContext) -> tuple[bool, str]:
+def _evaluate_numeric_range(
+    primitive: Primitive, context: RuleContext
+) -> tuple[EvaluationOutcome, str]:
     resolved = resolve_field(context, primitive.field)
     if isinstance(resolved, ResolutionFailure):
-        return False, resolved.reason(context.source_id)
+        outcome, reason = _absent_or_failed(primitive, resolved, context)
+        if outcome == OUTCOME_FAIL:
+            return outcome, reason
+        _, bounds_failure = _numeric_bounds(primitive, context)
+        if bounds_failure is not None:
+            return OUTCOME_FAIL, bounds_failure
+        return outcome, reason
     target_text = _structured_view.canonical_scalar(resolved.value)
     target = _structured_view.parse_decimal(target_text)
     if target is None:
-        return False, _reason(
+        return OUTCOME_FAIL, _reason(
             REASON_OUT_OF_RANGE,
             context.source_id,
             f"resolves to {target_text!r}, which is not a decimal number numeric_range can compare.",
             primitive.field,
         )
+    bounds, bounds_failure = _numeric_bounds(primitive, context)
+    if bounds_failure is not None:
+        return OUTCOME_FAIL, bounds_failure
+    described = ", ".join(f"{name} {_format_number(value)}" for name, value in bounds)
+    for name, bound in bounds:
+        if (name == "min" and target < bound) or (name == "max" and target > bound):
+            return OUTCOME_FAIL, _reason(
+                REASON_OUT_OF_RANGE,
+                context.source_id,
+                f"resolves to {target_text}, outside the inclusive range ({described}).",
+                primitive.field,
+            )
+    return OUTCOME_PASS, _satisfied(
+        context.source_id,
+        f"resolves to {target_text}, inside the inclusive range ({described}).",
+        primitive.field,
+    )
+
+
+def _numeric_bounds(
+    primitive: Primitive, context: RuleContext
+) -> tuple[list[tuple[str, Decimal]], str | None]:
+    """Resolve numeric-range operands, returning one hard-failure reason if needed."""
     bounds: list[tuple[str, Decimal]] = []
     for name, operand in (("min", primitive.minimum), ("max", primitive.maximum)):
         if operand is None:
             continue
         value, failure = _operand_value(operand, context)
         if failure is not None:
-            return False, failure.reason(context.source_id)
+            return [], failure.reason(context.source_id)
         rendered = _structured_view.canonical_scalar(value)
         parsed = _structured_view.parse_decimal(rendered)
         if parsed is None:
-            return False, _reason(
+            return [], _reason(
                 REASON_OUT_OF_RANGE,
                 context.source_id,
                 f"has a {name} bound of {rendered!r} ({operand.description}), "
@@ -1439,33 +1633,22 @@ def _evaluate_numeric_range(primitive: Primitive, context: RuleContext) -> tuple
                 primitive.field,
             )
         bounds.append((name, parsed))
-    described = ", ".join(f"{name} {_format_number(value)}" for name, value in bounds)
-    for name, bound in bounds:
-        if (name == "min" and target < bound) or (name == "max" and target > bound):
-            return False, _reason(
-                REASON_OUT_OF_RANGE,
-                context.source_id,
-                f"resolves to {target_text}, outside the inclusive range ({described}).",
-                primitive.field,
-            )
-    return True, _satisfied(
-        context.source_id,
-        f"resolves to {target_text}, inside the inclusive range ({described}).",
-        primitive.field,
-    )
+    return bounds, None
 
 
-def _evaluate_regex(primitive: Primitive, context: RuleContext) -> tuple[bool, str]:
+def _evaluate_regex(
+    primitive: Primitive, context: RuleContext
+) -> tuple[EvaluationOutcome, str]:
     resolved = resolve_field(context, primitive.field)
     if isinstance(resolved, ResolutionFailure):
-        return False, resolved.reason(context.source_id)
+        return _absent_or_failed(primitive, resolved, context)
     # A present-but-null field resolves successfully — `is_scalar(None)` is true — and
     # canonicalizes to the text "null", which any permissive pattern matches. `null` is
     # what a normalizer writes when it could not extract a value, so matching its
     # rendering would pass an identity check on precisely the evidence that is missing.
     # Booleans render the same way and are never an identity either.
     if resolved.value is None or isinstance(resolved.value, bool):
-        return False, _reason(
+        return OUTCOME_FAIL, _reason(
             REASON_REGEX_MISMATCH,
             context.source_id,
             f"holds {_structured_view.canonical_scalar(resolved.value)}, not text a pattern can identify.",
@@ -1476,20 +1659,22 @@ def _evaluate_regex(primitive: Primitive, context: RuleContext) -> tuple[bool, s
     # is precisely the weakness structured-view equality exists to remove. An author who
     # wants substring behaviour writes `.*B0.*` — permissiveness has to be declared.
     if primitive.compiled.fullmatch(target_text) is None:
-        return False, _reason(
+        return OUTCOME_FAIL, _reason(
             REASON_REGEX_MISMATCH,
             context.source_id,
             f"resolves to {target_text!r}, which is not a full match for pattern {primitive.pattern!r}.",
             primitive.field,
         )
-    return True, _satisfied(
+    return OUTCOME_PASS, _satisfied(
         context.source_id,
         f"resolves to {target_text!r}, a full match for pattern {primitive.pattern!r}.",
         primitive.field,
     )
 
 
-def _evaluate_one_of_provenance(primitive: Primitive, context: RuleContext) -> tuple[bool, str]:
+def _evaluate_one_of_provenance(
+    primitive: Primitive, context: RuleContext
+) -> tuple[EvaluationOutcome, str]:
     for allowed in primitive.providers:
         for observed in context.provider_ids:
             # Exact but for case, not `expected_matches`. That helper also folds NFKC,
@@ -1499,7 +1684,7 @@ def _evaluate_one_of_provenance(primitive: Primitive, context: RuleContext) -> t
             # keeping — registry metadata spells the same provider `ISO` or `iso`
             # depending on who wrote the sidecar, and a pack cannot know which.
             if observed.casefold() == allowed.casefold():
-                return True, _satisfied(
+                return OUTCOME_PASS, _satisfied(
                     context.source_id,
                     f"was delivered by provider {observed!r}, which one_of_provenance allows.",
                 )
@@ -1507,7 +1692,7 @@ def _evaluate_one_of_provenance(primitive: Primitive, context: RuleContext) -> t
     if host:
         for domain in primitive.domains:
             if context.domain_matches(host, domain):
-                return True, _satisfied(
+                return OUTCOME_PASS, _satisfied(
                     context.source_id,
                     f"has origin host {host!r}, which matches allowed domain {domain!r}.",
                 )
@@ -1517,7 +1702,7 @@ def _evaluate_one_of_provenance(primitive: Primitive, context: RuleContext) -> t
     if primitive.domains:
         checked.append(f"allowed domains [{', '.join(primitive.domains)}]")
     observed_ids = ", ".join(repr(value) for value in context.provider_ids) or "none"
-    return False, _reason(
+    return OUTCOME_FAIL, _reason(
         REASON_PROVENANCE_NOT_ALLOWED,
         context.source_id,
         f"has provider ids ({observed_ids}) and origin host {host!r}, "
@@ -1534,29 +1719,39 @@ _LEAF_EVALUATORS = {
 }
 
 
-def _evaluate_primitive(primitive: Primitive, context: RuleContext) -> tuple[bool, list[str]]:
+def _evaluate_primitive(primitive: Primitive, context: RuleContext) -> RuleEvaluation:
     if primitive.name == "all_of":
-        passed = True
         failures: list[str] = []
-        satisfied: list[str] = []
+        retained: list[str] = []
+        reviews = False
         for child in primitive.children:
-            child_passed, child_reasons = _evaluate_primitive(child, context)
-            if child_passed:
-                satisfied.extend(child_reasons)
+            evaluation = _evaluate_primitive(child, context)
+            if evaluation.outcome == OUTCOME_FAIL:
+                failures.extend(evaluation.reasons)
             else:
-                passed = False
-                failures.extend(child_reasons)
-        return passed, (satisfied if passed else failures)
+                retained.extend(evaluation.reasons)
+                reviews = reviews or evaluation.requires_manual_review
+        if failures:
+            return RuleEvaluation(OUTCOME_FAIL, failures)
+        if reviews:
+            return RuleEvaluation(OUTCOME_MANUAL_REVIEW, retained)
+        return RuleEvaluation(OUTCOME_PASS, retained)
     if primitive.name == "any_of":
-        collected: list[str] = []
+        failures: list[str] = []
+        reviews: list[str] = []
         for child in primitive.children:
-            child_passed, child_reasons = _evaluate_primitive(child, context)
-            if child_passed:
-                return True, child_reasons
-            collected.extend(child_reasons)
-        return False, collected
-    child_passed, reason = _LEAF_EVALUATORS[primitive.name](primitive, context)
-    return child_passed, [reason]
+            evaluation = _evaluate_primitive(child, context)
+            if evaluation.outcome == OUTCOME_PASS:
+                return evaluation
+            if evaluation.outcome == OUTCOME_MANUAL_REVIEW:
+                reviews.extend(evaluation.reasons)
+            else:
+                failures.extend(evaluation.reasons)
+        if reviews:
+            return RuleEvaluation(OUTCOME_MANUAL_REVIEW, reviews)
+        return RuleEvaluation(OUTCOME_FAIL, failures)
+    outcome, reason = _LEAF_EVALUATORS[primitive.name](primitive, context)
+    return RuleEvaluation(outcome, [reason])
 
 
 def evaluate_rule(rule: Rule, context: RuleContext) -> RuleEvaluation:
@@ -1567,5 +1762,4 @@ def evaluate_rule(rule: Rule, context: RuleContext) -> RuleEvaluation:
     here — it is the evaluator's business what a passing rule means for a policy that
     also wants a human.
     """
-    passed, reasons = _evaluate_primitive(rule.composition, context)
-    return RuleEvaluation(passed=passed, reasons=reasons)
+    return _evaluate_primitive(rule.composition, context)
