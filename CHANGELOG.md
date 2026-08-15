@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.1 - 2026-08-15
+
+- Let a pack author find out before shipping whether the mapping-only record rule
+  affects their pack. `0.4.0` made `record/...` rule paths mapping-only, including
+  present values previously reached through array indices, but `pack validate`
+  accepted such a declaration and reported nothing that distinguished it from one
+  that resolves, so the answer arrived instead as every candidate failing closed
+  after deploy with a reason naming the evidence. The per-rule summary that
+  `evidence-wiki pack validate` and `evidence-wiki contract` both publish now
+  carries `record_fields_that_may_traverse_arrays`, naming every `record/` field a
+  rule reads whose path contains a segment shaped like an array index, and the
+  `policy_rules` check counts them in its message. This is reported and never
+  refused: a numeric segment is an ordinary mapping key whenever the structured
+  view carries one, so rejecting these paths statically would reject packs that
+  resolve correctly, and only the container reached at answer time can tell the two
+  apart. The list is complete for the case that matters — a path that reaches its
+  value through an array carries an index-shaped step by construction — so an empty
+  list means the hardening cannot reach that rule. Runtime behavior, the check's
+  `pass` status, and every schema version are unchanged; the new field is additive.
+  `policy_rules` documentation now also states that a numeric segment in a `record/`
+  path is a mapping key and never an array index.
+
 ## 0.4.0 - 2026-08-15
 
 - Make question-scoped policy parameters writable through every supported

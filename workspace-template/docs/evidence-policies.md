@@ -242,6 +242,15 @@ One addressing scheme, three consumers. A pointer that reaches nothing, or that
 reaches a mapping or array rather than a single scalar, is a failure — see
 [Fail-Closed Evaluation](#fail-closed-evaluation).
 
+In a `record/` path a numeric segment is a mapping key, never an array index:
+`record/price_history/0/close` resolves only when `price_history` is a mapping
+carrying the literal key `"0"`. Record rules are mapping-only, so the same path
+against an actual array is a hard failure rather than the first entry. Grounding
+anchors are unaffected and still index arrays. Because the two cases are told
+apart only by the evidence a rule meets at answer time, `pack validate` reports
+every such path instead of refusing it — see
+[What The Tooling Reports](#what-the-tooling-reports).
+
 ### Primitives
 
 | Primitive | Shape | Passes when |
@@ -378,6 +387,17 @@ rule can require either kind of review needs `domain_pack.human_gated: true`.
 A rule with both flags false remains deterministic and may be required by an
 autonomous pack.
 
+The summary also carries `record_fields_that_may_traverse_arrays`: every
+`record/` field the rule reads whose path contains a segment shaped like an array
+index. The check still passes and names the count, because such a segment is a
+mapping key whenever the structured view carries one and refusing these would
+refuse working packs. Read it as the list to confirm, not as a defect: a path
+that would reach its value through an array always appears here, so a pack whose
+list is empty cannot be affected by the mapping-only record rule, and an author
+whose list is not empty can check those paths against a real structured view
+before shipping rather than discovering the refusal on every candidate
+afterwards.
+
 `evidence-wiki contract` publishes the same summary for every installed pack under
 an additive top-level `policy_rules` key:
 
@@ -388,7 +408,8 @@ an additive top-level `policy_rules` key:
       "primitives": ["all_of", "max_age"],
       "section": "freshness_policy",
       "manual_review_required": false,
-      "manual_review_on_absence": false
+      "manual_review_on_absence": false,
+      "record_fields_that_may_traverse_arrays": []
     }
   }
 }
