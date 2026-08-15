@@ -1352,6 +1352,10 @@ def rule_summary(rule: Rule) -> dict[str, Any]:
         "primitives": sorted(_primitive_names(rule.composition)),
         "manual_review_required": rule.manual_review_required,
         "manual_review_on_absence": _manual_review_on_absence(rule.composition),
+        # Reported, never refused: see :func:`_array_traversal_candidates`. Without it the
+        # tool an author uses to ask "is this rule decidable here" cannot distinguish a
+        # rule the mapping-only record rule will refuse from one that resolves.
+        "record_fields_that_may_traverse_arrays": sorted(_array_traversal_candidates(rule.composition)),
         # The vocabulary section the rule decides. A consumer reasoning about which fields
         # a pack automates cannot infer it from the policy id alone.
         "section": rule.section,
@@ -1371,6 +1375,36 @@ def _manual_review_on_absence(primitive: Primitive) -> bool:
     if primitive.when_absent == WHEN_ABSENT_MANUAL_REVIEW:
         return True
     return any(_manual_review_on_absence(child) for child in primitive.children)
+
+
+def _array_traversal_candidates(primitive: Primitive) -> set[str]:
+    """Every ``record`` field in a rule tree whose path could reach through an array.
+
+    Candidates, not findings, and deliberately not a refusal: an index-shaped step is an
+    ordinary mapping key whenever the structured view carries it as one, so a validator
+    that rejected these would reject packs that resolve correctly. Only the container the
+    walk actually reaches decides, and that is answer-time evidence a pack gate does not
+    hold.
+
+    What the set *is* complete for is the case worth warning about. A path that reached a
+    value through an array carries an index-shaped step by construction, because that is
+    the only step :func:`_structured_view.resolve_pointer` walks a list with, so every
+    rule the mapping-only record rule will refuse is named here.
+
+    Only the primary ``field`` is walked, which is the whole population: question operands
+    parse unrooted and can never carry a ``record`` root, and no other reference can.
+    """
+    candidates: set[str] = set()
+    field = primitive.field
+    if field is not None and field.root == "record":
+        for reference_token in field.pointer.split("/")[1:]:
+            token = _structured_view.unescape_token(reference_token)
+            if token is not None and _structured_view.is_array_index_token(token):
+                candidates.add(field.display)
+                break
+    for child in primitive.children:
+        candidates |= _array_traversal_candidates(child)
+    return candidates
 
 
 def declaration_errors(domain_pack: Any) -> list[str]:

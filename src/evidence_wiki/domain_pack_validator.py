@@ -483,6 +483,17 @@ def policy_rules_check(scripts: LoadedScripts, domain_pack: Any) -> tuple[dict[s
         )
     else:
         message = f"Domain pack declares {len(declared)} deterministic policy rule(s)."
+    array_capable = sum(1 for summary in declared.values() if summary.get("record_fields_that_may_traverse_arrays"))
+    if array_capable:
+        # Appended to a passing check on purpose. An index-shaped step is a mapping key
+        # whenever the structured view carries one, so these rules may be entirely
+        # correct and failing the gate on them would refuse working packs. The author
+        # reading this line is the only party who can tell which case theirs is, and
+        # this is the last point before shipping at which they can be told.
+        message += (
+            f" {array_capable} of them read a record field whose path may traverse a JSON array; "
+            "record rules are mapping-only, so confirm each such step is a mapping key."
+        )
     return declared, check("policy_rules", "pass", message, ["research.overlay.yml"])
 
 

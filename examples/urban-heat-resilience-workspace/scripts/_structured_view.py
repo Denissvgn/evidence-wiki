@@ -320,6 +320,18 @@ def unescape_token(token: str) -> str | None:
     return token.replace("~1", "/").replace("~0", "~")
 
 
+def is_array_index_token(token: str) -> bool:
+    """Whether one decoded reference token could address an array member.
+
+    Published rather than re-spelled by each caller: a second copy of "what an array
+    step looks like" is a second place to drift from the walk in
+    :func:`resolve_pointer`, and a reporter that disagreed with the walk would name the
+    wrong pointers. A token this accepts is still an ordinary mapping key whenever the
+    document carries it as one; only the container the walk actually reaches decides.
+    """
+    return _ARRAY_INDEX_RE.fullmatch(token) is not None
+
+
 def _pointer_prefix(tokens: list[str], depth: int) -> str:
     """How far the walk got, named the way the pointer named it."""
     if depth == 0:
@@ -406,7 +418,7 @@ def resolve_pointer(obj: Any, pointer: str) -> PointerResolution:
             continue
         if isinstance(current, list):
             traversed_array = True
-            if _ARRAY_INDEX_RE.fullmatch(token) is None:
+            if not is_array_index_token(token):
                 return _pointer_not_found(
                     normalized,
                     f"{location} is a JSON array, so step {token!r} must be a decimal index "

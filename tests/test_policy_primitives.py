@@ -407,6 +407,7 @@ class PrimitiveValidationTests(unittest.TestCase):
                 "primitives": ["all_of", "equals"],
                 "manual_review_required": False,
                 "manual_review_on_absence": False,
+                "record_fields_that_may_traverse_arrays": [],
                 "section": "freshness_policy",
             },
             RULES.rule_summary(deterministic),
@@ -431,6 +432,75 @@ class PrimitiveValidationTests(unittest.TestCase):
             }
         )
         self.assertTrue(RULES.rule_summary(conditional)["manual_review_on_absence"])
+
+    def array_candidates(self, *primitives: dict[str, Any]) -> list[str]:
+        return RULES.rule_summary(parse_one(*primitives))["record_fields_that_may_traverse_arrays"]
+
+    def test_rule_summary_names_record_paths_that_could_reach_through_an_array(self):
+        self.assertEqual(
+            ["record/price_history/series/0/close"],
+            self.array_candidates({"equals": {"field": "record/price_history/series/0/close", "value": "1"}}),
+        )
+        # Every depth of a composition, deduplicated across primitives that read the same
+        # field, and ordered so two runs of the same pack report the same list.
+        self.assertEqual(
+            ["record/offers/0/price", "record/offers/12/price"],
+            self.array_candidates(
+                {"regex": {"field": "record/offers/12/price", "pattern": "[0-9]+"}},
+                {
+                    "any_of": [
+                        {"equals": {"field": "record/offers/0/price", "value": "1"}},
+                        {"numeric_range": {"field": "record/offers/0/price", "min": 1}},
+                    ]
+                },
+            ),
+        )
+
+    def test_rule_summary_names_no_path_that_the_record_rule_can_refuse(self):
+        # `0` is the boundary the walk accepts; a leading zero, a sign and the RFC's
+        # append token are not array steps, so a rule using them cannot be refused for
+        # traversing one and must not be reported as if it could.
+        self.assertEqual([], self.array_candidates({"equals": {"field": "record/series/00/x", "value": "1"}}))
+        self.assertEqual([], self.array_candidates({"equals": {"field": "record/series/-/x", "value": "1"}}))
+        self.assertEqual([], self.array_candidates({"equals": {"field": "record/series/1.0/x", "value": "1"}}))
+        self.assertEqual(
+            ["record/series/0/x"],
+            self.array_candidates({"equals": {"field": "record/series/0/x", "value": "1"}}),
+        )
+        # The mapping-only rule governs `record` alone, so naming any other root would
+        # send an author to check a path no hardening can refuse.
+        self.assertEqual([], self.array_candidates({"max_age": {"field": "provenance/0/retrieved_at", "hours": 1}}))
+        self.assertEqual(
+            [],
+            self.array_candidates({"equals": {"field": "record/sku", "question_field": "metadata/skus/0/id"}}),
+        )
+
+    def test_every_rule_the_record_hardening_refuses_is_named_by_its_summary(self):
+        """The property the report is worth trusting for: no silent affected rule.
+
+        A pack upgrading from an array-backed declaration reads this list to decide
+        whether the mapping-only record rule reaches it. If a refusal could happen
+        without the path appearing here, an empty list would be the same false
+        reassurance as reporting nothing at all.
+        """
+        view = {"price_history": {"series": [{"close": "10"}]}}
+        rule = parse_one({"equals": {"field": "record/price_history/series/0/close", "value": "10"}})
+
+        evaluation = RULES.evaluate_rule(rule, context(structured_view=view))
+        self.assertEqual(RULES.OUTCOME_FAIL, evaluation.outcome, evaluation)
+        self.assertTrue(
+            any("traverses a JSON array" in reason for reason in evaluation.reasons),
+            evaluation.reasons,
+        )
+        self.assertIn(
+            "record/price_history/series/0/close",
+            RULES.rule_summary(rule)["record_fields_that_may_traverse_arrays"],
+        )
+
+        # The same path is correct, and still reported, when the step is a mapping key.
+        # This is why the report cannot become a refusal.
+        mapping_view = {"price_history": {"series": {"0": {"close": "10"}}}}
+        self.assertTrue(RULES.evaluate_rule(rule, context(structured_view=mapping_view)).passed)
 
     def test_equals_needs_exactly_one_of_value_and_question_field(self):
         both = self.only_error(

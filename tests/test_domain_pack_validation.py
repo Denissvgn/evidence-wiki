@@ -577,17 +577,57 @@ class DomainPackValidationTests(unittest.TestCase):
                     "primitives": ["all_of", "max_age"],
                     "manual_review_required": False,
                     "manual_review_on_absence": False,
+                    "record_fields_that_may_traverse_arrays": [],
                     "section": "freshness_policy",
                 },
                 "pack:market-data/sku-matches": {
                     "primitives": ["any_of", "equals", "one_of_provenance"],
                     "manual_review_required": True,
                     "manual_review_on_absence": False,
+                    "record_fields_that_may_traverse_arrays": [],
                     "section": "identity_policy",
                 },
             },
             payload["domain_pack"]["policy_rules"],
         )
+
+    def test_policy_rules_report_array_capable_record_paths_without_failing_the_gate(self):
+        """A pack must be able to answer "does the mapping-only record rule reach me".
+
+        It must get that answer here rather than as a fail-closed refusal on every
+        candidate after deploy — and without the gate refusing it, because the same
+        path is correct whenever the structured view carries the step as a mapping key.
+        """
+        code, payload = self.validate_pack_declaring_policy_rules(
+            "market-data",
+            {
+                "freshness_policy": {self.QUOTE_POLICY: "A supplier quote must be at most 48 hours old."},
+                "identity_policy": {"pack:market-data/sku-matches": "The quoted SKU must match the candidate."},
+            },
+            {
+                self.QUOTE_POLICY: self.QUOTE_RULE,
+                "pack:market-data/sku-matches": {
+                    "all_of": [{"equals": {"field": "record/price_history/series/0/sku", "value": "B0ABC12345"}}],
+                },
+            },
+        )
+
+        self.assertEqual(0, code, payload)
+        self.assertTrue(payload["ok"], payload)
+        checks = {check["id"]: check for check in payload["checks"]}
+        self.assertEqual("pass", checks["policy_rules"]["status"])
+        self.assertEqual(
+            "Domain pack declares 2 deterministic policy rule(s). 1 of them read a record field "
+            "whose path may traverse a JSON array; record rules are mapping-only, so confirm each "
+            "such step is a mapping key.",
+            checks["policy_rules"]["message"],
+        )
+        rules = payload["domain_pack"]["policy_rules"]
+        self.assertEqual(
+            ["record/price_history/series/0/sku"],
+            rules["pack:market-data/sku-matches"]["record_fields_that_may_traverse_arrays"],
+        )
+        self.assertEqual([], rules[self.QUOTE_POLICY]["record_fields_that_may_traverse_arrays"])
 
     def test_policy_rules_reject_unknown_primitive(self):
         code, payload = self.validate_pack_declaring_policy_rules(
