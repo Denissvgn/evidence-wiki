@@ -862,10 +862,11 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
     def test_orchestration_driver_busy_is_reached_by_next_while_a_second_driver_holds_the_session(self):
         """CR-8's contention refusal, reached through the library rather than a shell.
 
-        The code exists nowhere in this package: it is minted by the workspace's
-        deployed controller, absent from ``_script_errors._REMEDIATIONS``, and
-        reaches a host only because ``error_class_for`` maps the
-        ``ORCHESTRATION_`` prefix. That is precisely the arrangement this module
+        The code is minted by the workspace's deployed controller, which builds
+        its own remediation at the raise site, and reaches a host only because
+        ``error_class_for`` maps the ``ORCHESTRATION_`` prefix. (CR-14 added a
+        matching ``_script_errors._REMEDIATIONS`` entry, but that entry is a
+        fallback the controller never consults.) That is precisely the arrangement this module
         exists to distrust -- a mapping that is right on paper proves nothing
         about a code that never survives the seam -- so the condition is provoked
         for real and the exception is judged on what arrives.
@@ -962,9 +963,11 @@ class MatrixTests(unittest.TestCase):
                 self.assertIs(family, errors.error_class_for(code))
 
     def test_every_declared_code_is_one_the_package_documents(self):
-        # ``ORCHESTRATION_WORKSPACE_UNSAFE`` is emitted by the controller and is
-        # deliberately absent from the asset's remediation table, so it is checked
-        # against the controller source instead.
+        # The controller source is the second disjunct because a code may be
+        # emitted by the deployed controller without appearing in the asset's
+        # remediation table. CR-14 gave every controller code a table entry, so
+        # the disjunct is currently redundant; it stays because the table is
+        # hand-maintained and the next new code will land in the script first.
         script_errors = _script_host.load_packaged_script(_script_host.shared_assets_root(), "_script_errors")
         controller = (SCRIPTS / "orchestration_controller.py").read_text(encoding="utf-8")
         for code in EXPECTED_FAMILY:
