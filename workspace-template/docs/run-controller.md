@@ -59,7 +59,7 @@ Top-level `run_state` fields:
 | `budget_state` | Per-run budget counters, remaining capacity, stop flag, and `stop_reasons` from the workspace status contract. Includes question/source-request/release budgets plus harmonized discovery/acquisition counters for downloads, GitHub archive bytes, OpenAlex/arXiv requests, contracted web downloads, and manual URL deliveries. |
 | `budget_overrides` | Mapping of explicit supervisor-approved run-budget overrides. `manual_url_deliveries` records `previous_limit`, `new_limit`, `override_reason`, `approved_by`, `recorded_at`, and `agent_id`. |
 | `failure_records` | Recoverable or terminal failure records, ordered by time. Empty list when no failures are recorded. |
-| `recovery_history` | Ordered ownership recovery records from `adopt` or `abandon`, including previous owner, threshold, stale age, and reason when present. |
+| `recovery_history` | Ordered recovery records. Ownership records from `adopt` or `abandon` carry previous owner, threshold, stale age, and reason when present; `recover` appends `action: "mutation_recover"` records carrying `fault_code`, `recovered_event_id`, `quarantined_artifacts`, `recovery_id`, and `ownership_changed: false` instead. Read `action` before assuming a shape. |
 | `final_verdict` | `complete`, `blocked_on_sources`, `no_ship`, `failed`, or `null` while the run is active. |
 
 The `state` object is intentionally self-contained:
@@ -146,6 +146,26 @@ event:
 ```bash
 python3 scripts/run_controller.py abandon --run-id RUN_ID --agent-id supervisor --if-stale-hours 4 --reason "No heartbeat." --format json
 ```
+
+Interrupted mutations are recovered separately from ownership. The controller
+journals a pending event in `run-state.json` under `_pending_event` before it
+appends to `events.jsonl`, so a crash between those writes makes every later
+command — including read-only `status` — refuse with
+`RUN_MUTATION_RECOVERY_REQUIRED`, and a failed write refuses with
+`RUN_MUTATION_WRITE_FAILED`. Read those two artifacts directly, not through
+`status`, while the run is in that state. `recover` then completes the journaled
+commit and quarantines interrupted `.tmp` artifacts under
+`runs/<run_id>/.recovery/quarantine/` without changing run ownership:
+
+```bash
+python3 scripts/run_controller.py recover --run-id RUN_ID --agent-id pm --format json
+```
+
+Recovery never repairs damaged retained evidence by itself. A corrupt event log
+(`RUN_EVENTS_INVALID`), an event id retained twice with different content
+(`RUN_EVENT_ID_CONFLICT`), or a malformed pending-event journal
+(`RUN_PENDING_EVENT_INVALID`) must be preserved for audit and restored from a
+verified copy before `recover` is rerun.
 
 ## State Machine
 
@@ -305,6 +325,7 @@ Use a documented type below, or use the namespaced custom escape hatch
 | `budget_override` | Supervisor-approved budget override. |
 | `budget_divergence` | Runner-reported counters disagree with artifact-derived counters. |
 | `heartbeat` | Active-run liveness marker. |
+| `mutation_recovered` | Interrupted state/event commit completed by `recover` without changing ownership. |
 | `run_adopted` | Stale active run ownership transferred. |
 | `run_abandoned` | Stale active run failed for recovery. |
 | `source_request_opened`, `source_request_fulfilled` | Source request lifecycle marker. |

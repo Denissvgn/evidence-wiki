@@ -68,6 +68,54 @@ _REMEDIATIONS = {
     "FINAL_VERDICT_REQUIRED": "Pass --final-verdict complete, blocked_on_sources, no_ship, or failed.",
     "EVENT_TYPE_INVALID": "Use a documented event type or a namespaced custom type such as custom.operator.note.",
     "EVENT_DATA_INVALID": "Pass --data-json as a JSON object or omit it.",
+    # run_controller.py
+    "BUDGET_EXCEEDED": (
+        "Record an approved override with run_controller.py override-manual-url-budget --run-id RUN_ID "
+        "--agent-id AGENT --new-limit N --override-reason TEXT --approved-by WHO, then retry the transition "
+        "or finish command."
+    ),
+    "BUDGET_OVERRIDE_INVALID": (
+        "Rerun override-manual-url-budget with --new-limit greater than the current manual URL delivery "
+        "limit the message reports; an override only raises that budget, never lowers it."
+    ),
+    "RUN_ACADEMIC_PROVIDER_ACCOUNTING_EXISTS": (
+        "Preserve the retained artifact for audit, choose a fresh run id, and start a new run. "
+        "Do not truncate or replace provider accounting by hand."
+    ),
+    "RUN_COMPLETION_NOT_READY": (
+        "Resolve every returned readiness finding and rerun finish, or close the run honestly with "
+        "--final-verdict no_ship when that transition is legal."
+    ),
+    "RUN_COMPLETION_READINESS_INVALID": (
+        "Restore scripts/publication_readiness.py from the starter with evidence-wiki upgrade so it returns "
+        "a document carrying a string verdict, then rerun finish."
+    ),
+    "RUN_COMPLETION_READINESS_UNREADABLE": (
+        "Reproduce the reported failure with scripts/publication_readiness.py --format json, fix the workspace "
+        "state or dependency it names, then rerun finish."
+    ),
+    "RUN_EVENTS_INVALID": (
+        "Preserve runs/<run_id>/events.jsonl, then restore a verified copy or repair the reported line or "
+        "duplicate event id and run run_controller.py recover --run-id RUN_ID --agent-id AGENT "
+        "before the next mutation."
+    ),
+    "RUN_EVENT_ID_CONFLICT": (
+        "Preserve runs/<run_id>/events.jsonl and reconcile the two records that share the reported event id "
+        "by hand; a committed event is never rewritten, so no command resolves the conflict for you."
+    ),
+    "RUN_MUTATION_RECOVERY_REQUIRED": (
+        "Inspect runs/<run_id>/run-state.json and events.jsonl, then run run_controller.py recover --run-id "
+        "RUN_ID --agent-id AGENT before attempting another mutation."
+    ),
+    "RUN_MUTATION_WRITE_FAILED": (
+        "Restore write access or free space for the run directory, retain any generated .tmp artifact, then "
+        "run run_controller.py recover --run-id RUN_ID --agent-id AGENT before retrying the mutation."
+    ),
+    "RUN_PENDING_EVENT_INVALID": (
+        "Preserve runs/<run_id>/run-state.json for audit and restore a verified copy whose _pending_event is "
+        "an object with a string event_id before rerunning run_controller.py recover --run-id RUN_ID "
+        "--agent-id AGENT."
+    ),
     "COVERAGE_REQUIRED": "Create or select a coverage manifest and pass only after required facets are covered.",
     "COVERAGE_BLOCKED": "Resolve blocked coverage facets with accepted sources or source requests before answering.",
     "COVERAGE_MANIFEST_INVALID": "Fix the coverage manifest YAML so it matches docs/coverage-manifest.md.",
@@ -316,6 +364,76 @@ _REMEDIATIONS = {
     ),
     "DISCOVERY_NETWORK_ERROR": "Retry later, check network access, or lower request volume.",
     "DISCOVERY_RESPONSE_INVALID": "Retry later or inspect the provider response outside the workspace.",
+    # discover_sources.py
+    "DISCOVERY_PROVIDER_DISABLED": (
+        "Add the provider to integrations.discovery.providers or choose an enabled discovery route."
+    ),
+    "DISCOVERY_RUN_ID_REQUIRED": "Pass the exact --run-id from the work order.",
+    "DISCOVERY_RUN_ID_INVALID": "Pass a filename-safe active run id.",
+    "DISCOVERY_RUN_UNKNOWN": "Start a fresh run or choose an existing active run.",
+    "DISCOVERY_RUN_TERMINAL": "Start a fresh run; terminal run artifacts are immutable.",
+    "DISCOVERY_RUN_STATE_INVALID": "Restore verified run state or start a fresh run before retrying.",
+    "DISCOVERY_RUN_RECOVERY_REQUIRED": (
+        "Recover the run with run_controller.py recover --run-id <run-id>, then retry discovery."
+    ),
+    "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED": (
+        "Preserve the run for audit and start a fresh run; never create the marker or an empty ledger by hand."
+    ),
+    "ACADEMIC_PROVIDER_ACCOUNTING_INVALID": (
+        "Restore the exact trusted marker and ledger, or start a fresh run."
+    ),
+    "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID": (
+        "Restore the provider-call ledger from a trusted backup or start a fresh run; do not reset it."
+    ),
+    "ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED": "Start a new run or deliberately raise the reviewed budget.",
+    "ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED": (
+        "Restore workspace write access and retry; no provider call was authorized."
+    ),
+    "ARXIV_RATE_LIMITED": (
+        "Wait for the provider window, reduce the request rate, and resume the retained action."
+    ),
+    "SEARCH_PROVIDER_DISABLED": (
+        "Configure integrations.discovery.search with a fixture, command, or http provider."
+    ),
+    "SEARCH_PROVIDER_FAILED": "Check the configured command/fixture path and rerun.",
+    "PROVIDER_FAILED": (
+        "Pass a readable local fixture path for the discover_sources.py standards provider; that route "
+        "reads explicit fixture snapshots only and never performs live standards-registry discovery."
+    ),
+    "REQUEST_NOT_OPEN": (
+        "Pass an open source request id, or record a new request with source_requests.py add for the "
+        "remaining evidence gap; a fulfilled request is never reopened."
+    ),
+    "CANDIDATE_UNKNOWN": "List candidates with discover_sources.py candidates list and choose an existing id.",
+    "CANDIDATE_STATE_INVALID": (
+        "Repair the record in sources/discovery/candidates.jsonl so its lifecycle_state, status, and "
+        "lifecycle_schema_version match one canonical state and the current lifecycle contract version "
+        "documented in docs/source-discovery.md."
+    ),
+    "CANDIDATE_STATE_STALE": (
+        "Re-read the candidate's current state with discover_sources.py candidates list, then rerun the "
+        "same candidates command with --expected-state set to that state, and only if the lifecycle "
+        "state machine still permits the intended change from it."
+    ),
+    "CANDIDATE_TRANSITION_INVALID": (
+        "Target a state the envelope's details.allowed_states lists, with candidates transition "
+        "--to-state or by acting on a candidate whose current state permits select or reject. The "
+        "terminal states rejected, fetched, and superseded are never reopened."
+    ),
+    "CANDIDATE_CORRELATION_CONFLICT": (
+        "Repeat the same candidates command with the value the candidate already records for the "
+        "conflicting field, which the envelope's details name alongside the requested one, or act on "
+        "another candidate. A --superseded-by-candidate-id replacement must be a different candidate "
+        "that is not already rejected or superseded."
+    ),
+    "JURISDICTION_INVALID": (
+        "Fix the profile the message names in sources/jurisdictions.yml so it matches the profile schema "
+        "in docs/source-discovery.md, then confirm with discover_sources.py jurisdictions validate."
+    ),
+    "JURISDICTION_UNKNOWN": (
+        "Run discover_sources.py jurisdictions list and pass a --jurisdiction id it reports, or add that "
+        "profile to sources/jurisdictions.yml and confirm it with discover_sources.py jurisdictions validate."
+    ),
     "GITHUB_AUTH_REQUIRED": (
         "Set a valid GITHUB_TOKEN in the process environment and rerun, "
         "or unset an invalid token to use unauthenticated discovery."
@@ -352,6 +470,85 @@ _REMEDIATIONS = {
     "OPENALEX_RATE_LIMITED": "Retry later, reduce request volume, or set OPENALEX_API_KEY for a larger usage budget.",
     "OPENALEX_PDF_UNAVAILABLE": (
         "Choose another OpenAlex work or deliver the paper manually with a provenance sidecar."
+    ),
+    # fetch_sources.py
+    #
+    # Each entry below is aligned with the remediation its raise site already passes
+    # inline, so the string a CLI operator reads and the string a library host gets
+    # from ``remediation_for`` say the same thing. Where one code is raised from
+    # several sites with per-case wording, the entry generalizes those cases rather
+    # than picking one of them.
+    "ACQUISITION_RUN_ID_REQUIRED": "Pass --run-id for the active run that owns this acquisition.",
+    "ACQUISITION_RUN_ID_INVALID": "Use a filename-safe active run id from runs/<run-id>/run-state.json.",
+    "ACQUISITION_RUN_UNKNOWN": "Start the run with run_controller.py or pass an existing active --run-id.",
+    "ACQUISITION_RUN_TERMINAL": "Start a new run before acquiring additional evidence.",
+    "ACQUISITION_RUN_STATE_INVALID": (
+        "Repair or recover the retained run-state artifact before acquiring more evidence."
+    ),
+    "ACQUISITION_RUN_RECOVERY_REQUIRED": (
+        "Run run_controller.py recover --run-id RUN_ID before retrying acquisition."
+    ),
+    "ACQUISITION_PATH_UNSAFE": (
+        "Choose a canonical workspace-relative path under raw/ without symlinked ancestors. "
+        "When a registered provider supplied the offending artifact filename, fix that distribution "
+        "to return a plain filename inside the target root."
+    ),
+    "ACQUISITION_RECOVERY_REQUIRED": (
+        "Retry through the acquisition command so the marker-backed output is quarantined safely."
+    ),
+    "ACQUISITION_RECOVERY_FAILED": (
+        "Preserve the marker-backed output, restore write access, and retry. "
+        "Do not promote it into evidence manually."
+    ),
+    "ACQUISITION_MARKER_INVALID": (
+        "Preserve the marker and payload for operator review; do not promote or delete raw evidence "
+        "automatically."
+    ),
+    "ACQUISITION_COMMIT_INCOMPLETE": (
+        "Retry the acquisition; marker-backed incomplete output will be quarantined first."
+    ),
+    "ACQUISITION_WRITE_FAILED": (
+        "Restore write access or free space, preserve the hidden partial and marker, then retry so "
+        "marker-backed output can be quarantined safely."
+    ),
+    "ACQUISITION_METADATA_MISSING": (
+        "Write the --standards-metadata file before acquiring the web snapshot."
+    ),
+    "ACQUISITION_METADATA_UNREADABLE": (
+        "Check the workspace-relative path and file permissions, then retry."
+    ),
+    "ACQUISITION_METADATA_INVALID": "Fix the standards metadata file to contain one mapping object.",
+    "ACQUISITION_DATE_METADATA_INVALID": (
+        "Pass the flagged date in its documented form: a YYYY-MM-DD date, a four-digit "
+        "--valid-for-year, or a start/end --validity-period. Omit any date flag you cannot verify."
+    ),
+    "ACQUISITION_ARCHIVE_LIMIT_EXCEEDED": (
+        "Reject the archive or inspect it manually outside the workspace."
+    ),
+    "GITHUB_ARCHIVE_BUDGET_EXCEEDED": (
+        "Start a new run or raise the reviewed GitHub archive byte budget."
+    ),
+    "GITHUB_ARCHIVE_TOO_LARGE": (
+        "Raise integrations.acquisition.github.max_archive_bytes after review, or capture a smaller ref."
+    ),
+    "GITHUB_REPO_INVALID": (
+        "Pass exactly one of --repo owner/repo or --url, and a valid --ref for archive downloads."
+    ),
+    "GITHUB_NOT_FOUND": (
+        "Verify the owner/repo and ref exist and are readable with the current token."
+    ),
+    "GITHUB_RELEASE_UNAVAILABLE": (
+        "Choose a repository or tag with a published release, or capture a source archive instead."
+    ),
+    "OPENALEX_RESOLUTION_AMBIGUOUS": (
+        "Inspect candidates manually, then use openalex get --id-or-doi with an explicit OpenAlex ID or DOI."
+    ),
+    "SIDECAR_MISSING": (
+        "Run source_inventory.py to refresh provenance paths or reacquire the source."
+    ),
+    "SIDECAR_INVALID": "Repair the sidecar or reacquire the source.",
+    "SOURCE_NOT_FOUND": (
+        "Run source_inventory.py or pass a source id from sources/manifest.jsonl."
     ),
     "NOT_IMPLEMENTED": "Use a command whose provider transport is implemented, or add the missing adapter first.",
     "CLAIM_HELD": "Use claim --steal --if-older-than for orchestrator-mediated stale-claim recovery.",
@@ -390,6 +587,30 @@ _REMEDIATIONS = {
     "SLUG_INVALID": "Pass a non-empty question slug without path separators.",
     "SLUG_UNKNOWN": "Use a question slug that exists under wiki/questions/.",
     "PAGE_INVALID": "Fix the question page frontmatter and rerun the command.",
+    # question_resolve.py / coverage_manifest.py
+    "STATUS_NOT_REOPENABLE": "Reopen only blocked questions.",
+    "SOURCE_NOT_NORMALIZED": "Inventory and normalize the delivered source before reopening.",
+    "COVERAGE_CLAIM_PROBE_INVALID": (
+        "Record only method_or_artifact_existence probes with claim_verdict unconfirmed, "
+        "arXiv and OpenAlex results, zero exact matches, and the required limitation text."
+    ),
+    "REVIEWER_INVALID": "Pass a non-empty --reviewer value to approve, or --reviewed-by to review.",
+    "REVIEW_POLICY_UNKNOWN": (
+        "Pass --policy with one identifier from the question's human_review_policies; "
+        "scripts/question_status.py --format json lists each question's human_review_pending_policies."
+    ),
+    "REVIEW_VERDICT_INVALID": "Pass --verdict accepted or --verdict rejected.",
+    "REVIEW_ALREADY_RECORDED": (
+        "Reviews are append-only, so the accepted entry stands: review one of the question's still-pending "
+        "policies instead. To overturn the acceptance, record --verdict rejected for the policy named in "
+        "this refusal, which returns the question to open for rework."
+    ),
+    "STATUS_NOT_REVIEWABLE": (
+        "Review only a question in human_review; scripts/question_status.py lists those under Pending Human Review."
+    ),
+    "STATUS_NOT_APPROVABLE": (
+        "Approve only a question in human_review; scripts/question_status.py lists those under Pending Human Review."
+    ),
     "AGENT_ID_INVALID": "Pass a non-empty --agent-id value.",
 }
 

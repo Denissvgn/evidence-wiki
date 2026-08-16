@@ -2189,7 +2189,11 @@ def require_expected_candidate_state(candidate: dict[str, Any], expected_state: 
                 f"Candidate {candidate.get('candidate_id')!r} is in state {current_state!r}, "
                 f"not the expected state {expected_state!r}."
             ),
-            remediation="Reload the candidate and retry only if the new state still permits the intended transition.",
+            remediation=(
+                "Re-read the candidate's current state with discover_sources.py candidates list, then "
+                "rerun the same candidates command with --expected-state set to that state, and only if "
+                "the lifecycle state machine still permits the intended change from it."
+            ),
             details={
                 "candidate_id": candidate.get("candidate_id"),
                 "expected_state": expected_state,
@@ -2208,7 +2212,11 @@ def require_candidate_transition(candidate: dict[str, Any], new_state: str, expe
         raise DiscoverSourcesError(
             "CANDIDATE_TRANSITION_INVALID",
             f"Candidate {candidate.get('candidate_id')!r} cannot transition from {prior_state!r} to {new_state!r}.",
-            remediation="Use a transition listed in the candidate lifecycle table; terminal states cannot be reopened.",
+            remediation=(
+                "Target a state the envelope's details.allowed_states lists, with candidates transition "
+                "--to-state or by acting on a candidate whose current state permits select or reject. "
+                "The terminal states rejected, fetched, and superseded are never reopened."
+            ),
             details={
                 "candidate_id": candidate.get("candidate_id"),
                 "prior_state": prior_state,
@@ -2227,7 +2235,12 @@ def candidate_correlation_conflict(candidate: dict[str, Any], field: str, existi
             f"Candidate {candidate.get('candidate_id')!r} already has {field}={existing!r}; "
             f"the idempotent repeat requested {requested!r}."
         ),
-        remediation="Reload the candidate and preserve its existing correlation, or choose another candidate.",
+        remediation=(
+            "Repeat the same candidates command with the value the candidate already records for the "
+            "conflicting field, which the envelope's details name alongside the requested one, or act "
+            "on another candidate. A --superseded-by-candidate-id replacement must be a different "
+            "candidate that is not already rejected or superseded."
+        ),
         details={
             "candidate_id": candidate.get("candidate_id"),
             "field": field,
@@ -5460,7 +5473,11 @@ def _jurisdiction_invalid(message: str, *, remediation: str | None = None) -> Di
     return DiscoverSourcesError(
         "JURISDICTION_INVALID",
         message,
-        remediation=remediation or "Fix the profile in sources/jurisdictions.yml and rerun jurisdictions validate.",
+        remediation=remediation
+        or (
+            "Fix the profile the message names in sources/jurisdictions.yml so it matches the profile "
+            "schema in docs/source-discovery.md, then confirm with discover_sources.py jurisdictions validate."
+        ),
         details={"command": "jurisdictions", "network_io_executed": False},
     )
 
@@ -5615,7 +5632,7 @@ def load_jurisdiction_profiles(project_root: Path, config: dict[str, Any]) -> li
         raise DiscoverSourcesError(
             "JURISDICTION_INVALID",
             f"{relative_label(project_root, path)}: invalid YAML: {exc}",
-            remediation="Fix the YAML syntax and rerun jurisdictions validate.",
+            remediation="Fix the YAML syntax and rerun discover_sources.py jurisdictions validate.",
             details={"command": "jurisdictions", "network_io_executed": False},
         ) from exc
     if document is None:
@@ -5636,7 +5653,11 @@ def require_jurisdiction(profiles: list[dict[str, Any]], jurisdiction_id: str) -
         raise DiscoverSourcesError(
             "JURISDICTION_UNKNOWN",
             f"Unknown jurisdiction id: {jurisdiction_id!r} (no matching profile in sources/jurisdictions.yml).",
-            remediation="Run discover_sources.py jurisdictions list to see configured profiles, or add the profile.",
+            remediation=(
+                "Run discover_sources.py jurisdictions list and pass a --jurisdiction id it reports, or "
+                "add that profile to sources/jurisdictions.yml and confirm it with discover_sources.py "
+                "jurisdictions validate."
+            ),
             details={"jurisdiction_id": jurisdiction_id, "network_io_executed": False},
         )
     return profile
