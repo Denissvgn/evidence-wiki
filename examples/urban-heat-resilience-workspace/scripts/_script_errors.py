@@ -256,6 +256,30 @@ _REMEDIATIONS = {
     "SLUG_INVALID": "Pass a non-empty question slug without path separators.",
     "SLUG_UNKNOWN": "Use a question slug that exists under wiki/questions/.",
     "PAGE_INVALID": "Fix the question page frontmatter and rerun the command.",
+    # question_resolve.py / coverage_manifest.py
+    "STATUS_NOT_REOPENABLE": "Reopen only blocked questions.",
+    "SOURCE_NOT_NORMALIZED": "Inventory and normalize the delivered source before reopening.",
+    "COVERAGE_CLAIM_PROBE_INVALID": (
+        "Record only method_or_artifact_existence probes with claim_verdict unconfirmed, "
+        "arXiv and OpenAlex results, zero exact matches, and the required limitation text."
+    ),
+    "REVIEWER_INVALID": "Pass a non-empty --reviewer value to approve, or --reviewed-by to review.",
+    "REVIEW_POLICY_UNKNOWN": (
+        "Pass --policy with one identifier from the question's human_review_policies; "
+        "scripts/question_status.py --format json lists each question's human_review_pending_policies."
+    ),
+    "REVIEW_VERDICT_INVALID": "Pass --verdict accepted or --verdict rejected.",
+    "REVIEW_ALREADY_RECORDED": (
+        "Reviews are append-only, so the accepted entry stands: review one of the question's still-pending "
+        "policies instead. To overturn the acceptance, record --verdict rejected for the policy named in "
+        "this refusal, which returns the question to open for rework."
+    ),
+    "STATUS_NOT_REVIEWABLE": (
+        "Review only a question in human_review; scripts/question_status.py lists those under Pending Human Review."
+    ),
+    "STATUS_NOT_APPROVABLE": (
+        "Approve only a question in human_review; scripts/question_status.py lists those under Pending Human Review."
+    ),
     "AGENT_ID_INVALID": "Pass a non-empty --agent-id value.",
 }
 
