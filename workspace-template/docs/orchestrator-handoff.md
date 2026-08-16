@@ -732,6 +732,20 @@ Required envelope fields:
 | `budgets` | Per-run limits from `workspace_status.py` plus any remaining counters the PM is enforcing. |
 | `provider_policy` | Separate discovery and acquisition lists containing only concrete provider IDs already authorized by `research.yml`; an empty phase list means that network phase is unavailable. |
 | `delivery_modes` | Optional non-network delivery strategies such as `manual`; strategy and delivery labels are never provider authorization. |
+| `ACQUISITION_URL_UNSAFE` | A requested acquisition URL is not HTTPS, or its hostname is not public. | Use an HTTPS URL with a public hostname. |
+| `ACQUISITION_DNS_FAILED` | DNS resolution for the acquisition host failed, or its answer set was not entirely public. | Retry after DNS is healthy or acquire the source manually after review. |
+| `ACQUISITION_REDIRECT_LIMIT` | The HTTPS redirect chain exceeded the policy limit before reaching a final URL. | Use the canonical final HTTPS URL or review the redirect chain manually. |
+| `ACQUISITION_STATUS_UNEXPECTED` | The origin returned a non-2xx status for an automated acquisition. | Use a source URL that returns a successful 2xx response. |
+| `ACQUISITION_MIME_UNEXPECTED` | The response media type did not match the type the acquisition expected. | Use an endpoint that serves the expected media type; do not retain an error page. |
+| `GROUNDING_REQUIRED` | `answer --require-grounding` found no usable grounding entries on the question. | Add a grounding frontmatter list whose entries each carry claim, source_id, and exactly one form of evidence: quote (with optional location_hint) or anchor with pointer and expected. |
+| `GROUNDING_VERIFIER_REQUIRED` | `verify_quotes.py --write` was asked to stamp verification metadata without a verifier identity. | Pass --verified-by AGENT_ID when writing quote-verification metadata. |
+| `ACQUISITION_REDIRECT_UNSAFE` | An HTTPS redirect left the reviewed public-domain policy during acquisition. | Use a source URL whose redirects stay on reviewed public HTTPS domains. |
+| `DOMAIN_PACK_INVALID` | The installed or supplied domain pack does not satisfy the pack contract. | Fix the domain pack so it passes evidence-wiki pack validate, then rerun the command. |
+| `DOMAIN_PACK_STATE_INVALID` | `domain-packs/.evidence-wiki-state.yml` is missing, unreadable, or not a valid state document. | Restore domain-packs/.evidence-wiki-state.yml from a known-good backup or reinitialize the workspace before refreshing its domain pack. |
+| `DOMAIN_PACK_UNTRACKED` | The workspace has an installed pack with no lifecycle state, or one whose identity does not match `research.yml`. | Restore or align the installed pack tree and its research.yml name, version, and contract; then run evidence-wiki pack adopt, and refresh only after adoption succeeds. |
+| `DOMAIN_PACK_REFRESH_CONFLICT` | A pack refresh found local edits competing with pack-supplied `config:` or `file:` targets. | Review the reported config: and file: targets, then rerun with a path-specific --keep-local or --accept-pack resolution for each conflict. |
+| `DOMAIN_PACK_TRANSACTION_INCOMPLETE` | A previous pack write was interrupted and its transaction is still open. | Run a write-mode evidence-wiki pack command to recover the interrupted transaction; dry-run and doctor only report it. |
+| `DOMAIN_PACK_WRITE_FAILED` | A domain-pack write failed at the reported boundary. | Restore write access and free space for the workspace, inspect any reported transaction, then retry the pack command. |
 
 All child agents for one PM run use the same `run_id` and one
 `runs/<run_id>/run-state.json`. Child agents use distinct `agent_id` values only

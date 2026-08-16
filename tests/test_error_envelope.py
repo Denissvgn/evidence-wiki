@@ -76,6 +76,96 @@ def load_helper():
     return load_script_module("research_script_errors", "_script_errors.py")
 
 
+ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{4,}$")
+# Keywords through which a code reaches an error constructor without being its first
+# positional argument. Each was found the hard way: a code invisible to a positional-only
+# scan, already shipped with no remediation because nothing counted it.
+ERROR_CODE_KEYWORDS = {"error_code", "status_error_code", "not_found_code", "code"}
+
+
+def _code_strings(node: ast.expr, consts: dict[str, str]) -> list[str]:
+    """Every code-shaped string this expression can evaluate to, statically.
+
+    Handles the four shapes that occur in this package: a literal, a module constant, a
+    conditional (``A if cond else B`` — how ``require_safe_id`` picks between two codes),
+    and a boolean fallback. A code built at runtime is out of reach and is declared as
+    such in the caller's docstring rather than silently dropped.
+    """
+    values: list[str] = []
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        values = [node.value]
+    elif isinstance(node, ast.Name):
+        resolved = consts.get(node.id)
+        values = [resolved] if isinstance(resolved, str) else []
+    elif isinstance(node, ast.IfExp):
+        values = _code_strings(node.body, consts) + _code_strings(node.orelse, consts)
+    elif isinstance(node, ast.BoolOp):
+        values = [s for value in node.values for s in _code_strings(value, consts)]
+    return [value for value in values if ERROR_CODE_RE.match(value)]
+
+
+def collect_raised_error_codes() -> dict[str, set[str]]:
+    """Map every statically-discoverable error code to the scripts that raise it."""
+    owners: dict[str, set[str]] = {}
+    for path in sorted(SCRIPTS.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        consts = {
+            node.targets[0].id: node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and node.targets
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
+        # Anything *raised* with a code-shaped first argument is an error constructor,
+        # whatever it is called. Matching on the name alone missed `LifecycleFailure`
+        # (6 codes), `DomainPackInitFailure` (2) and the `registered_error` factory (3) —
+        # a filter built from the names that happened to be in front of its author.
+        raised_calls = {
+            id(node.exc)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            found: list[str] = []
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None) or ""
+            constructs_error = (
+                "Error" in name or "Refusal" in name or "Failure" in name or id(node) in raised_calls
+            )
+            if constructs_error:
+                for argument in node.args[:2]:
+                    found += _code_strings(argument, consts)
+                    if found:
+                        break
+            # Code-carrying keywords are read from *every* call, not only from error
+            # constructors. `STATUS_NOT_REVIEWABLE` is handed to `record_human_reviews`
+            # as `status_error_code=` and raised inside it, so a sweep restricted to
+            # constructor calls never sees it — the blind spot that let it ship with no
+            # remediation. A keyword named `*error_code` carrying a code-shaped string is
+            # an error code wherever it appears.
+            for keyword in node.keywords:
+                if keyword.arg in ERROR_CODE_KEYWORDS:
+                    found += _code_strings(keyword.value, consts)
+            for code in found:
+                owners.setdefault(code, set()).add(path.name)
+    return owners
+
+
+def documented_error_code_rows() -> set[str]:
+    """Every error code carrying a row in any shipped documentation table."""
+    codes: set[str] = set()
+    roots = [REPO_ROOT / "workspace-template" / "docs", REPO_ROOT / "docs"]
+    for root in roots:
+        for path in sorted(root.rglob("*.md")):
+            codes |= set(
+                re.findall(r"^\|\s*`([A-Z][A-Z0-9_]{4,})`", path.read_text(encoding="utf-8"), re.M)
+            )
+    return codes
+
+
 def markdown_row_cells(line: str) -> list[str]:
     """Split one Markdown table row into cells, honouring `\\|` as escaped content.
 
@@ -435,6 +525,52 @@ class ErrorEnvelopeTests(unittest.TestCase):
         self.assertIn("orchestration_controller.py", required)
         missing = sorted(set(required) - set(documented))
         self.assertEqual([], missing, "document every required JSON-mode script in orchestrator-handoff.md")
+
+    def test_every_raised_error_code_has_a_specific_remediation_and_a_doc_row(self):
+        """CR-14's closing gate: no code falls back to the generic remediation, and every
+        code a script can raise is documented in a table.
+
+        The registry and the doc tables are hand-maintained lists that must cover a set
+        nobody was counting. Before CR-14, 97 codes fell back to
+        ``"Read the message, fix the input or workspace state, and rerun the command."``
+        and 37 appeared in no doc at all — while the operator holding one of those
+        refusals was told nothing about how to fix it.
+
+        **This guard deliberately does not reuse the scan that scoped CR-14.** That scan
+        saw only codes passed as a positional string literal, and missed eight across two
+        modules that arrive through a keyword (``status_error_code=``, ``not_found_code=``,
+        ``error_code=``). A completeness check built on it would certify coverage over
+        exactly the codes it could see and stay silent about the rest — a guard carrying
+        the defect it exists to prevent, which is how the JSON Output Scripts check came
+        to pass while reading 85 of 131 codes.
+
+        Known blindness, stated rather than implied: a code assembled at runtime (an
+        f-string, a lookup, a value read from data) is invisible here, as is one raised by
+        a helper this walk does not recognise as an error constructor. The counts asserted
+        below are the guard's own scope, so a change that silently shrinks its reach fails
+        instead of quietly passing.
+        """
+        codes = collect_raised_error_codes()
+        helper = load_helper()
+        generic = helper.remediation_for("__no_such_code_can_ever_be_registered__")
+
+        # Guard the guard: publish the scope, so shrinking it is a failure, not a pass.
+        self.assertGreater(len(codes), 180, "error-code collection found suspiciously few codes")
+        for expected, why in (
+            ("STATUS_NOT_REVIEWABLE", "reached through a status_error_code= keyword"),
+            ("GITHUB_NOT_FOUND", "reached through a not_found_code= keyword"),
+            ("WORK_ORDER_INVALID", "reached through an error_code= keyword"),
+        ):
+            self.assertIn(expected, codes, f"{expected} must be collected: {why}")
+
+        documented = documented_error_code_rows()
+        self.assertGreater(len(documented), 190, "documentation sweep found suspiciously few code rows")
+
+        unremediated = sorted(code for code in codes if helper.remediation_for(code) == generic)
+        self.assertEqual([], unremediated, "these raised codes fall back to the generic remediation")
+
+        undocumented = sorted(code for code in codes if code not in documented)
+        self.assertEqual([], undocumented, "these raised codes appear in no documentation table")
 
     def test_json_output_scripts_table_uses_stable_error_codes(self):
         missing = sorted(documented_json_output_error_codes() - documented_stable_error_codes())
