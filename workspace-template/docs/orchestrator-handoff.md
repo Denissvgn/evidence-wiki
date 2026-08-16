@@ -578,11 +578,11 @@ Stable error codes:
 | `GITHUB_ARCHIVE_TOO_LARGE` | A GitHub source archive exceeds the configured size limit. | Raise `integrations.acquisition.github.max_archive_bytes` after review, or capture a smaller ref. |
 | `GITHUB_ARCHIVE_BUDGET_EXCEEDED` | Archives this run already retained plus the next one would exceed `integrations.acquisition.github.max_archive_bytes`. | Start a new run or raise the reviewed GitHub archive byte budget; it is cumulative across the run, not per archive. |
 | `ACQUISITION_PROVIDER_DISABLED` | Requested provider is not allow-listed for the workspace. | Add the provider to `integrations.acquisition.providers` or choose an enabled provider. |
-| `ACQUISITION_LIMIT_EXCEEDED` | Requested downloads exceed the workspace acquisition limit. | Lower the request count or raise the limit after reviewing provider constraints. |
+| `ACQUISITION_LIMIT_EXCEEDED` | A single command requested more downloads than the limit allows, or the run has already spent its download budget. | Lower the request count, start a new run when this run has spent its budget, or raise the limit after reviewing provider constraints. |
 | `ARXIV_ID_INVALID` | arXiv identifier syntax is invalid. | Pass a versioned post-2007 arXiv id. |
 | `ARXIV_RATE_LIMITED` | arXiv refused or throttled the bounded request. | Wait for the provider window, reduce the request rate, and resume the retained action. |
 | `ACQUISITION_NETWORK_ERROR` | Provider request failed due to network or server errors. | Retry later, check network access, or lower request volume. |
-| `ACQUISITION_RESPONSE_INVALID` | Provider response was malformed or missing required data. | Retry later or inspect the provider response manually. |
+| `ACQUISITION_RESPONSE_INVALID` | A provider response was malformed or missing required data, or the transport adapter itself returned something unusable. | Retry later or inspect the provider response manually; when the message names the adapter rather than the response, fix the adapter. |
 | `ACQUISITION_CONTENT_TOO_LARGE` | A provider response exceeds the configured download byte cap. No raw artifact or sidecar is left behind. | Raise the reviewed byte cap or acquire a smaller source artifact. |
 | `ACQUISITION_TLS_FAILED` | A provider endpoint's TLS certificate chain could not be verified, or a command asked to disable verification. Automated acquisition never disables TLS verification. | Use an endpoint with a valid, trusted TLS certificate chain. |
 | `ACQUISITION_ARCHIVE_UNSAFE` | Downloaded archive has unsafe paths or unsupported members. | Reject the archive or inspect it outside the workspace. |

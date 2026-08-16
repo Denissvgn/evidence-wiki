@@ -486,7 +486,7 @@ class SmokeValidateRegisteredProviderTests(unittest.TestCase):
         The chain is: a HIGH smoke issue clears ``results['ok']``, which
         ``workspace_status.smoke_section`` reports, which ``readiness_section`` turns
         into the ``attention_required`` verdict, which ``verify_runtime_guards``
-        refuses with ``ORCHESTRATION_WORKSPACE_HEALTH_CHANGED``.  Each hop is exercised here so
+        refuses with ``ORCHESTRATION_WORKSPACE_UNSAFE``.  Each hop is exercised here so
         that a future change breaking any one of them fails on this test rather than
         silently downgrading an authorization defect to a report nobody blocks on.
         """
@@ -508,7 +508,7 @@ class SmokeValidateRegisteredProviderTests(unittest.TestCase):
 
             with self.assertRaises(controller.OrchestrationControllerError) as caught:
                 controller.verify_runtime_guards(target, {})
-            self.assertEqual("ORCHESTRATION_WORKSPACE_HEALTH_CHANGED", caught.exception.error_code)
+            self.assertEqual("ORCHESTRATION_WORKSPACE_UNSAFE", caught.exception.error_code)
             self.assertEqual("attention_required", caught.exception.details["readiness_verdict"])
 
     def test_an_installed_registration_leaves_the_workspace_operable(self):
