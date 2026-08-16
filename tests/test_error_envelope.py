@@ -737,6 +737,46 @@ class ErrorEnvelopeTests(unittest.TestCase):
         )
         self.assertEqual({}, split, f"these codes report more than one recoverability: {detail}")
 
+    def test_documentation_tables_have_a_consistent_column_count(self):
+        """Every row in a Markdown table must match its header's column count.
+
+        `test_every_raised_error_code_has_a_specific_remediation_and_a_doc_row` counts a
+        code as documented when a row starting `| \\`CODE\\` |` exists *anywhere*, which is
+        deliberate — codes are documented across several files. The cost is that it cannot
+        tell a row in the right table from a row in the wrong one, and CR-14's insertion
+        script put fourteen 3-column error-code rows inside the 2-column "Required
+        envelope fields" table by partitioning on a marker and appending after the last
+        table row *in the rest of the document*. The completeness guard passed; the page
+        rendered as garbage. A reviewer caught it.
+
+        So the shape is checked separately from the membership. A table is a contiguous run
+        of lines starting `|`; every row in it must have the header's cell count.
+        """
+        offenders: list[str] = []
+        roots = [REPO_ROOT / "workspace-template" / "docs", REPO_ROOT / "docs"]
+        for root in roots:
+            for path in sorted(root.rglob("*.md")):
+                lines = path.read_text(encoding="utf-8").splitlines()
+                index = 0
+                while index < len(lines):
+                    if not lines[index].startswith("|"):
+                        index += 1
+                        continue
+                    block_start = index
+                    while index < len(lines) and lines[index].startswith("|"):
+                        index += 1
+                    block = lines[block_start:index]
+                    expected = len(markdown_row_cells(block[0]))
+                    for offset, row in enumerate(block[1:], start=1):
+                        if set(row.replace("|", "").replace("-", "").replace(":", "").strip()) == set():
+                            continue  # the ---|--- separator
+                        if len(markdown_row_cells(row)) != expected:
+                            offenders.append(
+                                f"{path.relative_to(REPO_ROOT)}:{block_start + offset + 1} has "
+                                f"{len(markdown_row_cells(row))} cells, header has {expected}"
+                            )
+        self.assertEqual([], offenders, "these table rows do not match their header's column count")
+
     def test_remediations_name_only_commands_that_exist(self):
         """A remediation must not send an operator to a flag or subcommand that isn't there.
 

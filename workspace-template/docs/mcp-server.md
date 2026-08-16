@@ -72,7 +72,7 @@ that only read textual tool output.
 | `query_index` | `scripts/query_index.py QUERY --format json` | `query` required; optional `scope`, `limit` capped at 100, workspace-relative `index_path` |
 | `intake_questions` | `scripts/intake_questions.py --format json` | `batch` required; optional `dry_run` |
 | `export_answers` | `scripts/export_answers.py --format json` | optional `status: string[]` |
-| `source_requests_list` | `scripts/source_requests.py list --format json` | optional `status: ["open"|"fulfilled"]`, `kind: string[]`, `scope: {string: string}` |
+| `source_requests_list` | `scripts/source_requests.py list --format json` | optional `status: ["open"\|"fulfilled"]`, `kind: string[]`, `scope: {string: string}` |
 
 ### Source Request Filters
 
