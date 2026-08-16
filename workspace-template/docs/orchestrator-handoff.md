@@ -499,7 +499,7 @@ Stable error codes:
 | `QUERY_MISSING` | Retrieval query text is missing. | Provide query terms. |
 | `QUESTION_UNKNOWN` | Referenced question slug does not exist. | Use an existing `wiki/questions/` slug. |
 | `REQUEST_UNKNOWN` | Referenced source-request id is unknown. | List requests and choose an existing id. |
-| `REQUEST_NOT_OPEN` | Discovery was requested for a source request that is no longer open. | Select an open request or reopen the request deliberately before discovery. |
+| `REQUEST_NOT_OPEN` | Discovery was requested for a source request that is no longer open. | Pass an open source request id, or record a new request with `source_requests.py add` for the remaining evidence gap; a fulfilled request is never reopened. |
 | `REQUEST_KIND_INVALID` | A source-request kind id is malformed, or a pack kind was written without its reserved `pack:` prefix. | Use a built-in kind, or a pack kind namespaced like `pack:<pack-name>/<kind-id>`. |
 | `REQUEST_KIND_UNDECLARED` | A well-formed namespaced kind is not declared by the workspace's active domain pack. | Declare the kind under `domain_pack.request_kinds`, or use a built-in kind. |
 | `REQUEST_SCOPE_INVALID` | A `--scope` or `--match-scope` value is not `key=value`, has a malformed key, or repeats a key. | Pass scope pairs as `key=value` with a lowercase key. |
@@ -507,6 +507,10 @@ Stable error codes:
 | `REQUEST_SCOPE_MISSING` | Under `fulfill --require-scope`, the delivered source declares no value for a scope key the request carries. | Stamp the sidecar with the request's scope keys, or rerun without `--require-scope`. |
 | `FACET_SCOPE_CONFLICT` | `set-facet --blocking-request-id` named a request whose scope `facet_id` is a different facet. | Link a request whose scope `facet_id` matches this facet, or open a new request for it. |
 | `CANDIDATE_UNKNOWN` | Referenced discovery candidate id is unknown. | List candidates with `discover_sources.py candidates list` and choose an existing id. |
+| `CANDIDATE_STATE_INVALID` | A candidate record's lifecycle fields are unknown, unsupported, or contradictory, so its canonical state cannot be read. | Repair the record in `sources/discovery/candidates.jsonl` so its `lifecycle_state`, `status`, and `lifecycle_schema_version` match one canonical state and the current lifecycle contract version documented in `docs/source-discovery.md`. |
+| `CANDIDATE_STATE_STALE` | `--expected-state` no longer matches the candidate's state, so another writer moved it first. | Re-read the candidate's current state with `discover_sources.py candidates list`, then rerun the same `candidates` command with `--expected-state` set to that state, and only if the lifecycle state machine still permits the intended change from it. |
+| `CANDIDATE_TRANSITION_INVALID` | The requested lifecycle edge is absent from the candidate state machine. | Target a state the envelope's `details.allowed_states` lists, with `candidates transition --to-state` or by acting on a candidate whose current state permits `select` or `reject`. The terminal states `rejected`, `fetched`, and `superseded` are never reopened. |
+| `CANDIDATE_CORRELATION_CONFLICT` | A same-state repeat requested different correlation from what the candidate records, or named an unusable replacement. | Repeat the same `candidates` command with the value the candidate already records for the conflicting field, which the envelope's `details` name alongside the requested one, or act on another candidate. A `--superseded-by-candidate-id` replacement must be a different candidate that is not already `rejected` or `superseded`. |
 | `SOURCE_UNKNOWN` | Referenced manifest source id is unknown. | Inventory sources and choose an existing source id. |
 | `TOOLING_MISSING` | A packaged or sibling script is missing. | Restore or upgrade workspace scripts. |
 | `INTAKE_FIELD_TOO_LONG` | A question batch includes an over-limit `question`, `text`, `summary`, `context`, or canonical `metadata` field. | Shorten oversized intake fields or metadata before retrying. |
@@ -524,14 +528,17 @@ Stable error codes:
 | `DISCOVERY_RUN_TERMINAL` | Academic discovery was assigned to a terminal run. | Start a fresh run; terminal run artifacts are immutable. |
 | `DISCOVERY_RUN_ID_REQUIRED` | More than one active run makes provider-budget ownership ambiguous. | Pass the exact `--run-id` from the work order. |
 | `DISCOVERY_RUN_STATE_INVALID` | Retained run state cannot safely authorize a provider call. | Restore verified run state or start a fresh run before retrying. |
-| `DISCOVERY_RUN_RECOVERY_REQUIRED` | The selected run has an interrupted controller mutation. | Recover the run with `run_controller.py recover`, then retry. |
-| `ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED` | An active legacy run has no trustworthy academic-provider call baseline. | Preserve it for audit and start a fresh run; never create the marker or an empty ledger by hand. |
+| `DISCOVERY_RUN_RECOVERY_REQUIRED` | The selected run has an interrupted controller mutation. | Recover the run with `run_controller.py recover --run-id <run-id>`, then retry discovery. |
+| `ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED` | An active legacy run has no trustworthy academic-provider call baseline. | Preserve the run for audit and start a fresh run; never create the marker or an empty ledger by hand. |
 | `ACADEMIC_PROVIDER_ACCOUNTING_INVALID` | The run's accounting marker does not bind the canonical ledger. | Restore the exact trusted marker and ledger, or start a fresh run. |
-| `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID` | The marked provider-call ledger is missing, linked, unreadable, or malformed. | Restore it from a trusted backup or start a fresh run; do not reset it. |
+| `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID` | The marked provider-call ledger is missing, linked, unreadable, or malformed. | Restore the provider-call ledger from a trusted backup or start a fresh run; do not reset it. |
 | `ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED` | The next arXiv/OpenAlex transport attempt would exceed the run budget. | Start a new run or deliberately raise the reviewed budget. |
 | `ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED` | The call reservation could not be persisted before transport. | Restore workspace write access and retry; no provider call was authorized. |
 | `SEARCH_PROVIDER_DISABLED` | No search provider is configured for `discover_sources.py search`. | Configure `integrations.discovery.search` with a fixture, command, or http provider. |
 | `SEARCH_PROVIDER_FAILED` | The configured search command or fixture could not produce results. | Check the configured command/fixture path and rerun. |
+| `PROVIDER_FAILED` | A `discover_sources.py standards` route was run without a usable fixture snapshot. | Pass a readable local fixture path for the `discover_sources.py standards` provider; that route reads explicit fixture snapshots only and never performs live standards-registry discovery. |
+| `JURISDICTION_INVALID` | The workspace jurisdiction profile file is malformed YAML or violates the profile schema. | Fix the profile the message names in `sources/jurisdictions.yml` so it matches the profile schema in `docs/source-discovery.md`, then confirm with `discover_sources.py jurisdictions validate`. |
+| `JURISDICTION_UNKNOWN` | No configured profile matches the requested jurisdiction id. | Run `discover_sources.py jurisdictions list` and pass a `--jurisdiction` id it reports, or add that profile to `sources/jurisdictions.yml` and confirm it with `jurisdictions validate`. |
 | `GITHUB_AUTH_REQUIRED` | GitHub returned an authentication-required response. | Set a valid `GITHUB_TOKEN` in the environment, or unset an invalid token to use unauthenticated discovery or acquisition. |
 | `GITHUB_RATE_LIMITED` | GitHub rate-limited the request. | Retry later, lower request volume, or set `GITHUB_TOKEN` for a higher rate limit. |
 | `GITHUB_REPO_INVALID` | A GitHub acquisition repository, URL, or ref was missing or malformed. | Pass exactly one of `--repo owner/repo` or `--url`, and a valid `--ref` for archive downloads. |

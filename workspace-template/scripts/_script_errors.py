@@ -182,6 +182,76 @@ _REMEDIATIONS = {
     ),
     "DISCOVERY_NETWORK_ERROR": "Retry later, check network access, or lower request volume.",
     "DISCOVERY_RESPONSE_INVALID": "Retry later or inspect the provider response outside the workspace.",
+    # discover_sources.py
+    "DISCOVERY_PROVIDER_DISABLED": (
+        "Add the provider to integrations.discovery.providers or choose an enabled discovery route."
+    ),
+    "DISCOVERY_RUN_ID_REQUIRED": "Pass the exact --run-id from the work order.",
+    "DISCOVERY_RUN_ID_INVALID": "Pass a filename-safe active run id.",
+    "DISCOVERY_RUN_UNKNOWN": "Start a fresh run or choose an existing active run.",
+    "DISCOVERY_RUN_TERMINAL": "Start a fresh run; terminal run artifacts are immutable.",
+    "DISCOVERY_RUN_STATE_INVALID": "Restore verified run state or start a fresh run before retrying.",
+    "DISCOVERY_RUN_RECOVERY_REQUIRED": (
+        "Recover the run with run_controller.py recover --run-id <run-id>, then retry discovery."
+    ),
+    "ACADEMIC_PROVIDER_ACCOUNTING_UNINITIALIZED": (
+        "Preserve the run for audit and start a fresh run; never create the marker or an empty ledger by hand."
+    ),
+    "ACADEMIC_PROVIDER_ACCOUNTING_INVALID": (
+        "Restore the exact trusted marker and ledger, or start a fresh run."
+    ),
+    "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID": (
+        "Restore the provider-call ledger from a trusted backup or start a fresh run; do not reset it."
+    ),
+    "ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED": "Start a new run or deliberately raise the reviewed budget.",
+    "ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED": (
+        "Restore workspace write access and retry; no provider call was authorized."
+    ),
+    "ARXIV_RATE_LIMITED": (
+        "Wait for the provider window, reduce the request rate, and resume the retained action."
+    ),
+    "SEARCH_PROVIDER_DISABLED": (
+        "Configure integrations.discovery.search with a fixture, command, or http provider."
+    ),
+    "SEARCH_PROVIDER_FAILED": "Check the configured command/fixture path and rerun.",
+    "PROVIDER_FAILED": (
+        "Pass a readable local fixture path for the discover_sources.py standards provider; that route "
+        "reads explicit fixture snapshots only and never performs live standards-registry discovery."
+    ),
+    "REQUEST_NOT_OPEN": (
+        "Pass an open source request id, or record a new request with source_requests.py add for the "
+        "remaining evidence gap; a fulfilled request is never reopened."
+    ),
+    "CANDIDATE_UNKNOWN": "List candidates with discover_sources.py candidates list and choose an existing id.",
+    "CANDIDATE_STATE_INVALID": (
+        "Repair the record in sources/discovery/candidates.jsonl so its lifecycle_state, status, and "
+        "lifecycle_schema_version match one canonical state and the current lifecycle contract version "
+        "documented in docs/source-discovery.md."
+    ),
+    "CANDIDATE_STATE_STALE": (
+        "Re-read the candidate's current state with discover_sources.py candidates list, then rerun the "
+        "same candidates command with --expected-state set to that state, and only if the lifecycle "
+        "state machine still permits the intended change from it."
+    ),
+    "CANDIDATE_TRANSITION_INVALID": (
+        "Target a state the envelope's details.allowed_states lists, with candidates transition "
+        "--to-state or by acting on a candidate whose current state permits select or reject. The "
+        "terminal states rejected, fetched, and superseded are never reopened."
+    ),
+    "CANDIDATE_CORRELATION_CONFLICT": (
+        "Repeat the same candidates command with the value the candidate already records for the "
+        "conflicting field, which the envelope's details name alongside the requested one, or act on "
+        "another candidate. A --superseded-by-candidate-id replacement must be a different candidate "
+        "that is not already rejected or superseded."
+    ),
+    "JURISDICTION_INVALID": (
+        "Fix the profile the message names in sources/jurisdictions.yml so it matches the profile schema "
+        "in docs/source-discovery.md, then confirm with discover_sources.py jurisdictions validate."
+    ),
+    "JURISDICTION_UNKNOWN": (
+        "Run discover_sources.py jurisdictions list and pass a --jurisdiction id it reports, or add that "
+        "profile to sources/jurisdictions.yml and confirm it with jurisdictions validate."
+    ),
     "GITHUB_AUTH_REQUIRED": (
         "Set a valid GITHUB_TOKEN in the process environment and rerun, "
         "or unset an invalid token to use unauthenticated discovery."
