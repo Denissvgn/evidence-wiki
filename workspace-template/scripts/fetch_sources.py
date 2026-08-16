@@ -1402,9 +1402,9 @@ def read_workspace_mapping(project_root: Path, value: str, *, label: str) -> dic
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        # UnicodeError is not an OSError: a UTF-16 or binary metadata file decodes
-        # rather than fails to open, and without it that read escapes ``main`` as a
-        # traceback instead of this envelope.
+        # UnicodeError is not an OSError: a UTF-16 or binary metadata file opens
+        # cleanly and then fails to decode as UTF-8, so catching OSError alone let
+        # that read escape ``main`` as a traceback instead of this envelope.
         raise FetchSourcesError(
             "ACQUISITION_METADATA_UNREADABLE",
             f"Cannot read {label}: {value}",
