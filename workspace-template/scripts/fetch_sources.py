@@ -1397,11 +1397,14 @@ def read_workspace_mapping(project_root: Path, value: str, *, label: str) -> dic
         raise FetchSourcesError(
             "ACQUISITION_METADATA_MISSING",
             f"{label} does not exist: {value}",
-            remediation="Write the selected candidate metadata file before acquiring the web snapshot.",
+            remediation=f"Write the {label} file before acquiring the web snapshot.",
         )
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
+        # UnicodeError is not an OSError: a UTF-16 or binary metadata file decodes
+        # rather than fails to open, and without it that read escapes ``main`` as a
+        # traceback instead of this envelope.
         raise FetchSourcesError(
             "ACQUISITION_METADATA_UNREADABLE",
             f"Cannot read {label}: {value}",
@@ -2515,7 +2518,17 @@ def load_sidecar_mapping(sidecar: Path) -> dict[str, Any]:
             f"Cannot enrich missing provenance sidecar: {sidecar}",
             remediation="Run source_inventory.py to refresh provenance paths or reacquire the source.",
         )
-    document = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or {}
+    try:
+        document = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        # A truncated, non-UTF-8, or otherwise unparseable sidecar is a broken
+        # sidecar, not a crash: without this the raw YAMLError escapes ``main``
+        # and the caller gets a traceback instead of a coded envelope.
+        raise FetchSourcesError(
+            "SIDECAR_INVALID",
+            f"Cannot read provenance sidecar as YAML: {sidecar}",
+            remediation="Repair the sidecar or reacquire the source.",
+        ) from exc
     if not isinstance(document, dict):
         raise FetchSourcesError(
             "SIDECAR_INVALID",
