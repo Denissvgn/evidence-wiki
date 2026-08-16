@@ -96,7 +96,8 @@ _REMEDIATIONS = {
     ),
     "RUN_EVENTS_INVALID": (
         "Preserve runs/<run_id>/events.jsonl, then restore a verified copy or repair the reported line or "
-        "duplicate event id and run run_controller.py recover before the next mutation."
+        "duplicate event id and run run_controller.py recover --run-id RUN_ID --agent-id AGENT "
+        "before the next mutation."
     ),
     "RUN_EVENT_ID_CONFLICT": (
         "Preserve runs/<run_id>/events.jsonl and reconcile the two records that share the reported event id "
@@ -108,11 +109,12 @@ _REMEDIATIONS = {
     ),
     "RUN_MUTATION_WRITE_FAILED": (
         "Restore write access or free space for the run directory, retain any generated .tmp artifact, then "
-        "run run_controller.py recover for this run before retrying the mutation."
+        "run run_controller.py recover --run-id RUN_ID --agent-id AGENT before retrying the mutation."
     ),
     "RUN_PENDING_EVENT_INVALID": (
         "Preserve runs/<run_id>/run-state.json for audit and restore a verified copy whose _pending_event is "
-        "an object with a string event_id before rerunning recover."
+        "an object with a string event_id before rerunning run_controller.py recover --run-id RUN_ID "
+        "--agent-id AGENT."
     ),
     "COVERAGE_REQUIRED": "Create or select a coverage manifest and pass only after required facets are covered.",
     "COVERAGE_BLOCKED": "Resolve blocked coverage facets with accepted sources or source requests before answering.",
