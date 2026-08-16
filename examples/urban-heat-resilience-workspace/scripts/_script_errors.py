@@ -260,8 +260,8 @@ _REMEDIATIONS = {
     "STATUS_NOT_REOPENABLE": "Reopen only blocked questions.",
     "SOURCE_NOT_NORMALIZED": "Inventory and normalize the delivered source before reopening.",
     "COVERAGE_CLAIM_PROBE_INVALID": (
-        "Record only method_or_artifact_existence probes with arXiv and OpenAlex results, "
-        "zero exact matches, and the required limitation text."
+        "Record only method_or_artifact_existence probes with claim_verdict unconfirmed, "
+        "arXiv and OpenAlex results, zero exact matches, and the required limitation text."
     ),
     "REVIEWER_INVALID": "Pass a non-empty --reviewer value to approve, or --reviewed-by to review.",
     "REVIEW_POLICY_UNKNOWN": (
