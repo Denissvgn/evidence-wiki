@@ -268,18 +268,45 @@ def all_remediation_texts() -> list[tuple[str, str]]:
     texts: list[tuple[str, str]] = [(code, text) for code, text in helper._REMEDIATIONS.items()]
     for path in sorted(SCRIPTS.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        # Resolve module constants, exactly as `collect_raised_error_codes` does. Requiring
+        # a string literal here read only 10 of the script files and skipped
+        # `_provider_accounting.py` entirely, because that module names its codes through
+        # `ERROR_LEDGER_INVALID`-style constants — so its remediations, prohibitions
+        # included, were invisible to every check built on this function. Two collectors in
+        # one file disagreeing about what counts as a code is the drift these guards exist
+        # to catch, one level up.
+        consts = {
+            node.targets[0].id: node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and node.targets
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not node.args:
                 continue
-            first = node.args[0]
-            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
-                continue
-            if not ERROR_CODE_RE.match(first.value):
+            codes = _code_strings(node.args[0], consts)
+            if not codes:
                 continue
             for keyword in node.keywords:
-                if keyword.arg == "remediation" and isinstance(keyword.value, ast.Constant):
-                    if isinstance(keyword.value.value, str):
-                        texts.append((f"{first.value} ({path.name}:{keyword.value.lineno})", keyword.value.value))
+                if keyword.arg != "remediation":
+                    continue
+                # The *value* is resolved through the same constant map as the code.
+                # `_provider_accounting.py` passes `remediation=ACCOUNTING_REMEDIATION`, so
+                # reading only literals here left its text unread even after the code side
+                # was fixed — the same omission twice, one argument apart.
+                if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                    text = keyword.value.value
+                elif isinstance(keyword.value, ast.Name):
+                    text = consts.get(keyword.value.id)
+                else:
+                    text = None
+                if not isinstance(text, str):
+                    continue
+                for code in codes:
+                    texts.append((f"{code} ({path.name}:{keyword.value.lineno})", text))
     return texts
 
 
@@ -736,6 +763,73 @@ class ErrorEnvelopeTests(unittest.TestCase):
             for code, answers in sorted(split.items())
         )
         self.assertEqual({}, split, f"these codes report more than one recoverability: {detail}")
+
+    def test_no_remediation_advises_what_another_forbids(self):
+        """A code must not tell one operator to do what it forbids another from doing.
+
+        `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID` did exactly that across its seven raise
+        sites: four said "**Repair** or restore the run-bound provider-call ledger", three
+        said "restore from a trusted backup … **Do not** deduplicate or reset accounting by
+        hand". Same code, same artifact, opposite instructions — and the artifact is the
+        accounting ledger that enforces provider budgets, so hand-repair is exactly what
+        must not be advised. The registry entry already said "do not reset it", making the
+        four inline texts contradict their own floor.
+
+        Deliberately narrow, per the lesson from the command checker: this flags only a
+        text that advises a verb some *prohibition for the same code* names. Variation
+        across conditions is correct and is not reported — `VALUE_INVALID` says different
+        things for different bad values, and a check that called those 35 codes defective
+        would be muted within a week.
+        """
+        # Capture the whole prohibition clause, then split it into verbs. Matching a
+        # `<verb>( or <verb>)*` shape directly stops at the first comma, so
+        # "Do not reset, deduplicate, or hand-edit provider accounting" contributed only
+        # "reset" and left two forbidden verbs uncollected — a scanner that reads the
+        # phrasing its author happened to write. Hyphenated verbs ("hand-edit") count too,
+        # which is why the verb is escaped before it reaches a pattern.
+        prohibition_clause = re.compile(r"\bdo not\b([^.;]*)", re.I)
+        # Strip *any* negated clause before looking for advice, but collect forbidden verbs
+        # only from the unambiguous imperative "do not". "Never" is both: "Never bind …" is
+        # a prohibition, while "status polling never requires this lock" and "a committed
+        # event is never rewritten" are descriptions. Collecting from it would put
+        # `requires` and `rewritten` in the forbidden set and flag ordinary sentences;
+        # not stripping it made a registry entry's own prohibition ("never create the
+        # marker by hand") read as advice to create one. Under-approximating the forbidden
+        # set is the safe direction: it misses a contradiction rather than inventing one.
+        whole_clause = re.compile(r"\b(?:do not|never)\b[^.]*\.?", re.I)
+
+        def forbidden_verbs(text: str) -> set[str]:
+            verbs: set[str] = set()
+            for clause in prohibition_clause.findall(text):
+                for token in re.split(r",|\bor\b", clause):
+                    word = token.strip().split(" ")[0].strip().lower()
+                    if re.fullmatch(r"[a-z][a-z-]*", word or ""):
+                        verbs.add(word)
+            return verbs
+
+        by_code: dict[str, list[tuple[str, str]]] = {}
+        for label, text in all_remediation_texts():
+            code = label.split(" ")[0]
+            by_code.setdefault(code, []).append((label, text))
+        self.assertGreater(len(by_code), 150, "remediation grouping found suspiciously few codes")
+
+        helper = load_helper()
+        contradictions: list[str] = []
+        for code, entries in by_code.items():
+            texts = [text for _, text in entries] + [helper.remediation_for(code)]
+            forbidden: set[str] = set()
+            for text in texts:
+                forbidden |= forbidden_verbs(text)
+            if not forbidden:
+                continue
+            for label, text in entries:
+                # Strip prohibitions entirely before looking for advice, so "do not repair
+                # or reset" is not read as advising "reset".
+                advised = whole_clause.sub("", text.lower())
+                for verb in sorted(forbidden):
+                    if re.search(rf"\b{re.escape(verb)}\b", advised):
+                        contradictions.append(f"{label} advises '{verb}', which another remediation for {code} forbids")
+        self.assertEqual([], contradictions)
 
     def test_documentation_tables_have_a_consistent_column_count(self):
         """Every row in a Markdown table must match its header's column count.
