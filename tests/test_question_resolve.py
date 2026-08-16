@@ -7,8 +7,8 @@ import json
 import sys
 import tempfile
 import unittest
-from typing import NamedTuple
 from pathlib import Path
+from typing import NamedTuple
 from unittest import mock
 
 import yaml
@@ -48,6 +48,20 @@ class _DoorBinding(NamedTuple):
     forwarded: frozenset[str]
 
 
+def _literal_str(node: ast.expr, consts: dict[str, str]) -> str | None:
+    """Resolve a string literal, or a module constant holding one, to its value.
+
+    Module-level and taking ``consts`` explicitly rather than closing over it: defined
+    inside the per-file loop it captured a variable that changes each iteration, which is
+    correct only by accident of being called in the same pass.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return consts.get(node.id)
+    return None
+
+
 def _door_seam_bindings() -> list[_DoorBinding]:
     """Discover every in-process door method that forwards to a packaged seam.
 
@@ -78,27 +92,22 @@ def _door_seam_bindings() -> list[_DoorBinding]:
             and isinstance(node.value.value, str)
         }
 
-        def literal(node: ast.expr) -> str | None:
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                return node.value
-            if isinstance(node, ast.Name):
-                return consts.get(node.id)
-            return None
-
         for method in ast.walk(tree):
             if not isinstance(method, ast.FunctionDef) or method.name.startswith("_"):
                 continue
             stem = seam_name = None
+            seam_call = None
             for call in ast.walk(method):
                 if not isinstance(call, ast.Call):
                     continue
                 if isinstance(call.func, ast.Attribute) and call.func.attr == "_call" and len(call.args) >= 2:
-                    stem, seam_name = literal(call.args[0]), literal(call.args[1])
+                    stem, seam_name = _literal_str(call.args[0], consts), _literal_str(call.args[1], consts)
                 elif isinstance(call.func, ast.Name) and call.func.id == "call_seam" and len(call.args) >= 3:
-                    stem, seam_name = literal(call.args[1]), literal(call.args[2])
+                    stem, seam_name = _literal_str(call.args[1], consts), _literal_str(call.args[2], consts)
                 if stem and seam_name:
+                    seam_call = call
                     break
-            if not (stem and seam_name):
+            if not (stem and seam_name and seam_call is not None):
                 continue
             if stem not in seam_cache:
                 script = SCRIPTS / f"{stem}.py"
@@ -111,23 +120,15 @@ def _door_seam_bindings() -> list[_DoorBinding]:
             accepted = {arg.arg for arg in method.args.args[1:]} | {
                 arg.arg for arg in method.args.kwonlyargs
             }
-            # A parameter counts as forwarded whether it is passed by keyword or
-            # positionally: `grounding.verify` hands `slugs` on positionally, and reading
-            # only `call.keywords` reported that as dropped. Same narrowness as reading
-            # only `kwonlyargs` on the accepting side — a walk that knows one calling
-            # convention is blind to the other.
-            forwarded = {
-                kw.arg
-                for call in ast.walk(method)
-                if isinstance(call, ast.Call)
-                for kw in call.keywords
-                if kw.arg
-            } | {
-                arg.id
-                for call in ast.walk(method)
-                if isinstance(call, ast.Call)
-                for arg in call.args
-                if isinstance(arg, ast.Name)
+            # Read forwarding from the SEAM CALL ONLY, not from every call in the method.
+            # Walking them all lets a name mentioned in some unrelated call — a log line,
+            # a validation helper — count as forwarded, so the guard could pass while the
+            # parameter never reached the seam: the exact defect it exists to catch.
+            #
+            # Both calling conventions count, because `grounding.verify` hands `slugs` to
+            # the seam positionally; reading only `keywords` reported that as dropped.
+            forwarded = {kw.arg for kw in seam_call.keywords if kw.arg} | {
+                arg.id for arg in seam_call.args if isinstance(arg, ast.Name)
             }
             bindings.append(
                 _DoorBinding(
