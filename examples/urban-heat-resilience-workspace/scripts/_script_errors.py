@@ -709,8 +709,30 @@ def classify_error_code(message: str) -> str:
     return "WORKSPACE_UNREADABLE"
 
 
+# Codes for which retrying the same call is never meaningful: the refusal reports a state
+# conflict or a corrupt artifact, not an input a caller can correct and resend. Mirrored in
+# ``src/evidence_wiki/errors.py``; `test_non_recoverable_codes_are_mirrored` pins the pair.
+#
+# CR-15a added five. Each was previously answered *both* ways across its own raise sites —
+# `ORCHESTRATION_STATE_INVALID` three ways across 25 — so a host branching on `recoverable`
+# retried some occurrences of one code and not others, with nothing in the envelope
+# explaining the difference. Declaring them here rather than annotating every site keeps
+# the answer in one place, which is what made the divergence possible.
+NON_RECOVERABLE_CODES = frozenset(
+    {
+        "CLAIM_HELD",
+        "CLAIM_NOT_STALE",
+        "CANDIDATE_STORE_INVALID",
+        "ORCHESTRATION_OWNER_MISMATCH",
+        "ORCHESTRATION_STATE_INVALID",
+        "PROVIDER_REGISTRATION_INVALID",
+        "WORKSPACE_UNREADABLE",
+    }
+)
+
+
 def default_recoverable(error_code: str) -> bool:
-    return error_code not in {"CLAIM_HELD", "CLAIM_NOT_STALE"}
+    return error_code not in NON_RECOVERABLE_CODES
 
 
 def remediation_for(error_code: str) -> str:

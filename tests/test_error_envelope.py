@@ -77,6 +77,25 @@ def load_helper():
 
 
 ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{4,}$")
+# Codes whose retry verdict legitimately differs between raise sites, each with a reason.
+# Empty on purpose: CR-15a found no condition that survived the "then the code is doing
+# two jobs" test. An entry here is a claim that one code covers two materially different
+# conditions and should be argued for, not a place to silence the guard.
+RECOVERABILITY_VARIES_BY_SITE: dict[str, str] = {
+    # One code, two genuinely different conditions — and the retry verdict differs with
+    # them. Seven sites mean "the workspace is unreadable, changed under us, oversized, or
+    # not a regular file": fix it and retry. One (orchestration_controller.py, the
+    # post-issue check) means "health or HIGH findings changed *after the work order was
+    # issued*", where retry is pointless and the session must be replaced — semantically a
+    # sibling of ORCHESTRATION_DELEGATION_CHANGED / _PROVIDER_POLICY_CHANGED /
+    # _INTEGRITY_BASELINE_CHANGED, wearing this code instead of its own.
+    #
+    # Forcing one answer would be wrong either way: True tells a caller to retry a
+    # baseline-moved refusal, False tells it not to retry a fixable workspace. The honest
+    # fix is a new code in the *_CHANGED family, which is a contract change tracked as
+    # CR-15d. Recorded here so the split is argued rather than dispersed across sites.
+    "ORCHESTRATION_WORKSPACE_UNSAFE": "post-issue baseline change vs fixable workspace state; split tracked in CR-15d",
+}
 # Keywords through which a code reaches an error constructor without being its first
 # positional argument. Each was found the hard way: a code invisible to a positional-only
 # scan, already shipped with no remediation because nothing counted it.
@@ -152,6 +171,48 @@ def collect_raised_error_codes() -> dict[str, set[str]]:
             for code in found:
                 owners.setdefault(code, set()).add(path.name)
     return owners
+
+
+def collect_recoverability_by_site() -> dict[str, dict[bool, list[str]]]:
+    """Map each error code to the recoverability its raise sites resolve to.
+
+    Returns ``{code: {resolved_bool: ["file.py:line", ...]}}``. A site that passes no
+    ``recoverable=`` is resolved through ``default_recoverable`` exactly as
+    ``emit_refusal`` would, because silence is an answer: every code but the two claim
+    codes defaults to recoverable, so an omitted flag says "retry is meaningful" just as
+    loudly as ``recoverable=True``. Comparing literal keyword values instead would call a
+    ``False``/omitted split consistent when the envelope reports two different things.
+    """
+    helper = load_helper()
+    sites: dict[str, dict[bool, list[str]]] = {}
+    for path in sorted(SCRIPTS.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        raised = {
+            id(node.exc)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None) or ""
+            if not ("Error" in name or "Refusal" in name or "Failure" in name or id(node) in raised):
+                continue
+            if not node.args:
+                continue
+            first = node.args[0]
+            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                continue
+            code = first.value
+            if not ERROR_CODE_RE.match(code):
+                continue
+            declared = None
+            for keyword in node.keywords:
+                if keyword.arg == "recoverable" and isinstance(keyword.value, ast.Constant):
+                    declared = keyword.value.value
+            resolved = helper.default_recoverable(code) if declared is None else bool(declared)
+            sites.setdefault(code, {}).setdefault(resolved, []).append(f"{path.name}:{node.lineno}")
+    return sites
 
 
 def documented_error_code_rows() -> set[str]:
@@ -571,6 +632,72 @@ class ErrorEnvelopeTests(unittest.TestCase):
 
         undocumented = sorted(code for code in codes if code not in documented)
         self.assertEqual([], undocumented, "these raised codes appear in no documentation table")
+
+    def test_each_error_code_resolves_to_one_recoverability(self):
+        """One code, one retry verdict — because a host branching on it has only the code.
+
+        `recoverable` is the only envelope field an automated caller *acts* on rather than
+        reads. When one code resolves both ways across its own raise sites, that caller
+        retries some occurrences and not others with nothing in the envelope explaining
+        the difference. `ORCHESTRATION_STATE_INVALID` answered three ways across 25 sites.
+
+        Where a condition genuinely needs both answers, that is evidence the code is doing
+        two jobs and should be split — not licence to vary. Such a case belongs in
+        `RECOVERABILITY_VARIES_BY_SITE` with a written reason, where it can be argued with,
+        rather than dispersed across raise sites where nobody can see it.
+
+        Sites that pass nothing are resolved through `default_recoverable`, the same way
+        `emit_refusal` does: silence answers "recoverable" for every code but the two claim
+        codes, so an omitted flag is as much an answer as an explicit one.
+        """
+        sites = collect_recoverability_by_site()
+        # Guard the guard: a collection that silently found nothing would pass forever.
+        self.assertGreater(len(sites), 150, "recoverability sweep found suspiciously few codes")
+        self.assertIn("ORCHESTRATION_STATE_INVALID", sites, "the worst offender must be inside the sweep")
+
+        split = {
+            code: answers
+            for code, answers in sites.items()
+            if len(answers) > 1 and code not in RECOVERABILITY_VARIES_BY_SITE
+        }
+        detail = "; ".join(
+            f"{code} -> "
+            + ", ".join(
+                f"{value} at {len(places)} site(s) ({places[0]}…)" for value, places in sorted(answers.items())
+            )
+            for code, answers in sorted(split.items())
+        )
+        self.assertEqual({}, split, f"these codes report more than one recoverability: {detail}")
+
+    def test_non_recoverable_codes_are_mirrored(self):
+        """The script helper and the library must agree on which codes are unretryable.
+
+        Two hand-mirrored sets with a comment asking for agreement and nothing checking
+        it. They happened to match, but a code added to one and not the other would give
+        a host a different retry verdict through the in-process door than through the CLI
+        — the same door-disagreement CR-13 fixed for flags, on the field callers act on.
+        """
+        helper = load_helper()
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        try:
+            from evidence_wiki import errors as library_errors
+        finally:
+            sys.path.pop(0)
+
+        self.assertEqual(
+            set(helper.NON_RECOVERABLE_CODES),
+            set(library_errors._NON_RECOVERABLE_CODES),
+            "workspace-template/scripts/_script_errors.py and src/evidence_wiki/errors.py "
+            "disagree about which codes are non-recoverable",
+        )
+        # Both doors must answer identically for every code either of them names.
+        for code in sorted(set(helper.NON_RECOVERABLE_CODES) | {"CONFIG_INVALID", "VALUE_INVALID"}):
+            with self.subTest(code=code):
+                self.assertEqual(
+                    helper.default_recoverable(code),
+                    library_errors.default_recoverable(code),
+                    f"{code} resolves differently in the script helper and the library",
+                )
 
     def test_json_output_scripts_table_uses_stable_error_codes(self):
         missing = sorted(documented_json_output_error_codes() - documented_stable_error_codes())

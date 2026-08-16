@@ -3640,7 +3640,6 @@ def resolve_registered_target_root(project_root: Path, value: Any) -> Path:
         raise FetchSourcesError(
             "ACQUISITION_PATH_UNSAFE",
             f"registered get --target-root must be a workspace-relative path under raw/: {value!r}",
-            recoverable=False,
             remediation=f"Pass a workspace-relative path under raw/, for example {REGISTERED_DEFAULT_TARGET_ROOT}.",
         ) from exc
     return safe_workspace_path(project_root, project_root / relative, "registered get --target-root")

@@ -1815,7 +1815,6 @@ def provider_policy(config: dict[str, Any]) -> dict[str, Any]:
             raise OrchestrationControllerError(
                 "CONFIG_INVALID",
                 f"research.yml integrations.{phase}.providers {exc}",
-                recoverable=False,
                 remediation=(
                     "Correct the provider id, or install a distribution registering it under the "
                     "evidence_wiki.acquisition_providers or evidence_wiki.discovery_providers "
@@ -1827,7 +1826,6 @@ def provider_policy(config: dict[str, Any]) -> dict[str, Any]:
             raise OrchestrationControllerError(
                 "CONFIG_INVALID",
                 f"research.yml integrations.{phase}.providers {exc}",
-                recoverable=False,
             ) from exc
         providers = sorted(validated.providers)
         policy[phase] = {
@@ -1867,7 +1865,6 @@ def acquisition_policy(config: dict[str, Any]) -> dict[str, Any]:
                     "research.yml declares orchestration.acquisition: delegated while "
                     "integrations.acquisition is enabled; exactly one of them acquires evidence"
                 ),
-                recoverable=False,
                 remediation=(
                     "Disable integrations.acquisition.providers, or remove "
                     "orchestration.acquisition: delegated."
@@ -3571,7 +3568,6 @@ def rollover_exhausted_child_for_phase(
         raise OrchestrationControllerError(
             "ORCHESTRATION_STATE_INVALID",
             "workspace status did not bind phase budgets to the parent session's active child run",
-            recoverable=True,
             remediation="Repair conflicting run-controller state before resuming the orchestration.",
             details={
                 "phase": phase,
@@ -3636,7 +3632,6 @@ def research_question_scope_limit(
         raise OrchestrationControllerError(
             "ORCHESTRATION_STATE_INVALID",
             "workspace status did not bind the research budget to the parent session's active child run",
-            recoverable=True,
             remediation="Re-run orchestration status, repair conflicting active child runs, and resume the session.",
             details={
                 "active_run_id": active_run_id,
@@ -3651,7 +3646,6 @@ def research_question_scope_limit(
         raise OrchestrationControllerError(
             "ORCHESTRATION_STATE_INVALID",
             "active child run is missing a valid artifact-derived remaining-question budget",
-            recoverable=True,
             remediation="Repair the run-controller budget state before resuming this orchestration session.",
             details={"active_run_id": active_run_id, "questions_remaining_this_run": remaining},
         )
@@ -3662,7 +3656,6 @@ def research_question_scope_limit(
         raise OrchestrationControllerError(
             "ORCHESTRATION_STATE_INVALID",
             "only an answering child run can roll over an exhausted question budget",
-            recoverable=True,
             remediation="Repair the active child run state before resuming this orchestration session.",
             details={"active_run_id": active_run_id, "state": run_controller.get("state")},
         )
@@ -7313,7 +7306,6 @@ def finalize_pending_submission(
             raise OrchestrationControllerError(
                 "ORCHESTRATION_STATE_INVALID",
                 "accepted blocked submission no longer verifies to its prepared next phase",
-                recoverable=True,
             )
         completion_reason = verified_reason or completion_reason
 
@@ -7363,7 +7355,6 @@ def finalize_pending_submission(
             raise OrchestrationControllerError(
                 "ORCHESTRATION_STATE_INVALID",
                 "accepted submission no longer verifies to its prepared next phase",
-                recoverable=True,
             )
         finalized_phase, finalized_reason = verify_action_postconditions(
             project_root,
@@ -7375,7 +7366,6 @@ def finalize_pending_submission(
             raise OrchestrationControllerError(
                 "ORCHESTRATION_STATE_INVALID",
                 "action finalization changed the verified next phase",
-                recoverable=True,
             )
         completion_reason = finalized_reason or verified_reason or completion_reason
     elif result["outcome"] == "blocked":

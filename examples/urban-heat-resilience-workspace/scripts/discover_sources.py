@@ -1301,7 +1301,6 @@ def provider_not_registered(command: str, label: str, exc: ProviderNotRegistered
     return DiscoverSourcesError(
         "PROVIDER_NOT_REGISTERED",
         f"research.yml {label} {exc}",
-        recoverable=False,
         remediation=(
             "Install a distribution registering the provider in the evidence_wiki.discovery_providers "
             "entry-point group, or remove the id from the discovery provider allow-list in research.yml."
