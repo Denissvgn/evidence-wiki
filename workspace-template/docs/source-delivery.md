@@ -97,7 +97,6 @@ request_id: req-1a2b3c4d5e                       # optional; required for delega
 candidate_id: cand-official-product              # optional: selected discovery candidate being delivered
 scope:                                           # optional: what this delivery answers, matched against the request's scope
   facet_id: supplier_quote
-  candidate: acme-widget
 terms_url: https://example.org/terms             # optional license/terms page for web captures
 terms_note: "Reuse terms reviewed on source page" # optional short terms/reuse note
 standards:                                      # optional standards-registry metadata
@@ -349,7 +348,7 @@ Evidence gaps flow out through `sources/source-requests.jsonl` (path configurabl
   "rationale": "Blocks the benchmark question.",
   "priority": "high",
   "question_slugs": ["which-benchmarks"],
-  "scope": {"facet_id": "supplier_quote", "candidate": "acme-widget"},
+  "scope": {"facet_id": "supplier_quote"},
   "status": "open",
   "created_at": "2026-06-10T12:00:00Z",
   "updated_at": "2026-06-10T12:00:00Z",
@@ -417,7 +416,86 @@ stamps `scope` opts into the fail-closed behavior instead.
 each supplied request with the supplied source whose scope does not
 contradict it, instead of zipping the two `--request-id`/`--source-id` lists
 by argument order. Requests or sources without scope fall back to the
-previous positional behavior.
+previous positional behavior. When a request's declared scope cannot single
+out one supplied source, `reopen` still pairs — it does not refuse — but says
+so; see "When scope cannot decide a pairing" below.
+
+### Choosing scope keys
+
+A scope key is a **join key**: two sides that never talk to each other have to
+produce the same string independently. Declare a key only when they can.
+
+- **The delivering side must be able to derive the value.** A value only the
+  workspace can construct — a question slug, a page id, anything carrying a
+  workspace-side hash — cannot be stamped into a sidecar, so under
+  `--require-scope` the request becomes permanently unfulfillable. `--match-scope`
+  is not an escape hatch: asserted keys join the required set rather than
+  leaving it (layer 3 above).
+- **The value must vary across the set being paired.** `reopen` only pairs
+  requests that all reference the same question, so a key with one value per
+  question is constant across that set and discriminates nothing. `facet_id`
+  varies within a question; a product, listing, or candidate identifier usually
+  does not.
+- **Both sides should emit the value from one generator.** Comparison is exact
+  text after stripping, with no case folding and no normalization, so two
+  independent derivations of "the same" identifier are a
+  `REQUEST_SCOPE_MISMATCH` waiting to happen.
+
+The request↔delivery binding itself does not need a scope key. Under
+`orchestration.acquisition: delegated` the sidecar's `request_id` is mandatory
+and enforced by the orchestration postcondition, which is both stricter and
+narrower than any scope comparison. Scope answers "is this the right *kind* of
+evidence for this request", not "is this the right request".
+
+A key set is well chosen when every key is derivable on both sides and at least
+one key varies within the question being reopened. A second key earns its place
+only when two requests on one question share a facet — two quotes for the same
+facet from different suppliers, where the delivering side knows which supplier
+it fetched from:
+
+```bash
+python3 scripts/source_requests.py add --kind pack:market-data/supplier_quote \
+  --scope facet_id=supplier_quote --scope supplier=acme ...
+```
+
+With one request per facet, `facet_id` alone is the whole key set.
+
+### When scope cannot decide a pairing
+
+Declared scope narrows the candidates for each request; it does not always
+narrow them to one. When two supplied requests declare the same scope, the scope
+evidence cannot say which delivery answers which — and that holds even when the
+deliveries differ, since scope is symmetric between the two requests: whichever
+one ends up with the better-corroborated source got it by supply order, not
+because scope chose it. `reopen` still
+returns a pairing in that case — refusing would break reopens that are
+legitimate today, and `reopen` reports a pairing rather than recording a
+fulfilment — but it reports how each pair was decided:
+
+- each `pairs[]` entry carries `decided_by`: `scope` when the declared scope
+  determined it, `tie_break` when another equally corroborated source could have
+  answered the request **or** another request could have taken the source, and
+  the choice fell to the order the requests and sources were supplied;
+- a `tie_break` pair adds a `request_scope_pairing_tie` entry to the report's
+  `warnings` array, naming both the sources that could have answered that request
+  (`alternative_source_ids`) and the requests that could have taken its source
+  (`contending_request_ids`); and
+- `log.md` records those pairs as tie-broken rather than claiming scope decided
+  them.
+
+A source that positively corroborates more of a request's scope still wins over
+one that merely fails to contradict it, and that is a scope decision, not a tie.
+`decided_by: tie_break` means specifically that scope ran out of discriminating
+power, which is the signal to add a key that varies within the question — or to
+reopen those requests in separate calls.
+
+`reopen --require-decisive-scope` turns that signal into a refusal
+(`REQUEST_SCOPE_UNDECIDED`), leaving the question `blocked`. It is the reopen
+counterpart to `fulfill --require-scope` on the axis reopen has: that flag asks
+whether the delivery *stated* the request's keys, this one whether the declared
+keys *discriminate*. Opt-in for the same reason absence is tolerated by default —
+requests that are genuinely interchangeable have ties with no consequence, and
+only the host knows which kind it has.
 
 ### Recorded acquisition attempts
 
@@ -472,7 +550,7 @@ acquisition work order rather than between actions; see
 [../skills/research-acquire-delegated.md](../skills/research-acquire-delegated.md) for the
 external acquirer's loop and [orchestration.md](orchestration.md) for the session shape.
 
-`plan-fetch` is read-only: it turns a request into candidate provider commands and records `network_io_executed: false`. Request-kind-based routing only special-cases `kind: paper`; every other kind — `dataset`, `web`, `code`, `other`, `structured_data`, and any pack-declared kind (`pack:<pack-name>/<kind-id>`) — has no provider-backed fetch plan and returns the same `unsupported` status and warning ("No provider-backed plan is available for this kind; use manual delivery."), with `network_io_executed: false` rather than an error. Repeating `--candidate-id` limits `candidate_routes` to exactly those selected candidates; an unknown, non-selected, or differently linked ID is rejected. Managed acquisition must pass the work order's candidate IDs so another selected candidate on the same request is never emitted accidentally. Omitting the flag retains the request-wide operator workflow. A fetch agent's loop is: `list --status open --format json` → scoped `plan-fetch --request-id ... --candidate-id ... --format json` → deliver files with sidecars (set `request_id` and `candidate_id` in the sidecar, and read the request's `scope` — if present, stamp the matching keys into the sidecar's `scope:` mapping so fulfilment can verify the delivery against the request instead of assuming it) → run inventory and normalization → `fulfill` each delivered request. Use `skills/research-acquire.md` for the optional provider-backed version of this loop, including disabled-acquisition refusal, sidecar verification, blocked-question reopening, and final status reporting. `add` and `fulfill` append one `source-request` entry to `log.md`; `list` and `plan-fetch` do not mutate the request artifact or `log.md`. When reopening a blocked question over multiple delivered sources, `reopen` pairs each request to a source by declared scope (see "Scope Matching" above) rather than by the order `--request-id`/`--source-id` were passed.
+`plan-fetch` is read-only: it turns a request into candidate provider commands and records `network_io_executed: false`. Request-kind-based routing only special-cases `kind: paper`; every other kind — `dataset`, `web`, `code`, `other`, `structured_data`, and any pack-declared kind (`pack:<pack-name>/<kind-id>`) — has no provider-backed fetch plan and returns the same `unsupported` status and warning ("No provider-backed plan is available for this kind; use manual delivery."), with `network_io_executed: false` rather than an error. Repeating `--candidate-id` limits `candidate_routes` to exactly those selected candidates; an unknown, non-selected, or differently linked ID is rejected. Managed acquisition must pass the work order's candidate IDs so another selected candidate on the same request is never emitted accidentally. Omitting the flag retains the request-wide operator workflow. A fetch agent's loop is: `list --status open --format json` → scoped `plan-fetch --request-id ... --candidate-id ... --format json` → deliver files with sidecars (set `request_id` and `candidate_id` in the sidecar, and read the request's `scope` — if present, stamp the matching keys into the sidecar's `scope:` mapping so fulfilment can verify the delivery against the request instead of assuming it) → run inventory and normalization → `fulfill` each delivered request. Use `skills/research-acquire.md` for the optional provider-backed version of this loop, including disabled-acquisition refusal, sidecar verification, blocked-question reopening, and final status reporting. `add` and `fulfill` append one `source-request` entry to `log.md`; `list` and `plan-fetch` do not mutate the request artifact or `log.md`. When reopening a blocked question over multiple delivered sources, `reopen` pairs each request to a source by declared scope (see "Scope Matching" above) rather than by the order `--request-id`/`--source-id` were passed; where the declared scope cannot single out one source, the pair is still reported but marked `decided_by: tie_break` rather than presented as a scope decision.
 
 ### Selected discovery candidates
 

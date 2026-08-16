@@ -95,7 +95,6 @@ license: CC-BY-4.0                  # or null as explicit uncertainty
 checksum: sha256:<64 hex chars>
 scope:                              # stamp this when the request declares a scope mapping
   facet_id: supplier_quote
-  candidate: acme-widget
 ```
 
    `candidate_id` stays absent: delegated acquisition has no candidate store.

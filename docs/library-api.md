@@ -107,7 +107,7 @@ trail as one moved from a shell:
 | `questions.block` | `block(*, slug, agent_id, blocked_reason, request_id=None, allow_unclaimed=False)` |
 | `questions.defer` | `defer(*, slug, agent_id, reason, allow_unclaimed=False)` |
 | `questions.reject` | `reject(*, slug, agent_id, reason, allow_unclaimed=False)` |
-| `questions.reopen` | `reopen(*, slug, agent_id, source_id, request_id=None)` |
+| `questions.reopen` | `reopen(*, slug, agent_id, source_id, request_id=None, require_decisive_scope=False)` |
 | `questions.approve` | `approve(*, slug, reviewer)` |
 | `questions.review` | `review(*, slug, policy, verdict, reviewed_by, review_ref=None, note=None)` |
 | `questions.set_grounding` | `set_grounding(*, slug, agent_id, from_file, allow_unclaimed=False)` |

@@ -6,7 +6,17 @@ method is a one-line forward to the matching ``run_<op>`` seam in
 ``question_claim.py``, ``question_resolve.py`` or ``intake_questions.py``, and
 every keyword mirrors the seam's -- which mirrors the CLI flag -- one for one. No
 friendlier names and no convenience transformations: an operation that reads the
-same on both doors is an operation that cannot drift between them.
+same on both doors is an operation that is hard to drift between them.
+
+Hard, not impossible, and the difference is worth stating because it has already
+happened: ``--require-decisive-scope`` was added to the parser, to
+``dispatch_seam`` and to ``run_reopen``, and this file was not touched, so the CLI
+refused an undecided pairing while an in-process host could not ask for that
+behaviour at all. Mirroring by hand is a convention, and a convention holds until
+someone edits three of the four places. So it is pinned by
+``test_library_facade_forwards_every_seam_keyword``, which checks both halves --
+that every seam keyword is reachable from the method, and that every keyword the
+method accepts is actually passed on -- rather than by remembering this paragraph.
 
 The audit trail is not optional and not the caller's job. Every mutating seam
 below writes its ``log.md`` entry and its page frontmatter *inside* the call, in
@@ -157,11 +167,15 @@ class QuestionsNamespace(Namespace):
         agent_id: str,
         source_id: list[str],
         request_id: list[str] | None = None,
+        require_decisive_scope: bool = False,
     ) -> dict[str, Any]:
         """Move a blocked question back to open once its evidence is delivered and normalized.
 
         There is no ``allow_unclaimed`` here, matching the seam and the CLI: a
         blocked question is never claimed.
+
+        ``require_decisive_scope`` refuses a pairing the declared scope did not
+        determine, rather than reporting it as a warning.
         """
         return self._call(
             _RESOLVE,
@@ -171,6 +185,7 @@ class QuestionsNamespace(Namespace):
             agent_id=agent_id,
             source_id=source_id,
             request_id=request_id,
+            require_decisive_scope=require_decisive_scope,
         )
 
     # -- review ---------------------------------------------------------

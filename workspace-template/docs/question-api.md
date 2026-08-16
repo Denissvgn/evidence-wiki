@@ -554,7 +554,9 @@ reported as `pairs`:
 
 | Field | Meaning |
 |-------|---------|
-| `pairs[]` | `{"request_id": ..., "source_id": ...}` per scoped request, in the order the requests were supplied. Always present on `reopen`; empty when nothing declared a scope. |
+| `pairs[]` | `{"request_id": ..., "source_id": ..., "decided_by": ...}` per scoped request, in the order the requests were supplied. Always present on `reopen`; empty when nothing declared a scope. |
+| `pairs[].decided_by` | `scope` when the declared scope determined this pair, `tie_break` when another equally corroborated source could have answered the request or another request could have taken the source, and the choice fell to the order the requests and sources were supplied. |
+| `warnings[]` | `{"code": ..., "message": ...}` plus the offending `request_id`, `source_id`, `alternative_source_ids` (sources that could have answered this request) and `contending_request_ids` (requests that could have taken this source). Always present on `reopen`; empty when every pair was decided by scope. |
 
 ```json
 {
@@ -563,9 +565,10 @@ reported as `pairs`:
   "source_ids": ["raw:shade-cover-survey", "raw:heat-index-readings"],
   "request_ids": ["req-heat-index", "req-shade-cover"],
   "pairs": [
-    {"request_id": "req-heat-index", "source_id": "raw:heat-index-readings"},
-    {"request_id": "req-shade-cover", "source_id": "raw:shade-cover-survey"}
-  ]
+    {"request_id": "req-heat-index", "source_id": "raw:heat-index-readings", "decided_by": "scope"},
+    {"request_id": "req-shade-cover", "source_id": "raw:shade-cover-survey", "decided_by": "scope"}
+  ],
+  "warnings": []
 }
 ```
 
@@ -574,9 +577,68 @@ delivered source declare must agree, while a key only one side states is
 compatible. Absence is not a refusal here — `fulfill --require-scope` is where a
 host opts into strictness, and it has no equivalent on `reopen`. A source that
 positively corroborates more of a request's scope is preferred over one that
-merely fails to contradict it, so the reported pairing is deterministic.
+merely fails to contradict it, and that preference is a scope decision.
 Requests without a scope are left unpaired, exactly as before, and contribute no
 `pairs` entries.
+
+Declared scope does not always narrow a request to one source. When two scoped
+requests declare the same scope, the assignment falls to the order the requests
+and sources were supplied — and that holds even when the deliveries differ,
+because scope is symmetric between those two requests: whichever one ends up
+with the better-corroborated source got it by supply order, not because scope
+chose it. `reopen` still pairs — it reports a pairing rather than recording a
+fulfilment, and refusing would break reopens that succeed today — but the pair
+is marked `decided_by: "tie_break"` and one `request_scope_pairing_tie` warning
+per tie-broken pair names what could have gone differently:
+
+```json
+{
+  "pairs": [
+    {"request_id": "req-a", "source_id": "raw:quote-one", "decided_by": "tie_break"},
+    {"request_id": "req-b", "source_id": "raw:quote-two", "decided_by": "tie_break"}
+  ],
+  "warnings": [
+    {
+      "code": "request_scope_pairing_tie",
+      "request_id": "req-a",
+      "source_id": "raw:quote-one",
+      "alternative_source_ids": ["raw:quote-two"],
+      "contending_request_ids": ["req-b"],
+      "message": "Declared scope does not determine which source answers request req-a: ..."
+    },
+    {
+      "code": "request_scope_pairing_tie",
+      "request_id": "req-b",
+      "source_id": "raw:quote-two",
+      "alternative_source_ids": ["raw:quote-one"],
+      "contending_request_ids": ["req-a"],
+      "message": "Declared scope does not determine which source answers request req-b: ..."
+    }
+  ]
+}
+```
+
+A host that needs the pairing to be evidence rather than convention passes
+`reopen --require-decisive-scope`, which refuses with `REQUEST_SCOPE_UNDECIDED`
+when any pair is `tie_break`, naming them and leaving the question `blocked`.
+That is the reopen counterpart to `fulfill --require-scope`, on the axis reopen
+has: `--require-scope` asks whether the delivery *stated* the request's keys,
+while this asks whether the declared keys *discriminate*. Absence strictness
+still has no equivalent here.
+
+It is opt-in for the same reason absence is tolerated by default on `fulfill`:
+a workspace whose same-facet requests are interchangeable has ties with no
+consequence, and only the host knows whether its requests are interchangeable or
+merely under-scoped — the package never interprets scope values. So the default
+reports and the host that can guarantee discriminating keys asks for the gate,
+rather than hand-rolling one over `warnings`. Requests that declare no scope
+produce no pairs and are outside the check, exactly as a request with no keys is
+outside `--require-scope`.
+
+Fix a refusal by declaring a scope key that varies between the requests on this
+question (see "Choosing scope keys" in [source-delivery.md](source-delivery.md))
+or by reopening those requests in separate calls. `log.md` records tie-broken
+pairs as such rather than claiming declared scope decided them.
 
 | Error code | Cause |
 |------------|-------|
@@ -584,6 +646,7 @@ Requests without a scope are left unpaired, exactly as before, and contribute no
 | `SOURCE_UNKNOWN` | A supplied `--source-id` is not in the manifest. |
 | `SOURCE_NOT_NORMALIZED` | A supplied source has no normalized record yet. |
 | `REQUEST_SCOPE_MISMATCH` | A scoped request matches no supplied source, or two scoped requests can only be satisfied by the same source. |
+| `REQUEST_SCOPE_UNDECIDED` | Under `reopen --require-decisive-scope`, declared scope did not determine at least one pairing. |
 
 `REQUEST_SCOPE_MISMATCH` is refused before the question page is written, so a
 failed reopen leaves the question `blocked` and the page byte-identical. Its
