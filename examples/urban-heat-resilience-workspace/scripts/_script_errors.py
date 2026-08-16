@@ -163,6 +163,140 @@ _REMEDIATIONS = {
     "ORCHESTRATION_STATE_UNREADABLE": (
         "Restore the orchestration control tree; unreadable session state cannot authorize a mutation."
     ),
+    # orchestration_controller.py
+    #
+    # Where a raise site passes its own ``remediation=``, that string wins and the entry
+    # here restates it so the two doors cannot drift. Where the site relies on this table,
+    # the entry is written for the conditions those default sites actually report.
+    "ORCHESTRATION_ID_INVALID": (
+        "Use a filename-safe orchestration id of at most 160 characters, or let orchestrate start generate "
+        "one. If the refused id came from a persisted work order, restore that work order instead of "
+        "starting a new session."
+    ),
+    "ACTION_ID_INVALID": (
+        "Pass submit --action-id exactly the action id next returned. If the controller derived or read back "
+        "the refused id, restore the retained work order, or start a fresh orchestration under a shorter "
+        "orchestration id."
+    ),
+    "ORCHESTRATION_EXISTS": "Resume or inspect that session, or start with another id.",
+    "ORCHESTRATION_UNKNOWN": "Inspect runs/orchestrations/ or start a session.",
+    "ORCHESTRATION_STATE_INVALID": (
+        "Restore the controller-owned artifact the message names (session, work order, control-repair marker, "
+        "or trusted-input fingerprint) from trusted recovery material. If no clean copy exists, preserve the "
+        "session for audit and start a fresh orchestration."
+    ),
+    "ORCHESTRATION_EVENTS_INVALID": (
+        "Restore the exact retained runs/orchestrations/<orchestration_id>/events.jsonl from trusted recovery "
+        "material; if no clean copy exists, preserve the session for audit and start a fresh orchestration. "
+        "Do not hand-edit the append-only event log to clear the refusal."
+    ),
+    "ORCHESTRATION_OWNER_MISMATCH": "Retry with the owning agent_id or start a separately owned session.",
+    "ORCHESTRATION_DRIVER_BUSY": (
+        "Retry after the holder's call completes, or serialize drivers host-side; status polling never "
+        "requires this lock. Pass --driver-wait-seconds SECONDS to wait instead of refusing."
+    ),
+    "ORCHESTRATION_WRITE_FAILED": "Restore workspace write access or free space, then retry the idempotent command.",
+    "ORCHESTRATION_WORKSPACE_UNSAFE": (
+        "Resolve the reported health or validation findings, then request the same next action again. If the "
+        "message names a question file, first replace any link or special file under the questions directory "
+        "with a stable singly linked regular file."
+    ),
+    "ORCHESTRATION_PROVIDER_POLICY_CHANGED": (
+        "Restore the research.yml provider authorization this session started under, or "
+        "preserve the session for audit and start a new orchestration."
+    ),
+    "ORCHESTRATION_DELEGATION_CHANGED": (
+        "Restore the research.yml orchestration: section this session started under, or start a new session "
+        "under the new declaration."
+    ),
+    "ORCHESTRATION_CONTROL_REPAIR_REQUIRED": (
+        "Inspect the retained attempt and quarantine, restore the issued state, then run managed orchestrate "
+        "resume with --acknowledge-control-repair."
+    ),
+    "ORCHESTRATION_TRUSTED_INPUT_UNSAFE": (
+        "Replace links or special files with bounded regular files/directories under the trusted workspace "
+        "inputs, then retry. Keep generated research output under its documented writable paths."
+    ),
+    "ORCHESTRATION_TRUSTED_INPUT_CHANGED": (
+        "Restore the issued static inputs and retry the same pending action. If the change was intentional, "
+        "start a new orchestration session from the updated workspace instead of editing parent state."
+    ),
+    "ORCHESTRATION_LEGACY_ACTION_UNBOUND": (
+        "Replay the pending action with evidence-wiki orchestrate next --resume, or use managed "
+        "evidence-wiki orchestrate resume, before submitting a result. The replay binds a controller-owned "
+        "fingerprint before any worker is launched."
+    ),
+    "WORK_ORDER_INVALID": (
+        "Restore the exact controller-owned work order under "
+        "runs/orchestrations/<orchestration_id>/work-orders/ and resume the same action, or preserve the "
+        "session for audit and start a fresh orchestration. Never hand-write a work order."
+    ),
+    "ACTION_NOT_PENDING": "Call next and submit the returned action id.",
+    "RESULT_UNREADABLE": (
+        "Pass submit --result-file a path that exists and is readable, then resubmit the same action id."
+    ),
+    "RESULT_INVALID": (
+        "Return exactly schema_version, action_id, outcome, a bounded summary, and an artifacts list of "
+        "workspace-relative paths."
+    ),
+    "RESULT_CONFLICT": "Treat the accepted result as immutable; do not overwrite it.",
+    "ORCHESTRATION_POSTCONDITION_FAILED": (
+        "Finish the same persisted action and resubmit it without changing the action id. If the message "
+        "names an unreadable, unsafe, or changed workspace artifact, repair that artifact first; "
+        "resubmission re-reads it."
+    ),
+    "ORCHESTRATION_RESEARCH_BASELINE_UNAVAILABLE": (
+        "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+        "workspace state. Do not hand-edit the retained work order or infer a baseline after worker "
+        "execution."
+    ),
+    "ORCHESTRATION_DISCOVERY_BASELINE_UNAVAILABLE": (
+        "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+        "workspace state. Do not hand-edit the retained work order or infer candidate creation after "
+        "execution."
+    ),
+    "ORCHESTRATION_CANDIDATE_REVIEW_BASELINE_UNAVAILABLE": (
+        "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+        "workspace state. Do not infer which candidate selections occurred after execution."
+    ),
+    "ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE": (
+        "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+        "workspace state. Do not infer question transitions or matching evidence after worker execution."
+    ),
+    "ORCHESTRATION_IMMUTABILITY_BASELINE_UNAVAILABLE": (
+        "Preserve this orchestration for audit and start a fresh orchestration session from the current "
+        "workspace state. Never bind raw or manifest digests after worker execution."
+    ),
+    "ORCHESTRATION_INTEGRITY_BASELINE_INVALID": (
+        "Restore the exact controller-owned sidecar from trusted recovery material, or preserve the "
+        "orchestration for audit and start a fresh session. Do not infer it from current workspace state."
+    ),
+    "ORCHESTRATION_INTEGRITY_BASELINE_CHANGED": (
+        "Restore the protected baseline exactly or preserve this session and start a fresh one."
+    ),
+    "ORCHESTRATION_SCOPE_EXCEEDED": (
+        "Archive or split the record store the message names, then start a safely bounded action. The guards "
+        "cap record and file counts as well as the 8 MiB scope sidecar and the 256 KiB public work order."
+    ),
+    "ORCHESTRATION_SCOPE_INVALID": (
+        "Repair the reported record store (evidence manifest, candidate store, source-request store, or "
+        "lifecycle audit) so every record is canonical JSON carrying a unique, non-empty, bounded id, then "
+        "rerun the refused next or submit."
+    ),
+    "CANDIDATE_STORE_INVALID": (
+        "Fix sources/discovery/candidates.jsonl, or the configured "
+        "integrations.discovery.candidate_store_path, so every line is a JSON object with a unique bounded "
+        "candidate_id and a lowercase lifecycle state."
+    ),
+    "SOURCE_REQUESTS_INVALID": (
+        "Fix sources/source-requests.jsonl so every line is a JSON object; its sibling "
+        "sources/source-request-attempts.jsonl is append-only audit, so restore that file rather than "
+        "rewriting it."
+    ),
+    "ARTIFACT_PATH_INVALID": (
+        "Bring the reported path back under the project root: correct the research.yml setting that points "
+        "outside it, or replace a symlinked or mounted workspace subtree with a real directory."
+    ),
     "SOURCE_UNKNOWN": "Run scripts/source_inventory.py --report and choose a source id present in the manifest.",
     "TOOLING_MISSING": "Restore or upgrade the workspace scripts from the starter.",
     "INTAKE_TOTAL_CAP_EXCEEDED": (
