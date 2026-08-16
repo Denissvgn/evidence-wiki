@@ -68,6 +68,52 @@ _REMEDIATIONS = {
     "FINAL_VERDICT_REQUIRED": "Pass --final-verdict complete, blocked_on_sources, no_ship, or failed.",
     "EVENT_TYPE_INVALID": "Use a documented event type or a namespaced custom type such as custom.operator.note.",
     "EVENT_DATA_INVALID": "Pass --data-json as a JSON object or omit it.",
+    # run_controller.py
+    "BUDGET_EXCEEDED": (
+        "Record an approved override with run_controller.py override-manual-url-budget --run-id RUN_ID "
+        "--agent-id AGENT --new-limit N --override-reason TEXT --approved-by WHO, then retry the transition "
+        "or finish command."
+    ),
+    "BUDGET_OVERRIDE_INVALID": (
+        "Rerun override-manual-url-budget with --new-limit greater than the current manual URL delivery "
+        "limit the message reports; an override only raises that budget, never lowers it."
+    ),
+    "RUN_ACADEMIC_PROVIDER_ACCOUNTING_EXISTS": (
+        "Preserve the retained artifact for audit, choose a fresh run id, and start a new run. "
+        "Do not truncate or replace provider accounting by hand."
+    ),
+    "RUN_COMPLETION_NOT_READY": (
+        "Resolve every returned readiness finding and rerun finish, or close the run honestly with "
+        "--final-verdict no_ship when that transition is legal."
+    ),
+    "RUN_COMPLETION_READINESS_INVALID": (
+        "Restore scripts/publication_readiness.py from the starter with evidence-wiki upgrade so it returns "
+        "a document carrying a string verdict, then rerun finish."
+    ),
+    "RUN_COMPLETION_READINESS_UNREADABLE": (
+        "Reproduce the reported failure with scripts/publication_readiness.py --format json, fix the workspace "
+        "state or dependency it names, then rerun finish."
+    ),
+    "RUN_EVENTS_INVALID": (
+        "Preserve runs/<run_id>/events.jsonl, then restore a verified copy or repair the reported line or "
+        "duplicate event id and run run_controller.py recover before the next mutation."
+    ),
+    "RUN_EVENT_ID_CONFLICT": (
+        "Preserve runs/<run_id>/events.jsonl and reconcile the two records that share the reported event id "
+        "by hand; a committed event is never rewritten, so no command resolves the conflict for you."
+    ),
+    "RUN_MUTATION_RECOVERY_REQUIRED": (
+        "Inspect runs/<run_id>/run-state.json and events.jsonl, then run run_controller.py recover --run-id "
+        "RUN_ID --agent-id AGENT before attempting another mutation."
+    ),
+    "RUN_MUTATION_WRITE_FAILED": (
+        "Restore write access or free space for the run directory, retain any generated .tmp artifact, then "
+        "run run_controller.py recover for this run before retrying the mutation."
+    ),
+    "RUN_PENDING_EVENT_INVALID": (
+        "Preserve runs/<run_id>/run-state.json for audit and restore a verified copy whose _pending_event is "
+        "an object with a string event_id before rerunning recover."
+    ),
     "COVERAGE_REQUIRED": "Create or select a coverage manifest and pass only after required facets are covered.",
     "COVERAGE_BLOCKED": "Resolve blocked coverage facets with accepted sources or source requests before answering.",
     "COVERAGE_MANIFEST_INVALID": "Fix the coverage manifest YAML so it matches docs/coverage-manifest.md.",
