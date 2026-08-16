@@ -337,6 +337,85 @@ _REMEDIATIONS = {
     "OPENALEX_PDF_UNAVAILABLE": (
         "Choose another OpenAlex work or deliver the paper manually with a provenance sidecar."
     ),
+    # fetch_sources.py
+    #
+    # Each entry below is aligned with the remediation its raise site already passes
+    # inline, so the string a CLI operator reads and the string a library host gets
+    # from ``remediation_for`` say the same thing. Where one code is raised from
+    # several sites with per-case wording, the entry generalizes those cases rather
+    # than picking one of them.
+    "ACQUISITION_RUN_ID_REQUIRED": "Pass --run-id for the active run that owns this acquisition.",
+    "ACQUISITION_RUN_ID_INVALID": "Use a filename-safe active run id from runs/<run-id>/run-state.json.",
+    "ACQUISITION_RUN_UNKNOWN": "Start the run with run_controller.py or pass an existing active --run-id.",
+    "ACQUISITION_RUN_TERMINAL": "Start a new run before acquiring additional evidence.",
+    "ACQUISITION_RUN_STATE_INVALID": (
+        "Repair or recover the retained run-state artifact before acquiring more evidence."
+    ),
+    "ACQUISITION_RUN_RECOVERY_REQUIRED": (
+        "Run run_controller.py recover --run-id RUN_ID before retrying acquisition."
+    ),
+    "ACQUISITION_PATH_UNSAFE": (
+        "Choose a canonical workspace-relative path under raw/ without symlinked ancestors. "
+        "When a registered provider supplied the offending artifact filename, fix that distribution "
+        "to return a plain filename inside the target root."
+    ),
+    "ACQUISITION_RECOVERY_REQUIRED": (
+        "Retry through the acquisition command so the marker-backed output is quarantined safely."
+    ),
+    "ACQUISITION_RECOVERY_FAILED": (
+        "Preserve the marker-backed output, restore write access, and retry. "
+        "Do not promote it into evidence manually."
+    ),
+    "ACQUISITION_MARKER_INVALID": (
+        "Preserve the marker and payload for operator review; do not promote or delete raw evidence "
+        "automatically."
+    ),
+    "ACQUISITION_COMMIT_INCOMPLETE": (
+        "Retry the acquisition; marker-backed incomplete output will be quarantined first."
+    ),
+    "ACQUISITION_WRITE_FAILED": (
+        "Restore write access or free space, preserve the hidden partial and marker, then retry so "
+        "marker-backed output can be quarantined safely."
+    ),
+    "ACQUISITION_METADATA_MISSING": (
+        "Write the --standards-metadata file before acquiring the web snapshot."
+    ),
+    "ACQUISITION_METADATA_UNREADABLE": (
+        "Check the workspace-relative path and file permissions, then retry."
+    ),
+    "ACQUISITION_METADATA_INVALID": "Fix the standards metadata file to contain one mapping object.",
+    "ACQUISITION_DATE_METADATA_INVALID": (
+        "Pass the flagged date in its documented form: a YYYY-MM-DD date, a four-digit "
+        "--valid-for-year, or a start/end --validity-period. Omit any date flag you cannot verify."
+    ),
+    "ACQUISITION_ARCHIVE_LIMIT_EXCEEDED": (
+        "Reject the archive or inspect it manually outside the workspace."
+    ),
+    "GITHUB_ARCHIVE_BUDGET_EXCEEDED": (
+        "Start a new run or raise the reviewed GitHub archive byte budget."
+    ),
+    "GITHUB_ARCHIVE_TOO_LARGE": (
+        "Raise integrations.acquisition.github.max_archive_bytes after review, or capture a smaller ref."
+    ),
+    "GITHUB_REPO_INVALID": (
+        "Pass exactly one of --repo owner/repo or --url, and a valid --ref for archive downloads."
+    ),
+    "GITHUB_NOT_FOUND": (
+        "Verify the owner/repo and ref exist and are readable with the current token."
+    ),
+    "GITHUB_RELEASE_UNAVAILABLE": (
+        "Choose a repository or tag with a published release, or capture a source archive instead."
+    ),
+    "OPENALEX_RESOLUTION_AMBIGUOUS": (
+        "Inspect candidates manually, then use openalex get --id-or-doi with an explicit OpenAlex ID or DOI."
+    ),
+    "SIDECAR_MISSING": (
+        "Run source_inventory.py to refresh provenance paths or reacquire the source."
+    ),
+    "SIDECAR_INVALID": "Repair the sidecar or reacquire the source.",
+    "SOURCE_NOT_FOUND": (
+        "Run source_inventory.py or pass a source id from sources/manifest.jsonl."
+    ),
     "NOT_IMPLEMENTED": "Use a command whose provider transport is implemented, or add the missing adapter first.",
     "CLAIM_HELD": "Use claim --steal --if-older-than for orchestrator-mediated stale-claim recovery.",
     "CLAIM_NOT_STALE": "Wait until the claim is stale or use a larger --if-older-than threshold.",
