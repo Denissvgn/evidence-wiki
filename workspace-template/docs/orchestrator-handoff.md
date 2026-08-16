@@ -548,6 +548,8 @@ Stable error codes:
 | `ARXIV_RATE_LIMITED` | arXiv refused or throttled the bounded request. | Wait for the provider window, reduce the request rate, and resume the retained action. |
 | `ACQUISITION_NETWORK_ERROR` | Provider request failed due to network or server errors. | Retry later, check network access, or lower request volume. |
 | `ACQUISITION_RESPONSE_INVALID` | Provider response was malformed or missing required data. | Retry later or inspect the provider response manually. |
+| `ACQUISITION_CONTENT_TOO_LARGE` | A provider response exceeds the configured download byte cap. No raw artifact or sidecar is left behind. | Raise the reviewed byte cap or acquire a smaller source artifact. |
+| `ACQUISITION_TLS_FAILED` | A provider endpoint's TLS certificate chain could not be verified, or a command asked to disable verification. Automated acquisition never disables TLS verification. | Use an endpoint with a valid, trusted TLS certificate chain. |
 | `ACQUISITION_ARCHIVE_UNSAFE` | Downloaded archive has unsafe paths or unsupported members. | Reject the archive or inspect it outside the workspace. |
 | `ACQUISITION_TARGET_EXISTS` | Acquisition target path already exists. | Move or review the existing raw evidence before retrying. |
 | `ACQUISITION_ARCHIVE_LIMIT_EXCEEDED` | An arXiv source archive exceeds the fixed member or uncompressed-byte safety limit. Nothing was extracted, and these caps are fixed rather than configuration. | Reject the archive or inspect it manually outside the workspace. |
