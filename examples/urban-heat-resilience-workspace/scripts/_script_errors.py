@@ -250,7 +250,7 @@ _REMEDIATIONS = {
     ),
     "JURISDICTION_UNKNOWN": (
         "Run discover_sources.py jurisdictions list and pass a --jurisdiction id it reports, or add that "
-        "profile to sources/jurisdictions.yml and confirm it with jurisdictions validate."
+        "profile to sources/jurisdictions.yml and confirm it with discover_sources.py jurisdictions validate."
     ),
     "GITHUB_AUTH_REQUIRED": (
         "Set a valid GITHUB_TOKEN in the process environment and rerun, "

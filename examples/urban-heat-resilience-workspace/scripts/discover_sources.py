@@ -5632,7 +5632,7 @@ def load_jurisdiction_profiles(project_root: Path, config: dict[str, Any]) -> li
         raise DiscoverSourcesError(
             "JURISDICTION_INVALID",
             f"{relative_label(project_root, path)}: invalid YAML: {exc}",
-            remediation="Fix the YAML syntax and rerun jurisdictions validate.",
+            remediation="Fix the YAML syntax and rerun discover_sources.py jurisdictions validate.",
             details={"command": "jurisdictions", "network_io_executed": False},
         ) from exc
     if document is None:
@@ -5655,7 +5655,8 @@ def require_jurisdiction(profiles: list[dict[str, Any]], jurisdiction_id: str) -
             f"Unknown jurisdiction id: {jurisdiction_id!r} (no matching profile in sources/jurisdictions.yml).",
             remediation=(
                 "Run discover_sources.py jurisdictions list and pass a --jurisdiction id it reports, or "
-                "add that profile to sources/jurisdictions.yml and confirm it with jurisdictions validate."
+                "add that profile to sources/jurisdictions.yml and confirm it with discover_sources.py "
+                "jurisdictions validate."
             ),
             details={"jurisdiction_id": jurisdiction_id, "network_io_executed": False},
         )
