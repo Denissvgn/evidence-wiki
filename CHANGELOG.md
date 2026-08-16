@@ -35,6 +35,21 @@
   `sync_vendored_scripts.py --check` for template↔mirror drift and `llm-wiki lint
   --strict` for code↔wiki drift; these close the doc↔doc, CLI↔seam and seam↔facade
   equivalents.
+- Each of those guards now derives its own coverage instead of listing it, after the
+  first versions were found to protect only the case that prompted them. The facade
+  guard walks 18 door→seam bindings across all seven namespaces and the `Workspace`
+  handle, in both call shapes, rather than eight hardcoded for one namespace; it also
+  reads positional-or-keyword parameters, not just keyword-only ones. The set of
+  scripts required to appear in the JSON Output Scripts table is derived from the
+  scripts directory rather than a hardcoded list that silently omitted eight
+  qualifying scripts, `orchestration_controller.py` — the largest error surface in
+  the package — among them; remaining exemptions are declared with a written reason.
+- Fix a Markdown table parser in the error-envelope checks that split rows on a bare
+  `|` and ignored `\|`. Rows whose JSON-mode column reads `next\|submit\|…` had a
+  fragment of the wrong column parsed as their error codes, so
+  `test_json_output_scripts_table_uses_stable_error_codes` was passing while
+  examining 85 of 131 codes and one orchestration code instead of 22. No shipped
+  behavior changes; the check simply now sees what it always claimed to.
 - Stop `reopen` from crediting declared scope for a pairing that argument order
   decided, and say which scope keys are worth declaring in the first place.
   Request scope narrows the sources that can answer each request, but it does not
