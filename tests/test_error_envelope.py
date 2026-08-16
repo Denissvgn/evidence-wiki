@@ -18,26 +18,45 @@ PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profil
 HELPER_PATH = SCRIPTS / "_script_errors.py"
 ERROR_HELPER_CALLS = {"handle_system_exit", "emit_error", "emit_refusal", "error_envelope"}
 
-JSON_MODE_SCRIPTS = [
-    "discover_sources.py",
-    "doctor.py",
-    "export_answers.py",
-    "intake_questions.py",
-    "lint.py",
-    "query_index.py",
-    "question_claim.py",
-    "question_resolve.py",
-    "question_status.py",
-    "run_controller.py",
-    "run_report.py",
-    "smoke_validate_workspace.py",
-    "fetch_sources.py",
-    "verify_citations.py",
-    "normalize_sources.py",
-    "source_inventory.py",
-    "source_requests.py",
-    "workspace_status.py",
-]
+# Scripts whose envelope codes need no JSON Output Scripts row, each for a stated reason.
+# An exemption belongs here — visible and arguable — rather than in a hand-kept inventory
+# of what to check, which is how `orchestration_controller.py` (36 codes),
+# `coverage_manifest.py` and `publication_readiness.py` sat outside this file's checks
+# without anyone deciding they should.
+JSON_MODE_DOC_EXEMPT = {
+    # Raise no envelope code of their own: the table lists the codes a host must handle
+    # per script, and an empty row states nothing. They still refuse through the shared
+    # helper, which `test_documented_json_mode_scripts_use_shared_error_helper` covers.
+    "init_research_workspace.py": "raises no envelope code of its own",
+    "serve_mcp.py": "raises no envelope code of its own",
+    "workspace_gc.py": "raises no envelope code of its own",
+    # TODO(CR-14): both need a JSON Output Scripts row, and verify_quotes.py additionally
+    # needs GROUNDING_INVALID and GROUNDING_VERIFIER_REQUIRED added to the Stable error
+    # codes table. Deferred only to avoid editing orchestrator-handoff.md while parallel
+    # CR-14 units are writing to it; tracked in docs/CR/CR-14-backlog.md.
+    "normalize_verify.py": "CR-14 follow-up: JSON Output Scripts row pending",
+    "verify_quotes.py": "CR-14 follow-up: row + 2 stable-code rows pending",
+}
+
+
+def json_mode_scripts() -> list[str]:
+    """Every script that must appear in the JSON Output Scripts table, derived not listed.
+
+    A script qualifies when it imports the shared error helper *and* calls it — the same
+    two predicates `test_documented_json_mode_scripts_use_shared_error_helper` already
+    applies in the other direction. Deriving it is the point: the previous hardcoded list
+    of 18 silently omitted 8 qualifying scripts, so the largest error surface in the
+    package (`orchestration_controller.py`) was exempt from these checks by an omission
+    nobody had to justify. A new script now joins the checks by existing.
+    """
+    scripts = []
+    for path in sorted(SCRIPTS.glob("*.py")):
+        if path.name.startswith("_") or path.name in JSON_MODE_DOC_EXEMPT:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if script_imports_error_helper(tree) and script_calls_error_helper(tree):
+            scripts.append(path.name)
+    return scripts
 
 
 def load_script_module(name: str, filename: str):
@@ -57,6 +76,22 @@ def load_helper():
     return load_script_module("research_script_errors", "_script_errors.py")
 
 
+def markdown_row_cells(line: str) -> list[str]:
+    """Split one Markdown table row into cells, honouring `\\|` as escaped content.
+
+    Splitting on a bare `|` silently truncates every row whose cell text contains an
+    escaped pipe — and rows here do: the JSON-mode column spells subcommand lists as
+    `next\\|submit\\|...`. That put a fragment of the *wrong column* in `cells[2]` for
+    `orchestration_controller.py`, `coverage_manifest.py` and `question_resolve.py`, so
+    the codes those rows advertise were never compared against the stable-codes table.
+    The table's largest error surface was unchecked by the check that exists to cover it,
+    which is why nine missing rows for that module went unnoticed until a reviewer read
+    them by hand.
+    """
+    cells = re.split(r"(?<!\\)\|", line.strip().strip("|"))
+    return [cell.strip().replace("\\|", "|") for cell in cells]
+
+
 def documented_json_output_script_rows() -> list[tuple[str, str]]:
     text = HANDOFF_DOC.read_text(encoding="utf-8")
     marker = "#### JSON Output Scripts"
@@ -68,7 +103,7 @@ def documented_json_output_script_rows() -> list[tuple[str, str]]:
         stripped = line.strip()
         if not stripped.startswith("|") or "---" in stripped:
             continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        cells = markdown_row_cells(stripped)
         if not cells or cells[0].lower() == "script":
             continue
         match = re.search(r"`(?:scripts/)?([\w_]+\.py)`", cells[0])
@@ -103,7 +138,7 @@ def documented_stable_error_codes() -> set[str]:
         stripped = line.strip()
         if not stripped.startswith("|") or "---" in stripped:
             continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        cells = markdown_row_cells(stripped)
         if not cells or cells[0].lower() == "code":
             continue
         match = re.fullmatch(r"`([A-Z][A-Z0-9_]+)`", cells[0])
@@ -393,7 +428,12 @@ class ErrorEnvelopeTests(unittest.TestCase):
         documented = documented_json_output_scripts()
 
         self.assertEqual(sorted(set(documented)), sorted(documented), "JSON Output Scripts table has duplicates")
-        missing = sorted(set(JSON_MODE_SCRIPTS) - set(documented))
+        required = json_mode_scripts()
+        # Guard the guard: a derivation that silently matched nothing would pass forever,
+        # and the script this derivation exists to stop exempting must be inside it.
+        self.assertGreater(len(required), 18, "JSON-mode derivation found fewer scripts than the list it replaced")
+        self.assertIn("orchestration_controller.py", required)
+        missing = sorted(set(required) - set(documented))
         self.assertEqual([], missing, "document every required JSON-mode script in orchestrator-handoff.md")
 
     def test_json_output_scripts_table_uses_stable_error_codes(self):

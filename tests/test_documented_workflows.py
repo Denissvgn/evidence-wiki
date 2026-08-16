@@ -4,6 +4,7 @@ import io
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -536,6 +537,59 @@ class DocumentedWorkflowTests(unittest.TestCase):
             self.assertIn(expected, handoff)
         self.assertIn("coverage_required", research_yml)
         self.assertIn("coverage_manifest", research_yml)
+
+    def test_no_shipped_surface_teaches_a_retired_scope_example(self):
+        """Retired scope exemplars must not survive anywhere a consumer copies from.
+
+        CR-12 retired `candidate=acme-widget` because it paired `facet_id` with a
+        per-question key, teaching a key set `fulfill --require-scope` cannot satisfy.
+        Five surfaces were updated and a sixth — the JSON form in mcp-server.md — was
+        missed, because the acceptance check grepped the two *syntaxes* its author had
+        just edited (`candidate=`, `candidate: `) rather than the *value*. Independent
+        review caught it.
+
+        So this greps values across every shipped surface, and is the reason a retired
+        example cannot come back: retiring one means adding it here, and no one has to
+        remember which spellings exist. The repo has `sync_vendored_scripts.py --check`
+        for template↔mirror drift and `llm-wiki lint --strict` for code↔wiki drift; this
+        is the doc↔doc equivalent, which is the gap that let the sixth surface go stale.
+        """
+        retired = {
+            "acme-widget": "CR-12: paired facet_id with a per-question candidate key",
+        }
+        # Shipped means tracked. Deriving the sweep from the index rather than from a path
+        # list is what keeps it honest: gitignored working areas (`docs/CR/`,
+        # `docs/llm_wiki/`) discuss retired examples by necessity and must not fail this,
+        # while any tracked surface added later is covered without anyone updating a list.
+        try:
+            listed = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        except (OSError, subprocess.CalledProcessError) as error:  # pragma: no cover - env dependent
+            raise unittest.SkipTest(f"shipped-surface sweep needs a git checkout: {error}") from error
+
+        surfaces = [
+            REPO_ROOT / name
+            for name in listed.split("\0")
+            if name and Path(name).suffix in {".md", ".py", ".yml", ".yaml", ".json"}
+        ]
+        surfaces = [path for path in surfaces if path.is_file() and not path.is_relative_to(REPO_ROOT / "tests")]
+        # Guard the guard: a sweep that silently matched nothing would pass forever, and
+        # the surface that actually regressed must be inside it.
+        self.assertGreater(len(surfaces), 100, "shipped-surface sweep collected suspiciously few files")
+        for required in (MCP_DOC, SOURCE_DELIVERY_DOC, QUESTION_API_DOC, SCRIPTS / "_request_scope.py"):
+            self.assertIn(required, surfaces, f"{required.name} must be inside the sweep")
+
+        offenders = [
+            f"{path.relative_to(REPO_ROOT)} still teaches {value!r} ({why})"
+            for path in surfaces
+            for value, why in retired.items()
+            if value in path.read_text(encoding="utf-8", errors="ignore")
+        ]
+        self.assertEqual([], offenders)
 
     def test_source_delivery_contract_is_documented(self):
         readme = README.read_text()

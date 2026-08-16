@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased
+
+- Give `reopen` the strictness layer its disclosure implied, and stop enforcing three
+  package guarantees by memory. The tie disclosure above reports a pairing declared
+  scope did not determine, but left every host to invent its own gate over the
+  `warnings` array — and the obvious gate (`warnings == []`) is wrong for a
+  workspace whose same-facet requests are interchangeable and right for one whose
+  requests are merely under-scoped, a distinction only the host can draw because
+  scope values are never interpreted here. `reopen --require-decisive-scope` refuses
+  such a reopen with `REQUEST_SCOPE_UNDECIDED`, naming the undecided pairs and
+  leaving the question `blocked`. It is the counterpart to `fulfill --require-scope`
+  on the axis `reopen` has: that flag asks whether the delivery *stated* the
+  request's keys, this one whether the declared keys *discriminate*. Absence
+  strictness still has no equivalent on `reopen`. Opt-in, so default behavior is
+  unchanged; requests that declare no scope produce no pairs and are outside the
+  check, exactly as a request with no keys is outside `--require-scope`.
+- `questions.reopen` accepts `require_decisive_scope` too, so the in-process door and
+  the CLI agree about whether a tie-broken reopen is refused. The flag reached the
+  parser, the dispatch and the `run_reopen` seam but not the published facade, which
+  made `library-api.md`'s promise that an operation "does not change what it means"
+  between doors false for it.
+- Three consistency rules that were previously conventions are now tests.
+  `test_no_shipped_surface_teaches_a_retired_scope_example` sweeps every tracked
+  surface for retired example *values* — the check that replaces the one-shot grep
+  which matched two syntaxes and missed the JSON form of the same value in
+  `mcp-server.md`. `test_dispatch_seam_forwards_every_cli_flag_to_its_seam` compares
+  each subparser's flags against the keywords `dispatch_seam` forwards, after
+  `--require-decisive-scope` was parsed by the CLI, dropped at the seam boundary,
+  and silently ignored while the library seam honoured it.
+  `test_library_facade_forwards_every_seam_keyword` pins the next boundary out —
+  every seam keyword reachable from the facade, and every accepted keyword actually
+  passed on — after the same flag was found missing there too. The repo had
+  `sync_vendored_scripts.py --check` for template↔mirror drift and `llm-wiki lint
+  --strict` for code↔wiki drift; these close the doc↔doc, CLI↔seam and seam↔facade
+  equivalents.
+- Stop `reopen` from crediting declared scope for a pairing that argument order
+  decided, and say which scope keys are worth declaring in the first place.
+  Request scope narrows the sources that can answer each request, but it does not
+  always narrow them to one: when several supplied requests declare the same scope,
+  the assignment among them came from the order the requests and sources were
+  supplied. That holds even when the deliveries differ, because scope is symmetric
+  between those requests — whichever one ends up with the better-corroborated
+  source got it by supply order, not because scope chose it. That is the positional
+  guess the feature exists to replace, and it was reported as `pairs` and written
+  to `log.md` as "Paired by declared scope" with nothing distinguishing it. Each
+  `pairs[]` entry now carries `decided_by` (`scope` when the declared scope
+  determined it, `tie_break` when another equally corroborated source could have
+  answered the request or another request could have taken the source), the reopen
+  report carries a `warnings` array whose `request_scope_pairing_tie` entries name
+  both the alternative sources and the contending requests, and `log.md` records
+  tie-broken pairs as such. A tie is reported, never refused:
+  refusing would break reopens that succeed today, and `reopen` reports a pairing
+  rather than recording a fulfilment. Preferring a source that corroborates more of
+  a request's scope over one that merely fails to contradict it remains a scope
+  decision and is not a tie. Both report fields are additive and always present;
+  scope matching, request records, sidecars, and every schema version are
+  unchanged, and a workspace where nothing declares scope sees no behavior change.
+- Document which identifiers are eligible to be scope keys. `docs/source-delivery.md`
+  gains "Choosing scope keys": the delivering side must be able to derive the value
+  (a workspace-only value such as a question slug can never be stamped, and
+  `--match-scope` does not exempt it because asserted keys join the required set),
+  the value must vary across the set `reopen` pairs (a per-question value
+  discriminates nothing), and both sides should emit it from one generator because
+  values are compared as exact text. The canonical example no longer pairs
+  `facet_id` with a per-question `candidate` key, which taught a key set that
+  `fulfill --require-scope` cannot satisfy. `REQUEST_SCOPE_MISSING` remediation now
+  offers the third branch this leaves out — drop a key the delivering side cannot
+  derive — alongside stamping the sidecar and rerunning without the flag.
+
 ## 0.4.1 - 2026-08-15
 
 - Let a pack author find out before shipping whether the mapping-only record rule

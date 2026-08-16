@@ -98,6 +98,12 @@ REVIEW_VERDICTS = (REVIEW_VERDICT_ACCEPTED, REVIEW_VERDICT_REJECTED)
 # the action. Reports and log entries carry the full spelling a host would type.
 GROUNDING_COMMAND = "grounding"
 GROUNDING_SET_ACTION = "grounding set"
+# Reopen pairs by declared scope; when scope cannot single out a source the pair is still
+# reported, marked `decided_by: tie_break`, and carries this warning. A warning rather than
+# a refusal: reopen reports a pairing, it does not record fulfilment.
+PAIRING_TIE_WARNING_CODE = "request_scope_pairing_tie"
+PAIRING_DECIDED_BY_SCOPE = "scope"
+PAIRING_DECIDED_BY_TIE_BREAK = "tie_break"
 # Verifier stamps attest specific grounding entries. Replacing the block invalidates them,
 # so both write paths drop them rather than leave a page claiming verified state it lost.
 GROUNDING_VERIFICATION_STAMPS = ("verified_by", "grounding_verified_at")
@@ -210,6 +216,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         default=None,
         help="Fulfilled source request id linked to this question to verify. Repeatable.",
+    )
+    reopen.add_argument(
+        "--require-decisive-scope",
+        action="store_true",
+        help=(
+            "Refuse the reopen when declared scope does not determine every pairing, "
+            "instead of reporting the undecided ones as warnings."
+        ),
     )
     reopen.add_argument(
         "--format",
@@ -707,56 +721,21 @@ def _ambiguous_assignment_error(
     )
 
 
-def compute_request_source_pairs(
-    request_records: list[dict[str, Any]],
-    source_ids: list[str],
-    source_scope: Callable[[str], dict[str, str]],
-) -> list[dict[str, str]]:
-    """Pair each scoped request with the supplied source that answers it.
+def _match_requests_to_sources(
+    order: list[str],
+    candidates: dict[str, list[str]],
+) -> tuple[dict[str, str], str | None, set[str]]:
+    """Assign each request in ``order`` a distinct source, by augmenting paths.
 
-    Only the contradiction layer applies here (see ``_request_scope``): a key both
-    sides declare must agree, while a key only one side declares is compatible.
-    Strictness about absence is a fulfil-time concern (``fulfill --require-scope``)
-    and deliberately has no equivalent on reopen — reopen reports a pairing, it does
-    not record fulfilment.
+    Returns ``(assigned_to, blocked_request_id, visited)``. ``blocked_request_id`` is
+    ``None`` on a perfect matching; otherwise it names the first request that could not
+    be placed, with the sources its search reached, which is what the ambiguity refusal
+    reports. Kuhn's algorithm explores each request's candidates in their ranked order,
+    so the same inputs always produce the same assignment.
 
-    Requests without a scope are left unpaired, which is exactly today's behaviour;
-    a workspace where nothing declares scope therefore gets an empty list and no new
-    refusals. Refusals are raised before the caller writes anything.
+    Recursion depth is bounded by the number of scoped ``--request-id`` values in one
+    invocation, which is a handful in every real reopen.
     """
-    scoped: list[tuple[str, dict[str, str]]] = []
-    for record in request_records:
-        request_scope = normalize_scope(record.get("scope"))
-        if request_scope:
-            scoped.append((str(record["request_id"]), request_scope))
-    if not scoped:
-        return []
-
-    candidates: dict[str, list[str]] = {}
-    for request_id, request_scope in scoped:
-        ranked: list[tuple[int, int, str]] = []
-        rejected: list[tuple[str, list[str]]] = []
-        for index, source_id in enumerate(source_ids):
-            declared = source_scope(source_id)
-            conflicts, _ = scope_match(request_scope, declared)
-            if conflicts:
-                rejected.append((source_id, conflicts))
-                continue
-            # Prefer a source that positively corroborates more of the request's scope
-            # over one that merely fails to contradict it; ties keep the supplied order,
-            # so the reported pairing is deterministic.
-            agreeing = sum(1 for key in request_scope if key in declared)
-            ranked.append((-agreeing, index, source_id))
-        if not ranked:
-            raise _no_matching_source_error(request_id, request_scope, rejected, source_scope)
-        candidates[request_id] = [source_id for _, _, source_id in sorted(ranked)]
-
-    # One source answers at most one scoped request, so a valid reopen needs a perfect
-    # matching over the scoped requests. Augmenting paths (Kuhn's algorithm) find one if
-    # it exists; failing to extend the matching means two scoped requests can only be
-    # satisfied by the same source, which is precisely the mis-pairing this refuses.
-    # Recursion depth is bounded by the number of scoped --request-id values in one
-    # invocation, which is a handful in every real reopen.
     assigned_to: dict[str, str] = {}
 
     def augment(request_id: str, visited: set[str]) -> bool:
@@ -770,17 +749,233 @@ def compute_request_source_pairs(
                 return True
         return False
 
-    for request_id, _ in scoped:
+    for request_id in order:
         visited: set[str] = set()
         if not augment(request_id, visited):
-            contested_sources = sorted(visited)
-            contested_requests = sorted(
-                {request_id, *(assigned_to[source_id] for source_id in visited if source_id in assigned_to)}
-            )
-            raise _ambiguous_assignment_error(contested_requests, contested_sources, scoped, candidates)
+            return assigned_to, request_id, visited
+    return assigned_to, None, set()
+
+
+def _pairing_alternatives(
+    request_id: str,
+    source_id: str,
+    order: list[str],
+    candidates: dict[str, list[str]],
+    agreement: dict[str, dict[str, int]],
+    paired: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """Return the ways this pair could legitimately have come out differently.
+
+    ``(alternative_source_ids, contending_request_ids)``. Both empty means the scope
+    evidence forced this pair; anything present means it did not, and the choice was
+    settled by the order the requests and sources were supplied.
+
+    A pairing has two axes and both must be asked, because scope is symmetric between
+    requests that declare the same keys:
+
+    1. **Another source could have answered this request.** Vary this request's source.
+    2. **Another request could have taken this source.** Vary the source's request.
+
+    Axis 2 is not implied by axis 1. Two requests with identical scope over one stamped
+    and one unstamped delivery leave the request that got the stamped source with no
+    better alternative of its own — yet which of the two got it was decided by supply
+    order, not by scope, since scope cannot tell them apart at all. Reporting only
+    axis 1 would mark that pair ``scope`` and write the claim into ``log.md``.
+
+    An alternative counts on either axis only when scope corroborates it *at least as
+    well* as what was assigned. A source that agrees with more of a request's scope beats
+    one that merely fails to contradict it, and acting on that preference is a scope
+    decision — counting a worse-corroborated option would report a tie on every partially
+    stamped workspace and teach hosts to ignore the signal. Being denied a
+    better-corroborated option because another request took it first does count: that is
+    supply order deciding, not scope.
+
+    Feasibility is re-checked against the whole set rather than read off the candidate
+    lists. An option that is compatible in isolation may be unusable once the other
+    requests are placed, and an augmenting path can move an earlier request onto a
+    different source after it was first assigned, so neither the candidate lists nor the
+    assignment order answers this on its own. Pinning the option and re-running the
+    matching asks the only question that matters — could this reopen legitimately have
+    come out the other way?
+    """
+
+    def feasible_with(pinned_request: str, pinned_source: str) -> bool:
+        pinned = dict(candidates)
+        pinned[pinned_request] = [pinned_source]
+        _, blocked, _ = _match_requests_to_sources(order, pinned)
+        return blocked is None
+
+    alternatives = [
+        other
+        for other in candidates[request_id]
+        if other != source_id
+        and agreement[request_id][other] >= agreement[request_id][source_id]
+        and feasible_with(request_id, other)
+    ]
+    contenders = [
+        other
+        for other in order
+        if other != request_id
+        and source_id in agreement[other]
+        and agreement[other][source_id] >= agreement[other][paired[other]]
+        and feasible_with(other, source_id)
+    ]
+    return alternatives, contenders
+
+
+def require_decisive_pairing(
+    pairs: list[dict[str, str]],
+    warnings: list[dict[str, Any]],
+) -> None:
+    """Refuse a reopen whose pairing declared scope did not determine. Never writes.
+
+    The opt-in strict layer for ``reopen``, and the counterpart to
+    ``fulfill --require-scope`` on the axis reopen actually has. That flag asks whether
+    the delivery *stated* the keys the request declares; absence strictness of that kind
+    deliberately has no equivalent here, because reopen reports a pairing rather than
+    recording a fulfilment. This asks a different question — whether the declared keys
+    *discriminate* — and that one is worth refusing on, because an undecided pairing fed
+    into ``fulfill`` becomes a recorded "request X answered by source Y" that scope never
+    supported.
+
+    Reported by default rather than refused: a workspace whose same-facet requests are
+    interchangeable has ties with no consequence, and only the host knows whether its
+    requests are interchangeable or merely under-scoped — scope values are opaque here by
+    construction. So the package supplies the signal, and the host that can guarantee
+    discriminating keys asks for the gate instead of hand-rolling one over ``warnings``.
+
+    Requests that declare no scope produce no pairs and are outside this check, exactly as
+    a request with no keys is outside ``--require-scope``. The flag constrains the pairings
+    scope claims to make; it cannot manufacture a claim where none was declared.
+    """
+    undecided = [pair for pair in pairs if pair.get("decided_by") != PAIRING_DECIDED_BY_SCOPE]
+    if not undecided:
+        return
+    rendered = ", ".join(f"{pair['request_id']} -> {pair['source_id']}" for pair in undecided)
+    raise ResolveError(
+        EXIT_INVALID,
+        "REQUEST_SCOPE_UNDECIDED",
+        (
+            f"--require-decisive-scope refuses this reopen: declared scope does not determine "
+            f"{'a pairing' if len(undecided) == 1 else 'these pairings'} — {rendered}. "
+            "The assignment would have come from the order the requests and sources were supplied."
+        ),
+        details={
+            "reason": "undecided_pairing",
+            "pairs": undecided,
+            "warnings": warnings,
+        },
+    )
+
+
+def compute_request_source_pairs(
+    request_records: list[dict[str, Any]],
+    source_ids: list[str],
+    source_scope: Callable[[str], dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    """Pair each scoped request with the supplied source that answers it.
+
+    Returns ``(pairs, warnings)``. Each pair carries ``decided_by``: ``scope`` when the
+    declared scope determined it, ``tie_break`` when another equally corroborated source
+    could have answered the request or another request could have taken the source (see
+    ``_pairing_alternatives``). A tie is reported, never refused — refusing would break
+    reopens that succeed today, and reopen reports a pairing rather than recording a
+    fulfilment — but it must not be presented as a scope decision, because the choice
+    among equals came from the order the requests and sources were supplied. That is the
+    positional pairing this feature exists to replace, so it is named rather than hidden.
+
+    Only the contradiction layer applies here (see ``_request_scope``): a key both
+    sides declare must agree, while a key only one side declares is compatible.
+    Strictness about absence is a fulfil-time concern (``fulfill --require-scope``)
+    and deliberately has no equivalent on reopen.
+
+    Requests without a scope are left unpaired, which is exactly today's behaviour;
+    a workspace where nothing declares scope therefore gets empty lists and no new
+    refusals. Refusals are raised before the caller writes anything.
+    """
+    scoped: list[tuple[str, dict[str, str]]] = []
+    for record in request_records:
+        request_scope = normalize_scope(record.get("scope"))
+        if request_scope:
+            scoped.append((str(record["request_id"]), request_scope))
+    if not scoped:
+        return [], []
+
+    candidates: dict[str, list[str]] = {}
+    agreement: dict[str, dict[str, int]] = {}
+    for request_id, request_scope in scoped:
+        ranked: list[tuple[int, int, str]] = []
+        rejected: list[tuple[str, list[str]]] = []
+        agreement[request_id] = {}
+        for index, source_id in enumerate(source_ids):
+            declared = source_scope(source_id)
+            conflicts, _ = scope_match(request_scope, declared)
+            if conflicts:
+                rejected.append((source_id, conflicts))
+                continue
+            # Prefer a source that positively corroborates more of the request's scope
+            # over one that merely fails to contradict it; ties keep the supplied order,
+            # so the pairing is deterministic — and `decided_by` reports that the order,
+            # not the scope, is what settled it.
+            agreeing = sum(1 for key in request_scope if key in declared)
+            agreement[request_id][source_id] = agreeing
+            ranked.append((-agreeing, index, source_id))
+        if not ranked:
+            raise _no_matching_source_error(request_id, request_scope, rejected, source_scope)
+        candidates[request_id] = [source_id for _, _, source_id in sorted(ranked)]
+
+    # One source answers at most one scoped request, so a valid reopen needs a perfect
+    # matching over the scoped requests. Failing to extend the matching means two scoped
+    # requests can only be satisfied by the same source, which is precisely the
+    # mis-pairing this refuses.
+    order = [request_id for request_id, _ in scoped]
+    assigned_to, blocked, visited = _match_requests_to_sources(order, candidates)
+    if blocked is not None:
+        contested_sources = sorted(visited)
+        contested_requests = sorted(
+            {blocked, *(assigned_to[source_id] for source_id in visited if source_id in assigned_to)}
+        )
+        raise _ambiguous_assignment_error(contested_requests, contested_sources, scoped, candidates)
 
     paired = {request_id: source_id for source_id, request_id in assigned_to.items()}
-    return [{"request_id": request_id, "source_id": paired[request_id]} for request_id, _ in scoped]
+    pairs: list[dict[str, str]] = []
+    warnings: list[dict[str, Any]] = []
+    for request_id in order:
+        source_id = paired[request_id]
+        alternatives, contenders = _pairing_alternatives(
+            request_id, source_id, order, candidates, agreement, paired
+        )
+        undecided = bool(alternatives or contenders)
+        pairs.append(
+            {
+                "request_id": request_id,
+                "source_id": source_id,
+                "decided_by": PAIRING_DECIDED_BY_TIE_BREAK if undecided else PAIRING_DECIDED_BY_SCOPE,
+            }
+        )
+        if undecided:
+            could_have = []
+            if alternatives:
+                could_have.append(f"it could equally have been answered by {', '.join(alternatives)}")
+            if contenders:
+                could_have.append(f"{source_id} could equally have answered {', '.join(contenders)}")
+            warnings.append(
+                {
+                    "code": PAIRING_TIE_WARNING_CODE,
+                    "request_id": request_id,
+                    "source_id": source_id,
+                    "alternative_source_ids": alternatives,
+                    "contending_request_ids": contenders,
+                    "message": (
+                        f"Declared scope does not determine which source answers request "
+                        f"{request_id}: {'; '.join(could_have)}. Paired with {source_id} by the "
+                        "order the requests and sources were supplied, not by declared scope. "
+                        "Declare a scope key that varies within this question, or reopen these "
+                        "requests in separate calls."
+                    ),
+                }
+            )
+    return pairs, warnings
 
 
 def is_top_level_field(line: str) -> bool:
@@ -1490,11 +1685,19 @@ def transition_reopen(
         # checks above (delegation, manifest membership, normalization) fail first, and this
         # still fails closed before the page is written. It is orthogonal to delegation and
         # runs in both modes.
-        pairs = compute_request_source_pairs(
+        pairs, pairing_warnings = compute_request_source_pairs(
             request_records,
             source_ids,
             source_scope_resolver(project_root, config),
         )
+        # Strictness layer, opt-in, and the reopen counterpart to `fulfill --require-scope`
+        # — on a different axis. That flag asks whether the *delivery stated* the request's
+        # keys; this one asks whether the *key set discriminates*. A host whose requests
+        # carry keys that vary within a question can refuse the pairing scope could not
+        # make, rather than gating on the warnings array itself. Refused here, before any
+        # page write, so a refusal leaves the question blocked.
+        if getattr(args, "require_decisive_scope", False):
+            require_decisive_pairing(pairs, pairing_warnings)
         merged = existing_source_ids(frontmatter)
         for source_id in source_ids:
             if source_id not in merged:
@@ -1512,6 +1715,7 @@ def transition_reopen(
             "source_ids": merged,
             "request_ids": request_ids,
             "pairs": pairs,
+            "warnings": pairing_warnings,
         }
 
 
@@ -1806,8 +2010,23 @@ def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) ->
     if action == "reopen" and result.get("source_ids"):
         lines.append(f"- Reopened with sources: {', '.join(result['source_ids'])}.")
     if action == "reopen" and result.get("pairs"):
-        rendered = ", ".join(f"{pair['request_id']} -> {pair['source_id']}" for pair in result["pairs"])
-        lines.append(f"- Paired by declared scope: {rendered}.")
+        # The audit entry must not credit scope for a pairing scope did not make: a tie
+        # settled on the order --source-id was passed is the positional guess this
+        # feature replaced, and writing it down as "paired by declared scope" is exactly
+        # the false audited fact CR-4 set out to stop.
+        by_decision: dict[str, list[str]] = {}
+        for pair in result["pairs"]:
+            # Default to the weaker claim: a pair that somehow reaches here without a
+            # decision recorded must not be written down as one scope made.
+            decision = pair.get("decided_by", PAIRING_DECIDED_BY_TIE_BREAK)
+            by_decision.setdefault(decision, []).append(f"{pair['request_id']} -> {pair['source_id']}")
+        if by_decision.get(PAIRING_DECIDED_BY_SCOPE):
+            lines.append(f"- Paired by declared scope: {', '.join(by_decision[PAIRING_DECIDED_BY_SCOPE])}.")
+        if by_decision.get(PAIRING_DECIDED_BY_TIE_BREAK):
+            lines.append(
+                "- Paired by supplied order because declared scope could not single out a source: "
+                f"{', '.join(by_decision[PAIRING_DECIDED_BY_TIE_BREAK])}."
+            )
     if action in {"approve", "review"}:
         lines.append(f"- Reviewer: {result.get('reviewer')}.")
         if result.get("reviewed_policies"):
@@ -1847,6 +2066,9 @@ def build_report(action: str, slug: str, agent_id: str, page_path: Path, project
         # Always present on reopen, empty when nothing declared a scope, so a host can
         # read `pairs` unconditionally instead of zipping the two repeatable flags.
         report["pairs"] = result.get("pairs", [])
+        # Always present for the same reason: a host that gates on "did scope actually
+        # decide this" reads one array rather than inferring absence from silence.
+        report["warnings"] = result.get("warnings", [])
     if result.get("reviewer"):
         report["reviewer"] = result["reviewer"]
     if result.get("approved_at"):
@@ -2123,10 +2345,14 @@ def run_reopen(
     agent_id: str,
     source_id: list[str],
     request_id: list[str] | None = None,
+    require_decisive_scope: bool = False,
 ) -> dict[str, Any]:
     """Move a blocked question back to open once its evidence is delivered and normalized.
 
     ``reopen`` has no ``--allow-unclaimed``: a blocked question is never claimed.
+
+    ``require_decisive_scope`` refuses a pairing the declared scope did not determine
+    rather than reporting it as a warning; see ``require_decisive_pairing``.
     """
     return _run_command(
         project_root,
@@ -2136,6 +2362,7 @@ def run_reopen(
             agent_id=agent_id,
             source_id=source_id,
             request_id=request_id,
+            require_decisive_scope=require_decisive_scope,
         ),
     )
 
@@ -2206,8 +2433,16 @@ def dispatch_seam(args: argparse.Namespace) -> dict[str, Any]:
     ``main`` goes through the public seams rather than straight to ``_run_command``
     on purpose: it makes the CLI one more caller of the library API instead of a
     parallel path, so the existing CLI suites exercise the seams' argument mapping
-    too, and a seam whose keyword does not reach the transition fails loudly here
-    rather than only in the conformance harness.
+    too.
+
+    The mapping is written out keyword by keyword, which means a flag added to a
+    subparser and to its seam can still be dropped here — parsed, defaulted, and
+    silently ignored on the command line while the library seam honours it. That is
+    not hypothetical: it happened to ``--require-decisive-scope``. The mapping is
+    therefore pinned structurally by
+    ``test_dispatch_seam_forwards_every_cli_flag_to_its_seam``, which compares each
+    subparser's dests against the keywords forwarded here, rather than by remembering
+    to edit this function.
     """
     if args.command == "answer":
         return run_answer(
@@ -2257,6 +2492,7 @@ def dispatch_seam(args: argparse.Namespace) -> dict[str, Any]:
             agent_id=args.agent_id,
             source_id=args.source_id,
             request_id=args.request_id,
+            require_decisive_scope=args.require_decisive_scope,
         )
     if args.command == "approve":
         return run_approve(args.project_root, slug=args.slug, reviewer=args.reviewer)

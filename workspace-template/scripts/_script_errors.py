@@ -99,8 +99,13 @@ _REMEDIATIONS = {
         "whose scope matches the delivered evidence."
     ),
     "REQUEST_SCOPE_MISSING": (
-        "Stamp the delivered source's provenance sidecar with the request's scope keys, or rerun "
+        "Stamp the delivered source's provenance sidecar with the request's scope keys, open a "
+        "replacement request without a scope key the delivering side cannot derive, or rerun "
         "without --require-scope."
+    ),
+    "REQUEST_SCOPE_UNDECIDED": (
+        "Declare a scope key that varies between the requests on this question, reopen them in "
+        "separate calls, or rerun without --require-decisive-scope to accept the reported pairing."
     ),
     "FACET_SCOPE_CONFLICT": (
         "Link a request whose scope facet_id matches this facet, or open a new request for it."

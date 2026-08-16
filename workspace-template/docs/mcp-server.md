@@ -101,7 +101,7 @@ Filtering narrows the returned `requests` array only. `counts` stays a census of
 the whole store, so a host can tell "nothing matches" from "nothing exists".
 
 ```json
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"source_requests_list","arguments":{"status":["open"],"kind":["pack:market-data/supplier_quote"],"scope":{"facet_id":"supplier_quote","candidate":"acme-widget"}}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"source_requests_list","arguments":{"status":["open"],"kind":["pack:market-data/supplier_quote"],"scope":{"facet_id":"supplier_quote","supplier":"acme"}}}}
 ```
 
 ### Human Review Over MCP

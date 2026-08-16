@@ -5,7 +5,7 @@ A source request carries free-text ``query_or_identifier`` for a human and, sinc
 CR-4, an optional ``scope`` mapping for a machine::
 
     source_requests.py add --kind pack:market-data/supplier_quote \\
-        --scope facet_id=supplier_quote --scope candidate=acme-widget ...
+        --scope facet_id=supplier_quote ...
 
 Without it, pairing a delivered source back to the request it answers degrades to
 convention — hosts zip ``blocking_request_ids`` against delivered sources *by
@@ -15,6 +15,18 @@ audited fact. With it, the delivering side states the same keys in its
 
 The package stores and matches these keys; it never interprets them. ``facet_id``
 is the convention coverage-manifest tooling uses, not a schema this module knows.
+
+A scope key is a join key, so not every identifier is eligible to be one (see
+"Choosing scope keys" in ``docs/source-delivery.md``):
+
+- the delivering side must be able to *derive* the value, or ``--require-scope``
+  can never be satisfied — and ``--match-scope`` does not exempt it, since
+  asserted keys join the required set rather than leaving it;
+- the value must *vary* across the set being paired: ``reopen`` pairs requests
+  that all reference one question, so a key with one value per question
+  discriminates nothing; and
+- both sides should emit it from one generator, because values are compared as
+  exact text with no normalization.
 
 Match semantics are layered, so opting in is never a backward-compatibility break:
 
