@@ -46,9 +46,23 @@ EXIT_CONFLICT = 3
 #: run whose runner failed -- a condition that must *not* be retried.
 EXIT_DRIVER_BUSY = 6
 
-# Mirrors ``_script_errors.default_recoverable``: a held or fresh claim is not a
-# thing the caller can retry its way out of, every other condition is.
-_NON_RECOVERABLE_CODES = frozenset({"CLAIM_HELD", "CLAIM_NOT_STALE"})
+# Mirrors ``_script_errors.NON_RECOVERABLE_CODES``: a state conflict or a corrupt
+# artifact is not a thing the caller can retry its way out of; every other condition is
+# something they can correct and resend. The two sets are hand-mirrored, so
+# ``test_non_recoverable_codes_are_mirrored`` compares them rather than trusting this
+# comment -- the pair had no check at all until CR-15a, which is how five codes came to
+# answer two ways at once across their own raise sites.
+_NON_RECOVERABLE_CODES = frozenset(
+    {
+        "CLAIM_HELD",
+        "CLAIM_NOT_STALE",
+        "CANDIDATE_STORE_INVALID",
+        "ORCHESTRATION_OWNER_MISMATCH",
+        "ORCHESTRATION_STATE_INVALID",
+        "PROVIDER_REGISTRATION_INVALID",
+        "WORKSPACE_UNREADABLE",
+    }
+)
 
 # Codes whose emitting script exits with something other than ``EXIT_INVALID``.
 #
