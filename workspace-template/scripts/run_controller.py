@@ -948,8 +948,9 @@ def enforce_manual_url_budget(document: dict[str, Any], status: dict[str, Any], 
         "BUDGET_EXCEEDED",
         f"manual URL deliveries {count} exceed configured limit {limit}; record an override first.",
         remediation=(
-            "Run override-manual-url-budget with --new-limit, --override-reason, and --approved-by, "
-            "then retry the transition or finish command."
+            "Record an approved override with run_controller.py override-manual-url-budget --run-id RUN_ID "
+            "--agent-id AGENT --new-limit N --override-reason TEXT --approved-by WHO, then retry the "
+            "transition or finish command."
         ),
         details={
             "budget": "manual_url_deliveries",
@@ -970,8 +971,9 @@ def enforce_web_download_budget(document: dict[str, Any], status: dict[str, Any]
         "BUDGET_EXCEEDED",
         f"web downloads {count} exceed configured limit {limit}; record an override first.",
         remediation=(
-            "Run override-manual-url-budget with --new-limit, --override-reason, and --approved-by, "
-            "then retry the transition or finish command."
+            "Record an approved override with run_controller.py override-manual-url-budget --run-id RUN_ID "
+            "--agent-id AGENT --new-limit N --override-reason TEXT --approved-by WHO, then retry the "
+            "transition or finish command."
         ),
         details={
             "budget": "web_downloads",
