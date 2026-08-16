@@ -1961,7 +1961,9 @@ def verify_provider_policy_unchanged(
             "ORCHESTRATION_PROVIDER_POLICY_CHANGED",
             "provider authorization was narrowed after the work order was issued",
             recoverable=False,
-            remediation="Restore the work order's explicit provider allow-list or start a new orchestration session.",
+            remediation=(
+                "Restore the research.yml provider authorization this session started under, or preserve the session for audit and start a new orchestration."
+            ),
             details={"removed_providers": removed, "current_provider_policy": current},
         )
 

@@ -211,11 +211,14 @@ class EmittedCodeFamilyTests(unittest.TestCase):
 
     ``test_every_documented_code_maps_to_a_family`` above walks
     ``_script_errors._REMEDIATIONS``, which is the *documented* registry. Scripts
-    emit codes that are absent from it -- the orchestration controller alone
-    raises ``RESULT_INVALID``, ``WORK_ORDER_INVALID`` and seven more with no
+    have emitted codes absent from it -- the orchestration controller alone
+    raised ``RESULT_INVALID``, ``WORK_ORDER_INVALID`` and seven more with no
     ``ORCHESTRATION_`` prefix -- and those reached a host as the bare base class.
     A host writing ``except OrchestrationError`` around ``session.submit`` caught
-    nothing, for the refusal that call makes most often.
+    nothing, for the refusal that call makes most often. CR-14 gave every code the
+    controller raises a registry entry, so that particular gap is closed; this
+    test stays source-scanned because the registry is a table someone maintains
+    and the next uncovered code will appear in a script first.
 
     Scanning the sources rather than the remediation table is what notices the
     next one. The exclusion set below is the honest cost: a screaming-snake string
