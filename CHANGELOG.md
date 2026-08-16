@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **New error code, and one condition now reports it instead of
+  `ORCHESTRATION_WORKSPACE_UNSAFE`.** A host matching on
+  `ORCHESTRATION_WORKSPACE_UNSAFE` will no longer see the case where workspace health or
+  HIGH validation findings changed *after* the work order was issued; that now raises
+  `ORCHESTRATION_WORKSPACE_HEALTH_CHANGED`, beside its siblings
+  `ORCHESTRATION_DELEGATION_CHANGED` and `ORCHESTRATION_PROVIDER_POLICY_CHANGED`. The
+  remaining `ORCHESTRATION_WORKSPACE_UNSAFE` sites are unchanged.
+
+  One code was covering two conditions whose correct advice is opposite. Seven sites mean
+  "the workspace is unreadable, changed under us, oversized, or not a regular file" —
+  repair it and retry — while this one means the baseline moved, where replaying the same
+  action cannot succeed. The shared registry remediation said "request the same next
+  action again", which was actively wrong for the second, and `recoverable` answered both
+  ways for the one code so an automated caller retried it or not depending on which
+  internal path fired.
+- Two remediations widened to describe both conditions their code covers.
+  `ACQUISITION_LIMIT_EXCEEDED` said "lower the requested count", which does not help when
+  the run has already spent its download budget; it now also names starting a new run.
+  `ACQUISITION_RESPONSE_INVALID` said "retry later or inspect the provider response",
+  which is wrong when the message names a broken transport adapter rather than the
+  response; it now says so. Both are floor text a host reads through
+  `remediation_for()`; the per-site inline messages were already correct.
+
 - Give `reopen` the strictness layer its disclosure implied, and stop enforcing three
   package guarantees by memory. The tie disclosure above reports a pairing declared
   scope did not determine, but left every host to invent its own gate over the

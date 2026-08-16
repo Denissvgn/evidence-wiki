@@ -1913,16 +1913,39 @@ def verify_runtime_guards(
     health = status.get("workspace_health") if isinstance(status.get("workspace_health"), dict) else {}
     readiness = status.get("readiness") if isinstance(status.get("readiness"), dict) else {}
     if not health.get("materially_valid", False) or readiness.get("verdict") == "attention_required":
+        # Which code this is depends on whether a work order exists, because that is what
+        # decides whether anything *changed*. With one, the baseline moved after the order
+        # was issued and replaying cannot succeed — a *_CHANGED condition beside
+        # ORCHESTRATION_DELEGATION_CHANGED / _PROVIDER_POLICY_CHANGED. Without one (this
+        # function is reachable as a direct guard check, `work_order` defaulting to None),
+        # nothing moved: the workspace is simply unsafe to act in now, which is the
+        # repair-and-retry condition the other seven WORKSPACE_UNSAFE sites report.
+        #
+        # Emitting the *_CHANGED code for both would name a change that did not happen and
+        # tell the operator to abandon a session they do not have.
+        details = {
+            "workspace_health": health,
+            "readiness_verdict": readiness.get("verdict"),
+            "readiness_reasons": readiness.get("reasons", []),
+        }
+        if work_order is not None:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_WORKSPACE_HEALTH_CHANGED",
+                "workspace health or HIGH validation findings changed after the work order was issued",
+                recoverable=False,
+                remediation=(
+                    "Preserve the session for audit and start a fresh orchestration once the reported "
+                    "workspace findings are repaired; replaying this action cannot succeed."
+                ),
+                details=details,
+            )
         raise OrchestrationControllerError(
             "ORCHESTRATION_WORKSPACE_UNSAFE",
-            "workspace health or HIGH validation findings changed after the work order was issued",
-            recoverable=False,
-            remediation="Repair the reported workspace findings before replaying or submitting this action.",
-            details={
-                "workspace_health": health,
-                "readiness_verdict": readiness.get("verdict"),
-                "readiness_reasons": readiness.get("reasons", []),
-            },
+            "workspace health or HIGH validation findings make this workspace unsafe to act in",
+            remediation=(
+                "Resolve the reported health or validation findings, then run this check again."
+            ),
+            details=details,
         )
     verify_provider_policy_unchanged(project_root, session, work_order)
     verify_delegation_unchanged(project_root, session)

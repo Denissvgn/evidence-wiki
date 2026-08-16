@@ -210,6 +210,10 @@ _REMEDIATIONS = {
         "Restore the research.yml provider authorization this session started under, or "
         "preserve the session for audit and start a new orchestration."
     ),
+    "ORCHESTRATION_WORKSPACE_HEALTH_CHANGED": (
+        "Preserve the session for audit and start a fresh orchestration once the reported "
+        "workspace findings are repaired; replaying the same action cannot succeed."
+    ),
     "ORCHESTRATION_DELEGATION_CHANGED": (
         "Restore the research.yml orchestration: section this session started under, or start a new session "
         "under the new declaration."
@@ -447,11 +451,15 @@ _REMEDIATIONS = {
         "Retry later, lower --max-results, or set GITHUB_TOKEN in the process environment for a higher rate limit."
     ),
     "ACQUISITION_LIMIT_EXCEEDED": (
-        "Lower the requested count or raise max_downloads_per_run after reviewing provider limits."
+        "Lower the requested count, or start a new run when this run has already spent its "
+        "downloads, or raise max_downloads_per_run after reviewing provider limits."
     ),
     "ARXIV_ID_INVALID": "Pass a versioned post-2007 arXiv id such as 2601.00001v1.",
     "ACQUISITION_NETWORK_ERROR": "Retry later, check network access, or lower request volume.",
-    "ACQUISITION_RESPONSE_INVALID": "Retry later or inspect the provider response outside the workspace.",
+    "ACQUISITION_RESPONSE_INVALID": (
+        "Retry later or inspect the provider response outside the workspace; when the message "
+        "names the transport adapter rather than the response, fix the adapter instead."
+    ),
     "ACQUISITION_URL_UNSAFE": "Use an HTTPS URL with a public hostname.",
     "ACQUISITION_DOMAIN_NOT_ALLOWED": (
         "Add the reviewed domain to integrations.acquisition.web.allowed_domains or choose another URL."
