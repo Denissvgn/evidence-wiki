@@ -1,6 +1,47 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-08-17
+
+- **Every error code this package raises now carries a specific remediation, and every
+  one is documented.** Before this release, 97 of the codes a workspace can emit fell
+  back to `"Read the message, fix the input or workspace state, and rerun the command."`
+  — an operator holding one of those refusals was told nothing about how to fix it — and
+  37 appeared in no documentation table at all. All 194 raised codes now have a
+  remediation naming an action that a real command can perform, and a row in the
+  orchestrator handoff tables. `test_every_raised_error_code_has_a_specific_remediation_and_a_doc_row`
+  keeps it that way.
+
+  Eight remediations that already shipped were found to name commands that do not exist
+  or that refuse without further arguments — `run_controller.py recover` without
+  `--run-id`, `override-manual-url-budget` without its required flags, and a *reviewed*
+  handoff-table cell telling operators to "reopen the request" when no command can reopen
+  one. Those are corrected, and
+  `test_remediations_name_only_commands_that_exist` now checks every command and flag
+  named in a remediation against the real CLI surface.
+
+  Two crash paths were fixed in the process: a UTF-16 `--standards-metadata` file raised
+  `UnicodeDecodeError` instead of `ACQUISITION_METADATA_UNREADABLE`, and a malformed
+  sidecar raised `yaml.YAMLError` instead of `SIDECAR_INVALID`. Both escaped as tracebacks
+  rather than refusal envelopes.
+
+- **`recoverable` now answers the same way every time a code is raised.** Nine codes
+  reported both values across their own raise sites — `ORCHESTRATION_STATE_INVALID`
+  answered three ways across 25 — so a host branching on `recoverable` retried some
+  occurrences of a code and not others, with nothing in the envelope explaining the
+  difference. `CANDIDATE_STORE_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`,
+  `ORCHESTRATION_STATE_INVALID`, `PROVIDER_REGISTRATION_INVALID` and
+  `WORKSPACE_UNREADABLE` are now declared non-recoverable, so a host that previously read
+  `recoverable: true` for them will now read `false`; that was already what most of their
+  raise sites reported. `ACQUISITION_PATH_UNSAFE`, `CONFIG_INVALID` and
+  `PROVIDER_NOT_REGISTERED` are recoverable at every site — each is an input an operator
+  corrects. The two `default_recoverable` implementations are now checked against each
+  other rather than mirrored by hand.
+
+- **One error code no longer gives opposite instructions depending on where it was
+  raised.** `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID` told four operators to *repair* the
+  provider-call ledger and three not to touch it by hand, for the same artifact. That
+  ledger enforces provider budgets, so hand-repair is what must not be advised; all seven
+  sites now carry the strict guidance, matching the registry entry that already said so.
 
 - **New error code, and one condition now reports it instead of
   `ORCHESTRATION_WORKSPACE_UNSAFE`.** A host matching on
