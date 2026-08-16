@@ -215,6 +215,74 @@ def collect_recoverability_by_site() -> dict[str, dict[bool, list[str]]]:
     return sites
 
 
+def cli_flag_universe() -> set[str]:
+    """Every ``--flag`` this package defines, across workspace scripts and the package CLI.
+
+    Both halves are needed: a remediation may legitimately name a flag of the packaged
+    `evidence-wiki` CLI (``--keep-local``, ``--acknowledge-control-repair``) rather than of
+    a workspace script. Auditing against workspace scripts alone reports those as unknown,
+    which is how a first pass at this check produced four false positives.
+    """
+    flags: set[str] = set()
+    roots = [SCRIPTS.glob("*.py"), (REPO_ROOT / "src" / "evidence_wiki").rglob("*.py")]
+    for paths in roots:
+        for path in paths:
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            except SyntaxError:  # pragma: no cover - a syntactically broken source fails elsewhere
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if re.fullmatch(r"--[a-z][a-z0-9-]+", node.value):
+                        flags.add(node.value)
+    return flags
+
+
+def script_subcommands() -> dict[str, set[str]]:
+    """Each workspace script's ``add_parser`` subcommand names."""
+    result: dict[str, set[str]] = {}
+    for path in sorted(SCRIPTS.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        names = {
+            node.args[0].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", None) == "add_parser"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        }
+        if names:
+            result[path.name] = names
+    return result
+
+
+def all_remediation_texts() -> list[tuple[str, str]]:
+    """Every remediation an operator can see: the registry, plus each inline override.
+
+    Inline text is included because it is what the operator actually reads — a raise site
+    passing ``remediation=`` overrides the registry entirely, so auditing only the registry
+    would check the fallback and skip the message.
+    """
+    helper = load_helper()
+    texts: list[tuple[str, str]] = [(code, text) for code, text in helper._REMEDIATIONS.items()]
+    for path in sorted(SCRIPTS.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            first = node.args[0]
+            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                continue
+            if not ERROR_CODE_RE.match(first.value):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "remediation" and isinstance(keyword.value, ast.Constant):
+                    if isinstance(keyword.value.value, str):
+                        texts.append((f"{first.value} ({path.name}:{keyword.value.lineno})", keyword.value.value))
+    return texts
+
+
 def documented_error_code_rows() -> set[str]:
     """Every error code carrying a row in any shipped documentation table."""
     codes: set[str] = set()
@@ -668,6 +736,56 @@ class ErrorEnvelopeTests(unittest.TestCase):
             for code, answers in sorted(split.items())
         )
         self.assertEqual({}, split, f"these codes report more than one recoverability: {detail}")
+
+    def test_remediations_name_only_commands_that_exist(self):
+        """A remediation must not send an operator to a flag or subcommand that isn't there.
+
+        This is the defect CR-14 kept finding by accident: `BUDGET_EXCEEDED` named a
+        command without its required `--run-id`/`--agent-id`; `DISCOVERY_RUN_RECOVERY_REQUIRED`
+        named `run_controller.py recover`, which refuses without them;
+        `REQUEST_NOT_OPEN` — a *reviewed* table cell — told operators to reopen a request
+        when no command can. Eight were found by reading, two of them introduced by the
+        very changes that fixed the others. Reading is what produced them, so this checks
+        mechanically instead.
+
+        Both halves of what an operator can see are audited: the registry and the inline
+        overrides, since an inline `remediation=` replaces the registry entry entirely.
+
+        Two deliberate limits, so the check is trusted rather than muted:
+
+        - A `<script>.py <token>` pair is judged only when the token is a subcommand of
+          *some* script. Otherwise the token is ordinary prose — `run_controller.py or …`,
+          `publication_readiness.py from …` — and a stricter rule reports five such
+          sentences as defects, which is how a check earns its way onto an ignore list.
+        - A bare verb with no script beside it ("reopen the request") is not mechanically
+          decidable and stays out of scope; that class is why `REQUEST_NOT_OPEN` needed a
+          human to catch it.
+        """
+        flags = cli_flag_universe()
+        subcommands = script_subcommands()
+        known_subcommands = set().union(*subcommands.values()) if subcommands else set()
+        texts = all_remediation_texts()
+
+        # Guard the guard: an extraction that silently collected nothing would pass forever.
+        self.assertGreater(len(texts), 400, "remediation sweep found suspiciously few texts")
+        self.assertGreater(len(flags), 150, "flag universe looks too small to audit against")
+        self.assertIn("--require-decisive-scope", flags)
+
+        unknown_flags = [
+            f"{code}: {match.group(0)}"
+            for code, text in texts
+            for match in re.finditer(r"--[a-z][a-z0-9-]+", text)
+            if match.group(0) not in flags
+        ]
+        self.assertEqual([], unknown_flags, "remediations name flags this package does not define")
+
+        wrong_script = [
+            f"{code}: `{script} {token}` — {token} belongs to {sorted(o for o, s in subcommands.items() if token in s)}"
+            for code, text in texts
+            for script, token in re.findall(r"\b([a-z_]+\.py)\s+([a-z][a-z-]*)", text)
+            if script in subcommands and token in known_subcommands and token not in subcommands[script]
+        ]
+        self.assertEqual([], wrong_script, "remediations pair a subcommand with the wrong script")
 
     def test_non_recoverable_codes_are_mirrored(self):
         """The script helper and the library must agree on which codes are unretryable.
