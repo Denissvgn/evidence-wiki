@@ -1625,7 +1625,8 @@ def load_academic_provider_request_events(
             "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
             f"Cannot read academic provider-call ledger {relative_label(project_root, path)}: {exc}",
             recoverable=False,
-            remediation="Repair or restore the run-bound provider-call ledger before retrying discovery.",
+            remediation="Preserve the affected run for audit, restore its verified provider-call ledger from a "
+                "trusted backup, or start a fresh run. Do not repair or reset the ledger by hand.",
             details={"command": "academic", "run_id": run_id, "network_io_executed": False},
         ) from exc
     for line_number, line in enumerate(lines, start=1):
@@ -1643,7 +1644,8 @@ def load_academic_provider_request_events(
                     f"at line {line_number}: {exc}"
                 ),
                 recoverable=False,
-                remediation="Repair or restore the run-bound provider-call ledger before retrying discovery.",
+                remediation="Preserve the affected run for audit, restore its verified provider-call ledger from a "
+                "trusted backup, or start a fresh run. Do not repair or reset the ledger by hand.",
                 details={"command": "academic", "run_id": run_id, "network_io_executed": False},
             ) from exc
         valid = (
@@ -1663,7 +1665,8 @@ def load_academic_provider_request_events(
                 "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
                 f"Invalid provider-call record in {relative_label(project_root, path)} at line {line_number}.",
                 recoverable=False,
-                remediation="Repair or restore the run-bound provider-call ledger before retrying discovery.",
+                remediation="Preserve the affected run for audit, restore its verified provider-call ledger from a "
+                "trusted backup, or start a fresh run. Do not repair or reset the ledger by hand.",
                 details={"command": "academic", "run_id": run_id, "network_io_executed": False},
             )
         call_id = record["call_id"].strip()
@@ -1819,7 +1822,8 @@ def academic_accounting_failure(
         "ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID",
         exc.message,
         recoverable=False,
-        remediation="Repair or restore the run-bound provider-call ledger before retrying discovery.",
+        remediation="Preserve the affected run for audit, restore its verified provider-call ledger from a "
+                "trusted backup, or start a fresh run. Do not repair or reset the ledger by hand.",
         details={
             "command": context["command"],
             "provider": provider,

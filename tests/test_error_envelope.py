@@ -737,6 +737,51 @@ class ErrorEnvelopeTests(unittest.TestCase):
         )
         self.assertEqual({}, split, f"these codes report more than one recoverability: {detail}")
 
+    def test_no_remediation_advises_what_another_forbids(self):
+        """A code must not tell one operator to do what it forbids another from doing.
+
+        `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID` did exactly that across its seven raise
+        sites: four said "**Repair** or restore the run-bound provider-call ledger", three
+        said "restore from a trusted backup … **Do not** deduplicate or reset accounting by
+        hand". Same code, same artifact, opposite instructions — and the artifact is the
+        accounting ledger that enforces provider budgets, so hand-repair is exactly what
+        must not be advised. The registry entry already said "do not reset it", making the
+        four inline texts contradict their own floor.
+
+        Deliberately narrow, per the lesson from the command checker: this flags only a
+        text that advises a verb some *prohibition for the same code* names. Variation
+        across conditions is correct and is not reported — `VALUE_INVALID` says different
+        things for different bad values, and a check that called those 35 codes defective
+        would be muted within a week.
+        """
+        prohibited_verbs = re.compile(r"\bdo not\b\s+((?:[a-z]+)(?:\s+or\s+[a-z]+)*)", re.I)
+        whole_clause = re.compile(r"\bdo not\b[^.]*\.?", re.I)
+
+        by_code: dict[str, list[tuple[str, str]]] = {}
+        for label, text in all_remediation_texts():
+            code = label.split(" ")[0]
+            by_code.setdefault(code, []).append((label, text))
+        self.assertGreater(len(by_code), 150, "remediation grouping found suspiciously few codes")
+
+        helper = load_helper()
+        contradictions: list[str] = []
+        for code, entries in by_code.items():
+            texts = [text for _, text in entries] + [helper.remediation_for(code)]
+            forbidden: set[str] = set()
+            for text in texts:
+                for match in prohibited_verbs.finditer(text):
+                    forbidden |= set(re.split(r"\s+or\s+", match.group(1).lower()))
+            if not forbidden:
+                continue
+            for label, text in entries:
+                # Strip prohibitions entirely before looking for advice, so "do not repair
+                # or reset" is not read as advising "reset".
+                advised = whole_clause.sub("", text.lower())
+                for verb in sorted(forbidden):
+                    if re.search(rf"\b{verb}\b", advised):
+                        contradictions.append(f"{label} advises '{verb}', which another remediation for {code} forbids")
+        self.assertEqual([], contradictions)
+
     def test_documentation_tables_have_a_consistent_column_count(self):
         """Every row in a Markdown table must match its header's column count.
 
