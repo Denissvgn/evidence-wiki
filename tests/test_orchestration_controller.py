@@ -2798,7 +2798,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             code, error, _ = self.submit(root, target, order["action_id"])
 
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
-            self.assertEqual("ORCHESTRATION_WORKSPACE_UNSAFE", error["error_code"])
+            self.assertEqual("ORCHESTRATION_WORKSPACE_HEALTH_CHANGED", error["error_code"])
             self.assertEqual("attention_required", error["details"]["readiness_verdict"])
             self.assertFalse(CONTROLLER.work_result_path(target, "orch-test", order["action_id"]).exists())
 
@@ -5153,7 +5153,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             code, error, _ = self.submit_delegated(target)
 
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
-            self.assertEqual("ORCHESTRATION_WORKSPACE_UNSAFE", error["error_code"])
+            self.assertEqual("ORCHESTRATION_WORKSPACE_HEALTH_CHANGED", error["error_code"])
 
     def test_the_question_transition_postcondition_names_the_unreopened_question(self):
         # The guard behind the runtime refusal above, exercised directly. It is the check

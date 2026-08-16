@@ -1913,11 +1913,21 @@ def verify_runtime_guards(
     health = status.get("workspace_health") if isinstance(status.get("workspace_health"), dict) else {}
     readiness = status.get("readiness") if isinstance(status.get("readiness"), dict) else {}
     if not health.get("materially_valid", False) or readiness.get("verdict") == "attention_required":
+        # A *_CHANGED condition, not an unsafe-workspace one. Every other
+        # ORCHESTRATION_WORKSPACE_UNSAFE site reports state the operator repairs and then
+        # retries; this one reports that the baseline moved *after* the work order was
+        # issued, where replaying the same action cannot succeed. Sharing one code made
+        # `recoverable` answer two ways for it and made the registry remediation ("request
+        # the same next action again") actively wrong here, so it has its own code beside
+        # its siblings ORCHESTRATION_DELEGATION_CHANGED / _PROVIDER_POLICY_CHANGED.
         raise OrchestrationControllerError(
-            "ORCHESTRATION_WORKSPACE_UNSAFE",
+            "ORCHESTRATION_WORKSPACE_HEALTH_CHANGED",
             "workspace health or HIGH validation findings changed after the work order was issued",
             recoverable=False,
-            remediation="Repair the reported workspace findings before replaying or submitting this action.",
+            remediation=(
+                "Preserve the session for audit and start a fresh orchestration once the reported "
+                "workspace findings are repaired; replaying this action cannot succeed."
+            ),
             details={
                 "workspace_health": health,
                 "readiness_verdict": readiness.get("verdict"),

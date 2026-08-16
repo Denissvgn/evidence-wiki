@@ -82,19 +82,16 @@ ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{4,}$")
 # two jobs" test. An entry here is a claim that one code covers two materially different
 # conditions and should be argued for, not a place to silence the guard.
 RECOVERABILITY_VARIES_BY_SITE: dict[str, str] = {
-    # One code, two genuinely different conditions — and the retry verdict differs with
-    # them. Seven sites mean "the workspace is unreadable, changed under us, oversized, or
-    # not a regular file": fix it and retry. One (orchestration_controller.py, the
-    # post-issue check) means "health or HIGH findings changed *after the work order was
-    # issued*", where retry is pointless and the session must be replaced — semantically a
-    # sibling of ORCHESTRATION_DELEGATION_CHANGED / _PROVIDER_POLICY_CHANGED /
-    # _INTEGRITY_BASELINE_CHANGED, wearing this code instead of its own.
+    # Empty again, and that is the point. CR-15a exempted ORCHESTRATION_WORKSPACE_UNSAFE
+    # because it carried two conditions whose retry verdicts genuinely differed, and
+    # recorded that as evidence the code was doing two jobs rather than as licence to
+    # vary. CR-15d split the post-issue baseline change into
+    # ORCHESTRATION_WORKSPACE_HEALTH_CHANGED, so each code now answers once and the
+    # exemption is unnecessary.
     #
-    # Forcing one answer would be wrong either way: True tells a caller to retry a
-    # baseline-moved refusal, False tells it not to retry a fixable workspace. The honest
-    # fix is a new code in the *_CHANGED family, which is a contract change tracked as
-    # CR-15d. Recorded here so the split is argued rather than dispersed across sites.
-    "ORCHESTRATION_WORKSPACE_UNSAFE": "post-issue baseline change vs fixable workspace state; split tracked in CR-15d",
+    # An entry here is a claim that one code covers two materially different conditions.
+    # It should be argued for — and preferably resolved by splitting, as this one was —
+    # not used to silence the guard.
 }
 # Keywords through which a code reaches an error constructor without being its first
 # positional argument. Each was found the hard way: a code invisible to a positional-only

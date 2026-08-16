@@ -106,6 +106,9 @@ EXPECTED_FAMILY: dict[str, type[errors.EvidenceWikiError]] = {
     "GROUNDING_ANCHOR_INVALID": errors.GroundingError,
     "INTAKE_TOTAL_CAP_EXCEEDED": errors.IntakeError,
     "ORCHESTRATION_WORKSPACE_UNSAFE": errors.OrchestrationError,
+    # Split out of ORCHESTRATION_WORKSPACE_UNSAFE by CR-15d: same family, but the
+    # baseline-moved condition rather than the repair-and-retry one.
+    "ORCHESTRATION_WORKSPACE_HEALTH_CHANGED": errors.OrchestrationError,
     "ORCHESTRATION_DRIVER_BUSY": errors.OrchestrationError,
 }
 
@@ -767,7 +770,7 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_orchestration_workspace_unsafe_is_reached_by_next_after_the_workspace_degrades(self):
+    def test_workspace_health_changed_is_reached_by_next_after_the_workspace_degrades(self):
         target = self.workspace("unsafe")
         with Workspace.open(target) as ws:
             session = ws.orchestrate.start(AGENT, orchestration_id="orch-reachability")
@@ -775,7 +778,7 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
             self.assertEqual("orchestration_work_order", order["artifact_type"])
             self.park_for_review(target, "park-me")
 
-            raised = self.reached("ORCHESTRATION_WORKSPACE_UNSAFE", session.next)
+            raised = self.reached("ORCHESTRATION_WORKSPACE_HEALTH_CHANGED", session.next)
 
         self.assertEqual("attention_required", raised.details.get("readiness_verdict"))
         self.assertFalse(raised.recoverable, "an unsafe workspace needs an operator, not a retry")
