@@ -154,7 +154,8 @@ _REMEDIATIONS = {
         "with a stable singly linked regular file."
     ),
     "ORCHESTRATION_PROVIDER_POLICY_CHANGED": (
-        "Restore the work order's explicit provider allow-list or start a new orchestration session."
+        "Restore the research.yml provider authorization this session started under, or "
+        "preserve the session for audit and start a new orchestration."
     ),
     "ORCHESTRATION_DELEGATION_CHANGED": (
         "Restore the research.yml orchestration: section this session started under, or start a new session "

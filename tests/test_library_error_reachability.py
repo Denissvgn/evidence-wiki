@@ -866,7 +866,8 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
         its own remediation at the raise site, and reaches a host only because
         ``error_class_for`` maps the ``ORCHESTRATION_`` prefix. (CR-14 added a
         matching ``_script_errors._REMEDIATIONS`` entry, but that entry is a
-        fallback the controller never consults.) That is precisely the arrangement this module
+        fallback the controller never consults.) That is precisely the
+        arrangement this module
         exists to distrust -- a mapping that is right on paper proves nothing
         about a code that never survives the seam -- so the condition is provoked
         for real and the exception is judged on what arrives.
