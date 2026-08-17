@@ -301,6 +301,94 @@ class DelegatedWorkspace:
         )
 
 
+class DelegatedStructuredSourceTests(DelegatedWorkspace, unittest.TestCase):
+    """A fulfilment whose normalized record binds a structured-view sidecar (EW-BUG-004).
+
+    The rest of this file delivers a payload that normalizes to exactly one file, which is
+    the only shape the postcondition's allowed set was ever built for. A well-formed CSV
+    takes the native table path and earns a structured view
+    (``normalize_sources.table_structured_skip_reason``), so normalization writes *two*
+    files — the record and the sidecar the package itself put beside it. Nothing else in the
+    suite reaches that state, which is why the refusal went unnoticed.
+    """
+
+    CSV_NAME = "supplier-quotes.csv"
+    CSV_BODY = "supplier,currency,unit_price\nacme,EUR,12.50\nglobex,EUR,13.75\n"
+
+    def acquire_csv(self, workspace: Path, request_id: str) -> str:
+        """The delegated acquirer's loop, delivering a table instead of a JSON payload."""
+        destination = workspace / "raw" / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        payload = destination / self.CSV_NAME
+        payload.write_text(self.CSV_BODY, encoding="utf-8", newline="\n")
+
+        sidecar = {
+            "origin_url": "https://example.test/supplier-quotes.csv",
+            "license": "CC-BY-4.0",
+            "retrieved_at": "2026-08-17T12:00:00Z",
+            "retrieved_by": ACQUIRER,
+            "request_id": request_id,
+            "checksum": f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}",
+        }
+        (destination / (self.CSV_NAME + ".provenance.yml")).write_text(
+            yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
+        )
+
+        self.run_script(INVENTORY, ["--report"], workspace)
+        self.run_script(NORMALIZE, ["--all"], workspace)
+        source_id = self.source_id_for(workspace, f"raw/data/{self.CSV_NAME}")
+        self.run_script(
+            REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
+        )
+        self.run_script(
+            RESOLVE,
+            [
+                "reopen",
+                "--slug",
+                QUESTION_SLUG,
+                "--agent-id",
+                ACQUIRER,
+                "--source-id",
+                source_id,
+                "--request-id",
+                request_id,
+            ],
+            workspace,
+        )
+        return source_id
+
+    def test_a_structured_source_can_close_a_delegated_fulfilment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+            action_id = order["action_id"]
+
+            self.acquire_csv(workspace, request_id)
+
+            normalized_root = workspace / "sources" / "normalized"
+            sidecars = sorted(path.name for path in normalized_root.glob("*.structured.json"))
+            self.assertEqual(
+                1,
+                len(sidecars),
+                "the reproduction needs a record that binds a structured view; "
+                f"normalized tree held {sorted(p.name for p in normalized_root.iterdir())}",
+            )
+
+            code, session = self.submit(
+                workspace, action_id, artifacts=[f"raw/data/{self.CSV_NAME}"]
+            )
+            self.assertEqual(
+                0,
+                code,
+                "the package must not refuse a sidecar its own normalizer wrote: "
+                f"{session}",
+            )
+            self.assertEqual("research", session["phase"])
+            self.assertEqual("open", self.question_status(workspace))
+
+
 class DelegatedAcquisitionChainTests(DelegatedWorkspace, unittest.TestCase):
     """CR-3 AC1, walked end to end."""
 
