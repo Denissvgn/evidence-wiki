@@ -40,9 +40,28 @@ Inputs:
   failure in the attempt audit for this `action_id`. A scoped request left with neither
   fails the postconditions — "we did not get to it" is not an outcome the controller can
   verify, and silence is what the audit exists to remove.
-- Stamp `request_id` in the provenance sidecar of everything you deliver. The controller
-  correlates a fulfilment to its request through that field; a delivered file without it
-  cannot satisfy the request it was fetched for.
+- Stamp `request_id` in the provenance sidecar of everything you deliver, at the moment
+  you deliver it. The controller correlates a fulfilment to its request through that
+  field; a delivered file without it cannot satisfy the request it was fetched for. The
+  stamp happens at delivery time and only at delivery time: a source already in the
+  manifest whose sidecar does not already name this request cannot be made to satisfy it
+  by editing that sidecar now. `raw/` is immutable, and a `request_id` added after
+  delivery is an assertion by you about what you once fetched rather than a record made
+  when you fetched it — the controller refuses it as a change to protected evidence.
+- When the evidence a request needs is already on disk but carries no `request_id` for
+  it, **deliver it again** as a new source (step 3), or record an attempt failure
+  (step 6). Most source ids are derived from the delivered relative path, so a distinct
+  capture at a distinct path is a distinct record — that is the identity model, not a
+  workaround, and every guard already allows it. Give the new capture a genuinely new
+  name under the delivery target its kind belongs to, not just a new directory: an arXiv
+  bundle directory named `arxiv-<id>` and a URL inside a link file take their ids from
+  the arXiv id and the URL rather than the path, and a PDF re-delivered under a filename
+  stem already paired with a LaTeX bundle disturbs the record that pairing produced.
+  Where no distinct id is reachable, record an attempt failure instead.
+- Reuse without re-delivery is available, but only for a source that was already
+  inventoried *and* normalized when the order was issued, whose sidecar already named
+  this request then, and whose manifest record and normalized output are unchanged: the
+  case where an earlier order for this request delivered evidence but did not complete.
 - Stamp a request's `scope` mapping into the same sidecar's `scope:` field, key for key,
   whenever the request declares one. `fulfill --require-scope` (step 5) makes that stamp
   load-bearing: it refuses a delivery that omits a scope key the request declares, or one
@@ -131,6 +150,14 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    after the fact to force a match. A request or delivery that carries no
    `scope` at all is unaffected by either check.
 
+   That prohibition is not specific to `scope`. It governs `request_id` too, and
+   more strictly: a sidecar you already delivered records what you fetched when
+   you fetched it, so editing one afterwards to add or change `request_id`
+   rewrites protected evidence, and the action is refused at submission with
+   `ORCHESTRATION_POSTCONDITION_FAILED` rather than accepted as a correlation.
+   The fix is the same shape as above — deliver the evidence again as a new
+   source (step 3), or record an attempt failure (step 6).
+
 6. Record a structured failure for each scoped request you could **not** fulfil:
 
 ```bash
@@ -198,6 +225,11 @@ evidence-wiki orchestrate submit --target . --orchestration-id ORCH_ID \
 - Scope-carrying deliveries were fulfilled with `--require-scope`, and no
   `REQUEST_SCOPE_MISMATCH`/`REQUEST_SCOPE_MISSING` refusal was worked around by editing a
   sidecar after delivery.
+- Nothing under `raw/` that existed when the order was issued was edited, renamed, or
+  removed — a `request_id` added to a delivered sidecar least of all. Evidence already on
+  disk but uncorrelated was re-delivered as a new source, or recorded as an attempt
+  failure; only a source whose sidecar already named a scoped request when the order was
+  issued was reused unchanged.
 - `source_inventory.py --report` and `normalize_sources.py --all` completed, and every
   fulfilled `source_id` has a normalized record.
 - Questions were reopened only where **all** blocking requests are fulfilled; questions
