@@ -21,7 +21,7 @@ import socket
 import stat
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -2764,6 +2764,106 @@ def file_tree_fingerprint_snapshot(
 
     visit(root)
     return dict(sorted(snapshot.items()))
+
+
+def record_declares_structured_view(record_path: Path) -> bool:
+    """Whether a normalized record binds a structured-view sidecar beside itself.
+
+    Normalization writes the sidecar *before* the record so the record can bind its digest,
+    which means an action that produces a structured source adds **two** files under the
+    normalized root: the record, and a companion the package itself wrote. The scope guards
+    below have to allow that companion, and this decides when it is legitimate to.
+
+    Gated on the record's own declaration rather than allowed unconditionally. The
+    controller runs no record-contract validation — it fingerprints files and nothing else —
+    so nothing in an acquisition flow would otherwise refuse an *undeclared* sidecar, and
+    `_normalized_contract` calls that "a breach in the other direction … the one that would
+    otherwise be invisible". Allowing the path only when the record asks for it keeps the
+    guard's reach one file wider, not one directory wider.
+
+    Fails closed: a record that cannot be read or parsed authorizes nothing beside itself.
+    """
+    contract = load_sibling_module("_normalized_contract")
+    try:
+        text = record_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    frontmatter, _, error = contract.split_record(text)
+    if error is not None or not isinstance(frontmatter, dict):
+        return False
+    return isinstance(frontmatter.get("structured_view"), dict)
+
+
+def allowed_normalized_paths_for_record(
+    project_root: Path,
+    record_path: Path,
+    normalize_sources: ModuleType,
+) -> set[str]:
+    """Every normalized path one record legitimately accounts for.
+
+    The record, plus the structured-view sidecar beside it when the record declares one.
+    Single-sourced so the three postcondition paths cannot drift: they answer the same
+    question about the same tree, and one of them allowing a companion the others refuse is
+    how a delivered source becomes fulfillable through one route and not another.
+    """
+    paths = {relative_workspace_path(project_root, record_path)}
+    if record_declares_structured_view(record_path):
+        paths.add(
+            relative_workspace_path(
+                project_root, normalize_sources.structured_view_path_for_record(record_path)
+            )
+        )
+    return paths
+
+
+def normalized_output_scope(
+    project_root: Path,
+    normalized_root: Path,
+    expected_new_source_ids: Iterable[str],
+    by_source_id: dict[str, Any],
+    normalize_sources: ModuleType,
+) -> tuple[set[str], set[str]]:
+    """The normalized paths an action may create, and those it must.
+
+    Returns ``(allowed, required)``. The record is both — an action that fulfils a source
+    owes exactly one record. Its structured-view sidecar is allowed and never required,
+    because a source binding no view writes only the record; demanding it would refuse
+    every non-structured fulfilment, which is how a naive fix to this breaks the other
+    direction.
+
+    Shaped after the raw-evidence check in the same functions, which has always allowed
+    `<file>.provenance.yml` beside a delivery for the same reason.
+    """
+    allowed: set[str] = set()
+    required: set[str] = set()
+    for source_id in expected_new_source_ids:
+        record = by_source_id.get(source_id)
+        if not isinstance(record, dict):
+            continue
+        record_path = normalize_sources.normalized_output_path_for_record(record, normalized_root)
+        allowed |= allowed_normalized_paths_for_record(project_root, record_path, normalize_sources)
+        required.add(relative_workspace_path(project_root, record_path))
+    return allowed, required
+
+
+def normalized_output_scope_failures(
+    allowed: set[str],
+    required: set[str],
+    files_before: dict[str, str],
+    files_now: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """New paths no expected source authorizes, and expected records that never appeared.
+
+    The missing-record half preserves an obligation the exact-equality check used to carry
+    and is deliberately kept, but it is **defence in depth, not the primary enforcement**:
+    the earlier `missing_normalized` guard refuses a fulfilled request with no normalized
+    record long before the scope comparison runs. What is left to this half is the narrower
+    anomaly of a source counted as newly fulfilled whose record is not newly created, which
+    the suite cannot reach without mocking — recorded here rather than left to read as
+    tested coverage.
+    """
+    actual_new = set(files_now) - set(files_before)
+    return sorted(actual_new - allowed), sorted(required - actual_new)
 
 
 def normalized_file_fingerprint_snapshot(
@@ -5599,13 +5699,9 @@ def verify_delegated_acquisition_postconditions(
     )
 
     current_normalized_files = normalized_file_fingerprint_snapshot(project_root, config)
-    allowed_new_normalized_paths: set[str] = set()
-    for source_id in expected_new_source_ids:
-        record = by_source_id.get(source_id)
-        if not isinstance(record, dict):
-            continue
-        normalized_path = normalize_sources.normalized_output_path_for_record(record, normalized_root)
-        allowed_new_normalized_paths.add(relative_workspace_path(project_root, normalized_path))
+    allowed_new_normalized_paths, required_new_normalized_paths = normalized_output_scope(
+        project_root, normalized_root, expected_new_source_ids, by_source_id, normalize_sources
+    )
     normalized_scope_violations = fingerprint_scope_violations(
         normalized_files_before,
         current_normalized_files,
@@ -5616,17 +5712,35 @@ def verify_delegated_acquisition_postconditions(
         not any(normalized_scope_violations.values()),
         "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
         {"normalized_scope_violations": normalized_scope_violations},
-        "Restore existing normalized evidence and keep new outputs limited to newly fulfilled sources.",
+        "Restore existing normalized evidence and keep new outputs limited to newly fulfilled "
+        "sources and the structured-view sidecars their records declare.",
+    )
+    unexpected_new_normalized, missing_new_normalized = normalized_output_scope_failures(
+        allowed_new_normalized_paths,
+        required_new_normalized_paths,
+        normalized_files_before,
+        current_normalized_files,
     )
     require(
-        (set(current_normalized_files) - set(normalized_files_before)) == allowed_new_normalized_paths,
-        "new fulfilled sources do not map exactly to newly created normalized outputs",
+        not unexpected_new_normalized,
+        "normalized outputs appeared that no newly fulfilled source authorizes",
         {
-            "expected_new_normalized_paths": sorted(allowed_new_normalized_paths),
+            "unexpected_new_normalized_paths": unexpected_new_normalized,
+            "allowed_new_normalized_paths": sorted(allowed_new_normalized_paths),
+        },
+        "Remove normalized outputs no fulfilled source owns; a structured-view sidecar is "
+        "allowed only when its record declares one.",
+    )
+    require(
+        not missing_new_normalized,
+        "newly fulfilled sources did not each produce a normalized record",
+        {
+            "missing_new_normalized_paths": missing_new_normalized,
             "actual_new_normalized_paths": sorted(
                 set(current_normalized_files) - set(normalized_files_before)
             ),
         },
+        "Run normalize_sources.py --all so every fulfilled source has a normalized record.",
     )
 
     current_raw_tree = raw_tree_snapshot(project_root, config, include_entries=True)
@@ -6453,13 +6567,9 @@ def verify_action_postconditions(
         )
 
         current_normalized_files = normalized_file_fingerprint_snapshot(project_root, config)
-        allowed_new_normalized_paths: set[str] = set()
-        for source_id in expected_new_source_ids:
-            record = by_source_id.get(source_id)
-            if not isinstance(record, dict):
-                continue
-            normalized_path = normalize_sources.normalized_output_path_for_record(record, normalized_root)
-            allowed_new_normalized_paths.add(relative_workspace_path(project_root, normalized_path))
+        allowed_new_normalized_paths, required_new_normalized_paths = normalized_output_scope(
+            project_root, normalized_root, expected_new_source_ids, by_source_id, normalize_sources
+        )
         normalized_scope_violations = fingerprint_scope_violations(
             normalized_files_before,
             current_normalized_files,
@@ -6470,17 +6580,35 @@ def verify_action_postconditions(
             not any(normalized_scope_violations.values()),
             "acquisition changed normalized evidence outside newly fulfilled source scope",
             {"normalized_scope_violations": normalized_scope_violations},
-            "Restore existing normalized evidence and keep new outputs limited to newly fulfilled sources.",
+            "Restore existing normalized evidence and keep new outputs limited to newly fulfilled "
+            "sources and the structured-view sidecars their records declare.",
+        )
+        unexpected_new_normalized, missing_new_normalized = normalized_output_scope_failures(
+            allowed_new_normalized_paths,
+            required_new_normalized_paths,
+            normalized_files_before,
+            current_normalized_files,
         )
         require(
-            (set(current_normalized_files) - set(normalized_files_before)) == allowed_new_normalized_paths,
-            "new fulfilled sources do not map exactly to newly created normalized outputs",
+            not unexpected_new_normalized,
+            "normalized outputs appeared that no newly fulfilled source authorizes",
             {
-                "expected_new_normalized_paths": sorted(allowed_new_normalized_paths),
+                "unexpected_new_normalized_paths": unexpected_new_normalized,
+                "allowed_new_normalized_paths": sorted(allowed_new_normalized_paths),
+            },
+            "Remove normalized outputs no fulfilled source owns; a structured-view sidecar is "
+            "allowed only when its record declares one.",
+        )
+        require(
+            not missing_new_normalized,
+            "newly fulfilled sources did not each produce a normalized record",
+            {
+                "missing_new_normalized_paths": missing_new_normalized,
                 "actual_new_normalized_paths": sorted(
                     set(current_normalized_files) - set(normalized_files_before)
                 ),
             },
+            "Run normalize_sources.py --all so every fulfilled source has a normalized record.",
         )
 
         current_raw_tree = raw_tree_snapshot(project_root, config, include_entries=True)
@@ -7140,13 +7268,15 @@ def verify_blocked_action_postconditions(
     )
 
     normalized_root = project_root / normalized_relative
-    allowed_new_normalized_paths = {
-        relative_workspace_path(
+    # Partial outputs may include the structured-view sidecar its record declares, for the
+    # same reason a completed fulfilment may: normalization wrote both.
+    allowed_new_normalized_paths: set[str] = set()
+    for record in correlated_records:
+        allowed_new_normalized_paths |= allowed_normalized_paths_for_record(
             project_root,
             normalize_sources.normalized_output_path_for_record(record, normalized_root),
+            normalize_sources,
         )
-        for record in correlated_records
-    }
     current_normalized_files = normalized_file_fingerprint_snapshot(project_root, config)
     actual_new_normalized_paths = set(current_normalized_files) - set(normalized_files_before)
     normalized_scope_violations = fingerprint_scope_violations(

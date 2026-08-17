@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import hashlib
 import importlib.util
@@ -6739,6 +6740,89 @@ class OrchestrationControllerTests(unittest.TestCase):
             with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
                 CONTROLLER.trusted_static_input_fingerprint(target)
             self.assertIn("symbolic link", str(caught.exception))
+
+
+class NormalizedOutputScopeTests(unittest.TestCase):
+    """The declared-only gate on structured-view sidecars (EW-BUG-004).
+
+    Normalization writes the sidecar beside the record, so an acquisition that fulfils a
+    structured source adds two files under the normalized root and the scope guards must
+    allow both. Allowing every `.structured.json` unconditionally would be the easy fix and
+    the wrong one: the controller runs no record-contract validation, so an undeclared
+    sidecar would pass unremarked. These pin the gate itself, independent of any harness.
+    """
+
+    def record(self, root: Path, *, declares: bool) -> Path:
+        path = root / "raw--sample-0123456789.md"
+        block = (
+            "structured_view:\n  path: sources/normalized/raw--sample-0123456789.structured.json\n"
+            "  content_hash: sha256:0\n"
+            if declares
+            else ""
+        )
+        path.write_text(f"---\nsource_id: raw:sample\n{block}---\n\nbody\n", encoding="utf-8")
+        return path
+
+    def allowed(self, root: Path, record_path: Path) -> set[str]:
+        normalize_sources = CONTROLLER.load_sibling_module("normalize_sources")
+        return CONTROLLER.allowed_normalized_paths_for_record(root, record_path, normalize_sources)
+
+    def test_a_declared_sidecar_is_allowed_beside_its_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            allowed = self.allowed(root, self.record(root, declares=True))
+            self.assertEqual(
+                {"raw--sample-0123456789.md", "raw--sample-0123456789.structured.json"},
+                allowed,
+            )
+
+    def test_an_undeclared_sidecar_is_not_allowed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            allowed = self.allowed(root, self.record(root, declares=False))
+            self.assertEqual({"raw--sample-0123456789.md"}, allowed)
+
+    def test_an_unreadable_record_authorizes_nothing_beside_itself(self):
+        """Fails closed: a record the guard cannot parse cannot widen the guard."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            missing = root / "raw--absent-0000000000.md"
+            self.assertEqual({"raw--absent-0000000000.md"}, self.allowed(root, missing))
+
+            malformed = root / "raw--broken-0000000000.md"
+            malformed.write_text("no frontmatter here\n", encoding="utf-8")
+            self.assertEqual({"raw--broken-0000000000.md"}, self.allowed(root, malformed))
+
+    def test_every_normalized_scope_site_shares_the_one_allowance(self):
+        """Three postcondition paths answer this question; none may answer it alone.
+
+        `verify_delegated_acquisition_postconditions`, `verify_action_postconditions` and
+        `verify_blocked_action_postconditions` each bound what an action may add under the
+        normalized root. EW-BUG-004 was one rule written three times and updated in none of
+        them, so the rule now lives in one helper and this fails if a site stops using it.
+        """
+        tree = ast.parse(Path(CONTROLLER.__file__).read_text(encoding="utf-8"))
+        wanted = {
+            "verify_delegated_acquisition_postconditions",
+            "verify_action_postconditions",
+            "verify_blocked_action_postconditions",
+        }
+        shared = {"allowed_normalized_paths_for_record", "normalized_output_scope"}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in wanted:
+                continue
+            called = {
+                getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+            }
+            with self.subTest(function=node.name):
+                self.assertTrue(
+                    called & shared,
+                    f"{node.name} bounds normalized outputs without the shared allowance",
+                )
+            wanted = wanted - {node.name}
+        self.assertEqual(set(), wanted, f"postcondition functions not found: {sorted(wanted)}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **Fix: an acquisition action could not fulfil a source whose normalized record binds a
+  structured-view sidecar.** Normalization writes the sidecar beside the record, so
+  fulfilling such a source adds two files under `sources/normalized/` — but the
+  postcondition guards allowed exactly one, the record, and judged the package's own write
+  an unauthorised change. Every affected submission refused with
+  `ORCHESTRATION_POSTCONDITION_FAILED`, naming the file the normalizer had just created.
+
+  This blocked delegated acquisition outright for any workspace whose evidence normalizes
+  structurally, and it was never limited to normalization adapters: a plain CSV takes the
+  native table path and earns a structured view too, so provider-mode acquisition of a
+  table hit it just the same.
+
+  All three scope guards — delegated acquisition, provider-mode acquisition, and the
+  blocked-action path — now allow a record's structured-view sidecar, and only when the
+  record itself declares one. An undeclared sidecar is still refused, as is any other
+  normalized output no fulfilled source accounts for; the guards grew by at most one
+  derived path per source, not by a directory. Reported downstream as EW-BUG-004.
 ## 0.5.0 - 2026-08-17
 
 - **Every error code this package raises now carries a specific remediation, and every

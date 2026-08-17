@@ -388,6 +388,99 @@ class DelegatedStructuredSourceTests(DelegatedWorkspace, unittest.TestCase):
             self.assertEqual("research", session["phase"])
             self.assertEqual("open", self.question_status(workspace))
 
+    def test_an_unauthorised_normalized_file_is_still_refused(self):
+        """The guard grew by one declared companion per source, not by a directory.
+
+        Fixing EW-BUG-004 relaxes a fail-closed check, so the refusal it still owes is the
+        part worth pinning: a normalized output no fulfilled source accounts for.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+
+            self.acquire_csv(workspace, request_id)
+            intruder = workspace / "sources" / "normalized" / "not-from-any-source.md"
+            intruder.write_text("---\nsource_id: invented\n---\n\nbody\n", encoding="utf-8")
+
+            code, session = self.submit(
+                workspace, order["action_id"], artifacts=[f"raw/data/{self.CSV_NAME}"]
+            )
+            self.assertEqual(2, code, session)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", session["error_code"])
+            self.assertIn(
+                "sources/normalized/not-from-any-source.md",
+                json.dumps(session["details"]),
+                "the refusal must name the file it refused",
+            )
+
+    def test_an_undeclared_structured_sidecar_is_still_refused(self):
+        """A sidecar is allowed because a record *declares* it, not because it exists.
+
+        The controller runs no record-contract validation, so if this path allowed every
+        `.structured.json` unconditionally, an action could leave an unbound sidecar beside
+        a record that never referenced it and nothing in the flow would object.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+
+            source_id = self.acquire_csv(workspace, request_id)
+            normalized_root = workspace / "sources" / "normalized"
+            declared = next(normalized_root.glob("*.structured.json"))
+            # A second sidecar, for a record that does not exist and declares nothing.
+            orphan = normalized_root / "raw--orphan-0000000000.structured.json"
+            orphan.write_text(declared.read_text(encoding="utf-8"), encoding="utf-8")
+
+            code, session = self.submit(
+                workspace, order["action_id"], artifacts=[f"raw/data/{self.CSV_NAME}"]
+            )
+            self.assertEqual(2, code, f"{source_id}: {session}")
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", session["error_code"])
+            self.assertIn(orphan.name, json.dumps(session["details"]))
+
+    def test_a_fulfilment_without_its_normalized_record_is_still_refused(self):
+        """The record stays obligatory after the exact-equality check was relaxed.
+
+        Replacing `==` with a subset test is what lets an optional sidecar through; done
+        carelessly it would also drop the requirement that each fulfilled source produced a
+        record at all, which the equality used to carry.
+
+        The refusal that actually fires here is the earlier `missing_normalized` check —
+        a fulfilled request with no normalized record never reaches the scope comparison.
+        That is the primary enforcement; the scope check's own missing-record refusal sits
+        behind it as defence in depth for the case where a record exists but is not new.
+        Asserted on the outcome rather than on which of the two spoke, because the
+        obligation is what matters and either refusal honours it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+
+            self.acquire_csv(workspace, request_id)
+            normalized_root = workspace / "sources" / "normalized"
+            record = next(normalized_root.glob("*.md"))
+            record.unlink()
+
+            code, session = self.submit(
+                workspace, order["action_id"], artifacts=[f"raw/data/{self.CSV_NAME}"]
+            )
+            self.assertEqual(2, code, session)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", session["error_code"])
+            self.assertIn(
+                session["message"],
+                {
+                    "fulfilled source requests do not have normalized evidence",
+                    "newly fulfilled sources did not each produce a normalized record",
+                },
+                session,
+            )
+
 
 class DelegatedAcquisitionChainTests(DelegatedWorkspace, unittest.TestCase):
     """CR-3 AC1, walked end to end."""
