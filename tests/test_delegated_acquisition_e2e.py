@@ -1122,6 +1122,218 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
             )
             self.assertFalse(failure["record_unchanged"])
 
+    # -- the reuse path that is allowed, and what it may still not touch ------------
+
+    def test_the_documented_reuse_path_closes_the_loop(self):
+        """The leg the delegated arm keeps on purpose, walked end to end for the first time.
+
+        `matching_normalized_source_records` explains in its own docstring that correlating
+        on a candidate id would "silently remove the reuse path the provider mode has".
+        Nothing checked that the path it preserves actually reaches the end, and the cost
+        is measurable: neutralising all four of this arm's scope guards -- manifest,
+        reconciliation, normalized and raw -- on 0.5.1 leaves
+        `tests/test_orchestration_controller.py` and this file passing, 197 of 197. A
+        repair of EW-BUG-005 that widened those guards instead of naming the constraint
+        would have landed green with nobody the wiser.
+
+        Reuse is read-only, which is why the raw tree, the normalized tree and the manifest
+        must be byte-identical afterwards -- the only durable changes an accepted reuse
+        makes are to the request store and the question it unblocks.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            source_id = self.deliver_before_the_order(workspace, request_id)
+            self.start(workspace)
+            order = self.pending_order(workspace)
+            self.assertEqual([request_id], order["scope"]["request_ids"])
+            evidence_before = self.evidence_bytes(workspace)
+
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(
+                0,
+                code,
+                "a source the order itself correlated to the request must satisfy it "
+                f"without being fetched again: {session}",
+            )
+            self.assertEqual("research", session["phase"])
+            self.assertEqual(order["action_id"], session["last_completed_action_id"])
+            self.assertEqual("open", self.question_status(workspace))
+            self.assertEqual(
+                evidence_before,
+                self.evidence_bytes(workspace),
+                "reuse fetches nothing, so it writes nothing under raw/, normalized/ or the manifest",
+            )
+
+    def test_editing_a_reused_records_manifest_entry_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, _, source_id, order = self.arrive_at_reuse(Path(tmpdir))
+            manifest = workspace / "sources" / "manifest.jsonl"
+            records = [
+                json.loads(line)
+                for line in manifest.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            for record in records:
+                if record["id"] == source_id:
+                    record["provenance"]["retrieved_by"] = "tidied-up-after-the-fact"
+            manifest.write_text(
+                "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+            )
+
+            envelope = self.assert_reuse_mutation_refused(workspace, order["action_id"])
+
+            self.assertIn(
+                "evidence-manifest records outside fulfilled source scope", envelope["message"]
+            )
+            self.assertEqual(
+                [source_id],
+                envelope["details"]["manifest_scope_violations"]["changed_outside_scope"],
+            )
+
+    def test_editing_a_reused_sources_raw_sidecar_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, _, _, order = self.arrive_at_reuse(Path(tmpdir))
+            relative = f"raw/data/{PAYLOAD.name}.provenance.yml"
+            sidecar = workspace / relative
+            content = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+            content["note"] = "annotated after the order was issued"
+            sidecar.write_text(yaml.safe_dump(content, sort_keys=False), encoding="utf-8")
+
+            envelope = self.assert_reuse_mutation_refused(workspace, order["action_id"])
+
+            self.assertIn("changed raw evidence outside newly fulfilled", envelope["message"])
+            self.assertEqual(
+                [relative], envelope["details"]["raw_scope_violations"]["changed_outside_scope"]
+            )
+
+    def test_editing_a_reused_sources_normalized_record_is_still_refused(self):
+        """Two guards can answer here and either honours the obligation.
+
+        Reconciliation compares the reused record's normalized digest against the order's
+        own baseline and speaks first; the normalized-scope guard behind it says the same
+        thing about the same file. Asserted on the pair, as elsewhere in this file, because
+        the promise is that the edit is refused rather than that a named check is the one
+        that noticed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, _, source_id, order = self.arrive_at_reuse(Path(tmpdir))
+            record = self.normalized_record_for(workspace, source_id)
+            record.write_text(
+                record.read_text(encoding="utf-8") + "\nAppended after the order was issued.\n",
+                encoding="utf-8",
+            )
+
+            envelope = self.assert_reuse_mutation_refused(workspace, order["action_id"])
+
+            self.assertIn(
+                envelope["message"],
+                {
+                    "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+                    "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
+                },
+                envelope,
+            )
+
+    def test_editing_an_uninvolved_sources_normalized_record_is_still_refused(self):
+        """The normalized-scope guard, pinned where reconciliation cannot reach it.
+
+        Reconciliation only walks the fulfilled source ids, so a workspace holding other
+        evidence relies entirely on `mutable_ids=set()` at the normalized-scope site to
+        keep it out of an acquisition's reach. Nothing exercised that site before.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            bystander = self.deliver_bystander_before_the_order(workspace)
+            source_id = self.deliver_before_the_order(workspace, request_id)
+            self.start(workspace)
+            order = self.pending_order(workspace)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            record = self.normalized_record_for(workspace, bystander)
+            record.write_text(
+                record.read_text(encoding="utf-8") + "\nRewritten by an order that never scoped it.\n",
+                encoding="utf-8",
+            )
+
+            envelope = self.assert_reuse_mutation_refused(workspace, order["action_id"])
+
+            self.assertEqual(
+                "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
+                envelope["message"],
+                envelope,
+            )
+            self.assertEqual(
+                [record.relative_to(workspace).as_posix()],
+                envelope["details"]["normalized_scope_violations"]["changed_outside_scope"],
+            )
+
+    # -- helpers -------------------------------------------------------------------
+
+    BYSTANDER_NAME = "keepa-b0zzz98765.json"
+    BYSTANDER_BODY = (
+        '{\n  "asin": "B0ZZZ98765",\n  "supplier_quote": "8.10 EUR",\n  "offer_count": 2\n}\n'
+    )
+
+    def deliver_bystander_before_the_order(self, workspace: Path) -> str:
+        """Unrelated evidence the workspace happens to hold. No request ever names it."""
+        destination = workspace / "raw" / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        payload = destination / self.BYSTANDER_NAME
+        payload.write_text(self.BYSTANDER_BODY, encoding="utf-8", newline="\n")
+        (destination / (self.BYSTANDER_NAME + ".provenance.yml")).write_text(
+            yaml.safe_dump(
+                {
+                    "origin_url": "https://api.keepa.test/product/B0ZZZ98765",
+                    "license": "CC-BY-4.0",
+                    "retrieved_at": "2026-08-08T12:00:00Z",
+                    "retrieved_by": "some-earlier-run",
+                    "checksum": f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}",
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        self.run_script(INVENTORY, ["--report"], workspace)
+        self.run_script(NORMALIZE, ["--all"], workspace)
+        return self.source_id_for(workspace, f"raw/data/{self.BYSTANDER_NAME}")
+
+    def arrive_at_reuse(self, root: Path) -> tuple[Path, str, str, dict]:
+        """A correlated pre-existing source, fulfilled inside the order that correlated it."""
+        workspace, request_id = self.make_workspace(root)
+        source_id = self.deliver_before_the_order(workspace, request_id)
+        self.start(workspace)
+        order = self.pending_order(workspace)
+        self.fulfil_and_reopen(workspace, request_id, source_id)
+        return workspace, request_id, source_id, order
+
+    def assert_reuse_mutation_refused(self, workspace: Path, action_id: str) -> dict:
+        code, envelope = self.submit(workspace, action_id)
+        self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+        self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"])
+        self.assertTrue(envelope["recoverable"])
+        return envelope
+
+    def normalized_record_for(self, workspace: Path, source_id: str) -> Path:
+        for path in sorted((workspace / "sources" / "normalized").glob("*.md")):
+            if source_id in path.read_text(encoding="utf-8"):
+                return path
+        raise AssertionError(f"no normalized record names {source_id}")
+
+    def evidence_bytes(self, workspace: Path) -> dict[str, str]:
+        """Digest exactly what an accepted reuse is forbidden to write: raw, normalized, manifest."""
+        state: dict[str, str] = {}
+        for root in (workspace / "raw", workspace / "sources" / "normalized"):
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    state[path.relative_to(workspace).as_posix()] = hashlib.sha256(
+                        path.read_bytes()
+                    ).hexdigest()
+        manifest = workspace / "sources" / "manifest.jsonl"
+        state["sources/manifest.jsonl"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        return state
+
 
 class AuditAssertionTests(DelegatedWorkspace, unittest.TestCase):
     """The audit assertion above is load-bearing, not decoration.

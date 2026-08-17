@@ -5498,6 +5498,67 @@ def verify_delegated_acquisition_postconditions(
         id_field="id",
         label="evidence manifest",
     )
+
+    # Reuse of evidence the workspace already held is admitted only on the terms fixed at
+    # issuance: `matching_source_records_before` carries the record and normalized digests of
+    # every pre-existing source the order correlated to a scoped request, and a record absent
+    # from it can never reconcile against it. Saying so here is the whole point — without
+    # this refusal the checks below speak first, and the first of them tells the acquirer to
+    # stamp the sidecar and re-inventory, which is then refused four more times over
+    # (manifest, reconciliation, normalized and raw scope in turn) because `raw/` is
+    # immutable and re-inventorying rewrites a record this order may not touch. Four
+    # unrelated-sounding refusals for obeying the first one's own advice.
+    #
+    # Three different things put a pre-existing source outside that baseline, and the
+    # message must not guess which, because their repairs differ: a sidecar naming no scoped
+    # request, a correctly named sidecar on a source nothing had normalized yet when the
+    # order was issued (`matching_normalized_source_records` requires both), and a record
+    # rewritten since issuance, which makes what it says now no evidence of what it said
+    # then. The message states the fact they share; `details` carries the cause per source.
+    reuse_scope_failures: list[dict[str, Any]] = []
+    for source_id in sorted(
+        {
+            str(request.get("source_id"))
+            for request in fulfilled
+            if str(request.get("source_id")) in manifest_records_before
+            and str(request.get("source_id")) not in matching_source_records_before
+        }
+    ):
+        record = by_source_id.get(source_id)
+        provenance = record.get("provenance") if isinstance(record, dict) else None
+        provenance_request_id = provenance.get("request_id") if isinstance(provenance, dict) else None
+        record_unchanged = current_manifest_fingerprints.get(source_id) == manifest_records_before[source_id]
+        if not record_unchanged:
+            cause = "manifest_record_changed_after_issuance"
+        elif provenance_request_id in scoped_requests:
+            cause = "no_normalized_output_at_issuance"
+        else:
+            cause = "provenance_names_no_scoped_request"
+        reuse_scope_failures.append(
+            {
+                "source_id": source_id,
+                "cause": cause,
+                "provenance_request_id": provenance_request_id,
+                "record_unchanged": record_unchanged,
+            }
+        )
+    require(
+        not reuse_scope_failures,
+        "a fulfilled request reuses pre-existing evidence that was not a scoped reconciliation match "
+        "when the order was issued",
+        {
+            "reuse_scope_failures": reuse_scope_failures,
+            "matching_source_ids_before": matching_source_ids_before,
+        },
+        (
+            "Reuse only a source this order already correlated: one whose .provenance.yml named this request "
+            "and which carried a normalized record before the order was issued, both unchanged since. When the "
+            "sidecar names no scoped request, deliver the evidence as a new source under its own raw path with "
+            "its own sidecar. When it names one but the source had no normalized record yet, record the attempt "
+            "failure with source_requests.py record-attempt-failure using this action id, run "
+            "normalize_sources.py --all, and start a fresh orchestration session whose baseline correlates it."
+        ),
+    )
     normalized_root = project_root / normalized_relative
     missing_normalized: list[str] = []
     unusable_normalized: list[dict[str, Any]] = []
@@ -5535,8 +5596,10 @@ def verify_delegated_acquisition_postconditions(
         "fulfilled evidence is not linked to its source request by a provenance sidecar",
         {"correlation_failures": correlation_failures},
         (
-            "Deliver each source with a .provenance.yml sidecar whose request_id names the request it "
-            "fulfils, then re-run source_inventory.py before fulfilling."
+            "Stamp request_id into each source's .provenance.yml as you deliver it, naming the request it "
+            "fulfils, then re-run source_inventory.py before fulfilling. Raw evidence is immutable, so a "
+            "source the manifest already holds cannot be given one afterwards; deliver that evidence as a "
+            "new source under its own raw path instead."
         ),
     )
 
@@ -5695,7 +5758,9 @@ def verify_delegated_acquisition_postconditions(
         not reconciliation_failures,
         "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
         {"reconciliation_failures": reconciliation_failures},
-        "Use only the unchanged scoped pre-existing source or deliver a genuinely new source id.",
+        "Reuse a pre-existing source only when its sidecar named this request before the order was issued "
+        "and its manifest record and normalized output are byte-identical to what the order recorded; "
+        "otherwise deliver a genuinely new source id.",
     )
 
     current_normalized_files = normalized_file_fingerprint_snapshot(project_root, config)
