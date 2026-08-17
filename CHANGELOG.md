@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 - 2026-08-17
 
 - **Fix: an acquisition action could not fulfil a source whose normalized record binds a
   structured-view sidecar.** Normalization writes the sidecar beside the record, so
