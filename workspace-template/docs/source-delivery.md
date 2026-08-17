@@ -154,6 +154,45 @@ sidecar" a checkable claim: an acquisition action fulfilling a request whose
 manifest record has no matching `provenance.request_id` is refused with
 `ORCHESTRATION_POSTCONDITION_FAILED`. `candidate_id` stays absent in that mode.
 
+The stamp is made at delivery time and only at delivery time. A source already in
+the manifest whose sidecar does not already name the request cannot be made to
+satisfy it later: `raw/` is immutable, and editing a delivered sidecar to add a
+`request_id` turns a delivery-time record into an after-the-fact assertion by the
+party whose claims this contract exists to check. The orchestration baseline of
+reusable evidence is fingerprinted when the work order is issued, so a
+`request_id` that appears after that is a change to protected evidence — refused
+with `ORCHESTRATION_POSTCONDITION_FAILED`, not accepted as a correlation. When
+the bytes are already on disk but carry no `request_id` for the request in hand,
+deliver them again as a new source under the delivery target its kind belongs to,
+with its own sidecar, or record an attempt failure. Most manifest IDs are derived
+from the delivered relative path (see "Naming guidance" above), so a distinct
+capture at a distinct path is a distinct source carrying its own provenance —
+that is the identity model, not a workaround. The new sidecar records the
+retrieval that actually happened — the `origin_url` and `retrieved_at` of the
+fetch that produced these bytes — plus the `request_id` this delivery answers. It
+is a second delivery of one retrieval, not a claim of a second retrieval.
+
+Two kinds do not take their ID from the path, and a copy of one lands on the
+record already in the manifest rather than beside it: an arXiv bundle directory
+named exactly `arxiv-<id>` takes its ID from that arXiv ID, and each URL expanded
+from a link file takes its ID from the URL. Re-deliver a bundle under a directory
+name that is not the `arxiv-<id>` form, and re-deliver an already-inventoried URL
+as an actual capture under `raw/web/` rather than as a second link list. Where no
+distinct ID is reachable, the request cannot be satisfied by re-delivery at all:
+record an attempt failure.
+
+Reuse without re-delivery is available too, but only for a source that was already
+inventoried *and* normalized when the order was issued, whose sidecar already
+named this request then, and whose manifest record and normalized output are
+byte-unchanged — the case where an earlier order for the same request delivered
+evidence but did not complete. None of this is in tension with the idempotency
+guarantee below that re-delivering identical bytes changes nothing: that guarantee
+is about the *normalizer*, which skips a source whose `raw_fingerprint` is
+unchanged, while the orchestration postcondition asks the different question of
+whether this action produced a manifest record correlated to the request it claims
+to fulfil. Re-delivering the same bytes at a new path costs one more copy of them,
+not a violated guarantee.
+
 Provider-backed delivery is fail closed before this sidecar contract begins.
 Automated acquisition requires verified TLS, successful DNS resolution whose
 entire answer set is public, a policy-compliant HTTPS redirect chain, a 2xx
@@ -331,7 +370,7 @@ reports.
 ## Idempotency Guarantees
 
 - Re-running `source_inventory.py` after a partial delivery only adds or refreshes affected records. Existing record IDs are stable (path-derived), `detected_at` is preserved across runs, and no prior records are lost when new files arrive.
-- Re-delivering identical bytes changes nothing: `raw_fingerprint` is content-derived, so normalization skips unchanged sources.
+- Re-delivering identical bytes changes nothing: `raw_fingerprint` is content-derived, so normalization skips unchanged sources. This is a normalizer property, not an orchestration postcondition: under `orchestration.acquisition: delegated`, re-running inventory over a source already in the manifest does not correlate it to a source request and cannot be made to — see "Provenance Sidecars" above.
 - Changed bytes under an existing path (discouraged — raw is immutable) change `raw_fingerprint`, and the next normalization run regenerates that record.
 - `source_requests.py add` deduplicates against open requests by kind plus normalized query text; re-submitting is a reported no-op. `fulfill` with the same source ID twice is a no-op.
 

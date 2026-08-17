@@ -329,7 +329,17 @@ byte-identical (its failure lives in the attempt audit, not in the request), and
 it may append to that append-only audit but never rewrite an event that existed
 when the order was issued. Question files are mutable only for questions whose
 *every* blocking request was fulfilled. Pre-existing evidence is reusable on the
-same terms as above, correlated by `provenance.request_id` alone.
+same terms as above, correlated by `provenance.request_id` alone — and correlated
+*already*, at the moment the order was issued. That reusable baseline is
+fingerprinted at issue time from the manifest records whose merged
+`provenance.request_id` named a scoped request then, together with their
+normalized outputs; a delivery not yet inventoried or not yet normalized is not in
+it. A source already in the manifest cannot join the baseline afterwards, because
+`raw/` is immutable and a `request_id` stamped into a delivered sidecar after the
+fact is an assertion by the untrusted party rather than a record of what it
+fetched. Evidence already on disk but uncorrelated is delivered again as a new
+source with its own sidecar — most source ids are path-derived, so a distinct
+capture at a distinct path is a distinct record.
 
 `blocked_on_sources`, `no_ship`, and `failed` remain terminal child-run states.
 The parent never reopens those records. For example, an initial research run
