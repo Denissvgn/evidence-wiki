@@ -981,18 +981,20 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
 
     Reuse is admitted on terms fixed at issuance: the source's sidecar named the request
     *and* the source already carried a normalized record, which together are what put it
-    in the order's scoped-match baseline. A record outside that baseline can never
-    reconcile against it. The package used to discover that four guards later, having
-    first told the operator to stamp the sidecar and re-run the inventory — advice that is
-    itself refused, because `raw/` is immutable and re-inventorying rewrites a manifest
-    record the order may not touch. Five refusals across four guards, and none of them
-    named the constraint that was actually broken.
+    in the order's scoped-match baseline. A record outside every baseline the order wrote
+    can never reconcile against one. The package used to discover that four guards later,
+    having first told the operator to stamp the sidecar and re-run the inventory — advice
+    that is itself refused, because `raw/` is immutable and re-inventorying rewrites a
+    manifest record the order may not touch. Five refusals across four guards, and none of
+    them named the constraint that was actually broken.
 
-    Three conditions land outside the baseline and their repairs differ, so each case here
-    pins its own `cause`: a sidecar naming no scoped request, a correctly named sidecar on
-    a source nothing had normalized yet, and a record rewritten after issuance. One
-    message covering all three would be honest only by saying nothing; one message
-    asserting the first would be a false accusation in the other two.
+    This class owns the leg that needs no authorization beyond the sidecar, and what it may
+    still not touch. The pairings the *controller* authorizes at issuance -- a source
+    stamped for another request, or one nothing had normalized yet -- belong to
+    `ControllerAuthorisedReuseTests` below, which is where they succeed. What stays here is
+    the boundary between them: a record rewritten after the order was issued is outside
+    every baseline whatever the sidecar says, because what it says now is no evidence of
+    what it said then.
     """
 
     REUSE_REFUSAL = (
@@ -1015,49 +1017,24 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
 
     # -- the refusal the operator is owed ------------------------------------------
 
-    def test_reusing_evidence_no_sidecar_correlated_is_refused_by_the_reuse_constraint(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace, request_id = self.make_workspace(Path(tmpdir))
-            source_id = self.deliver_before_the_order(workspace, None)
-            self.start(workspace)
-            order = self.pending_order(workspace)
-            self.fulfil_and_reopen(workspace, request_id, source_id)
+    def test_reopening_still_refuses_a_source_nothing_has_normalized(self):
+        """Reuse never became an exemption from normalizing, and this is where that starts.
 
-            code, envelope = self.submit(workspace, order["action_id"])
-
-            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
-            failure = self.assert_reuse_refusal(
-                envelope, source_id, "provenance_names_no_scoped_request"
-            )
-            self.assertIsNone(failure["provenance_request_id"])
-            self.assertEqual([], envelope["details"]["matching_source_ids_before"])
-
-    def test_a_correlated_source_nothing_normalized_yet_reports_that_cause(self):
-        """The second way out of the baseline, which must not be reported as the first.
-
-        `matching_normalized_source_records` admits a record only when its sidecar names a
-        scoped request *and* its normalized output exists. A source inventoried by a prior
-        order that never reached `normalize_sources.py` satisfies the first and fails the
-        second, so it lands in the same refusal as an uncorrelated one — but its sidecar
-        does name this request, and telling its operator otherwise sends them to re-deliver
-        evidence they already have under a second raw path for no reason.
-
-        The acquirer cannot avoid the state by leaving the source un-normalized either:
-        `question_resolve.py reopen` refuses `SOURCE_NOT_NORMALIZED` before the action can
-        be submitted at all. Both halves are asserted here because between them they say
-        the dead end is genuinely closed, and closing it is design work rather than a
-        message fix.
+        A source inventoried by a prior order that never reached `normalize_sources.py` is
+        reusable -- the order authorizes it and authorizes the record it owes -- but it is
+        not yet evidence. `question_resolve.py reopen` says so before the action can be
+        submitted at all, which is what makes "leave it un-normalized" not a route past the
+        postcondition rather than merely a route the postcondition catches later.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace, request_id = self.make_workspace(Path(tmpdir))
             source_id = self.deliver_before_the_order(workspace, request_id, normalize=False)
             self.start(workspace)
-            order = self.pending_order(workspace)
+            self.pending_order(workspace)
             self.run_script(
                 REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
             )
 
-            # Leaving it un-normalized is refused before the action is even submitted.
             stdout, stderr = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 code = RESOLVE.main(
@@ -1067,31 +1044,12 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
                         "--request-id", request_id, "--format", "json",
                     ]
                 )
+
             self.assertEqual(CONTROLLER.EXIT_INVALID, int(code or 0))
             self.assertEqual(
                 "SOURCE_NOT_NORMALIZED",
                 json.loads(stdout.getvalue() or stderr.getvalue())["error_code"],
             )
-
-            # So the acquirer normalizes inside the order, and the reuse constraint speaks.
-            self.run_script(NORMALIZE, ["--all"], workspace)
-            self.run_script(
-                RESOLVE,
-                [
-                    "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
-                    "--source-id", source_id, "--request-id", request_id,
-                ],
-                workspace,
-            )
-
-            code, envelope = self.submit(workspace, order["action_id"])
-
-            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
-            failure = self.assert_reuse_refusal(
-                envelope, source_id, "no_normalized_output_at_issuance"
-            )
-            self.assertEqual(request_id, failure["provenance_request_id"])
-            self.assertTrue(failure["record_unchanged"])
 
     def test_following_the_sidecar_remediation_reaches_the_same_single_refusal(self):
         """The bug as an operator meets it: the advice printed leads back here.
@@ -1507,6 +1465,157 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
                 "fulfilled source requests do not have normalized evidence", envelope["message"]
             )
             self.assertEqual([source_id], envelope["details"]["source_ids"])
+
+    def test_evidence_correlated_to_nothing_can_fulfil_a_scoped_request(self):
+        """The other half of the first dead end: a real record, correlated to nothing.
+
+        Evidence an operator dropped into `raw/` and inventoried, or that a run delivered
+        for a purpose no request records. Its scope contradicts nothing, so `fulfill` takes
+        it, and the order that listed it takes it too.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            source_id = self.deliver_before_the_order(workspace, None)
+            self.start(workspace)
+            order = self.pending_order(workspace)
+            evidence_before = self.evidence_bytes(workspace)
+
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(0, code, session)
+            self.assertEqual("research", session["phase"])
+            self.assertEqual(evidence_before, self.evidence_bytes(workspace))
+
+    # -- what an authorised reuse still may not do ---------------------------------
+
+    def test_editing_the_manifest_record_of_a_cross_request_reuse_is_still_refused(self):
+        """The allowlist names a source id; it does not bless whatever that id holds now.
+
+        Reconciliation compares the record against the digest the order fingerprinted at
+        issuance, so an authorised reuse whose record was rewritten afterwards is refused
+        exactly as an unauthorised one is. Without this the allowlist would be an opening
+        rather than an authorization.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, _, source_id, order = self.arrive_at_cross_request_reuse(
+                Path(tmpdir)
+            )
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            manifest = workspace / "sources" / "manifest.jsonl"
+            records = [
+                json.loads(line)
+                for line in manifest.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            for record in records:
+                if record["id"] == source_id:
+                    record["provenance"]["retrieved_by"] = "tidied-up-after-the-fact"
+            manifest.write_text(
+                "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+            )
+
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"])
+            self.assertIn(
+                source_id,
+                json.dumps(envelope["details"]),
+                "the refusal must name the source whose record moved",
+            )
+
+    def test_editing_the_raw_sidecar_of_a_cross_request_reuse_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, _, source_id, order = self.arrive_at_cross_request_reuse(
+                Path(tmpdir)
+            )
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            relative = f"raw/data/{PAYLOAD.name}.provenance.yml"
+            sidecar = workspace / relative
+            content = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+            content["request_id"] = request_id
+            sidecar.write_text(yaml.safe_dump(content, sort_keys=False), encoding="utf-8")
+
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertIn("changed raw evidence outside newly fulfilled", envelope["message"])
+            self.assertEqual(
+                [relative], envelope["details"]["raw_scope_violations"]["changed_outside_scope"]
+            )
+
+    def test_a_reuse_that_was_normalized_at_issuance_may_still_write_no_new_output(self):
+        """The arm boundary, asserted from the side that must not move.
+
+        Authorizing a normalized output for a source the order recorded as *not* normalized
+        is the whole of what the second arm adds. A source that already had one keeps
+        answering to byte-identity, so re-normalizing it -- or writing anything else beside
+        it -- is refused just as it was before the arm existed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, _, source_id, order = self.arrive_at_cross_request_reuse(
+                Path(tmpdir)
+            )
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            record = self.normalized_record_for(workspace, source_id)
+            record.write_text(
+                record.read_text(encoding="utf-8") + "\nRe-normalized after the order was issued.\n",
+                encoding="utf-8",
+            )
+
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertIn(
+                envelope["message"],
+                {
+                    "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+                    "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
+                },
+                envelope,
+            )
+
+    def test_an_arm_b_reuse_may_not_write_a_second_unrelated_normalized_file(self):
+        """One record for the source the order authorized, and nothing else beside it.
+
+        The second arm widens what an action may *create* by exactly one record per reused
+        source. A normalized file no fulfilled source accounts for is still refused, and the
+        refusal still names the file, or the widening would have been a directory rather
+        than a record.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            source_id = self.deliver_before_the_order(workspace, request_id, normalize=False)
+            self.start(workspace)
+            order = self.pending_order(workspace)
+            self.run_script(
+                REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
+            )
+            self.run_script(NORMALIZE, ["--all"], workspace)
+            self.run_script(
+                RESOLVE,
+                [
+                    "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
+                    "--source-id", source_id, "--request-id", request_id,
+                ],
+                workspace,
+            )
+            stray = workspace / "sources" / "normalized" / "invented-beside-the-record.md"
+            stray.write_text("---\ntype: normalized_source\n---\n\nInvented.\n", encoding="utf-8")
+
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual(
+                "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
+                envelope["message"],
+                envelope,
+            )
+            self.assertEqual(
+                ["sources/normalized/invented-beside-the-record.md"],
+                envelope["details"]["normalized_scope_violations"]["added_outside_scope"],
+            )
 
 
 class AuditAssertionTests(DelegatedWorkspace, unittest.TestCase):

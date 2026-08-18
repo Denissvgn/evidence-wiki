@@ -2855,6 +2855,77 @@ def normalized_output_scope(
     return allowed, required
 
 
+def reuse_expectation_for_source(
+    source_id: str,
+    matching_source_records_before: dict[str, Any],
+    reusable_source_records_before: dict[str, Any],
+    request_ids: Iterable[str],
+) -> dict[str, Any] | None:
+    """The issuance-time expectation that authorizes one pre-existing fulfilled source.
+
+    The scoped-match baseline answers first, so a source this order already correlated is
+    held to the terms it has always been held to. Otherwise the source must have been named
+    reusable by **every** request it fulfils here -- authorization is per pairing, and a
+    source authorized for one request does not become authorized for a second by being used
+    for both in the same action.
+    """
+    expected = matching_source_records_before.get(source_id)
+    if isinstance(expected, dict):
+        return expected
+    snapshots = [reusable_source_records_before.get(request_id, {}).get(source_id) for request_id in request_ids]
+    if not snapshots or any(not isinstance(snapshot, dict) for snapshot in snapshots):
+        return None
+    return snapshots[0] if all(snapshot == snapshots[0] for snapshot in snapshots) else None
+
+
+def reused_source_reconciliation_failure(
+    source_id: str,
+    expected: Any,
+    *,
+    record_fingerprint: str | None,
+    normalized_fingerprint: str | None,
+    normalized_relative: str | None,
+    normalized_files_before: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Compare one pre-existing fulfilled source against what the order fixed at issuance.
+
+    Which of the two arms applies is read off the baseline, never inferred from what the
+    action left behind -- otherwise an action could choose the weaker arm by deleting a file.
+
+    Arm (a), a source that already carried a normalized record: both digests must be
+    byte-identical, exactly as before this function existed. Arm (b), a source nothing had
+    normalized yet: the manifest record must be byte-identical and the normalized output
+    must be **newly created**, because by construction there was nothing there to overwrite.
+    Arm (b) verifies one digest instead of two, and the one it verifies is the record that
+    names the raw paths and their checksums; the output is derived from it by this package's
+    own normalizer, and the raw bytes behind it stay under the raw-scope guard.
+    """
+    if not isinstance(expected, dict):
+        return {
+            "source_id": source_id,
+            "was_scoped_match": False,
+            "record_unchanged": False,
+            "normalized_unchanged": False,
+        }
+    record_unchanged = record_fingerprint == expected.get("record_fingerprint")
+    if expected.get("normalized_fingerprint") is None:
+        normalized_as_authorized = (
+            normalized_fingerprint is not None
+            and normalized_relative is not None
+            and normalized_relative not in normalized_files_before
+        )
+    else:
+        normalized_as_authorized = normalized_fingerprint == expected.get("normalized_fingerprint")
+    if record_unchanged and normalized_as_authorized:
+        return None
+    return {
+        "source_id": source_id,
+        "was_scoped_match": True,
+        "record_unchanged": record_unchanged,
+        "normalized_unchanged": normalized_as_authorized,
+    }
+
+
 def normalized_output_scope_failures(
     allowed: set[str],
     required: set[str],
@@ -5435,13 +5506,24 @@ def request_attempt_audit_record_fingerprint_snapshot(
 def delegated_fulfilment_correlation_failures(
     fulfilled: list[dict[str, Any]],
     by_source_id: dict[str, dict[str, Any]],
+    reusable_source_records_before: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Return fulfilments whose evidence is not linked to the request it claims to satisfy.
 
-    Delegated acquisition has no candidate store, so the correlation is the provenance
-    sidecar's ``request_id`` alone. That field only reaches a manifest record from a
-    sidecar delivered beside the artifact, which is what makes "the source carries a
+    Delegated acquisition has no candidate store, so a fresh delivery correlates by the
+    provenance sidecar's ``request_id`` alone. That field only reaches a manifest record
+    from a sidecar delivered beside the artifact, which is what makes "the source carries a
     provenance sidecar" checkable rather than merely asserted.
+
+    The second disjunct is the other way a link can be trustworthy, and it is stricter about
+    who wrote it, not looser: the *controller* named this source as reusable by this request
+    when it issued the order, from evidence that was already durable then. A delivery cannot
+    talk its way into that list afterwards, and reconciliation still requires the record to
+    be byte-identical to what the order fingerprinted. It exists because
+    ``provenance.request_id`` is single-valued -- one record cannot attest two requests --
+    so without it a source a second request needs could only be reused by restamping the
+    sidecar, which orphans the first request's link and which this package tells acquirers
+    never to do.
 
     **CR-4 seam.** When a source request grows a structured ``scope``, ``--match-scope``
     verification is one added predicate in this function — compare the request's declared
@@ -5455,7 +5537,8 @@ def delegated_fulfilment_correlation_failures(
         record = by_source_id.get(source_id)
         provenance = record.get("provenance") if isinstance(record, dict) else None
         provenance_request_id = provenance.get("request_id") if isinstance(provenance, dict) else None
-        if not isinstance(provenance, dict) or provenance_request_id != request_id:
+        authorized_reuse = source_id in reusable_source_records_before.get(request_id, {})
+        if not authorized_reuse and (not isinstance(provenance, dict) or provenance_request_id != request_id):
             failures.append(
                 {
                     "request_id": request_id,
@@ -5674,22 +5757,37 @@ def verify_delegated_acquisition_postconditions(
         label="evidence manifest",
     )
 
+    reused_request_ids: dict[str, set[str]] = {}
+    for request in fulfilled:
+        source_id = str(request.get("source_id") or "")
+        if source_id:
+            reused_request_ids.setdefault(source_id, set()).add(str(request.get("request_id") or ""))
+
+    def issuance_expectation(source_id: str) -> dict[str, Any] | None:
+        return reuse_expectation_for_source(
+            source_id,
+            matching_source_records_before,
+            reusable_source_records_before,
+            sorted(reused_request_ids.get(source_id, set())),
+        )
+
     # Reuse of evidence the workspace already held is admitted only on the terms fixed at
-    # issuance: `matching_source_records_before` carries the record and normalized digests of
-    # every pre-existing source the order correlated to a scoped request, and a record absent
-    # from it can never reconcile against it. Saying so here is the whole point — without
-    # this refusal the checks below speak first, and the first of them tells the acquirer to
-    # stamp the sidecar and re-inventory, which is then refused four more times over
-    # (manifest, reconciliation, normalized and raw scope in turn) because `raw/` is
-    # immutable and re-inventorying rewrites a record this order may not touch. Four
+    # issuance -- either the order correlated the source to a scoped request itself, or it
+    # listed the source as reusable by that request. Both are written by the controller
+    # before the acquirer starts, so neither can be talked into existence afterwards, and a
+    # record outside both can never reconcile against either. Saying so here is the whole
+    # point — without this refusal the checks below speak first, and the first of them tells
+    # the acquirer to stamp the sidecar and re-inventory, which is then refused four more
+    # times over (manifest, reconciliation, normalized and raw scope in turn) because `raw/`
+    # is immutable and re-inventorying rewrites a record this order may not touch. Four
     # unrelated-sounding refusals for obeying the first one's own advice.
     #
-    # Three different things put a pre-existing source outside that baseline, and the
-    # message must not guess which, because their repairs differ: a sidecar naming no scoped
-    # request, a correctly named sidecar on a source nothing had normalized yet when the
-    # order was issued (`matching_normalized_source_records` requires both), and a record
-    # rewritten since issuance, which makes what it says now no evidence of what it said
-    # then. The message states the fact they share; `details` carries the cause per source.
+    # Two things now put a pre-existing source outside both baselines, and the message must
+    # not guess which, because their repairs differ: a record rewritten since issuance, which
+    # makes what it says now no evidence of what it said then, and a pairing the order never
+    # authorized -- a delivery whose provenance scope contradicts the request, or an order
+    # issued before reuse was authorizable at all. The message states the fact they share;
+    # `details` carries the cause per source and the ids this order did authorize.
     reuse_scope_failures: list[dict[str, Any]] = []
     for source_id in sorted(
         {
@@ -5703,12 +5801,13 @@ def verify_delegated_acquisition_postconditions(
         provenance = record.get("provenance") if isinstance(record, dict) else None
         provenance_request_id = provenance.get("request_id") if isinstance(provenance, dict) else None
         record_unchanged = current_manifest_fingerprints.get(source_id) == manifest_records_before[source_id]
-        if not record_unchanged:
-            cause = "manifest_record_changed_after_issuance"
-        elif provenance_request_id in scoped_requests:
-            cause = "no_normalized_output_at_issuance"
-        else:
-            cause = "provenance_names_no_scoped_request"
+        if issuance_expectation(source_id) is not None and record_unchanged:
+            continue
+        cause = (
+            "manifest_record_changed_after_issuance"
+            if not record_unchanged
+            else "no_reuse_authorization_at_issuance"
+        )
         reuse_scope_failures.append(
             {
                 "source_id": source_id,
@@ -5724,14 +5823,17 @@ def verify_delegated_acquisition_postconditions(
         {
             "reuse_scope_failures": reuse_scope_failures,
             "matching_source_ids_before": matching_source_ids_before,
+            "reusable_source_ids_before": {
+                request_id: sorted(snapshots) for request_id, snapshots in reusable_source_records_before.items()
+            },
         },
         (
-            "Reuse only a source this order already correlated: one whose .provenance.yml named this request "
-            "and which carried a normalized record before the order was issued, both unchanged since. When the "
-            "sidecar names no scoped request, deliver the evidence as a new source under its own raw path with "
-            "its own sidecar. When it names one but the source had no normalized record yet, record the attempt "
-            "failure with source_requests.py record-attempt-failure using this action id, run "
-            "normalize_sources.py --all, and start a fresh orchestration session whose baseline correlates it."
+            "Reuse only a source this order named at issuance, unchanged since: one this order correlated to "
+            "the request, or one it listed as reusable by it. When the record was rewritten after the order was "
+            "issued, restore it exactly as the order recorded it. When the order authorized no reuse for this "
+            "request, deliver the evidence as a new source under its own raw path with its own sidecar, or "
+            "record the attempt failure with source_requests.py record-attempt-failure using this action id "
+            "and start a fresh orchestration session whose baseline sees the current workspace."
         ),
     )
     normalized_root = project_root / normalized_relative
@@ -5765,7 +5867,9 @@ def verify_delegated_acquisition_postconditions(
             "PDFs without extracted text cannot satisfy a source request."
         ),
     )
-    correlation_failures = delegated_fulfilment_correlation_failures(fulfilled, by_source_id)
+    correlation_failures = delegated_fulfilment_correlation_failures(
+        fulfilled, by_source_id, reusable_source_records_before
+    )
     require(
         not correlation_failures,
         "fulfilled evidence is not linked to its source request by a provenance sidecar",
@@ -5897,8 +6001,9 @@ def verify_delegated_acquisition_postconditions(
         },
     )
     reconciliation_failures: list[dict[str, Any]] = []
+    reused_unnormalized_source_ids: set[str] = set()
     for source_id in sorted(fulfilled_source_ids & set(manifest_records_before)):
-        expected = matching_source_records_before.get(source_id)
+        expected = issuance_expectation(source_id)
         record = by_source_id.get(source_id)
         normalized_path = (
             normalize_sources.normalized_output_path_for_record(record, normalized_root)
@@ -5914,33 +6019,42 @@ def verify_delegated_acquisition_postconditions(
             if isinstance(normalized_path, Path) and normalized_path.is_file()
             else None
         )
-        if (
-            not isinstance(expected, dict)
-            or current_manifest_fingerprints.get(source_id) != expected.get("record_fingerprint")
-            or normalized_fingerprint != expected.get("normalized_fingerprint")
-        ):
-            reconciliation_failures.append(
-                {
-                    "source_id": source_id,
-                    "was_scoped_match": isinstance(expected, dict),
-                    "record_unchanged": isinstance(expected, dict)
-                    and current_manifest_fingerprints.get(source_id) == expected.get("record_fingerprint"),
-                    "normalized_unchanged": isinstance(expected, dict)
-                    and normalized_fingerprint == expected.get("normalized_fingerprint"),
-                }
-            )
+        if isinstance(expected, dict) and expected.get("normalized_fingerprint") is None:
+            reused_unnormalized_source_ids.add(source_id)
+        failure = reused_source_reconciliation_failure(
+            source_id,
+            expected,
+            record_fingerprint=current_manifest_fingerprints.get(source_id),
+            normalized_fingerprint=normalized_fingerprint,
+            normalized_relative=(
+                relative_workspace_path(project_root, normalized_path)
+                if isinstance(normalized_path, Path)
+                else None
+            ),
+            normalized_files_before=normalized_files_before,
+        )
+        if failure is not None:
+            reconciliation_failures.append(failure)
     require(
         not reconciliation_failures,
         "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
         {"reconciliation_failures": reconciliation_failures},
-        "Reuse a pre-existing source only when its sidecar named this request before the order was issued "
-        "and its manifest record and normalized output are byte-identical to what the order recorded; "
-        "otherwise deliver a genuinely new source id.",
+        "Reuse a pre-existing source only on the terms this order recorded for it: its manifest record "
+        "byte-identical to what the order fingerprinted, and its normalized output either byte-identical "
+        "or newly written where the order recorded none; otherwise deliver a genuinely new source id.",
     )
 
     current_normalized_files = normalized_file_fingerprint_snapshot(project_root, config)
+    # A reused source the order recorded as not yet normalized owes exactly the record a
+    # newly delivered source owes, so it joins the same set: its output becomes both allowed
+    # and required. A reused source that *was* normalized at issuance stays out of it, or the
+    # byte-identity its arm rests on would quietly become optional.
     allowed_new_normalized_paths, required_new_normalized_paths = normalized_output_scope(
-        project_root, normalized_root, expected_new_source_ids, by_source_id, normalize_sources
+        project_root,
+        normalized_root,
+        expected_new_source_ids | reused_unnormalized_source_ids,
+        by_source_id,
+        normalize_sources,
     )
     normalized_scope_violations = fingerprint_scope_violations(
         normalized_files_before,
@@ -6555,6 +6669,18 @@ def verify_action_postconditions(
                 "PDFs without extracted text cannot satisfy a source request."
             ),
         )
+        # Read and validated here rather than with the rest of the manifest baseline below,
+        # because correlation is the first check that consumes it and a verifier validates
+        # each baseline it consumes. Absent on every order issued before the reuse allowlist
+        # existed; those replay with reuse unavailable rather than being refused for it.
+        reusable_source_records_before = recorded_postcondition("manifest_records_increased").get(
+            "reusable_source_records_before", {}
+        )
+        require(
+            valid_reusable_source_record_snapshot(reusable_source_records_before),
+            "acquisition work order lacks a valid bounded reuse allowlist",
+            remediation="Start a fresh orchestration session; never infer reusable evidence after execution.",
+        )
         scoped_candidate_ids = {
             value for value in scope.get("candidate_ids", []) if isinstance(value, str) and value
         }
@@ -6577,14 +6703,31 @@ def verify_action_postconditions(
                 if isinstance(provenance_candidate_id, str)
                 else None
             )
-            if (
-                provenance_request_id != request_id
-                or provenance_candidate_id not in scoped_candidate_ids
-                or not isinstance(candidate, dict)
-                or candidate_request_id(candidate) != request_id
-                or candidate_state(candidate) != "fetched"
-                or candidate.get("fetched_source_id") != source_id
-            ):
+            correlated = (
+                provenance_request_id == request_id
+                and provenance_candidate_id in scoped_candidate_ids
+                and isinstance(candidate, dict)
+                and candidate_request_id(candidate) == request_id
+                and candidate_state(candidate) == "fetched"
+                and candidate.get("fetched_source_id") == source_id
+            )
+            if not correlated and source_id in reusable_source_records_before.get(request_id, {}):
+                # Reuse on the same terms as the delegated arm, and no looser: what the
+                # order authorized replaces the *provenance* half of the link, because a
+                # reused source carries the sidecar of the acquisition that first fetched
+                # it and one record cannot attest two requests. The candidate half stays --
+                # this arm has a candidate store, and the selected candidate reaching
+                # `fetched` with this source id is how the workspace records that this
+                # order's acquisition decision was made. Requiring it is the difference the
+                # two arms already have, not a new one.
+                correlated = any(
+                    isinstance(scoped_candidate := candidates_by_id.get(candidate_id), dict)
+                    and candidate_request_id(scoped_candidate) == request_id
+                    and candidate_state(scoped_candidate) == "fetched"
+                    and scoped_candidate.get("fetched_source_id") == source_id
+                    for candidate_id in sorted(scoped_candidate_ids)
+                )
+            if not correlated:
                 correlation_failures.append(
                     {
                         "request_id": request_id,
@@ -6685,9 +6828,6 @@ def verify_action_postconditions(
         before_manifest = int(manifest_guard.get("before", 0) or 0)
         matching_source_ids_before = manifest_guard.get("matching_source_ids_before")
         matching_source_records_before = manifest_guard.get("matching_source_records_before")
-        # Absent on every order issued before the reuse allowlist existed. Those replay with
-        # reuse unavailable rather than being refused for a field they could not have carried.
-        reusable_source_records_before = manifest_guard.get("reusable_source_records_before", {})
         manifest_records_before = manifest_guard.get("manifest_record_fingerprints_before")
         raw_tree_before = manifest_guard.get("raw_tree_before")
         candidate_records_before = manifest_guard.get("candidate_record_fingerprints_before")
@@ -6770,9 +6910,20 @@ def verify_action_postconditions(
             },
         )
         preexisting_fulfilled = fulfilled_source_ids & set(manifest_records_before)
+        reused_request_ids: dict[str, set[str]] = {}
+        for item in fulfilled:
+            reused_source_id = str(item.get("source_id") or "")
+            if reused_source_id:
+                reused_request_ids.setdefault(reused_source_id, set()).add(str(item.get("request_id") or ""))
         reconciliation_failures: list[dict[str, Any]] = []
+        reused_unnormalized_source_ids: set[str] = set()
         for source_id in sorted(preexisting_fulfilled):
-            expected = matching_source_records_before.get(source_id)
+            expected = reuse_expectation_for_source(
+                source_id,
+                matching_source_records_before,
+                reusable_source_records_before,
+                sorted(reused_request_ids.get(source_id, set())),
+            )
             record = by_source_id.get(source_id)
             normalized_path = (
                 normalize_sources.normalized_output_path_for_record(record, normalized_root)
@@ -6788,31 +6939,41 @@ def verify_action_postconditions(
                 if isinstance(normalized_path, Path) and normalized_path.is_file()
                 else None
             )
-            if (
-                not isinstance(expected, dict)
-                or current_manifest_fingerprints.get(source_id) != expected.get("record_fingerprint")
-                or normalized_fingerprint != expected.get("normalized_fingerprint")
-            ):
-                reconciliation_failures.append(
-                    {
-                        "source_id": source_id,
-                        "was_scoped_match": isinstance(expected, dict),
-                        "record_unchanged": isinstance(expected, dict)
-                        and current_manifest_fingerprints.get(source_id) == expected.get("record_fingerprint"),
-                        "normalized_unchanged": isinstance(expected, dict)
-                        and normalized_fingerprint == expected.get("normalized_fingerprint"),
-                    }
-                )
+            if isinstance(expected, dict) and expected.get("normalized_fingerprint") is None:
+                reused_unnormalized_source_ids.add(source_id)
+            failure = reused_source_reconciliation_failure(
+                source_id,
+                expected,
+                record_fingerprint=current_manifest_fingerprints.get(source_id),
+                normalized_fingerprint=normalized_fingerprint,
+                normalized_relative=(
+                    relative_workspace_path(project_root, normalized_path)
+                    if isinstance(normalized_path, Path)
+                    else None
+                ),
+                normalized_files_before=normalized_files_before,
+            )
+            if failure is not None:
+                reconciliation_failures.append(failure)
         require(
             not reconciliation_failures,
             "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
             {"reconciliation_failures": reconciliation_failures},
-            "Use only the unchanged scoped pre-existing source or acquire a genuinely new source id.",
+            "Use a pre-existing source only on the terms this order recorded for it: its manifest record "
+            "byte-identical to what the order fingerprinted, and its normalized output either byte-identical "
+            "or newly written where the order recorded none; otherwise acquire a genuinely new source id.",
         )
 
         current_normalized_files = normalized_file_fingerprint_snapshot(project_root, config)
+        # Same terms as the delegated arm: a reused source the order recorded as not yet
+        # normalized owes exactly the record a newly acquired source owes, and one that was
+        # already normalized authorizes no new file at all.
         allowed_new_normalized_paths, required_new_normalized_paths = normalized_output_scope(
-            project_root, normalized_root, expected_new_source_ids, by_source_id, normalize_sources
+            project_root,
+            normalized_root,
+            expected_new_source_ids | reused_unnormalized_source_ids,
+            by_source_id,
+            normalize_sources,
         )
         normalized_scope_violations = fingerprint_scope_violations(
             normalized_files_before,

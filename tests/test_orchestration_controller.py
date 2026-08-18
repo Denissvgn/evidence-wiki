@@ -3501,6 +3501,310 @@ class OrchestrationControllerTests(unittest.TestCase):
                 ):
                     verify({**reopened, "status": bypass_status})
 
+    def provider_reuse_fixture(self, tmpdir: Path, *, normalized_at_issuance: bool, authorized: bool):
+        """A provider acquisition that fulfils its request from a source it already held.
+
+        Nothing in `source_requests.py fulfill` requires a newly created source, and the
+        download guard that would have refused a re-fetch never runs, so this path is
+        reachable in provider mode exactly as it is under delegation. The source's own
+        provenance names the earlier request and candidate that fetched it -- one record
+        cannot attest two -- so the only thing that can authorize it here is the order.
+        """
+        request_id = "req-provider-reuse"
+        candidate_id = "cand-provider-reuse"
+        source_id = "html:provider-reuse"
+        manifest_record = {
+            "id": source_id,
+            "provenance": {"request_id": "req-earlier", "candidate_id": "cand-earlier"},
+        }
+        normalized_path = tmpdir / "sources" / "normalized" / "reused.md"
+        normalized_path.parent.mkdir(parents=True, exist_ok=True)
+        normalized_path.write_text(
+            "---\n"
+            "type: normalized_source\n"
+            f"source_id: {source_id}\n"
+            "source_kind: html\n"
+            "status: content_extracted\n"
+            "evidence_usable: true\n"
+            "---\n\n# Reused evidence\n\nNormalized evidence.\n",
+            encoding="utf-8",
+        )
+        normalized_relative = "sources/normalized/reused.md"
+        normalized_fingerprint = CONTROLLER.file_digest(normalized_path, containment_root=tmpdir)
+        manifest_fingerprint = CONTROLLER.canonical_json_fingerprint(
+            manifest_record, label="test manifest"
+        )[0]
+        raw_baseline = {
+            "algorithm": "sha256-content-v1",
+            "file_count": 0,
+            "total_bytes": 0,
+            "fingerprint": "sha256:" + hashlib.sha256(b"").hexdigest(),
+            "entries": {},
+        }
+        fulfilled_request = {
+            "request_id": request_id,
+            "status": "fulfilled",
+            "source_id": source_id,
+            "question_slugs": ["test-question"],
+        }
+        open_request = {key: value for key, value in fulfilled_request.items() if key != "source_id"}
+        open_request["status"] = "open"
+        fetched_candidate = {
+            "candidate_id": candidate_id,
+            "source_request_id": request_id,
+            "lifecycle_state": "fetched",
+            "fetched_source_id": source_id,
+        }
+        selected_candidate = {key: value for key, value in fetched_candidate.items() if key != "fetched_source_id"}
+        selected_candidate["lifecycle_state"] = "selected"
+        # Arm (a) records both digests and the file was already there; arm (b) records an
+        # explicit null and the action writes the record the order authorized.
+        allowlist = {
+            request_id: {
+                source_id: {
+                    "record_fingerprint": manifest_fingerprint,
+                    "normalized_fingerprint": normalized_fingerprint if normalized_at_issuance else None,
+                }
+            }
+        }
+        normalized_files_before = {normalized_relative: normalized_fingerprint} if normalized_at_issuance else {}
+        work_order = {
+            "phase": "acquisition",
+            "run_id": "run-provider-reuse",
+            "scope": {
+                "question_slugs": ["test-question"],
+                "request_ids": [request_id],
+                "candidate_ids": [candidate_id],
+            },
+            "required_postconditions": [
+                {"check": "request_fulfilled_with_normalized_source"},
+                {
+                    "check": "linked_blocked_questions_reopened",
+                    "blocked_questions_before": {
+                        "test-question": {
+                            "status": "blocked",
+                            "blocking_request_ids": [request_id],
+                            "source_ids_before": [],
+                        }
+                    },
+                },
+                {
+                    "check": "manifest_records_increased",
+                    "before": 1,
+                    "matching_source_ids_before": [],
+                    "matching_source_records_before": {},
+                    "reusable_source_records_before": allowlist if authorized else {},
+                    "manifest_record_fingerprints_before": {source_id: manifest_fingerprint},
+                    "raw_tree_before": raw_baseline,
+                    "candidate_record_fingerprints_before": (
+                        CONTROLLER.candidate_record_fingerprint_snapshot([selected_candidate])
+                    ),
+                    "candidate_audit_record_fingerprints_before": {},
+                    "source_request_record_fingerprints_before": CONTROLLER.record_fingerprint_snapshot(
+                        [open_request], id_field="request_id", label="test requests"
+                    ),
+                    "normalized_file_fingerprints_before": normalized_files_before,
+                    "question_file_fingerprints_before": {"test-question.md": "sha256:" + "4" * 64},
+                },
+            ],
+        }
+        run_controller = mock.Mock()
+        run_controller.load_run_state.return_value = {"state": {"current": "fetching"}}
+        source_requests = mock.Mock()
+        source_requests.requests_path.return_value = Path("/unused/source-requests.jsonl")
+        source_requests.load_requests.return_value = [fulfilled_request]
+        normalize_sources = mock.Mock()
+        normalize_sources.source_paths.return_value = ("sources/manifest.jsonl", "sources/normalized")
+        normalize_sources.load_manifest.return_value = [manifest_record]
+        normalize_sources.records_by_source_id.return_value = {source_id: manifest_record}
+        normalize_sources.normalized_output_path_for_record.return_value = normalized_path
+
+        real_load_sibling_module = CONTROLLER.load_sibling_module
+
+        def sibling(stem: str):
+            return {
+                "run_controller": run_controller,
+                "source_requests": source_requests,
+                "normalize_sources": normalize_sources,
+            }.get(stem) or real_load_sibling_module(stem)
+
+        def verify() -> tuple[str | None, str | None]:
+            with (
+                mock.patch.object(CONTROLLER, "load_config", return_value={}),
+                mock.patch.object(
+                    CONTROLLER,
+                    "fresh_workspace_status",
+                    return_value={
+                        "readiness": {"verdict": "in_progress"},
+                        "sources": {"manifest_records": 1},
+                        "questions": {"blocked_slugs": []},
+                    },
+                ),
+                mock.patch.object(CONTROLLER, "open_requests", return_value=[]),
+                mock.patch.object(CONTROLLER, "load_candidates", return_value=[fetched_candidate]),
+                mock.patch.object(CONTROLLER, "raw_tree_snapshot", return_value=raw_baseline),
+                mock.patch.object(
+                    CONTROLLER,
+                    "normalized_file_fingerprint_snapshot",
+                    return_value={normalized_relative: normalized_fingerprint},
+                ),
+                mock.patch.object(
+                    CONTROLLER,
+                    "question_file_fingerprint_snapshot",
+                    return_value={"test-question.md": "sha256:" + "5" * 64},
+                ),
+                mock.patch.object(
+                    CONTROLLER,
+                    "scoped_question_evidence_snapshot",
+                    return_value={
+                        "test-question": {
+                            "status": "open",
+                            "blocking_request_ids": [],
+                            "source_ids": [source_id],
+                        }
+                    },
+                ),
+                mock.patch.object(CONTROLLER, "load_sibling_module", side_effect=sibling),
+            ):
+                return CONTROLLER.verify_action_postconditions(
+                    tmpdir, {"agent_id": "agent-test"}, work_order
+                )
+
+        return verify, source_id
+
+    def test_the_provider_arm_accepts_the_same_controller_authorised_reuse(self):
+        # The symmetry the orchestration contract asserts: both arms bound the same way and
+        # reuse on the same terms. Implementing one alone would create a difference two
+        # shipped documents deny exists, and the provider arm is reachable -- nothing in
+        # `fulfill` requires a newly created source.
+        for normalized_at_issuance in (True, False):
+            with (
+                self.subTest(normalized_at_issuance=normalized_at_issuance),
+                tempfile.TemporaryDirectory() as tmpdir,
+            ):
+                verify, _ = self.provider_reuse_fixture(
+                    Path(tmpdir), normalized_at_issuance=normalized_at_issuance, authorized=True
+                )
+                self.assertEqual(("research", None), verify())
+
+    def test_the_provider_arm_refuses_a_reuse_its_order_never_authorised(self):
+        # The same action with an empty allowlist. The provenance names an earlier request
+        # and candidate, so nothing but the order could have authorized it, and nothing did.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            verify, source_id = self.provider_reuse_fixture(
+                Path(tmpdir), normalized_at_issuance=True, authorized=False
+            )
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                verify()
+            self.assertIn("acquired evidence is not linked", str(caught.exception))
+            self.assertIn(source_id, json.dumps(caught.exception.details))
+
+    def test_a_reuse_expectation_comes_from_the_order_and_holds_each_arm_to_its_own_terms(self):
+        # The arm is read off the baseline, never inferred from what the action left behind,
+        # or an action could pick the weaker arm by deleting a file. Asserted at unit level
+        # because the end-to-end cases can only show the arms working, not that the choice
+        # between them is made at issuance.
+        record_fingerprint = "sha256:" + "a" * 64
+        normalized_fingerprint = "sha256:" + "b" * 64
+        arm_a = {"record_fingerprint": record_fingerprint, "normalized_fingerprint": normalized_fingerprint}
+        arm_b = {"record_fingerprint": record_fingerprint, "normalized_fingerprint": None}
+
+        self.assertEqual(
+            arm_a,
+            CONTROLLER.reuse_expectation_for_source("s1", {"s1": arm_a}, {"r1": {"s1": arm_b}}, ["r1"]),
+            "a source the order already correlated keeps answering to the terms it always did",
+        )
+        self.assertEqual(
+            arm_b, CONTROLLER.reuse_expectation_for_source("s1", {}, {"r1": {"s1": arm_b}}, ["r1"])
+        )
+        self.assertIsNone(
+            CONTROLLER.reuse_expectation_for_source("s1", {}, {"r1": {"s1": arm_b}}, ["r1", "r2"]),
+            "authorization is per pairing: one request's listing does not cover a second's",
+        )
+        self.assertIsNone(CONTROLLER.reuse_expectation_for_source("s1", {}, {}, ["r1"]))
+
+        def failure(expected, **kwargs):
+            return CONTROLLER.reused_source_reconciliation_failure(
+                "s1",
+                expected,
+                record_fingerprint=kwargs.get("record", record_fingerprint),
+                normalized_fingerprint=kwargs.get("normalized", normalized_fingerprint),
+                normalized_relative=kwargs.get("relative", "sources/normalized/s1.md"),
+                normalized_files_before=kwargs.get("before", {}),
+            )
+
+        self.assertIsNone(failure(arm_a))
+        self.assertIsNone(failure(arm_b))
+        self.assertEqual(False, failure(arm_a, record="sha256:" + "c" * 64)["record_unchanged"])
+        self.assertEqual(
+            False,
+            failure(arm_b, before={"sources/normalized/s1.md": normalized_fingerprint})["normalized_unchanged"],
+            "arm (b) authorizes a new record, never an overwrite of one that was already there",
+        )
+        self.assertEqual(
+            False,
+            failure(arm_b, normalized=None)["normalized_unchanged"],
+            "arm (b) owes the record it was authorized to write",
+        )
+        self.assertEqual(False, failure(None)["was_scoped_match"])
+
+    def test_an_acquisition_order_issued_before_the_reuse_allowlist_still_replays(self):
+        # Additive and optional, like `acquisition_mode`: a pending order written before the
+        # field existed carries no reuse authorization and must replay with reuse simply
+        # unavailable rather than be refused for a field it could not have had. A field that
+        # *is* present and malformed is still refused.
+        source_id = "html:pre-allowlist"
+        fingerprint = "sha256:" + "7" * 64
+        manifest_guard = {
+            "check": "manifest_records_increased",
+            "before": 1,
+            "matching_source_ids_before": [source_id],
+            "matching_source_records_before": {
+                source_id: {"record_fingerprint": fingerprint, "normalized_fingerprint": fingerprint}
+            },
+            "manifest_record_fingerprints_before": {source_id: fingerprint},
+            "raw_tree_before": {
+                "algorithm": "sha256-content-v1",
+                "file_count": 0,
+                "total_bytes": 0,
+                "fingerprint": "sha256:" + hashlib.sha256(b"").hexdigest(),
+                "entries": {},
+            },
+            "candidate_record_fingerprints_before": {},
+            "candidate_audit_record_fingerprints_before": {},
+            "source_request_record_fingerprints_before": {"req-pre-allowlist": fingerprint},
+            "normalized_file_fingerprints_before": {"sources/normalized/pre.md": fingerprint},
+            "question_file_fingerprints_before": {"test-question.md": fingerprint},
+        }
+        work_order = {
+            "phase": "acquisition",
+            "action_id": "action-pre-allowlist",
+            "required_postconditions": [
+                {
+                    "check": "linked_blocked_questions_reopened",
+                    "blocked_questions_before": {
+                        "test-question": {
+                            "status": "blocked",
+                            "blocking_request_ids": ["req-pre-allowlist"],
+                            "source_ids_before": [],
+                        }
+                    },
+                },
+                manifest_guard,
+            ],
+        }
+
+        CONTROLLER.require_acquisition_evidence_baselines(json.loads(json.dumps(work_order)))
+
+        malformed = json.loads(json.dumps(work_order))
+        malformed["required_postconditions"][1]["reusable_source_records_before"] = {
+            "req-pre-allowlist": {source_id: {"record_fingerprint": fingerprint}}
+        }
+        with self.assertRaisesRegex(
+            CONTROLLER.OrchestrationControllerError, "question/evidence baseline"
+        ):
+            CONTROLLER.require_acquisition_evidence_baselines(malformed)
+
     def test_legacy_acquisition_without_reconciliation_baselines_requires_fresh_session(self):
         with self.assertRaisesRegex(
             CONTROLLER.OrchestrationControllerError,
