@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2 - 2026-08-18
 
 - **Security fix: postcondition verification could be made to run a program of the
   acquirer's choosing.** Re-deriving a reused PDF record read `pdf_extractor.name` out of
