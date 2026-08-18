@@ -924,11 +924,25 @@ def select_eligible_records(
     if args.source_id:
         selected: list[EligibleRecord] = []
         for source_id in unique_values(args.source_id):
+            # All-or-nothing, and said outright. Both refusals fire before anything is
+            # written, so a batch that names one bad id writes none of the good ones --
+            # which is the right direction when the caller named the ids: a run that
+            # quietly skipped one would report success for work it did not do, and the
+            # order that required that source would fail later with nothing pointing here.
+            # `--all` keeps its own behaviour, where an unsupported record is a count in
+            # the summary rather than a refusal, because there the caller named no ids.
             if source_id not in by_id:
-                raise SystemExit(f"Unknown source id: {source_id}")
+                raise SystemExit(
+                    f"Unknown source id: {source_id} — the evidence manifest holds no record with that id. "
+                    "No normalized records were written."
+                )
             item = eligible_by_id.get(source_id)
             if not item:
-                raise SystemExit(f"Source id is not eligible for normalization: {source_id}")
+                raise SystemExit(
+                    f"Source id is not eligible for normalization: {source_id} — this package has no "
+                    "extractor for that record's kind, or the raw evidence its kind requires is missing. "
+                    "No normalized records were written."
+                )
             selected.append(item)
         return selected, 0, "source_id"
 
