@@ -888,8 +888,8 @@ reason, discarded candidates need concrete rejection reasons, and the later
 provider command must carry both `--request-id req-1a2b3c4d5e` and
 `--candidate-id cand-1a2b3c4d5e`. A `manual_review` facet policy verdict during
 an autonomous run is an in-run repair signal: re-review, select, restamp,
-rerun `source_inventory.py --report` and `normalize_sources.py --all`, then
-rerun the coverage/readiness gate. Do not treat it as a wait-for-human state.
+rerun `source_inventory.py --report` and `normalize_sources.py` for the affected
+source ids, then rerun the coverage/readiness gate. Do not treat it as a wait-for-human state.
 
 The canonical lifecycle states are `proposed`, `reviewed`, `selected`,
 `rejected`, `deferred`, `fetched`, `failed`, and `superseded`. Orchestrators
@@ -996,7 +996,7 @@ python3 scripts/source_requests.py plan-fetch \
   --format json
 # ... deliver the requested files with provenance sidecars ...
 python3 scripts/source_inventory.py --report
-python3 scripts/normalize_sources.py --all
+python3 scripts/normalize_sources.py --all   # --source-id ID1 --source-id ID2 inside an orchestration action
 python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id paper:2601.00001v1
 ```
 

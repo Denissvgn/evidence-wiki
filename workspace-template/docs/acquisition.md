@@ -651,6 +651,11 @@ python3 scripts/source_inventory.py --report
 python3 scripts/normalize_sources.py --all
 ```
 
+Inside an orchestration acquisition action, normalize by ID instead
+(`--source-id ID1 --source-id ID2`): `--all` and a bare run also write records the
+action does not scope, and its submission refuses them. See
+[source-delivery.md](source-delivery.md).
+
 When a download fulfills a source request, link the resulting manifest source:
 
 ```bash

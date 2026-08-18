@@ -395,6 +395,13 @@ Common controls:
 | `python3 scripts/normalize_sources.py --pdf-extractor poppler` | Explicitly use the optional Poppler compatibility backend for this run. |
 | `python3 scripts/normalize_sources.py --append-log` | Append a compact run summary to `log.md`. |
 
+Every form above except `--source-id` selects across the whole workspace, which
+an orchestration acquisition action may not do: `--all` and the bare invocation
+both write an output for every eligible record that has none, including records
+the action does not scope, and its submission refuses those. Inside such an
+action, select the action's own sources by id — see
+[source-delivery.md](source-delivery.md).
+
 Unchanged existing records are not overwritten unless `--force` is supplied. A
 record is re-normalized automatically when its raw inputs change: inventory
 records a `raw_fingerprint` (a content hash of the paper bundle, PDF, HTML
