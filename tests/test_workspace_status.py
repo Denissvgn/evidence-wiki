@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1806,6 +1807,44 @@ question: Does cache invalidation work?
             self.assertEqual(0, code)
             self.assertNotEqual("cached-sentinel", third["generated_at"])
             self.assertEqual(first["questions"]["total"] + 1, third["questions"]["total"])
+
+    def test_concurrent_status_cache_writes_do_not_collide_on_one_temp_name(self):
+        """Two callers refreshing the cache at once must not make each other fail.
+
+        The write is atomic per caller only if the temporary it renames from is unique.
+        With one fixed name, the first `replace` renames the shared temporary away and the
+        second raises `FileNotFoundError` -- surfaced to a library caller that asked for
+        status and got an error from writing a cache back. The cache is an optimisation, so
+        a write that loses the race is also not allowed to fail the read it belongs to.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            failures: list[BaseException] = []
+
+            def refresh(worker: int) -> None:
+                for index in range(40):
+                    try:
+                        STATUS.write_cached_status(
+                            root, f"key-{worker}", {"domain_pack": {}, "index": index}
+                        )
+                    except BaseException as exc:  # noqa: BLE001 - the point is that none escape
+                        failures.append(exc)
+
+            threads = [threading.Thread(target=refresh, args=(worker,)) for worker in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual([], failures, "a concurrent cache write raised")
+            cache = STATUS.status_cache_path(root)
+            self.assertTrue(cache.is_file())
+            json.loads(cache.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [],
+                sorted(cache.parent.glob("*.tmp")),
+                "a temporary outlived the write that created it",
+            )
 
     def test_status_cache_corruption_falls_back_to_fresh_document(self):
         with tempfile.TemporaryDirectory() as tmpdir:
