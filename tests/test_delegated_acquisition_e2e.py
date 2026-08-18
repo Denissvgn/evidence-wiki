@@ -300,6 +300,91 @@ class DelegatedWorkspace:
             if line.startswith("status:")
         )
 
+    SECOND_SLUG = "needs-competitor-evidence"
+
+    def build_backlog(self, root: Path) -> tuple[Path, dict[str, str]]:
+        """Two blocked questions over three requests, none of them satisfiable yet.
+
+        The *second* question carries two of the requests. That grouping is deliberate:
+        a blocked question must have every one of its blocking requests still open —
+        `workspace_status` reports a fulfilled blocker as a missing open link and flips the
+        verdict to `attention_required`, which freezes the session. So the request that
+        gets fulfilled has to be the sole blocker of its question, and the two that fail
+        can share one. (That constraint predates delegation entirely: it reproduces with
+        no session and no `orchestration:` section. Batching just makes it easier to walk
+        into — see the follow-up in the backlog.)
+        """
+        workspace = self.init_workspace(root, spare_question=False)
+        self.configure(workspace, delegated=True)
+
+        profile_questions = workspace / "wiki" / "questions"
+        second = profile_questions / f"{self.SECOND_SLUG}.md"
+        second.write_text(
+            (profile_questions / f"{QUESTION_SLUG}.md").read_text(encoding="utf-8")
+            .replace(f"slug: {QUESTION_SLUG}", f"slug: {self.SECOND_SLUG}")
+            .replace("What does the supplier quote for B0ABC12345?", "What do competitors charge?"),
+            encoding="utf-8",
+        )
+
+        requests: dict[str, str] = {}
+        for name, slug, query in (
+            ("fulfilled", QUESTION_SLUG, "Live supplier quote for B0ABC12345"),
+            ("throttled", self.SECOND_SLUG, "Historic price series for B0ABC12345"),
+            ("refused", self.SECOND_SLUG, "Competitor offer snapshot"),
+        ):
+            requests[name] = self.run_script(
+                REQUESTS,
+                [
+                    "add", "--kind", "other", "--query-or-identifier", query,
+                    "--rationale", "Not answerable from delivered evidence.",
+                    "--priority", "high", "--question-slug", slug,
+                ],
+                workspace,
+            )["request"]["request_id"]
+
+        for slug, request_ids in (
+            (QUESTION_SLUG, [requests["fulfilled"]]),
+            (self.SECOND_SLUG, [requests["throttled"], requests["refused"]]),
+        ):
+            self.run_script(CLAIM, ["claim", "--slug", slug, "--agent-id", "research-agent"], workspace)
+            argv = ["block", "--slug", slug, "--agent-id", "research-agent",
+                    "--blocked-reason", "Evidence has not been delivered."]
+            for request_id in request_ids:
+                argv.extend(["--request-id", request_id])
+            self.run_script(RESOLVE, argv, workspace)
+        return workspace, requests
+
+    def record_failure(self, workspace: Path, request_id: str, code: str, action_id: str) -> None:
+        self.run_script(
+            REQUESTS,
+            [
+                "record-attempt-failure", "--request-id", request_id, "--failure-code", code,
+                "--orchestration-id", ORCHESTRATION_ID, "--action-id", action_id,
+            ],
+            workspace,
+        )
+
+    def deliver_for(self, workspace: Path, request_id: str) -> str:
+        destination = workspace / "raw" / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        payload = destination / PAYLOAD.name
+        shutil.copy2(PAYLOAD, payload)
+        sidecar = yaml.safe_load(
+            PAYLOAD.with_name(PAYLOAD.name + ".provenance.yml").read_text(encoding="utf-8")
+        )
+        sidecar["retrieved_by"] = ACQUIRER
+        sidecar["request_id"] = request_id
+        sidecar["checksum"] = f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}"
+        (destination / (PAYLOAD.name + ".provenance.yml")).write_text(
+            yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
+        )
+        self.run_script(INVENTORY, ["--report"], workspace)
+        self.run_script(NORMALIZE, ["--all"], workspace)
+        return self.source_id_for(workspace, f"raw/data/{PAYLOAD.name}")
+
+    def question_frontmatter(self, workspace: Path, slug: str) -> str:
+        return (workspace / "wiki" / "questions" / f"{slug}.md").read_text(encoding="utf-8")
+
     # -- evidence the workspace already held --------------------------------------
 
     def deliver_before_the_order(
@@ -331,6 +416,37 @@ class DelegatedWorkspace:
         if normalize:
             self.run_script(NORMALIZE, ["--all"], workspace)
         return self.source_id_for(workspace, f"raw/data/{PAYLOAD.name}")
+
+    TABLE_NAME = "supplier-quotes.csv"
+    TABLE_BODY = "supplier,currency,unit_price\nacme,EUR,12.50\nglobex,EUR,13.75\n"
+
+    def deliver_table_before_the_order(self, workspace: Path, request_id: str) -> str:
+        """The same state one file wider: a delivery whose record will bind a structured view.
+
+        A well-formed CSV takes the native table path, so normalizing it writes two files
+        rather than one. Inventoried and left un-normalized, it is the reuse case with the
+        sidecar attached.
+        """
+        destination = workspace / "raw" / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        payload = destination / self.TABLE_NAME
+        payload.write_text(self.TABLE_BODY, encoding="utf-8", newline="\n")
+        (destination / (self.TABLE_NAME + ".provenance.yml")).write_text(
+            yaml.safe_dump(
+                {
+                    "origin_url": "https://example.test/supplier-quotes.csv",
+                    "license": "CC-BY-4.0",
+                    "retrieved_at": "2026-08-17T12:00:00Z",
+                    "retrieved_by": ACQUIRER,
+                    "request_id": request_id,
+                    "checksum": f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}",
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        self.run_script(INVENTORY, ["--report"], workspace)
+        return self.source_id_for(workspace, f"raw/data/{self.TABLE_NAME}")
 
     def pending_order(self, workspace: Path) -> dict:
         code, order = self.next_action(workspace)
@@ -988,11 +1104,11 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
     manifest record the order may not touch. Five refusals across four guards, and none of
     them named the constraint that was actually broken.
 
-    This class owns the leg that needs no authorization beyond the sidecar, and what it may
-    still not touch. The pairings the *controller* authorizes at issuance -- a source
-    stamped for another request, or one nothing had normalized yet -- belong to
-    `ControllerAuthorisedReuseTests` below, which is where they succeed. What stays here is
-    the boundary between them: a record rewritten after the order was issued is outside
+    This class owns the leg where the source was already normalized when the order was
+    issued, and what that leg may still not touch. The one case the *controller* authorizes
+    beyond it -- a correctly correlated source nothing had normalized yet -- belongs to
+    `ControllerAuthorisedReuseTests` below, together with the cases that stay refused. What
+    stays here is the boundary: a record rewritten after the order was issued is outside
     every baseline whatever the sidecar says, because what it says now is no evidence of
     what it said then.
     """
@@ -1275,32 +1391,49 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
 
 
 class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
-    """Reuse of evidence the workspace already holds, on terms wider than one sidecar field.
+    """The one reuse the controller authorises, and the reuse it deliberately still refuses.
 
-    The reuse leg the sibling class walks succeeds only when the pre-existing source was
-    *both* stamped for the scoped request and already normalized when the order was
-    issued. Two workflows the CLI itself accepts are shut out by that, and neither has a
-    workaround for a source whose id is stable across deliveries -- an arXiv paper, a
-    `link:` source, a GitHub `codebase:` -- because re-delivering those bytes at a second
-    path earns the same id and the same manifest record, not a new one.
+    The sibling class walks the leg that succeeds only when the pre-existing source was
+    *both* stamped for the scoped request and already normalized when the order was issued.
+    One workflow the CLI accepts is shut out by the second half of that and has no
+    workaround: a source whose sidecar names the scoped request exactly, delivered and
+    inventoried under an order that failed, timed out, or rolled over before it normalized
+    anything. Its correlation is perfect. Re-delivering does not help, because the id is
+    already in the manifest, so a second raw path is a different record and leaves the
+    original fulfilling nothing.
 
-    The first is evidence acquired for an earlier request. `source_requests.py fulfill`
-    admits any manifest source whose provenance scope does not contradict the request, so
-    a workspace can fulfil a request from what it already holds; the acquisition
-    postcondition cannot, because the sidecar names some other request and one record
-    cannot attest two.
+    That case is now admitted, on terms the controller fixes at issuance: the order lists
+    the source as correlated-but-un-normalized, and the acquirer may write the one
+    normalized record it owes -- a record the verifier re-derives from the unchanged raw
+    evidence and compares byte for byte, because "the file is new" is a statement about a
+    path and the workspace quotes bodies, not paths.
 
-    The second is worse, because it sits inside the reuse path this package documents: a
-    source whose sidecar names the scoped request exactly, delivered and inventoried under
-    an order that failed, timed out, or rolled over before it normalized anything. Its
-    correlation is perfect and it is still shut out, by the normalized-output clause
-    rather than by the request filter.
-
-    Both cases turn on a decision the *controller* makes at issuance from state the
-    acquirer cannot reach, which is why admitting them widens no mutable set: the classes
-    above keep proving that a reused record, its raw sidecar and its normalized output are
-    all still immutable for the duration of the order.
+    Everything else stays shut, and the tests below say so in the same class so the boundary
+    is read in one place. Evidence stamped for another request, or for none at all, is not
+    reusable and is not made reusable by the workspace declaring `--scope`: correlation is
+    written by the acquirer, so a predicate over it authorizes nothing. The recourse for
+    those is a second delivery under a fresh raw path, or an honest attempt failure -- and
+    for an arXiv `paper:`, a `link:` or a GitHub `codebase:`, whose ids are stable across
+    deliveries, the recourse is the attempt failure alone. That residual gap is open on
+    purpose; closing it needs an authorization from a trusted party, which this package does
+    not have.
     """
+
+    REUSE_REFUSAL = (
+        "reuses pre-existing evidence that was not a scoped reconciliation match "
+        "when the order was issued"
+    )
+
+    def assert_reuse_refused(self, envelope: dict, source_id: str, cause: str) -> dict:
+        self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"], envelope)
+        self.assertIn(self.REUSE_REFUSAL, envelope["message"], envelope)
+        failure = next(
+            item
+            for item in envelope["details"]["reuse_scope_failures"]
+            if item["source_id"] == source_id
+        )
+        self.assertEqual(cause, failure["cause"], envelope)
+        return failure
 
     def add_request(self, workspace: Path, query: str) -> str:
         """A source request with no question behind it: an earlier purpose, since served."""
@@ -1313,6 +1446,28 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
             ],
             workspace,
         )["request"]["request_id"]
+
+    def arrive_at_unnormalized_reuse(self, root: Path) -> tuple[Path, str, str, dict]:
+        """The state a prior order leaves when it delivered and inventoried, then stopped."""
+        workspace, request_id = self.make_workspace(root)
+        source_id = self.deliver_before_the_order(workspace, request_id, normalize=False)
+        self.start(workspace)
+        order = self.pending_order(workspace)
+        return workspace, request_id, source_id, order
+
+    def normalize_and_close(self, workspace: Path, request_id: str, source_id: str) -> None:
+        self.run_script(
+            REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
+        )
+        self.run_script(NORMALIZE, ["--all"], workspace)
+        self.run_script(
+            RESOLVE,
+            [
+                "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
+                "--source-id", source_id, "--request-id", request_id,
+            ],
+            workspace,
+        )
 
     def arrive_at_cross_request_reuse(self, root: Path) -> tuple[Path, str, str, str, dict]:
         """Evidence stamped for -- and already spent on -- a request this order does not scope."""
@@ -1335,50 +1490,7 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
         )
         return workspace, scoped_request_id, earlier_request_id, source_id, order
 
-    def test_evidence_stamped_for_an_earlier_request_can_fulfil_a_scoped_one(self):
-        """A source id that cannot be earned twice, needed by a second request.
-
-        The sidecar names the request this evidence was first acquired for and may not be
-        restamped -- the acquirer skill forbids exactly that, and overwriting the field
-        would orphan the first request's provenance link with nothing to detect it. So the
-        workspace holds the evidence, the CLI accepts it, and the order refuses it.
-        """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace, request_id, earlier_request_id, source_id, order = (
-                self.arrive_at_cross_request_reuse(Path(tmpdir))
-            )
-            evidence_before = self.evidence_bytes(workspace)
-
-            self.fulfil_and_reopen(workspace, request_id, source_id)
-            code, session = self.submit(workspace, order["action_id"])
-
-            self.assertEqual(
-                0,
-                code,
-                "an unchanged source the workspace already holds must be able to satisfy a "
-                f"second request without being fetched again: {session}",
-            )
-            self.assertEqual("research", session["phase"])
-            self.assertEqual("open", self.question_status(workspace))
-            self.assertEqual(
-                evidence_before,
-                self.evidence_bytes(workspace),
-                "reuse fetches nothing, so it writes nothing under raw/, normalized/ or the manifest",
-            )
-            # The first request keeps its evidence: nothing restamped the sidecar, so both
-            # requests name the same unchanged source and neither link was orphaned.
-            requests = {
-                record["request_id"]: record
-                for record in (
-                    json.loads(line)
-                    for line in (workspace / "sources" / "source-requests.jsonl")
-                    .read_text(encoding="utf-8")
-                    .splitlines()
-                    if line.strip()
-                )
-            }
-            self.assertEqual(source_id, requests[earlier_request_id]["source_id"])
-            self.assertEqual(source_id, requests[request_id]["source_id"])
+    # -- the reuse this change opens ------------------------------------------------
 
     def test_a_correlated_source_normalized_inside_the_order_can_fulfil_it(self):
         """The documented reuse path's own primary use case: delivered, inventoried, dropped.
@@ -1390,24 +1502,10 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
         the manifest.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace, request_id = self.make_workspace(Path(tmpdir))
-            source_id = self.deliver_before_the_order(workspace, request_id, normalize=False)
-            self.start(workspace)
-            order = self.pending_order(workspace)
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
             raw_before = self.evidence_bytes(workspace)
 
-            self.run_script(
-                REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
-            )
-            self.run_script(NORMALIZE, ["--all"], workspace)
-            self.run_script(
-                RESOLVE,
-                [
-                    "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
-                    "--source-id", source_id, "--request-id", request_id,
-                ],
-                workspace,
-            )
+            self.normalize_and_close(workspace, request_id, source_id)
             code, session = self.submit(workspace, order["action_id"])
 
             self.assertEqual(
@@ -1425,10 +1523,36 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
                 sorted(set(after) - set(raw_before)),
             )
             self.assertEqual(
-                {path: digest for path, digest in raw_before.items()},
+                dict(raw_before.items()),
                 {path: after[path] for path in raw_before},
                 "normalizing rewrites neither the raw delivery nor its manifest record",
             )
+
+    def test_the_order_lists_only_the_correlated_un_normalized_source(self):
+        """What the baseline holds, read from the protected sidecar rather than inferred.
+
+        The list is the whole authorization, so it is worth reading directly: one id, the
+        source whose own sidecar names this order's request, and nothing else the manifest
+        happens to contain.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            bystander = self.add_request(workspace, "Something an earlier order already served")
+            baseline = json.loads(
+                CONTROLLER.scope_integrity_baseline_path(
+                    workspace, ORCHESTRATION_ID, order["action_id"]
+                ).read_text(encoding="utf-8")
+            )
+            fields = next(
+                item["fields"]
+                for item in baseline["postconditions"]
+                if item["check"] == "manifest_records_increased"
+            )
+
+            self.assertEqual([source_id], fields["reusable_source_ids_before"])
+            self.assertEqual({}, fields["matching_source_records_before"])
+            self.assertIn(source_id, fields["manifest_record_fingerprints_before"])
+            self.assertNotIn(bystander, json.dumps(fields["reusable_source_ids_before"]))
 
     def test_a_reused_source_without_its_normalized_record_is_still_refused(self):
         """The other direction, which stays shut: reuse is not an exemption from normalizing.
@@ -1439,22 +1563,8 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
         to name the source rather than the reuse.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace, request_id = self.make_workspace(Path(tmpdir))
-            source_id = self.deliver_before_the_order(workspace, request_id, normalize=False)
-            self.start(workspace)
-            order = self.pending_order(workspace)
-            self.run_script(
-                REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
-            )
-            self.run_script(NORMALIZE, ["--all"], workspace)
-            self.run_script(
-                RESOLVE,
-                [
-                    "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
-                    "--source-id", source_id, "--request-id", request_id,
-                ],
-                workspace,
-            )
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            self.normalize_and_close(workspace, request_id, source_id)
             self.normalized_record_for(workspace, source_id).unlink()
 
             code, envelope = self.submit(workspace, order["action_id"])
@@ -1466,42 +1576,113 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
             )
             self.assertEqual([source_id], envelope["details"]["source_ids"])
 
-    def test_evidence_correlated_to_nothing_can_fulfil_a_scoped_request(self):
-        """The other half of the first dead end: a real record, correlated to nothing.
+    # -- what an authorised reuse still may not do ---------------------------------
 
-        Evidence an operator dropped into `raw/` and inventoried, or that a run delivered
-        for a purpose no request records. Its scope contradicts nothing, so `fulfill` takes
-        it, and the order that listed it takes it too.
+    def test_an_authorised_reuse_may_not_author_its_own_normalized_body(self):
+        """The record has to be *derived*, not merely new.
+
+        This is the whole difference between authorizing a path and authorizing a body. The
+        raw bytes, the sidecar and the manifest record are all pinned byte-for-byte by
+        guards this order never relaxes; the normalized record is the one artifact the reuse
+        lets the acquirer create, and it is the artifact every downstream reader quotes. So
+        the verifier re-normalizes the unchanged raw evidence itself and compares.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            self.normalize_and_close(workspace, request_id, source_id)
+            record = self.normalized_record_for(workspace, source_id)
+            record.write_text(
+                record.read_text(encoding="utf-8").replace(
+                    "## Extracted Text", "## Extracted Text\n\nThe supplier quote is $1.00."
+                ),
+                encoding="utf-8",
+            )
+
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual(
+                "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+                envelope["message"],
+                envelope,
+            )
+            failure = next(
+                item
+                for item in envelope["details"]["reconciliation_failures"]
+                if item["source_id"] == source_id
+            )
+            self.assertTrue(failure["was_authorized_unnormalized"], failure)
+            self.assertTrue(failure["record_unchanged"], failure)
+            self.assertEqual(
+                "normalized evidence is not what normalizing the raw evidence produces",
+                failure["derivation_failure"]["reason"],
+                failure,
+            )
+
+    def test_an_authorised_reuse_may_not_author_its_structured_view_sidecar(self):
+        """The sidecar is bound by the same re-derivation, not by the record's own digest.
+
+        A record that binds a structured view names the sidecar's digest in its own
+        frontmatter, so an acquirer editing both together keeps the pair self-consistent and
+        every check that reads only the record agrees. The binding that survives that is the
+        one taken back to the raw bytes, which is why re-derivation renders the sidecar too.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace, request_id = self.make_workspace(Path(tmpdir))
-            source_id = self.deliver_before_the_order(workspace, None)
+            source_id = self.deliver_table_before_the_order(workspace, request_id)
             self.start(workspace)
             order = self.pending_order(workspace)
-            evidence_before = self.evidence_bytes(workspace)
+            self.normalize_and_close(workspace, request_id, source_id)
+            record = self.normalized_record_for(workspace, source_id)
+            sidecar = record.with_name(record.stem + ".structured.json")
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            payload["rows"] = []
+            rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            sidecar.write_text(rendered, encoding="utf-8", newline="\n")
+            # Restamp the record's own binding too, so every check that reads only the
+            # record still agrees and only the re-derivation can tell.
+            invented = "sha256:" + hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+            record.write_text(
+                "\n".join(
+                    f"{line.split('content_hash:', 1)[0]}content_hash: {invented}"
+                    if line.strip().startswith("content_hash:") and line.startswith("    ")
+                    else line
+                    for line in record.read_text(encoding="utf-8").split("\n")
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
 
-            self.fulfil_and_reopen(workspace, request_id, source_id)
-            code, session = self.submit(workspace, order["action_id"])
+            code, envelope = self.submit(workspace, order["action_id"])
 
-            self.assertEqual(0, code, session)
-            self.assertEqual("research", session["phase"])
-            self.assertEqual(evidence_before, self.evidence_bytes(workspace))
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual(
+                "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+                envelope["message"],
+                envelope,
+            )
+            failure = next(
+                item
+                for item in envelope["details"]["reconciliation_failures"]
+                if item["source_id"] == source_id
+            )
+            self.assertEqual(
+                "the structured-view sidecar is not what normalizing the raw evidence produces",
+                failure["derivation_failure"]["reason"],
+                failure,
+            )
 
-    # -- what an authorised reuse still may not do ---------------------------------
-
-    def test_editing_the_manifest_record_of_a_cross_request_reuse_is_still_refused(self):
-        """The allowlist names a source id; it does not bless whatever that id holds now.
+    def test_editing_the_manifest_record_of_an_authorised_reuse_is_still_refused(self):
+        """The baseline names a source id; it does not bless whatever that id holds now.
 
         Reconciliation compares the record against the digest the order fingerprinted at
         issuance, so an authorised reuse whose record was rewritten afterwards is refused
-        exactly as an unauthorised one is. Without this the allowlist would be an opening
+        exactly as an unauthorised one is. Without this the baseline would be an opening
         rather than an authorization.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace, request_id, _, source_id, order = self.arrive_at_cross_request_reuse(
-                Path(tmpdir)
-            )
-            self.fulfil_and_reopen(workspace, request_id, source_id)
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            self.normalize_and_close(workspace, request_id, source_id)
             manifest = workspace / "sources" / "manifest.jsonl"
             records = [
                 json.loads(line)
@@ -1525,16 +1706,15 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
                 "the refusal must name the source whose record moved",
             )
 
-    def test_editing_the_raw_sidecar_of_a_cross_request_reuse_is_still_refused(self):
+    def test_editing_the_raw_sidecar_of_an_authorised_reuse_is_still_refused(self):
+        """`raw/` stays immutable for an authorised reuse exactly as for everything else."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace, request_id, _, source_id, order = self.arrive_at_cross_request_reuse(
-                Path(tmpdir)
-            )
-            self.fulfil_and_reopen(workspace, request_id, source_id)
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            self.normalize_and_close(workspace, request_id, source_id)
             relative = f"raw/data/{PAYLOAD.name}.provenance.yml"
             sidecar = workspace / relative
             content = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
-            content["request_id"] = request_id
+            content["retrieved_by"] = "someone-else-entirely"
             sidecar.write_text(yaml.safe_dump(content, sort_keys=False), encoding="utf-8")
 
             code, envelope = self.submit(workspace, order["action_id"])
@@ -1545,62 +1725,17 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
                 [relative], envelope["details"]["raw_scope_violations"]["changed_outside_scope"]
             )
 
-    def test_a_reuse_that_was_normalized_at_issuance_may_still_write_no_new_output(self):
-        """The arm boundary, asserted from the side that must not move.
-
-        Authorizing a normalized output for a source the order recorded as *not* normalized
-        is the whole of what the second arm adds. A source that already had one keeps
-        answering to byte-identity, so re-normalizing it -- or writing anything else beside
-        it -- is refused just as it was before the arm existed.
-        """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace, request_id, _, source_id, order = self.arrive_at_cross_request_reuse(
-                Path(tmpdir)
-            )
-            self.fulfil_and_reopen(workspace, request_id, source_id)
-            record = self.normalized_record_for(workspace, source_id)
-            record.write_text(
-                record.read_text(encoding="utf-8") + "\nRe-normalized after the order was issued.\n",
-                encoding="utf-8",
-            )
-
-            code, envelope = self.submit(workspace, order["action_id"])
-
-            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
-            self.assertIn(
-                envelope["message"],
-                {
-                    "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
-                    "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
-                },
-                envelope,
-            )
-
-    def test_an_arm_b_reuse_may_not_write_a_second_unrelated_normalized_file(self):
+    def test_an_authorised_reuse_may_not_write_a_second_unrelated_normalized_file(self):
         """One record for the source the order authorized, and nothing else beside it.
 
-        The second arm widens what an action may *create* by exactly one record per reused
+        The reuse widens what an action may *create* by exactly one record per reused
         source. A normalized file no fulfilled source accounts for is still refused, and the
         refusal still names the file, or the widening would have been a directory rather
         than a record.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace, request_id = self.make_workspace(Path(tmpdir))
-            source_id = self.deliver_before_the_order(workspace, request_id, normalize=False)
-            self.start(workspace)
-            order = self.pending_order(workspace)
-            self.run_script(
-                REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
-            )
-            self.run_script(NORMALIZE, ["--all"], workspace)
-            self.run_script(
-                RESOLVE,
-                [
-                    "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
-                    "--source-id", source_id, "--request-id", request_id,
-                ],
-                workspace,
-            )
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            self.normalize_and_close(workspace, request_id, source_id)
             stray = workspace / "sources" / "normalized" / "invented-beside-the-record.md"
             stray.write_text("---\ntype: normalized_source\n---\n\nInvented.\n", encoding="utf-8")
 
@@ -1615,6 +1750,223 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
             self.assertEqual(
                 ["sources/normalized/invented-beside-the-record.md"],
                 envelope["details"]["normalized_scope_violations"]["added_outside_scope"],
+            )
+
+    def test_a_reuse_normalized_at_issuance_authorises_no_new_normalized_file(self):
+        """The arm boundary, asserted from the side that must not move.
+
+        Authorizing a normalized output for a source the order recorded as *not* normalized
+        is the whole of what this change adds. A source that already had one keeps answering
+        to byte-identity and authorizes nothing new at all, so any file appearing under
+        `sources/normalized/` during such an order is refused. If the two ever merged, the
+        already-normalized reuse would quietly stop being pinned to its digest.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            source_id = self.deliver_before_the_order(workspace, request_id)
+            self.start(workspace)
+            order = self.pending_order(workspace)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            stray = workspace / "sources" / "normalized" / "second-thoughts.md"
+            stray.write_text("---\ntype: normalized_source\n---\n\nInvented.\n", encoding="utf-8")
+
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual(
+                "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
+                envelope["message"],
+                envelope,
+            )
+            self.assertEqual(
+                ["sources/normalized/second-thoughts.md"],
+                envelope["details"]["normalized_scope_violations"]["added_outside_scope"],
+            )
+
+    # -- the reuse this change deliberately leaves shut ----------------------------
+
+    def test_evidence_stamped_for_an_earlier_request_is_still_refused(self):
+        """A source id that cannot be earned twice, needed by a second request.
+
+        The workspace holds the evidence and `source_requests.py fulfill` accepts it, so
+        this reads like the reuse case above. It is not, and the difference is who wrote the
+        link: `provenance.request_id` names the earlier request, and the only ways to make
+        it name this one are to restamp the sidecar -- which the acquirer skill forbids,
+        because it orphans the first request's link with nothing to detect it -- or to admit
+        the source on some predicate other than correlation. Every field such a predicate
+        could read is written by the same untrusted party, so it would authorize nothing.
+        The refusal names the cause, and the recourse is a second delivery or an honest
+        attempt failure.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, _, source_id, order = self.arrive_at_cross_request_reuse(
+                Path(tmpdir)
+            )
+            evidence_before = self.evidence_bytes(workspace)
+
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            failure = self.assert_reuse_refused(envelope, source_id, "provenance_names_no_scoped_request")
+            self.assertTrue(failure["record_unchanged"], failure)
+            self.assertEqual([], envelope["details"]["reusable_source_ids_before"])
+            self.assertEqual(
+                evidence_before,
+                self.evidence_bytes(workspace),
+                "a refused reuse leaves the evidence exactly as it found it",
+            )
+
+    def test_a_record_with_no_provenance_at_all_is_still_refused(self):
+        """Evidence correlated to nothing closes nothing.
+
+        A file dropped into `raw/` and inventoried without a sidecar has a real manifest
+        record and `provenance: null`. Nothing links it to any request, which is precisely
+        why it may not satisfy one -- and a reuse rule that reads any other field would
+        admit it, because there is no other field a delivery does not control.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            destination = workspace / "raw" / "data"
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "unattributed.json").write_text(
+                json.dumps({"quote": "from nowhere in particular"}) + "\n", encoding="utf-8"
+            )
+            self.run_script(INVENTORY, ["--report"], workspace)
+            self.run_script(NORMALIZE, ["--all"], workspace)
+            source_id = self.source_id_for(workspace, "raw/data/unattributed.json")
+            self.start(workspace)
+            order = self.pending_order(workspace)
+            evidence_before = self.evidence_bytes(workspace)
+
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            failure = self.assert_reuse_refused(envelope, source_id, "provenance_names_no_scoped_request")
+            self.assertIsNone(failure["provenance_request_id"], failure)
+            self.assertEqual(evidence_before, self.evidence_bytes(workspace))
+
+    def test_declaring_scope_does_not_admit_a_source_that_omits_the_key(self):
+        """A workspace that adopted `--scope` is protected by correlation, not by the scope.
+
+        Scope agreement is a filter over what a request *contradicts*, and a source that
+        declares no facet contradicts nothing, so a scope-declaring request agrees with
+        uncorrelated evidence as readily as an undeclared one does. Recording that here
+        because it is the reason reuse is not gated on scope agreement: the gate would read
+        as protection and be vacuous by construction.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            requests_path = workspace / "sources" / "source-requests.jsonl"
+            records = [
+                json.loads(line)
+                for line in requests_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            for record in records:
+                if record["request_id"] == request_id:
+                    record["scope"] = {"facet": "pricing"}
+            requests_path.write_text(
+                "".join(
+                    json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                    for record in records
+                ),
+                encoding="utf-8",
+            )
+            source_id = self.deliver_before_the_order(workspace, None)
+            self.start(workspace)
+            order = self.pending_order(workspace)
+
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assert_reuse_refused(envelope, source_id, "provenance_names_no_scoped_request")
+
+    def test_one_delivery_cannot_close_the_rest_of_the_backlog_in_a_later_order(self):
+        """The escalation an acquirer can build entirely out of its own successful order.
+
+        Nothing here is tampering. Order one fetches one source honestly and reports two
+        honest retryable failures; both outcomes are accepted. That leaves the workspace
+        holding a source the acquirer delivered, and order two is issued over the backlog
+        that is left. If pre-existing evidence were reusable on anything but its own
+        correlation, the acquirer would close the rest of the backlog with it, fetching
+        nothing -- and the second question would end up open, citing a supplier-quote
+        snapshot as its evidence for what competitors charge. That is wiki grounding
+        corruption rather than request-store bookkeeping, which is why it is the case worth
+        keeping a test on.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, requests = self.build_backlog(Path(tmpdir))
+            self.start(workspace)
+            code, first = self.next_action(workspace)
+            self.assertEqual(0, code, first)
+
+            source_id = self.deliver_for(workspace, requests["fulfilled"])
+            self.run_script(
+                REQUESTS,
+                ["fulfill", "--request-id", requests["fulfilled"], "--source-id", source_id],
+                workspace,
+            )
+            self.run_script(
+                RESOLVE,
+                [
+                    "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
+                    "--source-id", source_id, "--request-id", requests["fulfilled"],
+                ],
+                workspace,
+            )
+            for name in ("throttled", "refused"):
+                self.record_failure(workspace, requests[name], "provider_throttled", first["action_id"])
+            code, payload = self.submit(workspace, first["action_id"])
+            self.assertEqual(0, code, payload)
+
+            # Routing prefers research, so the reopened question is answered to get the
+            # session back to acquisition -- the acquirer's own honest work, throughout.
+            code, research = self.next_action(workspace)
+            self.assertEqual("research", research["phase"], research)
+            page = workspace / "wiki" / "synthesis" / "supplier-quote.md"
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text(
+                "---\ntype: synthesis\ncreated: 2026-08-09\nupdated: 2026-08-09\n"
+                f"source_ids:\n  - {source_id}\n"
+                "summary: The delivered snapshot carries the supplier quote.\n---\n\n"
+                "# Supplier quote\n\nThe delivered snapshot answers the question.\n",
+                encoding="utf-8",
+            )
+            self.run_script(
+                RESOLVE,
+                [
+                    "answer", "--slug", QUESTION_SLUG, "--agent-id", "research-agent",
+                    "--answer-page", "wiki/synthesis/supplier-quote.md",
+                    "--source-id", source_id, "--allow-unclaimed",
+                ],
+                workspace,
+            )
+            code, payload = self.submit(workspace, research["action_id"])
+            self.assertEqual(0, code, payload)
+
+            code, second = self.next_action(workspace)
+            self.assertEqual("acquisition", second["phase"], second)
+            evidence_before = self.evidence_bytes(workspace)
+            argv = ["reopen", "--slug", self.SECOND_SLUG, "--agent-id", ACQUIRER]
+            for retried in second["scope"]["request_ids"]:
+                self.run_script(
+                    REQUESTS, ["fulfill", "--request-id", retried, "--source-id", source_id], workspace
+                )
+                argv.extend(["--source-id", source_id, "--request-id", retried])
+            self.run_script(RESOLVE, argv, workspace)
+
+            code, envelope = self.submit(workspace, second["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assert_reuse_refused(envelope, source_id, "provenance_names_no_scoped_request")
+            self.assertEqual(evidence_before, self.evidence_bytes(workspace))
+            self.assertIn(
+                "status: blocked",
+                self.question_frontmatter(workspace, self.SECOND_SLUG),
+                "the second question stays blocked rather than opening on evidence for another request",
             )
 
 
@@ -1972,91 +2324,6 @@ class BatchRetryAndExhaustionTests(DelegatedWorkspace, unittest.TestCase):
     Two blocked questions keep the workspace in `blocked_on_sources` throughout, which is
     what lets routing return to acquisition rather than to research.
     """
-
-    SECOND_SLUG = "needs-competitor-evidence"
-
-    def build_backlog(self, root: Path) -> tuple[Path, dict[str, str]]:
-        """Two blocked questions over three requests, none of them satisfiable yet.
-
-        The *second* question carries two of the requests. That grouping is deliberate:
-        a blocked question must have every one of its blocking requests still open —
-        `workspace_status` reports a fulfilled blocker as a missing open link and flips the
-        verdict to `attention_required`, which freezes the session. So the request that
-        gets fulfilled has to be the sole blocker of its question, and the two that fail
-        can share one. (That constraint predates delegation entirely: it reproduces with
-        no session and no `orchestration:` section. Batching just makes it easier to walk
-        into — see the follow-up in the backlog.)
-        """
-        workspace = self.init_workspace(root, spare_question=False)
-        self.configure(workspace, delegated=True)
-
-        profile_questions = workspace / "wiki" / "questions"
-        second = profile_questions / f"{self.SECOND_SLUG}.md"
-        second.write_text(
-            (profile_questions / f"{QUESTION_SLUG}.md").read_text(encoding="utf-8")
-            .replace(f"slug: {QUESTION_SLUG}", f"slug: {self.SECOND_SLUG}")
-            .replace("What does the supplier quote for B0ABC12345?", "What do competitors charge?"),
-            encoding="utf-8",
-        )
-
-        requests: dict[str, str] = {}
-        for name, slug, query in (
-            ("fulfilled", QUESTION_SLUG, "Live supplier quote for B0ABC12345"),
-            ("throttled", self.SECOND_SLUG, "Historic price series for B0ABC12345"),
-            ("refused", self.SECOND_SLUG, "Competitor offer snapshot"),
-        ):
-            requests[name] = self.run_script(
-                REQUESTS,
-                [
-                    "add", "--kind", "other", "--query-or-identifier", query,
-                    "--rationale", "Not answerable from delivered evidence.",
-                    "--priority", "high", "--question-slug", slug,
-                ],
-                workspace,
-            )["request"]["request_id"]
-
-        for slug, request_ids in (
-            (QUESTION_SLUG, [requests["fulfilled"]]),
-            (self.SECOND_SLUG, [requests["throttled"], requests["refused"]]),
-        ):
-            self.run_script(CLAIM, ["claim", "--slug", slug, "--agent-id", "research-agent"], workspace)
-            argv = ["block", "--slug", slug, "--agent-id", "research-agent",
-                    "--blocked-reason", "Evidence has not been delivered."]
-            for request_id in request_ids:
-                argv.extend(["--request-id", request_id])
-            self.run_script(RESOLVE, argv, workspace)
-        return workspace, requests
-
-    def record_failure(self, workspace: Path, request_id: str, code: str, action_id: str) -> None:
-        self.run_script(
-            REQUESTS,
-            [
-                "record-attempt-failure", "--request-id", request_id, "--failure-code", code,
-                "--orchestration-id", ORCHESTRATION_ID, "--action-id", action_id,
-            ],
-            workspace,
-        )
-
-    def deliver_for(self, workspace: Path, request_id: str) -> str:
-        destination = workspace / "raw" / "data"
-        destination.mkdir(parents=True, exist_ok=True)
-        payload = destination / PAYLOAD.name
-        shutil.copy2(PAYLOAD, payload)
-        sidecar = yaml.safe_load(
-            PAYLOAD.with_name(PAYLOAD.name + ".provenance.yml").read_text(encoding="utf-8")
-        )
-        sidecar["retrieved_by"] = ACQUIRER
-        sidecar["request_id"] = request_id
-        sidecar["checksum"] = f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}"
-        (destination / (PAYLOAD.name + ".provenance.yml")).write_text(
-            yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
-        )
-        self.run_script(INVENTORY, ["--report"], workspace)
-        self.run_script(NORMALIZE, ["--all"], workspace)
-        return self.source_id_for(workspace, f"raw/data/{PAYLOAD.name}")
-
-    def question_frontmatter(self, workspace: Path, slug: str) -> str:
-        return (workspace / "wiki" / "questions" / f"{slug}.md").read_text(encoding="utf-8")
 
     def test_a_batch_with_three_outcomes_retires_only_what_cannot_be_retried(self):
         with tempfile.TemporaryDirectory() as tmpdir:

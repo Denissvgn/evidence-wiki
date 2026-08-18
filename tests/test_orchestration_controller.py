@@ -3501,315 +3501,30 @@ class OrchestrationControllerTests(unittest.TestCase):
                 ):
                     verify({**reopened, "status": bypass_status})
 
-    def provider_reuse_fixture(self, tmpdir: Path, *, normalized_at_issuance: bool, authorized: bool):
-        """A provider acquisition that fulfils its request from a source it already held.
-
-        Nothing in `source_requests.py fulfill` requires a newly created source, and the
-        download guard that would have refused a re-fetch never runs, so this path is
-        reachable in provider mode exactly as it is under delegation. The source's own
-        provenance names the earlier request and candidate that fetched it -- one record
-        cannot attest two -- so the only thing that can authorize it here is the order.
-        """
-        request_id = "req-provider-reuse"
-        candidate_id = "cand-provider-reuse"
-        source_id = "html:provider-reuse"
-        manifest_record = {
-            "id": source_id,
-            "provenance": {"request_id": "req-earlier", "candidate_id": "cand-earlier"},
-        }
-        normalized_path = tmpdir / "sources" / "normalized" / "reused.md"
-        normalized_path.parent.mkdir(parents=True, exist_ok=True)
-        normalized_path.write_text(
-            "---\n"
-            "type: normalized_source\n"
-            f"source_id: {source_id}\n"
-            "source_kind: html\n"
-            "status: content_extracted\n"
-            "evidence_usable: true\n"
-            "---\n\n# Reused evidence\n\nNormalized evidence.\n",
-            encoding="utf-8",
-        )
-        normalized_relative = "sources/normalized/reused.md"
-        normalized_fingerprint = CONTROLLER.file_digest(normalized_path, containment_root=tmpdir)
-        manifest_fingerprint = CONTROLLER.canonical_json_fingerprint(
-            manifest_record, label="test manifest"
-        )[0]
-        raw_baseline = {
-            "algorithm": "sha256-content-v1",
-            "file_count": 0,
-            "total_bytes": 0,
-            "fingerprint": "sha256:" + hashlib.sha256(b"").hexdigest(),
-            "entries": {},
-        }
-        fulfilled_request = {
-            "request_id": request_id,
-            "status": "fulfilled",
-            "source_id": source_id,
-            "question_slugs": ["test-question"],
-        }
-        open_request = {key: value for key, value in fulfilled_request.items() if key != "source_id"}
-        open_request["status"] = "open"
-        fetched_candidate = {
-            "candidate_id": candidate_id,
-            "source_request_id": request_id,
-            "lifecycle_state": "fetched",
-            "fetched_source_id": source_id,
-        }
-        selected_candidate = {key: value for key, value in fetched_candidate.items() if key != "fetched_source_id"}
-        selected_candidate["lifecycle_state"] = "selected"
-        # Arm (a) records both digests and the file was already there; arm (b) records an
-        # explicit null and the action writes the record the order authorized.
-        allowlist = {
-            request_id: {
-                source_id: {
-                    "record_fingerprint": manifest_fingerprint,
-                    "normalized_fingerprint": normalized_fingerprint if normalized_at_issuance else None,
-                }
-            }
-        }
-        normalized_files_before = {normalized_relative: normalized_fingerprint} if normalized_at_issuance else {}
-        work_order = {
-            "phase": "acquisition",
-            "run_id": "run-provider-reuse",
-            "scope": {
-                "question_slugs": ["test-question"],
-                "request_ids": [request_id],
-                "candidate_ids": [candidate_id],
-            },
-            "required_postconditions": [
-                {"check": "request_fulfilled_with_normalized_source"},
-                {
-                    "check": "linked_blocked_questions_reopened",
-                    "blocked_questions_before": {
-                        "test-question": {
-                            "status": "blocked",
-                            "blocking_request_ids": [request_id],
-                            "source_ids_before": [],
-                        }
-                    },
-                },
-                {
-                    "check": "manifest_records_increased",
-                    "before": 1,
-                    "matching_source_ids_before": [],
-                    "matching_source_records_before": {},
-                    "reusable_source_records_before": allowlist if authorized else {},
-                    "manifest_record_fingerprints_before": {source_id: manifest_fingerprint},
-                    "raw_tree_before": raw_baseline,
-                    "candidate_record_fingerprints_before": (
-                        CONTROLLER.candidate_record_fingerprint_snapshot([selected_candidate])
-                    ),
-                    "candidate_audit_record_fingerprints_before": {},
-                    "source_request_record_fingerprints_before": CONTROLLER.record_fingerprint_snapshot(
-                        [open_request], id_field="request_id", label="test requests"
-                    ),
-                    "normalized_file_fingerprints_before": normalized_files_before,
-                    "question_file_fingerprints_before": {"test-question.md": "sha256:" + "4" * 64},
-                },
-            ],
-        }
-        run_controller = mock.Mock()
-        run_controller.load_run_state.return_value = {"state": {"current": "fetching"}}
-        source_requests = mock.Mock()
-        source_requests.requests_path.return_value = Path("/unused/source-requests.jsonl")
-        source_requests.load_requests.return_value = [fulfilled_request]
-        normalize_sources = mock.Mock()
-        normalize_sources.source_paths.return_value = ("sources/manifest.jsonl", "sources/normalized")
-        normalize_sources.load_manifest.return_value = [manifest_record]
-        normalize_sources.records_by_source_id.return_value = {source_id: manifest_record}
-        normalize_sources.normalized_output_path_for_record.return_value = normalized_path
-
-        real_load_sibling_module = CONTROLLER.load_sibling_module
-
-        def sibling(stem: str):
-            return {
-                "run_controller": run_controller,
-                "source_requests": source_requests,
-                "normalize_sources": normalize_sources,
-            }.get(stem) or real_load_sibling_module(stem)
-
-        def verify() -> tuple[str | None, str | None]:
-            with (
-                mock.patch.object(CONTROLLER, "load_config", return_value={}),
-                mock.patch.object(
-                    CONTROLLER,
-                    "fresh_workspace_status",
-                    return_value={
-                        "readiness": {"verdict": "in_progress"},
-                        "sources": {"manifest_records": 1},
-                        "questions": {"blocked_slugs": []},
-                    },
-                ),
-                mock.patch.object(CONTROLLER, "open_requests", return_value=[]),
-                mock.patch.object(CONTROLLER, "load_candidates", return_value=[fetched_candidate]),
-                mock.patch.object(CONTROLLER, "raw_tree_snapshot", return_value=raw_baseline),
-                mock.patch.object(
-                    CONTROLLER,
-                    "normalized_file_fingerprint_snapshot",
-                    return_value={normalized_relative: normalized_fingerprint},
-                ),
-                mock.patch.object(
-                    CONTROLLER,
-                    "question_file_fingerprint_snapshot",
-                    return_value={"test-question.md": "sha256:" + "5" * 64},
-                ),
-                mock.patch.object(
-                    CONTROLLER,
-                    "scoped_question_evidence_snapshot",
-                    return_value={
-                        "test-question": {
-                            "status": "open",
-                            "blocking_request_ids": [],
-                            "source_ids": [source_id],
-                        }
-                    },
-                ),
-                mock.patch.object(CONTROLLER, "load_sibling_module", side_effect=sibling),
+            # Wiring site three. The provider arm validates the reuse baseline it consumes
+            # on the same terms as the delegated arm: an id the manifest baseline does not
+            # name is checked by nothing downstream, and an id already in the scoped-match
+            # map would leave which reuse terms apply to lookup order. The replay guard
+            # answers first in production, so it is stood down here — CR-3's rule is that
+            # each verifier validates every baseline it consumes, and a check that only
+            # ever runs behind another one is a check nobody would notice losing.
+            for tampered, why in (
+                (["raw:never-in-this-manifest"], "names a record outside the manifest baseline"),
+                ([source_id], "is already a scoped match"),
             ):
-                return CONTROLLER.verify_action_postconditions(
-                    tmpdir, {"agent_id": "agent-test"}, work_order
-                )
-
-        return verify, source_id
-
-    def test_the_provider_arm_accepts_the_same_controller_authorised_reuse(self):
-        # The symmetry the orchestration contract asserts: both arms bound the same way and
-        # reuse on the same terms. Implementing one alone would create a difference two
-        # shipped documents deny exists, and the provider arm is reachable -- nothing in
-        # `fulfill` requires a newly created source.
-        for normalized_at_issuance in (True, False):
-            with (
-                self.subTest(normalized_at_issuance=normalized_at_issuance),
-                tempfile.TemporaryDirectory() as tmpdir,
-            ):
-                verify, _ = self.provider_reuse_fixture(
-                    Path(tmpdir), normalized_at_issuance=normalized_at_issuance, authorized=True
-                )
-                self.assertEqual(("research", None), verify())
-
-    def test_the_provider_arm_refuses_a_reuse_its_order_never_authorised(self):
-        # The same action with an empty allowlist. The provenance names an earlier request
-        # and candidate, so nothing but the order could have authorized it, and nothing did.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            verify, source_id = self.provider_reuse_fixture(
-                Path(tmpdir), normalized_at_issuance=True, authorized=False
-            )
-            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
-                verify()
-            self.assertIn("acquired evidence is not linked", str(caught.exception))
-            self.assertIn(source_id, json.dumps(caught.exception.details))
-
-    def test_a_reuse_expectation_comes_from_the_order_and_holds_each_arm_to_its_own_terms(self):
-        # The arm is read off the baseline, never inferred from what the action left behind,
-        # or an action could pick the weaker arm by deleting a file. Asserted at unit level
-        # because the end-to-end cases can only show the arms working, not that the choice
-        # between them is made at issuance.
-        record_fingerprint = "sha256:" + "a" * 64
-        normalized_fingerprint = "sha256:" + "b" * 64
-        arm_a = {"record_fingerprint": record_fingerprint, "normalized_fingerprint": normalized_fingerprint}
-        arm_b = {"record_fingerprint": record_fingerprint, "normalized_fingerprint": None}
-
-        self.assertEqual(
-            arm_a,
-            CONTROLLER.reuse_expectation_for_source("s1", {"s1": arm_a}, {"r1": {"s1": arm_b}}, ["r1"]),
-            "a source the order already correlated keeps answering to the terms it always did",
-        )
-        self.assertEqual(
-            arm_b, CONTROLLER.reuse_expectation_for_source("s1", {}, {"r1": {"s1": arm_b}}, ["r1"])
-        )
-        self.assertIsNone(
-            CONTROLLER.reuse_expectation_for_source("s1", {}, {"r1": {"s1": arm_b}}, ["r1", "r2"]),
-            "authorization is per pairing: one request's listing does not cover a second's",
-        )
-        self.assertIsNone(CONTROLLER.reuse_expectation_for_source("s1", {}, {}, ["r1"]))
-
-        def failure(expected, **kwargs):
-            return CONTROLLER.reused_source_reconciliation_failure(
-                "s1",
-                expected,
-                record_fingerprint=kwargs.get("record", record_fingerprint),
-                normalized_fingerprint=kwargs.get("normalized", normalized_fingerprint),
-                normalized_relative=kwargs.get("relative", "sources/normalized/s1.md"),
-                normalized_files_before=kwargs.get("before", {}),
-            )
-
-        self.assertIsNone(failure(arm_a))
-        self.assertIsNone(failure(arm_b))
-        self.assertEqual(False, failure(arm_a, record="sha256:" + "c" * 64)["record_unchanged"])
-        self.assertEqual(
-            False,
-            failure(arm_b, before={"sources/normalized/s1.md": normalized_fingerprint})["normalized_unchanged"],
-            "arm (b) authorizes a new record, never an overwrite of one that was already there",
-        )
-        self.assertEqual(
-            False,
-            failure(arm_b, normalized=None)["normalized_unchanged"],
-            "arm (b) owes the record it was authorized to write",
-        )
-        self.assertEqual(False, failure(None)["was_authorized_at_issuance"])
-        self.assertEqual(
-            True,
-            failure(arm_b, normalized=None)["authorized_normalized_output"],
-            "the refusal says which obligation was owed, not just that one was missed",
-        )
-        self.assertEqual(False, failure(arm_a, record="sha256:" + "c" * 64)["authorized_normalized_output"])
-
-    def test_an_acquisition_order_issued_before_the_reuse_allowlist_still_replays(self):
-        # Additive and optional, like `acquisition_mode`: a pending order written before the
-        # field existed carries no reuse authorization and must replay with reuse simply
-        # unavailable rather than be refused for a field it could not have had. A field that
-        # *is* present and malformed is still refused.
-        source_id = "html:pre-allowlist"
-        fingerprint = "sha256:" + "7" * 64
-        manifest_guard = {
-            "check": "manifest_records_increased",
-            "before": 1,
-            "matching_source_ids_before": [source_id],
-            "matching_source_records_before": {
-                source_id: {"record_fingerprint": fingerprint, "normalized_fingerprint": fingerprint}
-            },
-            "manifest_record_fingerprints_before": {source_id: fingerprint},
-            "raw_tree_before": {
-                "algorithm": "sha256-content-v1",
-                "file_count": 0,
-                "total_bytes": 0,
-                "fingerprint": "sha256:" + hashlib.sha256(b"").hexdigest(),
-                "entries": {},
-            },
-            "candidate_record_fingerprints_before": {},
-            "candidate_audit_record_fingerprints_before": {},
-            "source_request_record_fingerprints_before": {"req-pre-allowlist": fingerprint},
-            "normalized_file_fingerprints_before": {"sources/normalized/pre.md": fingerprint},
-            "question_file_fingerprints_before": {"test-question.md": fingerprint},
-        }
-        work_order = {
-            "phase": "acquisition",
-            "action_id": "action-pre-allowlist",
-            "required_postconditions": [
-                {
-                    "check": "linked_blocked_questions_reopened",
-                    "blocked_questions_before": {
-                        "test-question": {
-                            "status": "blocked",
-                            "blocking_request_ids": ["req-pre-allowlist"],
-                            "source_ids_before": [],
-                        }
-                    },
-                },
-                manifest_guard,
-            ],
-        }
-
-        CONTROLLER.require_acquisition_evidence_baselines(json.loads(json.dumps(work_order)))
-
-        malformed = json.loads(json.dumps(work_order))
-        malformed["required_postconditions"][1]["reusable_source_records_before"] = {
-            "req-pre-allowlist": {source_id: {"record_fingerprint": fingerprint}}
-        }
-        with self.assertRaisesRegex(
-            CONTROLLER.OrchestrationControllerError, "question/evidence baseline"
-        ):
-            CONTROLLER.require_acquisition_evidence_baselines(malformed)
+                manifest_guard["reusable_source_ids_before"] = tampered
+                with (
+                    self.subTest(why=why),
+                    mock.patch.object(
+                        CONTROLLER, "require_action_baselines", side_effect=lambda order, _root: order
+                    ),
+                    self.assertRaisesRegex(
+                        CONTROLLER.OrchestrationControllerError,
+                        "bounded evidence integrity baseline",
+                    ),
+                ):
+                    verify(reopened)
+            manifest_guard["reusable_source_ids_before"] = []
 
     def test_legacy_acquisition_without_reconciliation_baselines_requires_fresh_session(self):
         with self.assertRaisesRegex(
@@ -4969,283 +4684,6 @@ class OrchestrationControllerTests(unittest.TestCase):
                 "a source already delivered for the scoped request must be reconcilable",
             )
 
-    # -- the issuance-time reuse allowlist -------------------------------------------
-
-    def add_scoped_request(self, target: Path, query: str, *scope: str) -> str:
-        argv = [
-            "--project-root", str(target), "add", "--kind", "other",
-            "--query-or-identifier", query,
-            "--rationale", "Scoped request for the reuse allowlist.",
-            "--format", "json",
-        ]
-        for pair in scope:
-            argv.extend(["--scope", pair])
-        return self.assert_json_script_ok(SOURCE_REQUESTS, argv)["request"]["request_id"]
-
-    def deliver_link_source(
-        self,
-        target: Path,
-        name: str,
-        *,
-        request_id: str | None = None,
-        scope: dict[str, str] | None = None,
-        normalize: bool = True,
-    ) -> str:
-        """One pre-existing manifest source, with whatever provenance the case needs."""
-        links = target / "raw" / "links"
-        links.mkdir(parents=True, exist_ok=True)
-        (links / f"{name}.txt").write_text(f"https://example.org/{name}\n", encoding="utf-8")
-        sidecar = [
-            f"origin_url: https://example.org/{name}",
-            "retrieved_at: 2026-08-08T00:00:00Z",
-            "retrieved_by: acquirer-1",
-        ]
-        if request_id is not None:
-            sidecar.append(f"request_id: {request_id}")
-        if scope:
-            sidecar.append("scope:")
-            sidecar.extend(f"  {key}: {value}" for key, value in sorted(scope.items()))
-        (links / f"{name}.txt.provenance.yml").write_text(
-            "\n".join(sidecar) + "\n", encoding="utf-8"
-        )
-        self.assert_json_script_ok(
-            INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
-        )
-        if normalize:
-            self.assert_json_script_ok(
-                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
-            )
-        for line in (target / "sources" / "manifest.jsonl").read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            if f"raw/links/{name}.txt" in record.get("raw_paths", []):
-                return str(record["id"])
-        raise AssertionError(f"no manifest record for raw/links/{name}.txt")
-
-    def test_the_reuse_allowlist_admits_scope_agreement_and_is_keyed_per_request(self):
-        # The allowlist answers a different question from `matching_normalized_source_records`:
-        # not "did this delivery name this request" but "would `fulfill` accept this pairing".
-        # Keyed per request because the answer differs per request -- a source stamped for one
-        # facet is reusable by the request declaring that facet and by no other, and a flat map
-        # would hand the second request an authorization the first one earned.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            target = self.init_workspace(root, question=True)
-            quotes = self.add_scoped_request(target, "supplier quotes", "facet_id=supplier_quote")
-            competitors = self.add_scoped_request(target, "competitor offers", "facet_id=competitor_offer")
-            source_id = self.deliver_link_source(
-                target, "quote", scope={"facet_id": "supplier_quote"}
-            )
-            config = CONTROLLER.load_config(target)
-
-            allowlist = CONTROLLER.reusable_source_records(target, config, [quotes, competitors])
-
-            self.assertEqual([quotes], sorted(allowlist))
-            self.assertEqual([source_id], sorted(allowlist[quotes]))
-            self.assertNotIn(
-                competitors,
-                allowlist,
-                "a source reusable by one request must not become reusable by another",
-            )
-
-    def test_an_unstamped_source_is_reusable_while_the_scoped_match_map_stays_empty(self):
-        # The two maps disagree on purpose. Correlation by sidecar is what
-        # `matching_normalized_source_records` reports and it stays exactly as strict; the
-        # allowlist reports what the controller is willing to authorize instead, which is why
-        # a source correlated to nothing can still be reused and a rewritten one cannot.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            target = self.init_workspace(root, question=True)
-            request_id = self.block_question(target)
-            source_id = self.deliver_link_source(target, "unstamped")
-            config = CONTROLLER.load_config(target)
-
-            self.assertEqual({}, CONTROLLER.matching_normalized_source_records(target, config, [request_id], None))
-            allowlist = CONTROLLER.reusable_source_records(target, config, [request_id])
-            self.assertEqual([source_id], sorted(allowlist[request_id]))
-            self.assertTrue(
-                CONTROLLER.valid_sha256_fingerprint(
-                    allowlist[request_id][source_id]["normalized_fingerprint"]
-                ),
-                "an already-normalized source records both digests",
-            )
-
-    def test_an_un_normalized_source_is_excluded_by_the_is_file_clause_and_reusable_anyway(self):
-        # Pins where the exclusion comes from. A source inventoried but never normalized has a
-        # perfect sidecar, so the request filter admits it and the normalized-output clause is
-        # the only thing that drops it -- which is why the fix is a second map rather than a
-        # relaxed first one. It is in the manifest snapshot throughout, so the verifier can
-        # tell "pre-existing" from "delivered by this action" without either map.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            target = self.init_workspace(root, question=True)
-            request_id = self.block_question(target)
-            source_id = self.deliver_link_source(target, "inventoried", request_id=request_id, normalize=False)
-            config = CONTROLLER.load_config(target)
-
-            self.assertEqual(
-                {},
-                CONTROLLER.matching_normalized_source_records(target, config, [request_id], None),
-                "the sidecar names the scoped request, so only the normalized-output clause can exclude it",
-            )
-            self.assertIn(source_id, CONTROLLER.manifest_record_fingerprint_snapshot(target, config))
-
-            self.assert_json_script_ok(
-                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
-            )
-            self.assertEqual(
-                {source_id},
-                set(CONTROLLER.matching_normalized_source_records(target, config, [request_id], None)),
-                "normalizing it is the only thing that changed, and it is now correlated",
-            )
-
-    def test_a_source_with_nothing_normalized_yet_is_reusable_with_an_explicit_null(self):
-        # Arm (b). The absence of a normalized digest is recorded rather than implied, so the
-        # verifier reads which arm applies off the baseline the controller wrote instead of
-        # inferring it from whatever the action left on disk.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            target = self.init_workspace(root, question=True)
-            request_id = self.block_question(target)
-            source_id = self.deliver_link_source(target, "pending", request_id=request_id, normalize=False)
-            config = CONTROLLER.load_config(target)
-
-            snapshot = CONTROLLER.reusable_source_records(target, config, [request_id])[request_id][source_id]
-
-            self.assertIsNone(snapshot["normalized_fingerprint"])
-            self.assertTrue(CONTROLLER.valid_sha256_fingerprint(snapshot["record_fingerprint"]))
-            self.assertTrue(CONTROLLER.valid_reusable_source_record_snapshot({request_id: {source_id: snapshot}}))
-
-    def test_a_reuse_baseline_missing_the_normalized_key_is_rejected(self):
-        # An explicit null and a missing key are one keystroke apart and mean opposite things.
-        # A truncated baseline must fail closed rather than read as the arm that authorizes a
-        # new normalized file.
-        record_fingerprint = "sha256:" + "a" * 64
-        self.assertTrue(
-            CONTROLLER.valid_reusable_source_record_snapshot(
-                {"req-1": {"link:one": {"record_fingerprint": record_fingerprint, "normalized_fingerprint": None}}}
-            )
-        )
-        self.assertFalse(
-            CONTROLLER.valid_reusable_source_record_snapshot(
-                {"req-1": {"link:one": {"record_fingerprint": record_fingerprint}}}
-            )
-        )
-        for malformed in (
-            {"req-1": {"link:one": {"record_fingerprint": "nope", "normalized_fingerprint": None}}},
-            {"req-1": {"link:one": {"record_fingerprint": record_fingerprint, "normalized_fingerprint": "nope"}}},
-            {"req-1": {"link:one": {"record_fingerprint": record_fingerprint, "normalized_fingerprint": None, "x": 1}}},
-            {"req-1": [record_fingerprint]},
-            {"": {"link:one": {"record_fingerprint": record_fingerprint, "normalized_fingerprint": None}}},
-            "not-a-map",
-        ):
-            with self.subTest(malformed=malformed):
-                self.assertFalse(CONTROLLER.valid_reusable_source_record_snapshot(malformed))
-
-    def test_an_allowlist_beyond_the_bounded_baseline_offers_no_reuse_rather_than_a_subset(self):
-        # The bound is the same one the manifest snapshot beside it carries, so a request is
-        # never limited more tightly than the manifest its reuse would come from. A request
-        # that outgrows it is issued with no reuse at all -- an unstated subset would be an
-        # authorization surface whose contents nobody can name -- and it takes only its own
-        # entry down, because one request outgrowing the bound is not a reason to withdraw
-        # the affordance from every other request in the same order.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            target = self.init_workspace(root, question=True)
-            crowded = self.add_scoped_request(target, "crowded request")
-            spare = self.add_scoped_request(target, "spare request", "facet_id=only_mine")
-            self.deliver_link_source(target, "first", scope={"facet_id": "elsewhere"})
-            self.deliver_link_source(target, "second", scope={"facet_id": "elsewhere"})
-            self.deliver_link_source(target, "third", scope={"facet_id": "only_mine"})
-            config = CONTROLLER.load_config(target)
-
-            allowlist = CONTROLLER.reusable_source_records(target, config, [crowded, spare])
-            self.assertEqual(3, len(allowlist[crowded]))
-            self.assertEqual(1, len(allowlist[spare]))
-
-            with mock.patch.object(CONTROLLER, "MAX_SCOPE_GUARD_ENTRIES", 2):
-                bounded = CONTROLLER.reusable_source_records(target, config, [crowded, spare])
-            self.assertNotIn(crowded, bounded, "the request that outgrew the bound offers no reuse")
-            self.assertEqual(1, len(bounded[spare]), "and takes no other request down with it")
-
-    def test_a_reuse_allowlist_naming_a_source_the_manifest_baseline_does_not_is_rejected(self):
-        # Correlation accepts an authorized source without consulting its sidecar, and both
-        # the reuse guard and reconciliation only walk sources the manifest baseline holds --
-        # so an allowlist entry outside it would be checked by nothing at all. The two maps
-        # come from one manifest read, so disagreeing means the baseline was tampered with.
-        fingerprint = "sha256:" + "d" * 64
-        allowlist = {"req-1": {"link:known": {"record_fingerprint": fingerprint, "normalized_fingerprint": None}}}
-
-        self.assertTrue(
-            CONTROLLER.reuse_allowlist_names_only_known_records(allowlist, {"link:known": fingerprint})
-        )
-        self.assertFalse(
-            CONTROLLER.reuse_allowlist_names_only_known_records(allowlist, {"link:other": fingerprint})
-        )
-        self.assertTrue(CONTROLLER.reuse_allowlist_names_only_known_records({}, {}))
-        self.assertFalse(CONTROLLER.reuse_allowlist_names_only_known_records(None, {}))
-
-    def test_a_per_request_baseline_is_counted_by_the_pairings_it_carries(self):
-        # The published entry counter bounds how much a baseline sidecar can hold. A map
-        # keyed by request nests one level deeper than the flat snapshots, so counting its
-        # top-level keys would report requests and leave its real size uncounted.
-        fingerprint = "sha256:" + "e" * 64
-        self.assertEqual(
-            3,
-            CONTROLLER.baseline_value_count(
-                {
-                    "req-1": {
-                        "link:one": {"record_fingerprint": fingerprint, "normalized_fingerprint": None},
-                        "link:two": {"record_fingerprint": fingerprint, "normalized_fingerprint": None},
-                    },
-                    "req-2": {"link:one": {"record_fingerprint": fingerprint, "normalized_fingerprint": None}},
-                }
-            ),
-        )
-        self.assertEqual(
-            1,
-            CONTROLLER.baseline_value_count(
-                {"link:one": {"record_fingerprint": fingerprint, "normalized_fingerprint": fingerprint}}
-            ),
-            "the flat scoped-match snapshot keeps counting records, exactly as it did",
-        )
-        self.assertEqual(2, CONTROLLER.baseline_value_count({"a": fingerprint, "b": fingerprint}))
-        self.assertEqual(1, CONTROLLER.baseline_value_count(7))
-
-    def test_the_reuse_allowlist_externalises_and_stays_inside_the_published_field_count(self):
-        # The allowlist rides in the protected 8 MiB sidecar rather than the 256 KiB order, and
-        # it is the twelfth baseline field an acquisition order externalises -- exactly the
-        # ceiling the published work-order schema states. A thirteenth would need the schema
-        # raised in the same change.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            target = self.init_workspace(root, question=True)
-            request_id = self.block_question(target)
-            source_id = self.deliver_link_source(target, "earlier")
-            self.delegated_session(target)
-
-            order = self.issue_delegated_order(target)
-
-            guard = next(
-                check for check in order["required_postconditions"]
-                if check["check"] == "controller_integrity_baseline"
-            )
-            self.assertEqual(12, guard["field_count"])
-            self.assertNotIn(
-                "reusable_source_records_before",
-                json.dumps(order),
-                "the allowlist belongs in the protected baseline, not in the published order",
-            )
-            manifest_guard = next(
-                check for check in self.hydrated_order(target, order)["required_postconditions"]
-                if check["check"] == "manifest_records_increased"
-            )
-            self.assertEqual(
-                [source_id],
-                sorted(manifest_guard["reusable_source_records_before"][request_id]),
-            )
-
     def test_candidate_correlation_is_required_in_provider_mode_and_skipped_when_delegated(self):
         # `matching_normalized_source_records` gained an optional candidate scope for
         # delegated orders. Provider orders must keep correlating on the candidate: a
@@ -5345,8 +4783,13 @@ class OrchestrationControllerTests(unittest.TestCase):
         name: str = "supplier-quote",
         sidecar_request_id: str | None = "",
         with_sidecar: bool = True,
+        normalize: bool = True,
     ) -> str:
-        """Deliver one acquirer-style artifact with a provenance sidecar, no candidate."""
+        """Deliver one acquirer-style artifact with a provenance sidecar, no candidate.
+
+        `normalize=False` stops after the inventory, which is where a workspace sits when a
+        prior order delivered evidence and never got as far as normalizing it.
+        """
         relative = f"raw/papers/{name}.html"
         path = target / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -5373,9 +4816,10 @@ class OrchestrationControllerTests(unittest.TestCase):
         self.assert_json_script_ok(
             INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
         )
-        self.assert_json_script_ok(
-            NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
-        )
+        if normalize:
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
         manifest = (target / "sources" / "manifest.jsonl").read_text(encoding="utf-8")
         for line in manifest.splitlines():
             record = json.loads(line)
@@ -5868,6 +5312,354 @@ class OrchestrationControllerTests(unittest.TestCase):
                     apply_effects=False,
                 )
             self.assertIn("bounded evidence integrity baseline", str(caught.exception))
+
+    # -- reuse of correlated evidence nothing normalized yet ---------------------------
+
+    def reuse_selector(self, tmpdir: str, records: list[dict], normalized_ids: set[str]):
+        """Both issuance-time baselines over one hand-built manifest.
+
+        Returns `(matching, reusable)` so the pair can be read together: they answer the
+        same correlation question and split on one clause, and a test that saw only one of
+        them could not tell a source that moved between them from one that fell out of both.
+        """
+        root = Path(tmpdir)
+        normalized_root = root / "sources" / "normalized"
+        normalized_root.mkdir(parents=True, exist_ok=True)
+        for source_id in normalized_ids:
+            (normalized_root / f"{source_id.replace(':', '--')}.md").write_text(
+                f"---\ntype: normalized_source\nsource_id: {source_id}\n---\n\nbody\n",
+                encoding="utf-8",
+            )
+        normalize_sources = mock.Mock()
+        normalize_sources.source_paths.return_value = ("sources/manifest.jsonl", "sources/normalized")
+        normalize_sources.load_manifest.return_value = records
+        normalize_sources.normalized_output_path_for_record.side_effect = (
+            lambda record, output_root: output_root / f"{str(record['id']).replace(':', '--')}.md"
+        )
+        with mock.patch.object(CONTROLLER, "load_sibling_module", return_value=normalize_sources):
+            return (
+                CONTROLLER.matching_normalized_source_records(root, {}, ["req-scoped"], None),
+                CONTROLLER.unnormalized_matching_source_ids(root, {}, ["req-scoped"], None),
+            )
+
+    def test_the_two_reuse_baselines_split_on_the_is_file_clause_and_nothing_else(self):
+        """The whole widening, pinned to the one clause it is.
+
+        Two records with identical correlation, differing only in whether anything has
+        normalized them. One lands in the map that fingerprints both digests; the other in
+        the list that authorizes the record it still owes. Neither lands in both, which is
+        what lets the verifier read the reuse terms off the baseline rather than off the
+        state the action left behind.
+        """
+        records = [
+            {"id": "raw:already-normalized", "provenance": {"request_id": "req-scoped"}},
+            {"id": "raw:not-normalized-yet", "provenance": {"request_id": "req-scoped"}},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            matching, reusable = self.reuse_selector(tmpdir, records, {"raw:already-normalized"})
+
+        self.assertEqual(["raw:already-normalized"], sorted(matching))
+        self.assertEqual(["raw:not-normalized-yet"], reusable)
+        self.assertEqual(set(), set(matching) & set(reusable))
+
+    def test_evidence_correlated_to_another_request_or_to_nothing_is_not_reusable(self):
+        """The predicate is correlation, and correlation only.
+
+        Every other field a reuse rule could read -- the delivery's scope, its timing, its
+        retriever -- is written by the same untrusted party as `request_id` itself, so a
+        rule that read one of them would authorize whatever that party decided to write.
+        These three are the shapes that rule would have admitted.
+        """
+        records = [
+            {"id": "raw:another-request", "provenance": {"request_id": "req-elsewhere"}},
+            {"id": "raw:no-request", "provenance": {"retrieved_by": "acquirer-1"}},
+            {"id": "raw:no-provenance", "provenance": None},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            matching, reusable = self.reuse_selector(tmpdir, records, set())
+
+        self.assertEqual({}, matching)
+        self.assertEqual([], reusable)
+
+    def test_a_reuse_baseline_beyond_the_bounded_contract_is_refused_at_issuance(self):
+        records = [
+            {"id": f"raw:pending-{index:04d}", "provenance": {"request_id": "req-scoped"}}
+            for index in range(CONTROLLER.MAX_SCOPE_IDS + 1)
+        ]
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught,
+        ):
+            self.reuse_selector(tmpdir, records, set())
+
+        self.assertEqual("ORCHESTRATION_SCOPE_EXCEEDED", caught.exception.error_code)
+
+    def test_the_reuse_baseline_validator_bounds_names_and_disambiguates(self):
+        """Three properties, because a verifier acting on any of it needs all three."""
+        manifest = {"raw:a": "sha256:" + "1" * 64, "raw:b": "sha256:" + "2" * 64}
+        valid = CONTROLLER.valid_unnormalized_reuse_baseline
+
+        self.assertTrue(valid([], [], manifest))
+        self.assertTrue(valid(["raw:a"], ["raw:b"], manifest))
+        # Not a bounded list of scope ids.
+        self.assertFalse(valid({"raw:a": {}}, [], manifest))
+        self.assertFalse(valid(["raw:a", ""], [], manifest))
+        self.assertFalse(
+            valid([f"raw:pad-{index}" for index in range(CONTROLLER.MAX_SCOPE_IDS + 1)], [], manifest)
+        )
+        # Names a record the manifest baseline does not, so nothing would check it.
+        self.assertFalse(valid(["raw:invented"], [], manifest))
+        # In both maps at once, so which reuse terms apply would depend on lookup order.
+        self.assertFalse(valid(["raw:a"], ["raw:a"], manifest))
+
+    def test_a_source_whose_normalization_reads_unpinned_inputs_is_not_reusable(self):
+        """Re-derivation is only as strong as what the order pinned, and says so.
+
+        A `codebase:` record normalizes from an artifact bundle under the configured
+        codebase output directory, which neither the raw-tree baseline nor the normalized
+        one fingerprints. Re-deriving such a record would confirm its body against an input
+        the acquirer can write during the order, which is the one thing this check exists
+        to prevent, so the reuse is withheld instead.
+        """
+        normalize_sources = CONTROLLER.load_sibling_module("normalize_sources")
+        record = {
+            "id": "codebase:example",
+            "kind": normalize_sources.CODEBASE_KIND,
+            "raw_paths": ["raw/code/example"],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            normalized_path = root / "sources" / "normalized" / "codebase--example.md"
+            normalized_path.parent.mkdir(parents=True)
+            normalized_path.write_text(
+                "---\ntype: normalized_source\nsource_id: codebase:example\n"
+                "updated: 2026-08-18\nnormalized_at: 2026-08-18T00:00:00Z\n---\n\nbody\n",
+                encoding="utf-8",
+            )
+
+            failure = CONTROLLER.normalized_output_derivation_failure(
+                root, {}, record, normalized_path, [record], normalize_sources
+            )
+
+        self.assertEqual(
+            "the reused source normalizes from artifacts this order does not fingerprint",
+            failure["reason"],
+        )
+
+    def test_each_acquisition_arm_offers_a_recourse_that_arm_actually_has(self):
+        """One set of reuse terms, two recourses, because the arms end requests differently.
+
+        A delegated batch reports a request it could not satisfy as an attempt failure. The
+        provider arm has no such outcome — every scoped request must be fulfilled — so
+        telling it to record one would be advice its own fulfilment guard then refuses,
+        which is the CR-15c shape.
+        """
+        terms = CONTROLLER.REUSE_SCOPE_TERMS
+        self.assertTrue(CONTROLLER.REUSE_SCOPE_REMEDIATION.startswith(terms))
+        self.assertTrue(CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION.startswith(terms))
+        self.assertIn("record-attempt-failure", CONTROLLER.REUSE_SCOPE_REMEDIATION)
+        self.assertNotIn("record-attempt-failure", CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION)
+        self.assertIn("another selected candidate", CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION)
+
+    def tampered_reuse_baseline(self, order: dict, value: list[str]) -> dict:
+        for check in order["required_postconditions"]:
+            if check["check"] == "manifest_records_increased":
+                check["reusable_source_ids_before"] = value
+        return order
+
+    def hydrated_pending_order(self, target: Path, action_id: str = "action-0001") -> dict:
+        return CONTROLLER.hydrate_integrity_baselines(
+            target,
+            CONTROLLER.load_json_object(
+                CONTROLLER.work_order_path(target, "orch-test", action_id),
+                error_code="WORK_ORDER_INVALID",
+                label="work order",
+            ),
+        )
+
+    def verify_delegated(self, target: Path, order: dict):
+        return CONTROLLER.verify_delegated_acquisition_postconditions(
+            target,
+            CONTROLLER.load_session(target, "orch-test"),
+            order,
+            config=CONTROLLER.load_config(target),
+            status=CONTROLLER.fresh_workspace_status(target),
+            run_id=order.get("run_id"),
+            current="fetching",
+            controller=CONTROLLER.load_sibling_module("run_controller"),
+            apply_effects=False,
+        )
+
+    def test_a_reuse_baseline_naming_an_unknown_record_is_refused_at_replay(self):
+        """Wiring site one: the guard that decides a pending order is replayable at all."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, _ = self.delegated_action(Path(tmpdir))
+            order = self.tampered_reuse_baseline(
+                self.hydrated_pending_order(target), ["raw:never-in-this-manifest"]
+            )
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                CONTROLLER.require_acquisition_evidence_baselines(order)
+
+            self.assertEqual(
+                "ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE", caught.exception.error_code
+            )
+
+    def test_a_reuse_baseline_naming_an_unknown_record_is_refused_by_the_delegated_arm(self):
+        """Wiring site two. An id outside the manifest baseline is checked by nothing.
+
+        Reconciliation only walks sources the manifest snapshot holds, so an allowlist that
+        reaches past it would silently authorize an id no guard ever looks at. The two maps
+        are written together from one manifest read, so disagreeing means tampering.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+            order = self.tampered_reuse_baseline(
+                self.hydrated_pending_order(target), ["raw:never-in-this-manifest"]
+            )
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                self.verify_delegated(target, order)
+
+            self.assertIn("bounded evidence integrity baseline", str(caught.exception))
+
+    def test_an_order_issued_before_reuse_existed_replays_unchanged(self):
+        """The field is additive: a pending order without it verifies exactly as it did."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+            order = self.hydrated_pending_order(target)
+            manifest_guard = next(
+                check
+                for check in order["required_postconditions"]
+                if check["check"] == "manifest_records_increased"
+            )
+            self.assertEqual([], manifest_guard.pop("reusable_source_ids_before"))
+
+            CONTROLLER.require_acquisition_evidence_baselines(order)
+
+            self.assertEqual(("research", None), self.verify_delegated(target, order))
+
+    def test_an_order_issued_before_reuse_existed_replays_with_reuse_unavailable(self):
+        """And it is additive in the other direction too: the affordance is simply absent.
+
+        The same workspace, the same fulfilment, one field removed. With the field the
+        reuse is authorized and the action verifies; without it the action is refused, and
+        refused for the reason that is actually true of a pre-reuse order -- this order
+        authorized none -- rather than for a mislabelled one.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            source_id = self.deliver_for_request(target, request_id, normalize=False)
+            self.delegated_session(target)
+            code, _, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+
+            self.assertEqual(("research", None), self.verify_delegated(target, self.hydrated_pending_order(target)))
+
+            legacy = self.tampered_reuse_baseline(self.hydrated_pending_order(target), [])
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                self.verify_delegated(target, legacy)
+
+            self.assertIn("reuses pre-existing evidence", str(caught.exception))
+            self.assertEqual(
+                [{"source_id": source_id, "cause": "no_reuse_authorization_at_issuance",
+                  "provenance_request_id": request_id, "record_unchanged": True}],
+                caught.exception.details["reuse_scope_failures"],
+            )
+
+    def test_the_reuse_baseline_authorises_exactly_one_normalized_record(self):
+        """The unit-level view of what the arm widens: `allowed_new_normalized_paths`.
+
+        Asserted on the returned set rather than through a refusal, because the boundary
+        that matters is what the set *contains* -- an arm the order recorded as already
+        normalized must contribute nothing to it, or its byte-identity guarantee quietly
+        becomes optional and no single refusal would show that.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            reused = self.deliver_for_request(target, request_id, normalize=False)
+            self.delegated_session(target)
+            code, _, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+
+            order = self.hydrated_pending_order(target)
+            manifest_guard = next(
+                check
+                for check in order["required_postconditions"]
+                if check["check"] == "manifest_records_increased"
+            )
+            self.assertEqual([reused], manifest_guard["reusable_source_ids_before"])
+            self.assertEqual({}, manifest_guard["matching_source_records_before"])
+
+            normalize_sources = CONTROLLER.load_sibling_module("normalize_sources")
+            config = CONTROLLER.load_config(target)
+            manifest_relative, normalized_relative = normalize_sources.source_paths(config)
+            by_source_id = normalize_sources.records_by_source_id(
+                normalize_sources.load_manifest(target / manifest_relative)
+            )
+
+            allowed, required = CONTROLLER.normalized_output_scope(
+                target, target / normalized_relative, {reused}, by_source_id, normalize_sources
+            )
+            self.assertEqual({f"sources/normalized/{reused.replace(':', '--')}.md"}, allowed)
+            self.assertEqual(allowed, required)
+
+            # The arm that was normalized at issuance contributes nothing at all.
+            empty_allowed, empty_required = CONTROLLER.normalized_output_scope(
+                target, target / normalized_relative, set(), by_source_id, normalize_sources
+            )
+            self.assertEqual(set(), empty_allowed)
+            self.assertEqual(set(), empty_required)
+
+    def test_an_authored_normalized_body_is_refused_for_a_reused_source(self):
+        """The reuse authorizes a path; re-derivation is what binds the bytes to the raw.
+
+        Every other artifact a reuse touches is pinned by a digest the order took before the
+        acquirer started. The normalized record is the one it may create, and it is the one
+        the wiki quotes, so the verifier normalizes the unchanged raw evidence itself and
+        compares rather than trusting that a new file is a derived one.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            source_id = self.deliver_for_request(target, request_id, normalize=False)
+            self.delegated_session(target)
+            code, _, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+            record = target / "sources" / "normalized" / f"{source_id.replace(':', '--')}.md"
+            record.write_text(
+                record.read_text(encoding="utf-8").replace("23.99 EUR", "1.00 EUR"),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                self.verify_delegated(target, self.hydrated_pending_order(target))
+
+            failure = caught.exception.details["reconciliation_failures"][0]
+            self.assertEqual(source_id, failure["source_id"])
+            self.assertTrue(failure["was_authorized_unnormalized"])
+            self.assertTrue(failure["record_unchanged"])
+            self.assertEqual(
+                "normalized evidence is not what normalizing the raw evidence produces",
+                failure["derivation_failure"]["reason"],
+            )
 
     # -- delegated acquisition: blocked-path verification -----------------------------
 
@@ -7407,6 +7199,38 @@ class NormalizedOutputScopeTests(unittest.TestCase):
                 self.assertTrue(
                     called & shared,
                     f"{node.name} bounds normalized outputs without the shared allowance",
+                )
+            wanted = wanted - {node.name}
+        self.assertEqual(set(), wanted, f"postcondition functions not found: {sorted(wanted)}")
+
+    def test_both_acquisition_arms_hold_reuse_to_the_same_shared_terms(self):
+        """The symmetry CR-17 required, asserted where it can actually be broken.
+
+        `workspace-template/docs/orchestration.md` states that the two arms admit reuse on
+        the same terms, and the delegated verifier's own docstring counts the differences
+        between them. Both claims stay true only while the reuse decision lives in shared
+        helpers, so this fails if either arm grows its own copy.
+        """
+        tree = ast.parse(Path(CONTROLLER.__file__).read_text(encoding="utf-8"))
+        wanted = {"verify_delegated_acquisition_postconditions", "verify_action_postconditions"}
+        shared = {
+            "preexisting_reuse_scope_failures",
+            "reused_source_reconciliation_failure",
+            "valid_unnormalized_reuse_baseline",
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in wanted:
+                continue
+            called = {
+                getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+            }
+            with self.subTest(function=node.name):
+                self.assertEqual(
+                    shared,
+                    shared & called,
+                    f"{node.name} decides reuse without one of the shared helpers",
                 )
             wanted = wanted - {node.name}
         self.assertEqual(set(), wanted, f"postcondition functions not found: {sorted(wanted)}")
