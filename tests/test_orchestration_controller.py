@@ -5578,6 +5578,30 @@ class OrchestrationControllerTests(unittest.TestCase):
                 self.assertNotEqual(root.resolve(), sandbox.resolve())
             self.assertFalse(sandbox.exists(), "the sandbox outlived the re-derivation")
 
+    def test_the_re_derivation_sandbox_refuses_a_multiply_linked_input(self):
+        """Singly linked, not merely regular -- the constraint every sibling guard applies.
+
+        `file_tree_fingerprint_snapshot` and `file_digest` both refuse a file whose
+        `st_nlink` exceeds one, because a second name for the same inode makes "which path
+        was verified" unanswerable. The sandbox copies inputs by path, so admitting one
+        would re-derive evidence from bytes no baseline fingerprinted under that name --
+        the confinement checking a weaker property than the guards it stands beside.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "normalize_sources.py").write_text("x = 1\n", encoding="utf-8")
+            target = root / "scripts" / "shared.py"
+            target.write_text("y = 2\n", encoding="utf-8")
+            os.link(target, root / "scripts" / "alias.py")
+
+            module = CONTROLLER.load_sibling_module("normalize_sources")
+            item = SimpleNamespace(method=module.ADAPTER_METHOD)
+            with self.assertRaises(CONTROLLER.RederivationSandboxError) as caught:
+                with CONTROLLER.rederivation_root(root, item, module, []):
+                    pass
+            self.assertIn("singly linked", str(caught.exception))
+
     def test_a_stamped_pdf_extractor_is_resolved_through_the_allowlist_not_executed(self):
         """The record is the acquirer's file, so the extractor it names is untrusted text.
 

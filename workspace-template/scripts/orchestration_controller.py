@@ -3025,8 +3025,15 @@ def rederivation_root(
                 for child in children:
                     copy_entry(relative / child.name)
                 return
-            if not stat.S_ISREG(metadata.st_mode):
-                raise RederivationSandboxError(f"{relative.as_posix()} is not a regular file")
+            # Singly linked, not merely regular: every sibling integrity guard requires it
+            # (`file_tree_fingerprint_snapshot`, `file_digest`), because a second name for
+            # the same inode makes "which path was verified" unanswerable. A sandbox that
+            # copied one would re-derive from bytes no baseline fingerprinted under that
+            # name.
+            if not stat.S_ISREG(metadata.st_mode) or int(getattr(metadata, "st_nlink", 1) or 1) != 1:
+                raise RederivationSandboxError(
+                    f"{relative.as_posix()} is not a singly linked regular file"
+                )
             copied["files"] += 1
             copied["bytes"] += int(metadata.st_size)
             if (
