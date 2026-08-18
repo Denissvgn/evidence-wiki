@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import copy
 import hashlib
@@ -11,9 +12,80 @@ from typing import Any
 
 from evidence_wiki import cli, orchestration
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CONTROLLER_SOURCE = REPO_ROOT / "workspace-template" / "scripts" / "orchestration_controller.py"
+
 
 def _json_key(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _controller_tree() -> ast.Module:
+    return ast.parse(CONTROLLER_SOURCE.read_text(encoding="utf-8"))
+
+
+def controller_baseline_field_names() -> set[str]:
+    """The names in the controller's own ``INTEGRITY_BASELINE_FIELDS``.
+
+    Read from source rather than imported: this test file validates the *published*
+    contract and must not load workspace code to do it, for the same reason
+    ``orchestration_schemas`` declares the acquisition modes literally.
+    """
+    for node in ast.walk(_controller_tree()):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "INTEGRITY_BASELINE_FIELDS"
+            for target in node.targets
+        ):
+            continue
+        return {
+            element.value
+            for element in ast.walk(node.value)
+            if isinstance(element, ast.Constant) and isinstance(element.value, str)
+        }
+    raise AssertionError("the controller no longer declares INTEGRITY_BASELINE_FIELDS")
+
+
+def acquisition_order_baseline_fields() -> set[str]:
+    """Baseline fields the acquisition branch of ``action_spec`` actually emits.
+
+    Computed rather than written down, because the number is the whole point: the
+    published ceiling exists to be at or above what an acquisition order carries, and a
+    literal in a test cannot notice a new field being added to the order.
+    """
+    spec = next(
+        node
+        for node in ast.walk(_controller_tree())
+        if isinstance(node, ast.FunctionDef) and node.name == "action_spec"
+    )
+    branches = [
+        node
+        for node in ast.walk(spec)
+        if isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "route"
+        and any(
+            isinstance(value, ast.Constant) and value.value == "acquisition"
+            for value in node.comparators
+        )
+    ]
+    if not branches:
+        raise AssertionError("action_spec no longer branches on the acquisition route")
+    enclosing = [
+        node
+        for node in ast.walk(spec)
+        if isinstance(node, ast.If) and any(branch in ast.walk(node.test) for branch in branches)
+    ]
+    emitted = {
+        key.value
+        for node in enclosing
+        for mapping in ast.walk(node)
+        if isinstance(mapping, ast.Dict)
+        for key in mapping.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    return emitted & controller_baseline_field_names()
 
 
 def assert_matches_schema(value: Any, schema: dict[str, Any], *, root: dict[str, Any] | None = None) -> None:
@@ -589,12 +661,21 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 assert_matches_schema(order, order_schema)
 
-    def test_the_baseline_field_count_ceiling_is_the_acquisition_orders_own_count(self):
-        """The published ceiling is not slack: an acquisition order sits exactly on it.
+    def test_the_published_baseline_ceiling_covers_what_the_controller_emits(self):
+        """The published bound must never trail the controller's own.
 
-        Every other phase externalises fewer baseline fields, so this bound is set by the
-        acquisition order alone and a thirteenth field would have to raise it here, in the
-        published schema, rather than quietly emit an order no host can validate.
+        Two numbers say how large a controller integrity baseline may be: the controller
+        accepts up to ``len(INTEGRITY_BASELINE_FIELDS)`` fields on replay, and this schema
+        publishes a maximum every host validating an order enforces. They are shipped in
+        *different distributions*, so when the controller gains a baseline field and the
+        schema does not, the controller emits and accepts an order that every
+        schema-validating host rejects — a contract break that surfaces at the point where
+        the two are hardest to correlate.
+
+        So the acquisition order's field count is computed from ``action_spec`` rather than
+        written down, and both the controller's bound and the published one are held above
+        it. Asserting a literal could not see a new field being added to the order, which
+        is exactly the change that breaks this.
         """
         order_schema = cli._contract_payload()["artifact_schema_documents"]["orchestration_work_order"]
         guard_schema = next(
@@ -602,7 +683,30 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
             for option in order_schema["properties"]["required_postconditions"]["items"]["oneOf"]
             if option["properties"]["check"].get("const") == "controller_integrity_baseline"
         )
-        self.assertEqual(12, guard_schema["properties"]["field_count"]["maximum"])
+        published_ceiling = guard_schema["properties"]["field_count"]["maximum"]
+        controller_ceiling = len(controller_baseline_field_names())
+        emitted = acquisition_order_baseline_fields()
+
+        # Guard the guard: a walk that stopped finding the acquisition branch would
+        # otherwise certify an empty set as being under every bound.
+        self.assertIn("matching_source_records_before", emitted)
+        self.assertIn("raw_tree_before", emitted)
+        self.assertLessEqual(
+            len(emitted),
+            controller_ceiling,
+            "an acquisition order emits more baseline fields than the controller accepts on replay",
+        )
+        self.assertGreaterEqual(
+            published_ceiling,
+            controller_ceiling,
+            "the published field_count ceiling trails the controller's INTEGRITY_BASELINE_FIELDS, so the "
+            "controller would accept an order every schema-validating host rejects",
+        )
+        self.assertGreaterEqual(
+            guard_schema["properties"]["entry_count"]["maximum"],
+            controller_ceiling * 10_000,
+            "the published entry_count ceiling trails MAX_SCOPE_GUARD_ENTRIES x INTEGRITY_BASELINE_FIELDS",
+        )
 
         guard = {
             "check": "controller_integrity_baseline",
@@ -610,12 +714,14 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
                 "runs/orchestrations/orch-schema/trusted-inputs/action-0001-scope-baseline.json"
             ),
             "fingerprint": "sha256:" + "6" * 64,
-            "field_count": 12,
+            "field_count": len(emitted),
             "entry_count": 0,
         }
         assert_matches_schema(guard, guard_schema, root=order_schema)
         with self.assertRaises(AssertionError):
-            assert_matches_schema({**guard, "field_count": 13}, guard_schema, root=order_schema)
+            assert_matches_schema(
+                {**guard, "field_count": published_ceiling + 1}, guard_schema, root=order_schema
+            )
 
     def test_orchestration_docs_name_both_contract_surfaces(self):
         root = Path(__file__).resolve().parents[1]
