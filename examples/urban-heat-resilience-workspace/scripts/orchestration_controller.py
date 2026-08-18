@@ -2484,6 +2484,13 @@ def require_acquisition_evidence_baselines(work_order: dict[str, Any]) -> None:
     matching_source_records_before = (
         manifest_guard.get("matching_source_records_before") if isinstance(manifest_guard, dict) else None
     )
+    # Additive and optional, the way `acquisition_mode` is: an order issued before the reuse
+    # allowlist existed carries no key, replays with reuse unavailable, and is not refused
+    # for it. Present-but-malformed is still refused, which is why absence defaults to an
+    # empty map rather than skipping the check.
+    reusable_source_records_before = (
+        manifest_guard.get("reusable_source_records_before", {}) if isinstance(manifest_guard, dict) else None
+    )
     manifest_records_before = (
         manifest_guard.get("manifest_record_fingerprints_before") if isinstance(manifest_guard, dict) else None
     )
@@ -2509,6 +2516,8 @@ def require_acquisition_evidence_baselines(work_order: dict[str, Any]) -> None:
         matching_source_ids_before
     ) and valid_matching_source_record_snapshot(matching_source_records_before) and (
         set(matching_source_ids_before) == set(matching_source_records_before)
+    ) and valid_reusable_source_record_snapshot(
+        reusable_source_records_before
     ) and valid_record_fingerprint_snapshot(manifest_records_before) and (
         set(matching_source_ids_before) <= set(manifest_records_before)
     ) and valid_raw_tree_snapshot(raw_tree_before, include_entries=True) and valid_record_fingerprint_snapshot(
@@ -3195,6 +3204,161 @@ def valid_matching_source_record_snapshot(value: Any) -> bool:
             for snapshot in value.values()
         )
     )
+
+
+def reusable_source_records(
+    project_root: Path,
+    config: dict[str, Any],
+    request_ids: list[str],
+) -> dict[str, dict[str, dict[str, str | None]]]:
+    """Fingerprint, per scoped request, the pre-existing evidence it may legitimately reuse.
+
+    A sibling of ``matching_normalized_source_records`` rather than a widening of it. That
+    map answers "already correlated to this request" -- the delivery's own sidecar names it
+    -- and stays exactly as strict. This one answers the question the CLI already answers
+    every time it fulfils a request from the manifest: is this pre-existing source one this
+    request is *allowed* to reuse? The predicate is the CLI's own ``check_fulfill_scope``
+    over the delivery's provenance scope, so the two layers cannot come to different
+    conclusions about which pairings are legitimate.
+
+    Keyed per request, because reusability is a property of the pairing. A source request B
+    may reuse must not become reusable by request A for having been listed once.
+
+    Two arms in one map, told apart by ``normalized_fingerprint`` rather than by which key
+    is present, so a truncated baseline fails closed instead of reading as the weaker arm.
+    A source that already carried a normalized record at issuance records both digests and
+    must stay byte-identical in both. One that carried none records an explicit ``None`` and
+    owes a normalized output this order authorizes it to create. The ``is_file()`` clause in
+    ``matching_normalized_source_records`` is untouched: "nothing normalized this yet" is
+    disqualifying there and admissible here.
+
+    Computed once, at issuance, from state the acquirer has not touched, and persisted in
+    the protected baseline sidecar. Nothing written during the order can add an entry.
+    """
+    source_requests = load_sibling_module("source_requests")
+    normalize_sources = load_sibling_module("normalize_sources")
+    requests_by_id = {
+        str(record.get("request_id")): record
+        for record in source_requests.load_requests(source_requests.requests_path(project_root, config))
+        if isinstance(record, dict) and isinstance(record.get("request_id"), str)
+    }
+    manifest_relative, normalized_relative = normalize_sources.source_paths(config)
+    records = normalize_sources.load_manifest(project_root / manifest_relative)
+    normalized_root = project_root / normalized_relative
+    scoped_records: list[tuple[str, dict[str, Any], dict[str, str]]] = []
+    for record in records:
+        source_id = record.get("id") if isinstance(record, dict) else None
+        if not isinstance(source_id, str) or not valid_scope_id_list([source_id]):
+            continue
+        provenance = record.get("provenance") if isinstance(record, dict) else None
+        # ``source_requests.source_provenance_scope`` reads this off the same merged manifest
+        # record. Taking it from the record already in hand keeps the pass linear in the
+        # manifest instead of re-reading the whole file once per source.
+        source_scope = (
+            source_requests.normalize_scope(provenance.get("scope")) if isinstance(provenance, dict) else {}
+        )
+        scoped_records.append((source_id, record, source_scope))
+
+    fingerprinted: dict[str, dict[str, str | None] | None] = {}
+
+    def fingerprints(source_id: str, record: dict[str, Any]) -> dict[str, str | None] | None:
+        if source_id in fingerprinted:
+            return fingerprinted[source_id]
+        normalized_path = normalize_sources.normalized_output_path_for_record(record, normalized_root)
+        normalized_fingerprint: str | None = None
+        if isinstance(normalized_path, Path) and normalized_path.is_file():
+            normalized_fingerprint = file_digest(
+                normalized_path,
+                max_bytes=MAX_VERIFICATION_ARTIFACT_BYTES,
+                containment_root=project_root,
+            )
+            if normalized_fingerprint is None:
+                # Unreadable or oversized. Authorizing evidence that cannot be fingerprinted
+                # is the one thing this map exists to prevent, so the source is simply not
+                # reusable -- and it is not silently accepted either, because a source the
+                # order *did* correlate still fails the sibling map outright.
+                fingerprinted[source_id] = None
+                return None
+        snapshot: dict[str, str | None] = {
+            "record_fingerprint": canonical_json_fingerprint(record, label="evidence manifest")[0],
+            "normalized_fingerprint": normalized_fingerprint,
+        }
+        fingerprinted[source_id] = snapshot
+        return snapshot
+
+    admitted_by_request: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    admitted_total = 0
+    for request_id in sorted(set(request_ids)):
+        request = requests_by_id.get(request_id)
+        if not isinstance(request, dict):
+            continue
+        admitted: list[tuple[str, dict[str, Any]]] = []
+        for source_id, record, source_scope in scoped_records:
+            try:
+                source_requests.check_fulfill_scope(request, source_id, source_scope, {}, require_scope=False)
+            except source_requests.RequestScopeError:
+                continue
+            admitted.append((source_id, record))
+        if not admitted:
+            continue
+        admitted_total += len(admitted)
+        if admitted_total > MAX_SCOPE_GUARD_ENTRIES:
+            # More pairings agree than one bounded baseline can carry. The order still
+            # issues and offers no reuse at all -- the state an order issued before this
+            # field existed replays in -- rather than offering an unstated subset of them.
+            # Bounded by the same limit as the manifest snapshot beside it, so this map is
+            # never the reason an order a manifest guard would have accepted is refused.
+            return {}
+        admitted_by_request[request_id] = admitted
+
+    reusable: dict[str, dict[str, dict[str, str | None]]] = {}
+    for request_id, admitted in admitted_by_request.items():
+        allowed = {
+            source_id: snapshot
+            for source_id, record in admitted
+            if (snapshot := fingerprints(source_id, record)) is not None
+        }
+        if allowed:
+            reusable[request_id] = dict(sorted(allowed.items()))
+    return dict(sorted(reusable.items()))
+
+
+def valid_reusable_source_record_snapshot(value: Any) -> bool:
+    """Validate the per-request reuse allowlist, admitting arm (b)'s explicit null.
+
+    An absent ``normalized_fingerprint`` key is rejected rather than read as "nothing was
+    normalized at issuance". The two are one keystroke apart and mean opposite things, so a
+    baseline that lost the key fails closed instead of quietly claiming the weaker arm.
+
+    Bounded on both axes and on the total, so a hostile baseline cannot make verification
+    walk an unbounded map: request ids are order scope ids, and the pairings they carry are
+    limited exactly as the manifest snapshot beside them is.
+    """
+    if not isinstance(value, dict) or len(value) > MAX_SCOPE_IDS or not valid_scope_id_list(sorted(value)):
+        return False
+    total = 0
+    for snapshots in value.values():
+        if not isinstance(snapshots, dict):
+            return False
+        total += len(snapshots)
+        if total > MAX_SCOPE_GUARD_ENTRIES:
+            return False
+        for source_id, snapshot in snapshots.items():
+            if (
+                not isinstance(source_id, str)
+                or not source_id
+                or len(source_id) > MAX_SCOPE_ID_LENGTH
+                or "\x00" in source_id
+                or not isinstance(snapshot, dict)
+                or set(snapshot) != {"record_fingerprint", "normalized_fingerprint"}
+                or not valid_sha256_fingerprint(snapshot["record_fingerprint"])
+                or (
+                    snapshot["normalized_fingerprint"] is not None
+                    and not valid_sha256_fingerprint(snapshot["normalized_fingerprint"])
+                )
+            ):
+                return False
+    return True
 
 
 def manifest_record_fingerprint_snapshot(
@@ -4248,6 +4412,11 @@ def action_spec(
             None if delegated else scoped_candidate_ids,
         )
         matching_source_ids_before = sorted(matching_source_records_before)
+        # Correlation the controller stamps, beside correlation the delivery stamped: which
+        # pre-existing sources each scoped request is *allowed* to reuse, on the CLI's own
+        # scope-agreement terms. Computed from pre-existing state only, so nothing the
+        # acquirer writes during the order can widen it.
+        reusable_source_records_before = reusable_source_records(project_root, config, scoped_request_ids)
         manifest_records_before = manifest_record_fingerprint_snapshot(project_root, config)
         raw_tree_before = raw_tree_snapshot(project_root, config, include_entries=True)
         candidate_records_before = candidate_record_fingerprint_snapshot(load_candidates(project_root, config))
@@ -4282,6 +4451,7 @@ def action_spec(
                 "before": int(status.get("sources", {}).get("manifest_records", 0) or 0),
                 "matching_source_ids_before": matching_source_ids_before,
                 "matching_source_records_before": matching_source_records_before,
+                "reusable_source_records_before": reusable_source_records_before,
                 "manifest_record_fingerprints_before": manifest_records_before,
                 "raw_tree_before": raw_tree_before,
                 "candidate_record_fingerprints_before": candidate_records_before,
@@ -4365,6 +4535,7 @@ INTEGRITY_BASELINE_FIELDS = frozenset(
         "blocked_questions_before",
         "matching_source_ids_before",
         "matching_source_records_before",
+        "reusable_source_records_before",
         "manifest_record_fingerprints_before",
         "raw_tree_before",
         "normalized_file_fingerprints_before",
@@ -5366,6 +5537,9 @@ def verify_delegated_acquisition_postconditions(
     before_manifest = int(manifest_guard.get("before", 0) or 0)
     matching_source_ids_before = manifest_guard.get("matching_source_ids_before")
     matching_source_records_before = manifest_guard.get("matching_source_records_before")
+    # Absent on every order issued before the reuse allowlist existed. Those replay with
+    # reuse unavailable rather than being refused for a field they could not have carried.
+    reusable_source_records_before = manifest_guard.get("reusable_source_records_before", {})
     manifest_records_before = manifest_guard.get("manifest_record_fingerprints_before")
     raw_tree_before = manifest_guard.get("raw_tree_before")
     candidate_records_before = manifest_guard.get("candidate_record_fingerprints_before")
@@ -5377,6 +5551,7 @@ def verify_delegated_acquisition_postconditions(
         valid_scope_id_list(matching_source_ids_before)
         and valid_matching_source_record_snapshot(matching_source_records_before)
         and set(matching_source_ids_before) == set(matching_source_records_before)
+        and valid_reusable_source_record_snapshot(reusable_source_records_before)
         and valid_record_fingerprint_snapshot(manifest_records_before)
         and set(matching_source_ids_before) <= set(manifest_records_before)
         and before_manifest == len(manifest_records_before)
@@ -6510,6 +6685,9 @@ def verify_action_postconditions(
         before_manifest = int(manifest_guard.get("before", 0) or 0)
         matching_source_ids_before = manifest_guard.get("matching_source_ids_before")
         matching_source_records_before = manifest_guard.get("matching_source_records_before")
+        # Absent on every order issued before the reuse allowlist existed. Those replay with
+        # reuse unavailable rather than being refused for a field they could not have carried.
+        reusable_source_records_before = manifest_guard.get("reusable_source_records_before", {})
         manifest_records_before = manifest_guard.get("manifest_record_fingerprints_before")
         raw_tree_before = manifest_guard.get("raw_tree_before")
         candidate_records_before = manifest_guard.get("candidate_record_fingerprints_before")
@@ -6520,6 +6698,7 @@ def verify_action_postconditions(
             valid_scope_id_list(matching_source_ids_before)
             and valid_matching_source_record_snapshot(matching_source_records_before)
             and set(matching_source_ids_before) == set(matching_source_records_before)
+            and valid_reusable_source_record_snapshot(reusable_source_records_before)
             and valid_record_fingerprint_snapshot(manifest_records_before)
             and set(matching_source_ids_before) <= set(manifest_records_before)
             and before_manifest == len(manifest_records_before)

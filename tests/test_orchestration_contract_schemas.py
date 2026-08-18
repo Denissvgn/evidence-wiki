@@ -589,6 +589,34 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 assert_matches_schema(order, order_schema)
 
+    def test_the_baseline_field_count_ceiling_is_the_acquisition_orders_own_count(self):
+        """The published ceiling is not slack: an acquisition order sits exactly on it.
+
+        Every other phase externalises fewer baseline fields, so this bound is set by the
+        acquisition order alone and a thirteenth field would have to raise it here, in the
+        published schema, rather than quietly emit an order no host can validate.
+        """
+        order_schema = cli._contract_payload()["artifact_schema_documents"]["orchestration_work_order"]
+        guard_schema = next(
+            option
+            for option in order_schema["properties"]["required_postconditions"]["items"]["oneOf"]
+            if option["properties"]["check"].get("const") == "controller_integrity_baseline"
+        )
+        self.assertEqual(12, guard_schema["properties"]["field_count"]["maximum"])
+
+        guard = {
+            "check": "controller_integrity_baseline",
+            "path": (
+                "runs/orchestrations/orch-schema/trusted-inputs/action-0001-scope-baseline.json"
+            ),
+            "fingerprint": "sha256:" + "6" * 64,
+            "field_count": 12,
+            "entry_count": 0,
+        }
+        assert_matches_schema(guard, guard_schema, root=order_schema)
+        with self.assertRaises(AssertionError):
+            assert_matches_schema({**guard, "field_count": 13}, guard_schema, root=order_schema)
+
     def test_orchestration_docs_name_both_contract_surfaces(self):
         root = Path(__file__).resolve().parents[1]
         for relative in (
