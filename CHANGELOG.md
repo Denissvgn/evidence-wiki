@@ -28,6 +28,19 @@
   byte-identical or newly written where the order recorded none. Both postcondition arms
   take it, so the delegated and provider arms still reuse on the same terms.
 
+  **Read that predicate literally: it is the door `fulfill` already opens, no narrower.**
+  A pre-existing source is reusable by a scoped request when the two declare no
+  contradictory `scope` key — so in a workspace that declares no scope at all, every source
+  the manifest already held is reusable by every scoped request, exactly as
+  `source_requests.py fulfill` has always accepted any manifest source id. The consequence
+  is deliberate and worth stating: an acquirer can now close a scoped request by naming
+  unrelated evidence the workspace already held, and the provenance-sidecar correlation that
+  used to make that impossible is no longer what stops it. What still stops an acquirer
+  inventing evidence is unchanged — anything it delivers is new, and a new source must
+  carry a sidecar naming the request. Workspaces that want reuse narrower than this should
+  declare `--scope` on their requests and stamp it on their deliveries, which is what the
+  predicate reads.
+
   **No mutable set widened, and `raw/` is still immutable.** Every `mutable_ids` in both
   arms is still `set()`. What widened is `allowed_new_ids` — what an action may *create* —
   by exactly one normalized record per reused source the order recorded as not yet
@@ -39,9 +52,10 @@
   naming the source, and no `provenance.request_id` is ever restamped — which is what keeps
   two requests able to name the same unchanged source without orphaning either link. An
   order issued before this change carries no allowlist and replays exactly as it did, with
-  reuse simply unavailable. One bound to know about: when more pairings agree than the
-  bounded baseline can carry, the order still issues and offers no reuse rather than an
-  unstated subset. Reported downstream as EW-BUG-005.
+  reuse simply unavailable. One bound to know about: a request whose agreeing pairings would
+  exceed the bounded baseline is issued with no reuse rather than with an unstated subset of
+  them, and the refusal that follows names the request and lists what the order did
+  authorize. Reported downstream as EW-BUG-005.
 
 - **Fix: a delegated acquisition that fulfilled a request from evidence the workspace
   already held was refused five times over, and never for the reason it was refused.** The

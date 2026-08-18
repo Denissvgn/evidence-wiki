@@ -3746,7 +3746,13 @@ class OrchestrationControllerTests(unittest.TestCase):
             failure(arm_b, normalized=None)["normalized_unchanged"],
             "arm (b) owes the record it was authorized to write",
         )
-        self.assertEqual(False, failure(None)["was_scoped_match"])
+        self.assertEqual(False, failure(None)["was_authorized_at_issuance"])
+        self.assertEqual(
+            True,
+            failure(arm_b, normalized=None)["authorized_normalized_output"],
+            "the refusal says which obligation was owed, not just that one was missed",
+        )
+        self.assertEqual(False, failure(arm_a, record="sha256:" + "c" * 64)["authorized_normalized_output"])
 
     def test_an_acquisition_order_issued_before_the_reuse_allowlist_still_replays(self):
         # Additive and optional, like `acquisition_mode`: a pending order written before the
@@ -5138,21 +5144,74 @@ class OrchestrationControllerTests(unittest.TestCase):
                 self.assertFalse(CONTROLLER.valid_reusable_source_record_snapshot(malformed))
 
     def test_an_allowlist_beyond_the_bounded_baseline_offers_no_reuse_rather_than_a_subset(self):
-        # The bound is the same one the manifest snapshot beside it carries, so this map is
-        # never the reason an order refuses. When more pairings agree than it can hold it
-        # offers none of them -- an unstated subset would be an authorization surface whose
-        # contents nobody can name, and the order still has to issue.
+        # The bound is the same one the manifest snapshot beside it carries, so a request is
+        # never limited more tightly than the manifest its reuse would come from. A request
+        # that outgrows it is issued with no reuse at all -- an unstated subset would be an
+        # authorization surface whose contents nobody can name -- and it takes only its own
+        # entry down, because one request outgrowing the bound is not a reason to withdraw
+        # the affordance from every other request in the same order.
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root, question=True)
-            request_id = self.block_question(target)
-            self.deliver_link_source(target, "first")
-            self.deliver_link_source(target, "second")
+            crowded = self.add_scoped_request(target, "crowded request")
+            spare = self.add_scoped_request(target, "spare request", "facet_id=only_mine")
+            self.deliver_link_source(target, "first", scope={"facet_id": "elsewhere"})
+            self.deliver_link_source(target, "second", scope={"facet_id": "elsewhere"})
+            self.deliver_link_source(target, "third", scope={"facet_id": "only_mine"})
             config = CONTROLLER.load_config(target)
 
-            self.assertEqual(2, len(CONTROLLER.reusable_source_records(target, config, [request_id])[request_id]))
-            with mock.patch.object(CONTROLLER, "MAX_SCOPE_GUARD_ENTRIES", 1):
-                self.assertEqual({}, CONTROLLER.reusable_source_records(target, config, [request_id]))
+            allowlist = CONTROLLER.reusable_source_records(target, config, [crowded, spare])
+            self.assertEqual(3, len(allowlist[crowded]))
+            self.assertEqual(1, len(allowlist[spare]))
+
+            with mock.patch.object(CONTROLLER, "MAX_SCOPE_GUARD_ENTRIES", 2):
+                bounded = CONTROLLER.reusable_source_records(target, config, [crowded, spare])
+            self.assertNotIn(crowded, bounded, "the request that outgrew the bound offers no reuse")
+            self.assertEqual(1, len(bounded[spare]), "and takes no other request down with it")
+
+    def test_a_reuse_allowlist_naming_a_source_the_manifest_baseline_does_not_is_rejected(self):
+        # Correlation accepts an authorized source without consulting its sidecar, and both
+        # the reuse guard and reconciliation only walk sources the manifest baseline holds --
+        # so an allowlist entry outside it would be checked by nothing at all. The two maps
+        # come from one manifest read, so disagreeing means the baseline was tampered with.
+        fingerprint = "sha256:" + "d" * 64
+        allowlist = {"req-1": {"link:known": {"record_fingerprint": fingerprint, "normalized_fingerprint": None}}}
+
+        self.assertTrue(
+            CONTROLLER.reuse_allowlist_names_only_known_records(allowlist, {"link:known": fingerprint})
+        )
+        self.assertFalse(
+            CONTROLLER.reuse_allowlist_names_only_known_records(allowlist, {"link:other": fingerprint})
+        )
+        self.assertTrue(CONTROLLER.reuse_allowlist_names_only_known_records({}, {}))
+        self.assertFalse(CONTROLLER.reuse_allowlist_names_only_known_records(None, {}))
+
+    def test_a_per_request_baseline_is_counted_by_the_pairings_it_carries(self):
+        # The published entry counter bounds how much a baseline sidecar can hold. A map
+        # keyed by request nests one level deeper than the flat snapshots, so counting its
+        # top-level keys would report requests and leave its real size uncounted.
+        fingerprint = "sha256:" + "e" * 64
+        self.assertEqual(
+            3,
+            CONTROLLER.baseline_value_count(
+                {
+                    "req-1": {
+                        "link:one": {"record_fingerprint": fingerprint, "normalized_fingerprint": None},
+                        "link:two": {"record_fingerprint": fingerprint, "normalized_fingerprint": None},
+                    },
+                    "req-2": {"link:one": {"record_fingerprint": fingerprint, "normalized_fingerprint": None}},
+                }
+            ),
+        )
+        self.assertEqual(
+            1,
+            CONTROLLER.baseline_value_count(
+                {"link:one": {"record_fingerprint": fingerprint, "normalized_fingerprint": fingerprint}}
+            ),
+            "the flat scoped-match snapshot keeps counting records, exactly as it did",
+        )
+        self.assertEqual(2, CONTROLLER.baseline_value_count({"a": fingerprint, "b": fingerprint}))
+        self.assertEqual(1, CONTROLLER.baseline_value_count(7))
 
     def test_the_reuse_allowlist_externalises_and_stays_inside_the_published_field_count(self):
         # The allowlist rides in the protected 8 MiB sidecar rather than the 256 KiB order, and

@@ -2520,6 +2520,8 @@ def require_acquisition_evidence_baselines(work_order: dict[str, Any]) -> None:
         reusable_source_records_before
     ) and valid_record_fingerprint_snapshot(manifest_records_before) and (
         set(matching_source_ids_before) <= set(manifest_records_before)
+    ) and reuse_allowlist_names_only_known_records(
+        reusable_source_records_before, manifest_records_before
     ) and valid_raw_tree_snapshot(raw_tree_before, include_entries=True) and valid_record_fingerprint_snapshot(
         candidate_records_before
     ) and valid_record_fingerprint_snapshot(candidate_audit_records_before) and valid_record_fingerprint_snapshot(
@@ -2903,7 +2905,8 @@ def reused_source_reconciliation_failure(
     if not isinstance(expected, dict):
         return {
             "source_id": source_id,
-            "was_scoped_match": False,
+            "was_authorized_at_issuance": False,
+            "authorized_normalized_output": False,
             "record_unchanged": False,
             "normalized_unchanged": False,
         }
@@ -2920,7 +2923,11 @@ def reused_source_reconciliation_failure(
         return None
     return {
         "source_id": source_id,
-        "was_scoped_match": True,
+        "was_authorized_at_issuance": True,
+        # Which obligation the second flag reports: an output the order fingerprinted must
+        # still match it, one it recorded as absent must be newly written. Saying which is
+        # the difference between "you changed it" and "you did not create it".
+        "authorized_normalized_output": expected.get("normalized_fingerprint") is None,
         "record_unchanged": record_unchanged,
         "normalized_unchanged": normalized_as_authorized,
     }
@@ -3357,41 +3364,69 @@ def reusable_source_records(
         fingerprinted[source_id] = snapshot
         return snapshot
 
-    admitted_by_request: dict[str, list[tuple[str, dict[str, Any]]]] = {}
-    admitted_total = 0
+    reusable: dict[str, dict[str, dict[str, str | None]]] = {}
+    remaining_pairings = MAX_SCOPE_GUARD_ENTRIES
     for request_id in sorted(set(request_ids)):
         request = requests_by_id.get(request_id)
         if not isinstance(request, dict):
             continue
+        # The predicate depends on the pair of declared scopes and nothing else, and a
+        # workspace that never passed --scope declares none, so one call answers for the
+        # whole manifest instead of one per record.
+        agrees: dict[tuple[tuple[str, str], ...], bool] = {}
         admitted: list[tuple[str, dict[str, Any]]] = []
         for source_id, record, source_scope in scoped_records:
-            try:
-                source_requests.check_fulfill_scope(request, source_id, source_scope, {}, require_scope=False)
-            except source_requests.RequestScopeError:
-                continue
-            admitted.append((source_id, record))
-        if not admitted:
+            key = tuple(sorted(source_scope.items()))
+            if key not in agrees:
+                try:
+                    source_requests.check_fulfill_scope(
+                        request, source_id, source_scope, {}, require_scope=False
+                    )
+                except source_requests.RequestScopeError:
+                    agrees[key] = False
+                else:
+                    agrees[key] = True
+            if agrees[key]:
+                admitted.append((source_id, record))
+        # More pairings agree with this request than the bounded baseline can still carry.
+        # Reuse is unavailable for *this* request -- the state an order issued before this
+        # field existed replays in -- rather than an unstated subset of what agreed, and
+        # rather than the whole order losing an affordance one request outgrew. Bounded by
+        # the same limit as the manifest snapshot beside it, so a request is never limited
+        # more tightly than the manifest the reuse would come from.
+        if not admitted or len(admitted) > remaining_pairings:
             continue
-        admitted_total += len(admitted)
-        if admitted_total > MAX_SCOPE_GUARD_ENTRIES:
-            # More pairings agree than one bounded baseline can carry. The order still
-            # issues and offers no reuse at all -- the state an order issued before this
-            # field existed replays in -- rather than offering an unstated subset of them.
-            # Bounded by the same limit as the manifest snapshot beside it, so this map is
-            # never the reason an order a manifest guard would have accepted is refused.
-            return {}
-        admitted_by_request[request_id] = admitted
-
-    reusable: dict[str, dict[str, dict[str, str | None]]] = {}
-    for request_id, admitted in admitted_by_request.items():
         allowed = {
             source_id: snapshot
             for source_id, record in admitted
             if (snapshot := fingerprints(source_id, record)) is not None
         }
-        if allowed:
-            reusable[request_id] = dict(sorted(allowed.items()))
+        if not allowed:
+            continue
+        remaining_pairings -= len(allowed)
+        reusable[request_id] = dict(sorted(allowed.items()))
     return dict(sorted(reusable.items()))
+
+
+def reuse_allowlist_names_only_known_records(
+    reusable_source_records_before: Any,
+    manifest_records_before: Any,
+) -> bool:
+    """Whether every authorized reuse names a source the manifest baseline also names.
+
+    Layering, not paranoia: correlation accepts an authorized source without a sidecar, and
+    both the reuse-scope guard and reconciliation only walk sources the manifest baseline
+    holds. An allowlist naming an id outside it would therefore be checked by nothing at
+    all. The two maps are written together from one manifest read, so disagreeing means the
+    baseline was tampered with, and that is exactly when a verifier should refuse.
+    """
+    if not isinstance(reusable_source_records_before, dict) or not isinstance(manifest_records_before, dict):
+        return False
+    known = set(manifest_records_before)
+    return all(
+        isinstance(snapshots, dict) and set(snapshots) <= known
+        for snapshots in reusable_source_records_before.values()
+    )
 
 
 def valid_reusable_source_record_snapshot(value: Any) -> bool:
@@ -4615,6 +4650,23 @@ INTEGRITY_BASELINE_FIELDS = frozenset(
 
 
 def baseline_value_count(value: Any) -> int:
+    """One unit per record a guard actually names, counted where the records are.
+
+    A baseline keyed by request rather than by record nests one level deeper, so counting
+    its top-level keys would report the number of requests and leave the size it really
+    carries unbounded by the published counter. The nested form is recognised by shape --
+    every value a map of maps -- so the flat fingerprint snapshots, whose values are digest
+    strings, keep counting exactly as they always did.
+    """
+    if (
+        isinstance(value, dict)
+        and value
+        and all(
+            isinstance(item, dict) and item and all(isinstance(inner, dict) for inner in item.values())
+            for item in value.values()
+        )
+    ):
+        return sum(len(item) for item in value.values())
     if isinstance(value, (dict, list)):
         return len(value)
     return 1
@@ -5636,6 +5688,7 @@ def verify_delegated_acquisition_postconditions(
         and set(matching_source_ids_before) == set(matching_source_records_before)
         and valid_reusable_source_record_snapshot(reusable_source_records_before)
         and valid_record_fingerprint_snapshot(manifest_records_before)
+        and reuse_allowlist_names_only_known_records(reusable_source_records_before, manifest_records_before)
         and set(matching_source_ids_before) <= set(manifest_records_before)
         and before_manifest == len(manifest_records_before)
         and valid_raw_tree_snapshot(raw_tree_before, include_entries=True)
@@ -5812,6 +5865,9 @@ def verify_delegated_acquisition_postconditions(
             {
                 "source_id": source_id,
                 "cause": cause,
+                # Which pairings were claimed, so `reusable_source_ids_before` below reads as
+                # the answer to a question rather than as an unrelated list.
+                "request_ids": sorted(reused_request_ids.get(source_id, set())),
                 "provenance_request_id": provenance_request_id,
                 "record_unchanged": record_unchanged,
             }
@@ -6840,6 +6896,9 @@ def verify_action_postconditions(
             and set(matching_source_ids_before) == set(matching_source_records_before)
             and valid_reusable_source_record_snapshot(reusable_source_records_before)
             and valid_record_fingerprint_snapshot(manifest_records_before)
+            and reuse_allowlist_names_only_known_records(
+                reusable_source_records_before, manifest_records_before
+            )
             and set(matching_source_ids_before) <= set(manifest_records_before)
             and before_manifest == len(manifest_records_before)
             and valid_raw_tree_snapshot(raw_tree_before, include_entries=True)
