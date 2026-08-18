@@ -3505,9 +3505,9 @@ class OrchestrationControllerTests(unittest.TestCase):
             # on the same terms as the delegated arm: an id the manifest baseline does not
             # name is checked by nothing downstream, and an id already in the scoped-match
             # map would leave which reuse terms apply to lookup order. The replay guard
-            # answers first in production, so it is stood down here — CR-3's rule is that
-            # each verifier validates every baseline it consumes, and a check that only
-            # ever runs behind another one is a check nobody would notice losing.
+            # answers first in production, so it is stood down here: each verifier
+            # validates every baseline it consumes, and a check that only ever runs
+            # behind another one is a check nobody would notice losing.
             for tampered, why in (
                 (["raw:never-in-this-manifest"], "names a record outside the manifest baseline"),
                 ([source_id], "is already a scoped match"),
@@ -4685,7 +4685,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             )
 
     def test_candidate_correlation_is_required_in_provider_mode_and_skipped_when_delegated(self):
-        # `matching_normalized_source_records` gained an optional candidate scope for
+        # `acquisition_reuse_baselines` takes an optional candidate scope for
         # delegated orders. Provider orders must keep correlating on the candidate: a
         # source belonging to a different candidate on the same request is not evidence
         # this order may reconcile against.
@@ -4712,17 +4712,17 @@ class OrchestrationControllerTests(unittest.TestCase):
             )
             config = CONTROLLER.load_config(target)
 
-            matched = CONTROLLER.matching_normalized_source_records(
+            matched, _, _ = CONTROLLER.acquisition_reuse_baselines(
                 target, config, [request_id], ["cand-scoped"]
             )
             self.assertEqual(1, len(matched), "the scoped candidate's source is reconcilable")
 
-            other = CONTROLLER.matching_normalized_source_records(
+            other, _, _ = CONTROLLER.acquisition_reuse_baselines(
                 target, config, [request_id], ["cand-different"]
             )
             self.assertEqual({}, other, "another candidate's source is not in this order's baseline")
 
-            delegated = CONTROLLER.matching_normalized_source_records(target, config, [request_id], None)
+            delegated, _, _ = CONTROLLER.acquisition_reuse_baselines(target, config, [request_id], None)
             self.assertEqual(
                 set(matched),
                 set(delegated),
@@ -5336,11 +5336,15 @@ class OrchestrationControllerTests(unittest.TestCase):
         normalize_sources.normalized_output_path_for_record.side_effect = (
             lambda record, output_root: output_root / f"{str(record['id']).replace(':', '--')}.md"
         )
+        normalize_sources.is_codebase_record.return_value = False
+        # A record declaring no input paths cannot be refused for naming an unpinned one,
+        # which keeps this fixture about the one clause it exists to isolate.
+        normalize_sources.raw_paths.return_value = []
         with mock.patch.object(CONTROLLER, "load_sibling_module", return_value=normalize_sources):
-            return (
-                CONTROLLER.matching_normalized_source_records(root, {}, ["req-scoped"], None),
-                CONTROLLER.unnormalized_matching_source_ids(root, {}, ["req-scoped"], None),
+            matching, reusable, _ = CONTROLLER.acquisition_reuse_baselines(
+                root, {}, ["req-scoped"], None
             )
+            return matching, reusable
 
     def test_the_two_reuse_baselines_split_on_the_is_file_clause_and_nothing_else(self):
         """The whole widening, pinned to the one clause it is.
@@ -5412,6 +5416,33 @@ class OrchestrationControllerTests(unittest.TestCase):
         # In both maps at once, so which reuse terms apply would depend on lookup order.
         self.assertFalse(valid(["raw:a"], ["raw:a"], manifest))
 
+        # The bound and the id shape have to be asserted against ids the manifest baseline
+        # *does* name, or the containment clause alone rejects every case above and the
+        # first two properties are never exercised: deleting them from the validator would
+        # leave the suite green. Each of these is well within the manifest baseline and
+        # refused on its own terms.
+        digest = "sha256:" + "3" * 64
+        oversized = "raw:" + "x" * CONTROLLER.MAX_SCOPE_ID_LENGTH
+        embedded_nul = "raw:a\x00b"
+        malformed_manifest = {**manifest, oversized: digest, embedded_nul: digest}
+        self.assertFalse(
+            valid([oversized], [], malformed_manifest),
+            "an over-length id the manifest baseline holds is still not a scope id",
+        )
+        self.assertFalse(
+            valid([embedded_nul], [], malformed_manifest),
+            "an id carrying a NUL is still not a scope id",
+        )
+        self.assertFalse(
+            valid(["raw:a", "raw:a"], [], manifest),
+            "a repeated id makes the baseline's own length no answer about what it names",
+        )
+        over_bound = [f"raw:pad-{index}" for index in range(CONTROLLER.MAX_SCOPE_IDS + 1)]
+        self.assertFalse(
+            valid(over_bound, [], {source_id: digest for source_id in over_bound}),
+            "the bound holds even when every id is named by the manifest baseline",
+        )
+
     def test_a_source_whose_normalization_reads_unpinned_inputs_is_not_reusable(self):
         """Re-derivation is only as strong as what the order pinned, and says so.
 
@@ -5446,13 +5477,266 @@ class OrchestrationControllerTests(unittest.TestCase):
             failure["reason"],
         )
 
+    def test_a_record_naming_a_path_outside_the_fingerprinted_raw_roots_is_not_reusable(self):
+        """The general form of the kind-specific early-out above.
+
+        `raw_tree_snapshot` walks `raw.source_roots` and nothing else, while every record
+        path field resolves through `safe_workspace_path`, which accepts any
+        workspace-relative path. So a record may name raw evidence no baseline fingerprints
+        — exactly the set a *failed* prior order leaves behind — and re-deriving from it
+        would confirm the reused body against bytes the acquirer can still write.
+        """
+        normalize_sources = CONTROLLER.load_sibling_module("normalize_sources")
+        config = {"raw": {"source_roots": ["raw/papers", "raw/data"]}}
+        unpinned = CONTROLLER.unpinned_record_input_paths
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.assertEqual(
+                [],
+                unpinned(root, config, {"raw_paths": ["raw/papers/a.pdf"]}, normalize_sources),
+                "a path under a configured root is pinned",
+            )
+            self.assertEqual(
+                ["sources/scratch/a.pdf"],
+                unpinned(root, config, {"raw_paths": ["sources/scratch/a.pdf"]}, normalize_sources),
+            )
+            self.assertEqual(
+                ["raw/leftovers/a.pdf"],
+                unpinned(root, config, {"raw_pdf": "raw/leftovers/a.pdf"}, normalize_sources),
+                "raw/ is not the fingerprinted set; the configured roots are",
+            )
+            self.assertEqual(
+                ["raw/tex-elsewhere"],
+                unpinned(root, config, {"latex_root": "raw/tex-elsewhere"}, normalize_sources),
+            )
+            self.assertEqual(
+                ["../escape.pdf"],
+                unpinned(root, config, {"raw_paths": ["../escape.pdf"]}, normalize_sources),
+                "a path safe_workspace_path refuses is unpinned rather than an exception",
+            )
+            self.assertEqual(
+                ["raw/papers/a.pdf"],
+                unpinned(root, {}, {"raw_paths": ["raw/papers/a.pdf"]}, normalize_sources),
+                "a workspace configuring no raw roots fingerprints nothing, so nothing is pinned",
+            )
+
+    def test_the_re_derivation_sandbox_carries_the_adapter_it_has_to_run(self):
+        """The confinement must not turn a working adapter into unverifiable evidence.
+
+        The sandbox holds the trusted static inputs and the record's own raw evidence, and
+        the adapter runs with it as the working directory. An adapter argv naming a
+        workspace path outside those trees — `tools/adapter.py` is as valid as one under
+        `scripts/` — would be absent there, so a workspace where `normalize_sources.py`
+        succeeds would fail only under verification, refused as evidence that could not be
+        re-derived. Whatever of the argv lives in the workspace comes along, with its mode
+        bits, because an adapter that is an executable script must still be executable.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "tools").mkdir()
+            outside = root / "tools" / "structured_adapter.py"
+            outside.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            outside.chmod(0o755)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "normalize_sources.py").write_text("x = 1\n", encoding="utf-8")
+
+            config = {
+                "normalization": {
+                    "adapters": [
+                        {
+                            "kinds": ["structured_data"],
+                            "provider": "command",
+                            "command": ["python3", "tools/structured_adapter.py", "--json"],
+                            "name": "stub",
+                            "version": "1.0.0",
+                        }
+                    ]
+                }
+            }
+            record = {"id": "raw:example", "kind": "structured_data"}
+            self.assertEqual(
+                ["tools/structured_adapter.py"],
+                CONTROLLER.adapter_workspace_command_paths(root, config, record),
+                "an interpreter name and a flag are not workspace paths; the script is",
+            )
+            self.assertEqual(
+                [],
+                CONTROLLER.adapter_workspace_command_paths(root, config, {"kind": "table"}),
+                "a kind no adapter is configured for names nothing",
+            )
+
+            module = CONTROLLER.load_sibling_module("normalize_sources")
+            item = SimpleNamespace(method=module.ADAPTER_METHOD)
+            with CONTROLLER.rederivation_root(
+                root, item, module, ["tools/structured_adapter.py"]
+            ) as sandbox:
+                copied = sandbox / "tools" / "structured_adapter.py"
+                self.assertTrue(copied.is_file(), "the sandbox does not carry the adapter it must run")
+                self.assertTrue(os.access(copied, os.X_OK), "the copied adapter lost its mode bits")
+                self.assertTrue((sandbox / "scripts" / "normalize_sources.py").is_file())
+                self.assertNotEqual(root.resolve(), sandbox.resolve())
+            self.assertFalse(sandbox.exists(), "the sandbox outlived the re-derivation")
+
+    def test_a_stamped_pdf_extractor_is_resolved_through_the_allowlist_not_executed(self):
+        """The record is the acquirer's file, so the extractor it names is untrusted text.
+
+        `normalize_selected_record` takes `pdf_extractor or resolve_pdf_extractor(...)`, and
+        a bare `str` there means *a resolved pdftotext executable path* that becomes
+        `argv[0]` of a subprocess. Forwarding the stamped name let the record choose the
+        program postcondition verification runs. Resolving through the allowlist refuses an
+        unknown name with a reason instead, and never reaches an executable at all.
+        """
+        normalize_sources = CONTROLLER.load_sibling_module("normalize_sources")
+
+        with mock.patch.object(normalize_sources.subprocess, "run") as never_run:
+            for stamped in (
+                {"name": "/tmp/attacker-script.sh", "version": "1"},
+                {"name": "pdftotext"},
+                {"name": ""},
+                {"version": "1"},
+                "poppler",
+                None,
+            ):
+                with self.subTest(stamped=stamped):
+                    failure, extractor = CONTROLLER.stamped_pdf_extractor(
+                        {"pdf_extractor": stamped}, normalize_sources
+                    )
+                    self.assertIsNone(extractor)
+                    self.assertEqual(
+                        "normalized evidence names a PDF extractor this package does not implement",
+                        failure["reason"],
+                    )
+            never_run.assert_not_called()
+
+        # And the one name this package does implement resolves to a real extractor whose
+        # identity comes from the allowlist rather than from the record.
+        failure, extractor = CONTROLLER.stamped_pdf_extractor(
+            {"pdf_extractor": {"name": "pypdf", "version": "claimed-by-the-record"}}, normalize_sources
+        )
+        self.assertIsNone(failure)
+        self.assertEqual("pypdf", extractor.name)
+        self.assertNotEqual("claimed-by-the-record", extractor.version)
+
+    def test_version_stamps_are_read_back_so_a_host_upgrade_is_not_a_forgery(self):
+        """Provenance about the tools, not a statement about the evidence.
+
+        Both stamps are taken from whatever is installed at the moment of the run and land
+        in the compared bytes. Comparing them would make an upgrade between issuance and
+        submission, a different virtualenv, or a replay across a version bump read as
+        "normalized evidence is not what normalizing the raw evidence produces" — with a
+        remediation that blames hand-editing. `normalize_sources.is_stale` already calls
+        extractor versions provenance rather than a rewrite trigger; this keeps the two
+        halves of the package saying one thing.
+        """
+        expected = {
+            "normalizer": {"name": "normalize_sources.py", "version": 9},
+            "pdf_extractor": {"name": "pypdf", "version": "6.0.0"},
+            "content_hash": "sha256:derived",
+        }
+        CONTROLLER.carry_version_stamps(
+            expected,
+            {
+                "normalizer": {"name": "something-else", "version": 8},
+                "pdf_extractor": {"name": "poppler", "version": "24.02.0"},
+                "content_hash": "sha256:claimed",
+            },
+        )
+        self.assertEqual(8, expected["normalizer"]["version"])
+        self.assertEqual("24.02.0", expected["pdf_extractor"]["version"])
+        # Only the versions travel: the producer names and everything else stay derived, so
+        # a record still cannot claim a producer that did not produce it.
+        self.assertEqual("normalize_sources.py", expected["normalizer"]["name"])
+        self.assertEqual("pypdf", expected["pdf_extractor"]["name"])
+        self.assertEqual("sha256:derived", expected["content_hash"])
+
+    def test_the_re_derivation_verdict_is_reached_once_per_submit_not_once_per_pass(self):
+        """Three verification passes, one re-derivation.
+
+        `submit_result` verifies to prepare the submission, again to confirm the prepared
+        phase still holds, and again to apply effects. Re-derivation is the most expensive
+        check either arm has — an external adapter run, or two `pdftotext` passes, per
+        reused source, bounded only by `MAX_SCOPE_IDS` — and all of it is held inside the
+        driver session lock that peers acquire with `wait_seconds=0`.
+        """
+        calls: list[tuple[str, str]] = []
+
+        def record(project_root, config, record_value, normalized_path, manifest_records, module):
+            calls.append((record_value["id"], str(normalized_path)))
+            return None
+
+        with (
+            mock.patch.object(CONTROLLER, "normalized_output_derivation_failure", record),
+            CONTROLLER.derivation_verdict_memo(),
+        ):
+            for _ in range(3):
+                CONTROLLER.memoised_derivation_failure(
+                    Path("/workspace"), {}, "raw:a", {"id": "raw:a"}, Path("/n/a.md"),
+                    "sha256:record", "sha256:normalized", [], object(),
+                )
+            self.assertEqual(1, len(calls))
+
+            # A digest that moved is a different question, so it is asked again.
+            CONTROLLER.memoised_derivation_failure(
+                Path("/workspace"), {}, "raw:a", {"id": "raw:a"}, Path("/n/a.md"),
+                "sha256:record", "sha256:rewritten", [], object(),
+            )
+            self.assertEqual(2, len(calls))
+
+        # Outside a submit there is no memo at all, so nothing is carried between them.
+        with mock.patch.object(CONTROLLER, "normalized_output_derivation_failure", record):
+            for _ in range(2):
+                CONTROLLER.memoised_derivation_failure(
+                    Path("/workspace"), {}, "raw:a", {"id": "raw:a"}, Path("/n/a.md"),
+                    "sha256:record", "sha256:normalized", [], object(),
+                )
+        self.assertEqual(4, len(calls))
+
+    def test_submit_enters_the_memo_around_every_verification_pass(self):
+        """The memo is only worth anything where all three passes are inside it."""
+        tree = ast.parse(Path(CONTROLLER.__file__).read_text(encoding="utf-8"))
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "submit_result"
+        )
+        guarded = {
+            getattr(call.func, "id", None)
+            for statement in ast.walk(function)
+            if isinstance(statement, ast.With)
+            for item in statement.items
+            for call in [item.context_expr]
+            if isinstance(call, ast.Call)
+        }
+        self.assertIn("derivation_verdict_memo", guarded)
+        finalizers = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "finalize_pending_submission"
+        ]
+        self.assertTrue(finalizers, "submit_result no longer finalizes a submission")
+        memo_lines = [
+            statement.lineno
+            for statement in ast.walk(function)
+            if isinstance(statement, ast.With)
+            and any(
+                isinstance(item.context_expr, ast.Call)
+                and getattr(item.context_expr.func, "id", None) == "derivation_verdict_memo"
+                for item in statement.items
+            )
+        ]
+        for call in finalizers:
+            self.assertTrue(
+                any(line < call.lineno for line in memo_lines),
+                "a verification pass runs outside the per-submit memo",
+            )
+
     def test_each_acquisition_arm_offers_a_recourse_that_arm_actually_has(self):
         """One set of reuse terms, two recourses, because the arms end requests differently.
 
         A delegated batch reports a request it could not satisfy as an attempt failure. The
         provider arm has no such outcome — every scoped request must be fulfilled — so
-        telling it to record one would be advice its own fulfilment guard then refuses,
-        which is the CR-15c shape.
+        telling it to record one would be advice its own fulfilment guard then refuses.
         """
         terms = CONTROLLER.REUSE_SCOPE_TERMS
         self.assertTrue(CONTROLLER.REUSE_SCOPE_REMEDIATION.startswith(terms))
@@ -5572,8 +5856,20 @@ class OrchestrationControllerTests(unittest.TestCase):
 
             self.assertIn("reuses pre-existing evidence", str(caught.exception))
             self.assertEqual(
-                [{"source_id": source_id, "cause": "no_reuse_authorization_at_issuance",
-                  "provenance_request_id": request_id, "record_unchanged": True}],
+                [
+                    {
+                        "source_id": source_id,
+                        "cause": "no_reuse_authorization_at_issuance",
+                        # Each cause carries its own repair, because they do not share one.
+                        # This source satisfies every clause of the shared reuse terms, so
+                        # repeating those terms at it would tell it to do what it has done.
+                        "repair": CONTROLLER.REUSE_SCOPE_CAUSE_REPAIRS[
+                            "no_reuse_authorization_at_issuance"
+                        ],
+                        "provenance_request_id": request_id,
+                        "record_unchanged": True,
+                    }
+                ],
                 caught.exception.details["reuse_scope_failures"],
             )
 
@@ -7204,7 +7500,7 @@ class NormalizedOutputScopeTests(unittest.TestCase):
         self.assertEqual(set(), wanted, f"postcondition functions not found: {sorted(wanted)}")
 
     def test_both_acquisition_arms_hold_reuse_to_the_same_shared_terms(self):
-        """The symmetry CR-17 required, asserted where it can actually be broken.
+        """The symmetry the two arms promise, asserted where it can actually be broken.
 
         `workspace-template/docs/orchestration.md` states that the two arms admit reuse on
         the same terms, and the delegated verifier's own docstring counts the differences
@@ -7234,6 +7530,106 @@ class NormalizedOutputScopeTests(unittest.TestCase):
                 )
             wanted = wanted - {node.name}
         self.assertEqual(set(), wanted, f"postcondition functions not found: {sorted(wanted)}")
+
+    def test_the_reuse_refusal_speaks_before_the_guards_that_would_mask_it(self):
+        """Call-presence is not parity; order is, and only one arm had it.
+
+        Two of the three causes the reuse refusal reports are also visible to later guards:
+        a sidecar naming no scoped request is refused by candidate correlation, and a record
+        rewritten since issuance is refused by the manifest-scope guard. Whichever guard
+        speaks first is the one the acquirer acts on, and only the reuse refusal names reuse,
+        says which cause applies to which source, and carries that cause's repair. Ordered
+        after them, its remediation is dead text for two of the three states it describes.
+
+        The sibling parity test walks calls and cannot see this: both arms called the helper,
+        and the provider arm called it roughly 190 lines too late.
+        """
+        tree = ast.parse(Path(CONTROLLER.__file__).read_text(encoding="utf-8"))
+        expected_order = ("reuse_scope_failures", "correlation_failures", "manifest_scope_violations")
+        for name in ("verify_delegated_acquisition_postconditions", "verify_action_postconditions"):
+            function = next(
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == name
+            )
+            first_line: dict[str, int] = {}
+            for statement in ast.walk(function):
+                # Annotated assignments count too: one arm seeds its correlation list with
+                # `name: list[...] = []`, and a walk that saw only plain assignments would
+                # report that guard as absent rather than as ordered.
+                if isinstance(statement, ast.AnnAssign):
+                    targets = [statement.target]
+                elif isinstance(statement, ast.Assign):
+                    targets = list(statement.targets)
+                else:
+                    continue
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id in expected_order:
+                        first_line.setdefault(target.id, statement.lineno)
+            with self.subTest(function=name):
+                self.assertEqual(
+                    set(expected_order),
+                    set(first_line),
+                    f"{name} no longer computes one of the guards whose order is asserted here",
+                )
+                self.assertEqual(
+                    list(expected_order),
+                    sorted(first_line, key=lambda key: first_line[key]),
+                    f"{name} orders the reuse refusal behind a guard that masks two of its causes",
+                )
+
+    def test_the_reconciliation_and_missing_record_advice_names_only_selectors_that_work(self):
+        """A remediation that is refused for being followed is the defect, not the fix.
+
+        `normalize_sources.py` with neither selector normalizes the pending set, which for a
+        hand-edited record is empty; `--all` considers every eligible record in the workspace
+        and an acquisition order authorizes output for the sources it scopes and nothing else,
+        so following it lands on `unexpected_new_normalized` or on a scope guard whose
+        `mutable_ids` is empty. `--source-id` is the selector both refusals can honestly name.
+        """
+        for constant in (
+            CONTROLLER.RECONCILIATION_REMEDIATION,
+            CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION,
+            CONTROLLER.MISSING_NORMALIZED_REMEDIATION,
+        ):
+            with self.subTest(remediation=constant[:60]):
+                self.assertIn("--source-id", constant)
+                self.assertNotIn("--all", constant)
+
+        # Same split as the reuse terms, and for the same reason: only the delegated arm
+        # can end a request it cannot serve with a recorded attempt failure.
+        self.assertTrue(CONTROLLER.RECONCILIATION_REMEDIATION.startswith(CONTROLLER.RECONCILIATION_TERMS))
+        self.assertTrue(
+            CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION.startswith(CONTROLLER.RECONCILIATION_TERMS)
+        )
+        self.assertIn("record-attempt-failure", CONTROLLER.RECONCILIATION_REMEDIATION)
+        self.assertNotIn("record-attempt-failure", CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION)
+        self.assertIn("another selected candidate", CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION)
+        self.assertNotIn("another selected candidate", CONTROLLER.RECONCILIATION_REMEDIATION)
+
+    def test_every_reuse_scope_cause_carries_a_repair_that_is_not_the_shared_terms(self):
+        """Each cause has its own repair, because they do not share one.
+
+        The single sentence that used to serve all three told the acquirer to reuse only a
+        source correlated to this request and unchanged since — which for
+        `no_reuse_authorization_at_issuance` describes exactly what the refused source
+        already is. Advice that restates the state being refused is advice with no next step
+        in it.
+        """
+        repairs = CONTROLLER.REUSE_SCOPE_CAUSE_REPAIRS
+        self.assertEqual(
+            {
+                "provenance_names_no_scoped_request",
+                "manifest_record_changed_after_issuance",
+                "no_reuse_authorization_at_issuance",
+            },
+            set(repairs),
+        )
+        self.assertEqual(len(repairs), len(set(repairs.values())), "two causes share one repair")
+        for cause, repair in repairs.items():
+            with self.subTest(cause=cause):
+                self.assertNotIn(CONTROLLER.REUSE_SCOPE_TERMS, repair)
+        self.assertIn("nothing done inside the order can add one", repairs["no_reuse_authorization_at_issuance"])
 
 
 if __name__ == "__main__":
