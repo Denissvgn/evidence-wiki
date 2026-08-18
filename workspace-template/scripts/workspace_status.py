@@ -52,6 +52,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -2699,7 +2700,10 @@ def write_cached_status(project_root: Path, cache_key: str, document: dict[str, 
     except OSError:
         # The cache is an optimisation; a caller asking for status must not fail because
         # writing it back did. A concurrent writer's document is as valid as this one.
-        tmp_path.unlink(missing_ok=True)
+        # The cleanup is best-effort for the same reason: whatever stopped the write can
+        # stop the unlink, and a leftover temporary is not worth failing a status read.
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
 
 
 def refresh_run_controller_liveness(project_root: Path, document: dict[str, Any], run_id: str | None) -> dict[str, Any]:

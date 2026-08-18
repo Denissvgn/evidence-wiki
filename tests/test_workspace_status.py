@@ -1840,9 +1840,12 @@ question: Does cache invalidation work?
             cache = STATUS.status_cache_path(root)
             self.assertTrue(cache.is_file())
             json.loads(cache.read_text(encoding="utf-8"))
+            # By suffix rather than by glob: the temporaries are dotfiles, and whether a
+            # `*` pattern matches those is a detail of the globbing implementation rather
+            # than something this assertion should rest on.
             self.assertEqual(
                 [],
-                sorted(cache.parent.glob("*.tmp")),
+                sorted(p.name for p in cache.parent.iterdir() if p.name.endswith(".tmp")),
                 "a temporary outlived the write that created it",
             )
 
