@@ -207,6 +207,8 @@ python3 scripts/normalize_sources.py --all
 
    Identify the manifest `source_id` created or refreshed by the download. Confirm a normalized record exists under `sources/normalized/` for that source ID before unblocking any question.
 
+   Under an orchestration work order, normalize by ID instead: `python3 scripts/normalize_sources.py --source-id ID1 --source-id ID2`, naming exactly the sources this action delivered or reused. `--all`, and a bare run, also write records the action does not scope, and submission refuses those as normalized outputs no fulfilled source authorizes; `--all` additionally rewrites stale records outside the scope, refused as changed normalized evidence. `--all --dry-run` writes nothing and lists what `--all` would touch.
+
 8. Bind the selected candidate to the normalized manifest source, then fulfill
    the request. For a managed action, pass the work order's exact run ID:
 
@@ -273,7 +275,7 @@ python3 scripts/workspace_status.py --format json
 - Provenance sidecars exist and include origin URL, retrieval agent, timestamp, request ID and candidate ID when applicable, checksum for file downloads, and license status.
 - Scope-carrying requests had matching keys stamped into the delivered sidecar's `scope:` field before inventory, and any `REQUEST_SCOPE_MISMATCH` refusal was resolved by delivering matching evidence or opening a new request, never by editing the sidecar's scope.
 - Standards captures include `provenance.standards` with registry provider, standards body, designation, edition or year, status, registry URL, and terms or dataset-license metadata; `license: null` remains explicit uncertainty when reuse rights are not reviewed.
-- `source_inventory.py --report` and `normalize_sources.py --all` completed successfully.
+- `source_inventory.py --report` and `normalize_sources.py` completed successfully — `--all` outside an orchestration action, `--source-id` naming exactly the action's own sources under one.
 - Fulfilled requests point at real manifest source IDs.
 - The scoped selected candidate is `fetched` and its `fetched_source_id` equals the fulfilled manifest source ID.
 - Blocked questions were reopened only when fulfilled and normalized evidence exists.

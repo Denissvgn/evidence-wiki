@@ -327,7 +327,11 @@ python3 scripts/normalize_sources.py --all
 
 `normalize_sources.py` alone normalizes only pending eligible records; `--all`
 (re)normalizes every delivered source and is the form used in
-`docs/source-delivery.md` after a fresh delivery.
+`docs/source-delivery.md` after a fresh delivery. Inside an orchestration
+acquisition action neither form is safe: both write records the action does not
+scope, and its submission refuses them. There the acquirer normalizes by id
+(`--source-id ID1 --source-id ID2`) for exactly the sources it delivered or
+reused.
 
 Deliver evidence in a normalizer-supported format: papers (LaTeX bundle / PDF),
 standalone PDFs, HTML, link records (`.url`/`.webloc`/link lists), and tables.
@@ -519,6 +523,8 @@ effect of fulfillment. The full sequence the fetch agent runs is: deliver the
 file (with sidecar) → `source_inventory.py --report` → `normalize_sources.py --all`
 → `source_requests.py fulfill --request-id <id> --source-id <manifest-id>` →
 `question_resolve.py reopen --slug <slug> --agent-id <id> --source-id <manifest-id>`.
+Inside an orchestration action the normalize step is `--source-id ID1 --source-id
+ID2` naming exactly that action's own sources, never `--all`.
 `fulfill` only links the source to the request; the deterministic `reopen` verb
 moves the question `blocked` → `open`, drops `blocked_reason`, and attaches the
 delivered `source_id`. `reopen` refuses with `SOURCE_NOT_NORMALIZED` until a

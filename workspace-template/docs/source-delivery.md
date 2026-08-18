@@ -175,43 +175,79 @@ is a second delivery of one retrieval, not a claim of a second retrieval.
 Two kinds do not take their ID from the path, and a copy of one lands on the
 record already in the manifest rather than beside it: an arXiv bundle directory
 named exactly `arxiv-<id>` takes its ID from that arXiv ID, and each URL expanded
-from a link file takes its ID from the URL. Re-deliver a bundle under a directory
-name that is not the `arxiv-<id>` form, and re-deliver an already-inventoried URL
-as an actual capture under `raw/web/` rather than as a second link list. Where no
-distinct ID is reachable, the request cannot be satisfied by re-delivery at all:
-record an attempt failure.
+from a link file takes its ID from the URL — the GitHub repository link that
+becomes a `codebase:` record included. A PDF is a third case of landing on an
+existing record: re-delivered under a filename stem already paired with a LaTeX
+bundle, it is merged into that bundle's record rather than inventoried as its own
+source. What the first two need is a different delivery *form*, not merely a
+different path, and each form has conditions worth stating — miss them and the
+delivery scatters across the manifest as one record per file instead of producing
+the one record the request needs:
+
+- An already-inventoried URL: capture the page itself under `raw/web/` rather than
+  listing the URL a second time. The capture has to be `.html`, `.htm`, or `.xhtml`
+  with the canonical `<name>.html.provenance.yml` sidecar; an `.mhtml`, `.txt`, or
+  reader-mode Markdown capture inventories as a kind nothing normalizes, and an
+  un-normalized source cannot fulfil a request.
+- An arXiv bundle: deliver it under a directory name that is **not** the
+  `arxiv-<id>` form — a different `arxiv-<other-id>` name is still that form and
+  would assert another paper's identity — and keep `00README.json` inside the
+  bundle. Without that file and without the `arxiv-` name the directory is not a
+  bundle candidate at all, and every `.tex`, `.bbl`, and figure in it becomes its
+  own `raw:` record. The renamed bundle also loses `metadata.arxiv_id`, and with it
+  its arXiv key in the cross-reference index and the PDF pairing that key drives.
+- A GitHub `codebase:`: there is no second form. Depositing the repository under
+  `raw/code/` needs `integrations.codebase_analysis.enabled`, which the starter
+  `research.yml` ships `false`, and a shape inventory recognizes — a snapshot
+  directory carrying a repository marker such as `.git` or `pyproject.toml` at its
+  top, or a code archive. Even with both, the record normalizes to a
+  `codebase_stub` until a separately authorized external worker deposits its
+  artifact bundle, which a delivery cannot do, and a stub is refused as unusable
+  evidence. The answer for a `codebase:` ID is an attempt failure.
+
+Where the conditions above do not hold, where the bytes cannot be captured at all,
+or where a license, robots, or terms decision forbids the capture, the request
+cannot be satisfied by re-delivery: record an attempt failure.
 
 Reuse without re-delivery is available too, but only for a source **whose sidecar
-already named this request when the order was issued**. That is the whole rule; it
-covers the case where an earlier order for the same request delivered evidence and
-did not complete, and it covers nothing else. Two shapes qualify:
+already named this request when the order was issued** — and, under provider-backed
+acquisition, whose sidecar also carries a `candidate_id` that order scoped. That is
+the whole rule; it covers the case where an earlier order for the same request
+delivered evidence and did not complete, and it covers nothing else. Two shapes
+qualify:
 
 - the source was already normalized then, and its manifest record and normalized
   output are byte-unchanged; or
 - nothing had normalized it then, and its manifest record is byte-unchanged while
   the one normalized record it owes is written inside this order by
-  `normalize_sources.py`. Verification re-normalizes the unchanged raw evidence and
-  compares, so the record has to be the normalizer's output rather than merely a
-  file that was not there before. Do not hand-edit it — `normalize_sources.py --all`
-  skips a record it does not consider stale, so repairing an edited one means
-  deleting it and re-running, or re-running with `--force`. A source whose
-  normalization is not reproducible from the same bytes, and a `codebase:` source
-  whose artifact bundle no baseline fingerprints, are refused rather than reused.
+  `normalize_sources.py --source-id <id>`. Verification re-normalizes the unchanged
+  raw evidence and compares, so the record has to be the normalizer's output rather
+  than merely a file that was not there before. Always select by ID here: `--all`
+  and a bare run both write an output for every eligible record that has none,
+  including records this order does not scope, and each of those is refused as a
+  normalized output no fulfilled source authorizes. Do not hand-edit the record
+  either — a run skips an output it does not consider stale, so repairing an edited
+  one means deleting it and re-running, or re-running `--source-id <id> --force`. A
+  source whose normalization is not reproducible from the same bytes is refused
+  rather than reused, and a `codebase:` source is refused whatever its state,
+  because its normalized record derives from an artifact bundle no baseline
+  fingerprints.
 
 A source stamped for a **different** request, or for none, is not reusable. It does
 not become reusable by restamping the sidecar (see above), and it does not become
 reusable because the request declares a `scope` the delivery does not contradict:
 scope agreement is a filter over what a delivery *claims*, and a delivery that
 claims nothing contradicts nothing. Deliver those bytes again under their own raw
-path with their own sidecar — unavailable for an arXiv `paper:`, a `link:`, or a
-GitHub `codebase:`, whose IDs are stable across deliveries, where the answer is an
-attempt failure recorded against the request. None of this is in tension with the idempotency
+path with their own sidecar, in whichever form above fits the ID at hand; where
+none does — every `codebase:` ID included — the answer is an attempt failure
+recorded against the request. None of this is in tension with the idempotency
 guarantee below that re-delivering identical bytes changes nothing: that guarantee
-is about the *normalizer*, which skips a source whose `raw_fingerprint` is
-unchanged, while the orchestration postcondition asks the different question of
+is about the *normalizer*, which re-derives a record only when it considers that
+record stale, while the orchestration postcondition asks the different question of
 whether this action produced a manifest record correlated to the request it claims
-to fulfil. Re-delivering the same bytes at a new path costs one more copy of them,
-not a violated guarantee.
+to fulfil.
+Re-delivering the same bytes at a new path costs one more copy of them, not a
+violated guarantee.
 
 Provider-backed delivery is fail closed before this sidecar contract begins.
 Automated acquisition requires verified TLS, successful DNS resolution whose
@@ -363,6 +399,11 @@ python3 scripts/source_inventory.py --report
 python3 scripts/normalize_sources.py --all
 ```
 
+Inside an orchestration acquisition action, normalize by ID instead — `--source-id
+ID1 --source-id ID2`, naming exactly the sources that action delivered or reused.
+`--all`, and a bare run, also write records the action does not scope, and its
+submission refuses those (see "Provenance Sidecars" above).
+
 When the delivery fulfills a source request, link it and unblock the affected questions:
 
 ```bash
@@ -390,7 +431,7 @@ reports.
 ## Idempotency Guarantees
 
 - Re-running `source_inventory.py` after a partial delivery only adds or refreshes affected records. Existing record IDs are stable (path-derived), `detected_at` is preserved across runs, and no prior records are lost when new files arrive.
-- Re-delivering identical bytes changes nothing: `raw_fingerprint` is content-derived, so normalization skips unchanged sources. This is a normalizer property, not an orchestration postcondition: under `orchestration.acquisition: delegated`, re-running inventory over a source already in the manifest does not correlate it to a source request and cannot be made to — see "Provenance Sidecars" above.
+- Re-delivering identical bytes changes nothing: `raw_fingerprint` is content-derived, so normalization skips a source whose bytes and extraction profile are both unchanged. Skipping is the normal case rather than a guarantee that a run writes nothing: a changed normalizer or adapter version, a different configured `pdf_extractor`, and a record predating structured-view sidecars each make an otherwise untouched record stale. This is a normalizer property, not an orchestration postcondition: under `orchestration.acquisition: delegated`, re-running inventory over a source already in the manifest does not correlate it to a source request and cannot be made to — see "Provenance Sidecars" above.
 - Changed bytes under an existing path (discouraged — raw is immutable) change `raw_fingerprint`, and the next normalization run regenerates that record.
 - `source_requests.py add` deduplicates against open requests by kind plus normalized query text; re-submitting is a reported no-op. `fulfill` with the same source ID twice is a no-op.
 
