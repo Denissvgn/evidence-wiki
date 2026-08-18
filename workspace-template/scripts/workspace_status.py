@@ -52,12 +52,14 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import re
 import stat
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from types import ModuleType
@@ -2685,9 +2687,23 @@ def write_cached_status(project_root: Path, cache_key: str, document: dict[str, 
         "generated_at": timestamp_utc(),
         "document": document,
     }
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
-    tmp_path.replace(path)
+    # Unique per writer, like `write_json_atomic` in the orchestration controller. A fixed
+    # temp name is not atomic across concurrent callers: two `status()` calls in one
+    # workspace both write this path, the first `replace` renames it away, and the second
+    # raises FileNotFoundError from a call that only asked to refresh a cache.
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n"
+        )
+        tmp_path.replace(path)
+    except OSError:
+        # The cache is an optimisation; a caller asking for status must not fail because
+        # writing it back did. A concurrent writer's document is as valid as this one.
+        # The cleanup is best-effort for the same reason: whatever stopped the write can
+        # stop the unlink, and a leftover temporary is not worth failing a status read.
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
 
 
 def refresh_run_controller_liveness(project_root: Path, document: dict[str, Any], run_id: str | None) -> dict[str, Any]:

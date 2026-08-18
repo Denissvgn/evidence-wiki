@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.5.2 - 2026-08-18
+## 0.5.2 - 2026-08-19
+
+- **Fix: two concurrent status reads could make each other fail.** Writing the status
+  cache back renamed from a temporary whose name was fixed, so two callers refreshing it
+  in one workspace wrote the same path: the first rename moved it away and the second
+  raised `FileNotFoundError` from a call that had only asked to answer a status query. The
+  temporary is now unique per writer, and a write that loses the race is no longer fatal --
+  the cache is an optimisation, and a concurrent writer's document is as valid as this one.
+  Present since before 0.5.1.
 
 - **Security fix: postcondition verification could be made to run a program of the
   acquirer's choosing.** Re-deriving a reused PDF record read `pdf_extractor.name` out of
