@@ -181,11 +181,31 @@ as an actual capture under `raw/web/` rather than as a second link list. Where n
 distinct ID is reachable, the request cannot be satisfied by re-delivery at all:
 record an attempt failure.
 
-Reuse without re-delivery is available too, but only for a source that was already
-inventoried *and* normalized when the order was issued, whose sidecar already
-named this request then, and whose manifest record and normalized output are
-byte-unchanged — the case where an earlier order for the same request delivered
-evidence but did not complete. None of this is in tension with the idempotency
+Reuse without re-delivery is available too, but only for a source **whose sidecar
+already named this request when the order was issued**. That is the whole rule; it
+covers the case where an earlier order for the same request delivered evidence and
+did not complete, and it covers nothing else. Two shapes qualify:
+
+- the source was already normalized then, and its manifest record and normalized
+  output are byte-unchanged; or
+- nothing had normalized it then, and its manifest record is byte-unchanged while
+  the one normalized record it owes is written inside this order by
+  `normalize_sources.py`. Verification re-normalizes the unchanged raw evidence and
+  compares, so the record has to be the normalizer's output rather than merely a
+  file that was not there before. Do not hand-edit it — `normalize_sources.py --all`
+  skips a record it does not consider stale, so repairing an edited one means
+  deleting it and re-running, or re-running with `--force`. A source whose
+  normalization is not reproducible from the same bytes, and a `codebase:` source
+  whose artifact bundle no baseline fingerprints, are refused rather than reused.
+
+A source stamped for a **different** request, or for none, is not reusable. It does
+not become reusable by restamping the sidecar (see above), and it does not become
+reusable because the request declares a `scope` the delivery does not contradict:
+scope agreement is a filter over what a delivery *claims*, and a delivery that
+claims nothing contradicts nothing. Deliver those bytes again under their own raw
+path with their own sidecar — unavailable for an arXiv `paper:`, a `link:`, or a
+GitHub `codebase:`, whose IDs are stable across deliveries, where the answer is an
+attempt failure recorded against the request. None of this is in tension with the idempotency
 guarantee below that re-delivering identical bytes changes nothing: that guarantee
 is about the *normalizer*, which skips a source whose `raw_fingerprint` is
 unchanged, while the orchestration postcondition asks the different question of

@@ -3501,6 +3501,31 @@ class OrchestrationControllerTests(unittest.TestCase):
                 ):
                     verify({**reopened, "status": bypass_status})
 
+            # Wiring site three. The provider arm validates the reuse baseline it consumes
+            # on the same terms as the delegated arm: an id the manifest baseline does not
+            # name is checked by nothing downstream, and an id already in the scoped-match
+            # map would leave which reuse terms apply to lookup order. The replay guard
+            # answers first in production, so it is stood down here — CR-3's rule is that
+            # each verifier validates every baseline it consumes, and a check that only
+            # ever runs behind another one is a check nobody would notice losing.
+            for tampered, why in (
+                (["raw:never-in-this-manifest"], "names a record outside the manifest baseline"),
+                ([source_id], "is already a scoped match"),
+            ):
+                manifest_guard["reusable_source_ids_before"] = tampered
+                with (
+                    self.subTest(why=why),
+                    mock.patch.object(
+                        CONTROLLER, "require_action_baselines", side_effect=lambda order, _root: order
+                    ),
+                    self.assertRaisesRegex(
+                        CONTROLLER.OrchestrationControllerError,
+                        "bounded evidence integrity baseline",
+                    ),
+                ):
+                    verify(reopened)
+            manifest_guard["reusable_source_ids_before"] = []
+
     def test_legacy_acquisition_without_reconciliation_baselines_requires_fresh_session(self):
         with self.assertRaisesRegex(
             CONTROLLER.OrchestrationControllerError,
@@ -4758,8 +4783,13 @@ class OrchestrationControllerTests(unittest.TestCase):
         name: str = "supplier-quote",
         sidecar_request_id: str | None = "",
         with_sidecar: bool = True,
+        normalize: bool = True,
     ) -> str:
-        """Deliver one acquirer-style artifact with a provenance sidecar, no candidate."""
+        """Deliver one acquirer-style artifact with a provenance sidecar, no candidate.
+
+        `normalize=False` stops after the inventory, which is where a workspace sits when a
+        prior order delivered evidence and never got as far as normalizing it.
+        """
         relative = f"raw/papers/{name}.html"
         path = target / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -4786,9 +4816,10 @@ class OrchestrationControllerTests(unittest.TestCase):
         self.assert_json_script_ok(
             INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
         )
-        self.assert_json_script_ok(
-            NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
-        )
+        if normalize:
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
         manifest = (target / "sources" / "manifest.jsonl").read_text(encoding="utf-8")
         for line in manifest.splitlines():
             record = json.loads(line)
@@ -5281,6 +5312,354 @@ class OrchestrationControllerTests(unittest.TestCase):
                     apply_effects=False,
                 )
             self.assertIn("bounded evidence integrity baseline", str(caught.exception))
+
+    # -- reuse of correlated evidence nothing normalized yet ---------------------------
+
+    def reuse_selector(self, tmpdir: str, records: list[dict], normalized_ids: set[str]):
+        """Both issuance-time baselines over one hand-built manifest.
+
+        Returns `(matching, reusable)` so the pair can be read together: they answer the
+        same correlation question and split on one clause, and a test that saw only one of
+        them could not tell a source that moved between them from one that fell out of both.
+        """
+        root = Path(tmpdir)
+        normalized_root = root / "sources" / "normalized"
+        normalized_root.mkdir(parents=True, exist_ok=True)
+        for source_id in normalized_ids:
+            (normalized_root / f"{source_id.replace(':', '--')}.md").write_text(
+                f"---\ntype: normalized_source\nsource_id: {source_id}\n---\n\nbody\n",
+                encoding="utf-8",
+            )
+        normalize_sources = mock.Mock()
+        normalize_sources.source_paths.return_value = ("sources/manifest.jsonl", "sources/normalized")
+        normalize_sources.load_manifest.return_value = records
+        normalize_sources.normalized_output_path_for_record.side_effect = (
+            lambda record, output_root: output_root / f"{str(record['id']).replace(':', '--')}.md"
+        )
+        with mock.patch.object(CONTROLLER, "load_sibling_module", return_value=normalize_sources):
+            return (
+                CONTROLLER.matching_normalized_source_records(root, {}, ["req-scoped"], None),
+                CONTROLLER.unnormalized_matching_source_ids(root, {}, ["req-scoped"], None),
+            )
+
+    def test_the_two_reuse_baselines_split_on_the_is_file_clause_and_nothing_else(self):
+        """The whole widening, pinned to the one clause it is.
+
+        Two records with identical correlation, differing only in whether anything has
+        normalized them. One lands in the map that fingerprints both digests; the other in
+        the list that authorizes the record it still owes. Neither lands in both, which is
+        what lets the verifier read the reuse terms off the baseline rather than off the
+        state the action left behind.
+        """
+        records = [
+            {"id": "raw:already-normalized", "provenance": {"request_id": "req-scoped"}},
+            {"id": "raw:not-normalized-yet", "provenance": {"request_id": "req-scoped"}},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            matching, reusable = self.reuse_selector(tmpdir, records, {"raw:already-normalized"})
+
+        self.assertEqual(["raw:already-normalized"], sorted(matching))
+        self.assertEqual(["raw:not-normalized-yet"], reusable)
+        self.assertEqual(set(), set(matching) & set(reusable))
+
+    def test_evidence_correlated_to_another_request_or_to_nothing_is_not_reusable(self):
+        """The predicate is correlation, and correlation only.
+
+        Every other field a reuse rule could read -- the delivery's scope, its timing, its
+        retriever -- is written by the same untrusted party as `request_id` itself, so a
+        rule that read one of them would authorize whatever that party decided to write.
+        These three are the shapes that rule would have admitted.
+        """
+        records = [
+            {"id": "raw:another-request", "provenance": {"request_id": "req-elsewhere"}},
+            {"id": "raw:no-request", "provenance": {"retrieved_by": "acquirer-1"}},
+            {"id": "raw:no-provenance", "provenance": None},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            matching, reusable = self.reuse_selector(tmpdir, records, set())
+
+        self.assertEqual({}, matching)
+        self.assertEqual([], reusable)
+
+    def test_a_reuse_baseline_beyond_the_bounded_contract_is_refused_at_issuance(self):
+        records = [
+            {"id": f"raw:pending-{index:04d}", "provenance": {"request_id": "req-scoped"}}
+            for index in range(CONTROLLER.MAX_SCOPE_IDS + 1)
+        ]
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught,
+        ):
+            self.reuse_selector(tmpdir, records, set())
+
+        self.assertEqual("ORCHESTRATION_SCOPE_EXCEEDED", caught.exception.error_code)
+
+    def test_the_reuse_baseline_validator_bounds_names_and_disambiguates(self):
+        """Three properties, because a verifier acting on any of it needs all three."""
+        manifest = {"raw:a": "sha256:" + "1" * 64, "raw:b": "sha256:" + "2" * 64}
+        valid = CONTROLLER.valid_unnormalized_reuse_baseline
+
+        self.assertTrue(valid([], [], manifest))
+        self.assertTrue(valid(["raw:a"], ["raw:b"], manifest))
+        # Not a bounded list of scope ids.
+        self.assertFalse(valid({"raw:a": {}}, [], manifest))
+        self.assertFalse(valid(["raw:a", ""], [], manifest))
+        self.assertFalse(
+            valid([f"raw:pad-{index}" for index in range(CONTROLLER.MAX_SCOPE_IDS + 1)], [], manifest)
+        )
+        # Names a record the manifest baseline does not, so nothing would check it.
+        self.assertFalse(valid(["raw:invented"], [], manifest))
+        # In both maps at once, so which reuse terms apply would depend on lookup order.
+        self.assertFalse(valid(["raw:a"], ["raw:a"], manifest))
+
+    def test_a_source_whose_normalization_reads_unpinned_inputs_is_not_reusable(self):
+        """Re-derivation is only as strong as what the order pinned, and says so.
+
+        A `codebase:` record normalizes from an artifact bundle under the configured
+        codebase output directory, which neither the raw-tree baseline nor the normalized
+        one fingerprints. Re-deriving such a record would confirm its body against an input
+        the acquirer can write during the order, which is the one thing this check exists
+        to prevent, so the reuse is withheld instead.
+        """
+        normalize_sources = CONTROLLER.load_sibling_module("normalize_sources")
+        record = {
+            "id": "codebase:example",
+            "kind": normalize_sources.CODEBASE_KIND,
+            "raw_paths": ["raw/code/example"],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            normalized_path = root / "sources" / "normalized" / "codebase--example.md"
+            normalized_path.parent.mkdir(parents=True)
+            normalized_path.write_text(
+                "---\ntype: normalized_source\nsource_id: codebase:example\n"
+                "updated: 2026-08-18\nnormalized_at: 2026-08-18T00:00:00Z\n---\n\nbody\n",
+                encoding="utf-8",
+            )
+
+            failure = CONTROLLER.normalized_output_derivation_failure(
+                root, {}, record, normalized_path, [record], normalize_sources
+            )
+
+        self.assertEqual(
+            "the reused source normalizes from artifacts this order does not fingerprint",
+            failure["reason"],
+        )
+
+    def test_each_acquisition_arm_offers_a_recourse_that_arm_actually_has(self):
+        """One set of reuse terms, two recourses, because the arms end requests differently.
+
+        A delegated batch reports a request it could not satisfy as an attempt failure. The
+        provider arm has no such outcome — every scoped request must be fulfilled — so
+        telling it to record one would be advice its own fulfilment guard then refuses,
+        which is the CR-15c shape.
+        """
+        terms = CONTROLLER.REUSE_SCOPE_TERMS
+        self.assertTrue(CONTROLLER.REUSE_SCOPE_REMEDIATION.startswith(terms))
+        self.assertTrue(CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION.startswith(terms))
+        self.assertIn("record-attempt-failure", CONTROLLER.REUSE_SCOPE_REMEDIATION)
+        self.assertNotIn("record-attempt-failure", CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION)
+        self.assertIn("another selected candidate", CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION)
+
+    def tampered_reuse_baseline(self, order: dict, value: list[str]) -> dict:
+        for check in order["required_postconditions"]:
+            if check["check"] == "manifest_records_increased":
+                check["reusable_source_ids_before"] = value
+        return order
+
+    def hydrated_pending_order(self, target: Path, action_id: str = "action-0001") -> dict:
+        return CONTROLLER.hydrate_integrity_baselines(
+            target,
+            CONTROLLER.load_json_object(
+                CONTROLLER.work_order_path(target, "orch-test", action_id),
+                error_code="WORK_ORDER_INVALID",
+                label="work order",
+            ),
+        )
+
+    def verify_delegated(self, target: Path, order: dict):
+        return CONTROLLER.verify_delegated_acquisition_postconditions(
+            target,
+            CONTROLLER.load_session(target, "orch-test"),
+            order,
+            config=CONTROLLER.load_config(target),
+            status=CONTROLLER.fresh_workspace_status(target),
+            run_id=order.get("run_id"),
+            current="fetching",
+            controller=CONTROLLER.load_sibling_module("run_controller"),
+            apply_effects=False,
+        )
+
+    def test_a_reuse_baseline_naming_an_unknown_record_is_refused_at_replay(self):
+        """Wiring site one: the guard that decides a pending order is replayable at all."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, _ = self.delegated_action(Path(tmpdir))
+            order = self.tampered_reuse_baseline(
+                self.hydrated_pending_order(target), ["raw:never-in-this-manifest"]
+            )
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                CONTROLLER.require_acquisition_evidence_baselines(order)
+
+            self.assertEqual(
+                "ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE", caught.exception.error_code
+            )
+
+    def test_a_reuse_baseline_naming_an_unknown_record_is_refused_by_the_delegated_arm(self):
+        """Wiring site two. An id outside the manifest baseline is checked by nothing.
+
+        Reconciliation only walks sources the manifest snapshot holds, so an allowlist that
+        reaches past it would silently authorize an id no guard ever looks at. The two maps
+        are written together from one manifest read, so disagreeing means tampering.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+            order = self.tampered_reuse_baseline(
+                self.hydrated_pending_order(target), ["raw:never-in-this-manifest"]
+            )
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                self.verify_delegated(target, order)
+
+            self.assertIn("bounded evidence integrity baseline", str(caught.exception))
+
+    def test_an_order_issued_before_reuse_existed_replays_unchanged(self):
+        """The field is additive: a pending order without it verifies exactly as it did."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+            order = self.hydrated_pending_order(target)
+            manifest_guard = next(
+                check
+                for check in order["required_postconditions"]
+                if check["check"] == "manifest_records_increased"
+            )
+            self.assertEqual([], manifest_guard.pop("reusable_source_ids_before"))
+
+            CONTROLLER.require_acquisition_evidence_baselines(order)
+
+            self.assertEqual(("research", None), self.verify_delegated(target, order))
+
+    def test_an_order_issued_before_reuse_existed_replays_with_reuse_unavailable(self):
+        """And it is additive in the other direction too: the affordance is simply absent.
+
+        The same workspace, the same fulfilment, one field removed. With the field the
+        reuse is authorized and the action verifies; without it the action is refused, and
+        refused for the reason that is actually true of a pre-reuse order -- this order
+        authorized none -- rather than for a mislabelled one.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            source_id = self.deliver_for_request(target, request_id, normalize=False)
+            self.delegated_session(target)
+            code, _, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+
+            self.assertEqual(("research", None), self.verify_delegated(target, self.hydrated_pending_order(target)))
+
+            legacy = self.tampered_reuse_baseline(self.hydrated_pending_order(target), [])
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                self.verify_delegated(target, legacy)
+
+            self.assertIn("reuses pre-existing evidence", str(caught.exception))
+            self.assertEqual(
+                [{"source_id": source_id, "cause": "no_reuse_authorization_at_issuance",
+                  "provenance_request_id": request_id, "record_unchanged": True}],
+                caught.exception.details["reuse_scope_failures"],
+            )
+
+    def test_the_reuse_baseline_authorises_exactly_one_normalized_record(self):
+        """The unit-level view of what the arm widens: `allowed_new_normalized_paths`.
+
+        Asserted on the returned set rather than through a refusal, because the boundary
+        that matters is what the set *contains* -- an arm the order recorded as already
+        normalized must contribute nothing to it, or its byte-identity guarantee quietly
+        becomes optional and no single refusal would show that.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            reused = self.deliver_for_request(target, request_id, normalize=False)
+            self.delegated_session(target)
+            code, _, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+
+            order = self.hydrated_pending_order(target)
+            manifest_guard = next(
+                check
+                for check in order["required_postconditions"]
+                if check["check"] == "manifest_records_increased"
+            )
+            self.assertEqual([reused], manifest_guard["reusable_source_ids_before"])
+            self.assertEqual({}, manifest_guard["matching_source_records_before"])
+
+            normalize_sources = CONTROLLER.load_sibling_module("normalize_sources")
+            config = CONTROLLER.load_config(target)
+            manifest_relative, normalized_relative = normalize_sources.source_paths(config)
+            by_source_id = normalize_sources.records_by_source_id(
+                normalize_sources.load_manifest(target / manifest_relative)
+            )
+
+            allowed, required = CONTROLLER.normalized_output_scope(
+                target, target / normalized_relative, {reused}, by_source_id, normalize_sources
+            )
+            self.assertEqual({f"sources/normalized/{reused.replace(':', '--')}.md"}, allowed)
+            self.assertEqual(allowed, required)
+
+            # The arm that was normalized at issuance contributes nothing at all.
+            empty_allowed, empty_required = CONTROLLER.normalized_output_scope(
+                target, target / normalized_relative, set(), by_source_id, normalize_sources
+            )
+            self.assertEqual(set(), empty_allowed)
+            self.assertEqual(set(), empty_required)
+
+    def test_an_authored_normalized_body_is_refused_for_a_reused_source(self):
+        """The reuse authorizes a path; re-derivation is what binds the bytes to the raw.
+
+        Every other artifact a reuse touches is pinned by a digest the order took before the
+        acquirer started. The normalized record is the one it may create, and it is the one
+        the wiki quotes, so the verifier normalizes the unchanged raw evidence itself and
+        compares rather than trusting that a new file is a derived one.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            source_id = self.deliver_for_request(target, request_id, normalize=False)
+            self.delegated_session(target)
+            code, _, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+            record = target / "sources" / "normalized" / f"{source_id.replace(':', '--')}.md"
+            record.write_text(
+                record.read_text(encoding="utf-8").replace("23.99 EUR", "1.00 EUR"),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                self.verify_delegated(target, self.hydrated_pending_order(target))
+
+            failure = caught.exception.details["reconciliation_failures"][0]
+            self.assertEqual(source_id, failure["source_id"])
+            self.assertTrue(failure["was_authorized_unnormalized"])
+            self.assertTrue(failure["record_unchanged"])
+            self.assertEqual(
+                "normalized evidence is not what normalizing the raw evidence produces",
+                failure["derivation_failure"]["reason"],
+            )
 
     # -- delegated acquisition: blocked-path verification -----------------------------
 
@@ -6820,6 +7199,38 @@ class NormalizedOutputScopeTests(unittest.TestCase):
                 self.assertTrue(
                     called & shared,
                     f"{node.name} bounds normalized outputs without the shared allowance",
+                )
+            wanted = wanted - {node.name}
+        self.assertEqual(set(), wanted, f"postcondition functions not found: {sorted(wanted)}")
+
+    def test_both_acquisition_arms_hold_reuse_to_the_same_shared_terms(self):
+        """The symmetry CR-17 required, asserted where it can actually be broken.
+
+        `workspace-template/docs/orchestration.md` states that the two arms admit reuse on
+        the same terms, and the delegated verifier's own docstring counts the differences
+        between them. Both claims stay true only while the reuse decision lives in shared
+        helpers, so this fails if either arm grows its own copy.
+        """
+        tree = ast.parse(Path(CONTROLLER.__file__).read_text(encoding="utf-8"))
+        wanted = {"verify_delegated_acquisition_postconditions", "verify_action_postconditions"}
+        shared = {
+            "preexisting_reuse_scope_failures",
+            "reused_source_reconciliation_failure",
+            "valid_unnormalized_reuse_baseline",
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in wanted:
+                continue
+            called = {
+                getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+            }
+            with self.subTest(function=node.name):
+                self.assertEqual(
+                    shared,
+                    shared & called,
+                    f"{node.name} decides reuse without one of the shared helpers",
                 )
             wanted = wanted - {node.name}
         self.assertEqual(set(), wanted, f"postcondition functions not found: {sorted(wanted)}")

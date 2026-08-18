@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+- **An acquisition order can now fulfil a scoped request from a source it already
+  correlated to that request but nothing had normalized yet.** An acquirer that delivered
+  and inventoried evidence under an order that then failed, timed out, or rolled over
+  leaves exactly that state: the sidecar names the request, the manifest holds the record,
+  and only the normalized output is missing. Producing it is the work the next order asks
+  for, and the postcondition refused it — first as an uncorrelated reuse, then as an
+  unauthorised normalized file. There was no workaround. The source id is already in the
+  manifest, so re-delivering the same bytes at a second path creates a different record and
+  leaves the original fulfilling nothing.
+
+  An acquisition order now also records the ids of pre-existing manifest sources whose own
+  `provenance.request_id` named one of its scoped requests when it was issued and that
+  nothing had normalized. Reconciliation requires such a source's manifest record to be
+  byte-identical to what the order fingerprinted, and its normalized output to be newly
+  written — and, because "new" is a statement about a path rather than about a body, the
+  verifier re-normalizes the unchanged raw evidence itself and compares the result, record
+  and structured-view sidecar alike. Both postcondition arms take it, so the delegated and
+  provider arms still admit reuse on the same terms.
+
+  **The predicate is correlation, and only correlation.** A source stamped for a different
+  request, or for none, is still refused, and this change deliberately does not open it.
+  Correlation is written by the acquirer, and so is every other field such a decision could
+  read — the delivery's scope, its timing, its retriever — so a predicate over delivered
+  metadata authorizes whatever the untrusted party decided to write. Reuse across requests
+  needs an authorization from a trusted party, which this package does not yet have; until
+  it does, the answer for that evidence stays a second delivery under its own raw path, or
+  an attempt failure where the id is stable across deliveries (arXiv `paper:`, `link:`,
+  GitHub `codebase:`). That residual gap stays open on purpose.
+
+  **No mutable set widened, and `raw/` is still immutable.** Every `mutable_ids` in both
+  arms is still `set()`. What widened is `allowed_new_ids` — what an action may *create* —
+  by exactly one normalized record per reused source, and only for a source the order
+  recorded as not yet normalized; one that was already normalized still authorizes no new
+  file at all and still answers to byte-identity. The list is computed once, at issuance,
+  from state that was already durable then, by the controller, and lives in the protected
+  baseline sidecar, so nothing an acquirer writes during the order can add to it. A reused
+  source whose manifest record, raw sidecar or normalized output changed afterwards is
+  still refused naming the source, and no `provenance.request_id` is ever restamped. An
+  order issued before this change carries no list and replays exactly as it did, with the
+  reuse simply unavailable. Reported downstream as EW-BUG-005.
+
 - **Fix: a delegated acquisition that fulfilled a request from evidence the workspace
   already held was refused five times over, and never for the reason it was refused.** The
   first refusal said the fulfilled evidence carried no provenance sidecar naming its
@@ -22,17 +63,15 @@
 
   Delegated acquisition now refuses this once, up front, naming the reuse constraint: a
   pre-existing manifest record may satisfy a scoped request only when the order itself
-  correlated it — its sidecar named that request and it already carried a normalized
-  record when the order was issued — and both are unchanged since. Three different states
-  fall outside that baseline and their repairs differ, so the refusal reports which one it
-  hit per source rather than asserting a reason: `provenance_names_no_scoped_request`,
-  `no_normalized_output_at_issuance`, and `manifest_record_changed_after_issuance`. The
+  named it at issuance, unchanged since. Three different states fall outside every baseline
+  the order wrote and their repairs differ, so the refusal reports which one it hit per
+  source rather than asserting a reason: `provenance_names_no_scoped_request`,
+  `no_reuse_authorization_at_issuance`, and `manifest_record_changed_after_issuance`. The
   remediation covers each — deliver the evidence as a new source under its own raw path
-  with its own sidecar when nothing correlated it, and for a correlated source that was
-  never normalized, record the attempt failure with `source_requests.py
-  record-attempt-failure`, normalize, and take a fresh session whose baseline correlates
-  it. That second state remains a dead end inside an order it was not correlated to;
-  giving it a route is design work rather than a message fix, and is not attempted here.
+  with its own sidecar when nothing correlated it, restore a record rewritten since
+  issuance, and record an attempt failure where neither is available. (The entry above
+  closes the second of those states for a correctly correlated source; a source correlated
+  elsewhere stays a dead end, deliberately.)
   Two existing remediations were corrected to
   stop pointing at the dead end: the correlation refusal now says the sidecar must be
   stamped *at delivery* and that raw immutability is why a source the manifest already

@@ -318,9 +318,18 @@ questions. Discovery may append only request-scoped candidates from enabled
 providers. Review may change only scoped candidate IDs. Acquisition may fulfill
 only scoped requests, transition only scoped candidates/questions, preserve all
 existing raw and normalized evidence, and create only outputs attributable to
-new fulfilled source IDs. An unchanged pre-existing source is reusable only
-when both its manifest record and normalized output exactly match the protected
-baseline.
+new fulfilled source IDs. An unchanged pre-existing source is reusable only on
+terms the controller fixed when it issued the order, and there are exactly two:
+its manifest record and normalized output both exactly match the protected
+baseline, or — for a source the order recorded as correlated to a scoped request
+with nothing normalized yet — its manifest record matches and its normalized
+output is newly written by `normalize_sources.py`. The second is verified by
+re-normalizing the unchanged raw evidence and comparing the result, so a new file
+must also be a derived one. That check re-runs the normalizer the trusted
+`research.yml` configures, reads back only the record's timestamps and its
+bibliography cross-references, and fails closed: a source whose normalization is
+not reproducible from the same bytes, or whose inputs this order does not
+fingerprint (a `codebase:` artifact bundle), is refused rather than reused.
 
 A **delegated** acquisition action is bounded the same way, with three
 differences that follow from having no candidate store: it may not change
@@ -330,16 +339,24 @@ it may append to that append-only audit but never rewrite an event that existed
 when the order was issued. Question files are mutable only for questions whose
 *every* blocking request was fulfilled. Pre-existing evidence is reusable on the
 same terms as above, correlated by `provenance.request_id` alone — and correlated
-*already*, at the moment the order was issued. That reusable baseline is
-fingerprinted at issue time from the manifest records whose merged
-`provenance.request_id` named a scoped request then, together with their
-normalized outputs; a delivery not yet inventoried or not yet normalized is not in
-it. A source already in the manifest cannot join the baseline afterwards, because
-`raw/` is immutable and a `request_id` stamped into a delivered sidecar after the
-fact is an assertion by the untrusted party rather than a record of what it
-fetched. Evidence already on disk but uncorrelated is delivered again as a new
-source with its own sidecar — most source ids are path-derived, so a distinct
-capture at a distinct path is a distinct record.
+*already*, at the moment the order was issued. Both reusable baselines are taken
+at issue time from the manifest records whose merged `provenance.request_id`
+named a scoped request then: those with a normalized output are fingerprinted
+together with it, and those without are listed by id and owe the one normalized
+record they authorize. A delivery not yet inventoried is in neither.
+
+**Reuse never widens past that correlation.** A source whose sidecar names a
+different request, or names none, is not reusable and does not become reusable by
+being restamped: `raw/` is immutable, and a `request_id` written into a delivered
+sidecar after the fact is an assertion by the untrusted party rather than a record
+of what it fetched. Every other field such a decision could read — the delivery's
+scope, its timing, its retriever — is written by that same party, so no predicate
+over delivered metadata can authorize the pairing. Evidence already on disk but
+correlated elsewhere is delivered again as a new source with its own sidecar; most
+source ids are path-derived, so a distinct capture at a distinct path is a distinct
+record. Where the id is stable across deliveries — an arXiv `paper:`, a `link:`, a
+GitHub `codebase:` — there is no second path, and the outcome is an attempt failure
+recorded against the request.
 
 `blocked_on_sources`, `no_ship`, and `failed` remain terminal child-run states.
 The parent never reopens those records. For example, an initial research run

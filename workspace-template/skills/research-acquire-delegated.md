@@ -158,6 +158,39 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    The fix is the same shape as above — deliver the evidence again as a new
    source (step 3), or record an attempt failure (step 6).
 
+   **When you may reuse evidence the workspace already holds.** Read this beside
+   the prohibition above, because the two draw one line. A source already in the
+   manifest can fulfil a scoped request without being fetched again **only when
+   its `.provenance.yml` already named that request before this order was
+   issued**. That is the case where an earlier order delivered and inventoried
+   the evidence and stopped: skip step 3, run step 4 to produce the normalized
+   record it still owes, then fulfil it in step 5. If it was already normalized
+   then, leave it exactly as it is — its record and its normalized output must
+   both stay byte-identical, and re-running `normalize_sources.py --all` is
+   harmless because the normalizer skips a source whose `raw_fingerprint` is
+   unchanged.
+
+   A source stamped for **another** request, or for none, is not reusable, and
+   nothing you can write makes it reusable. Not restamping the sidecar; not
+   stamping a `scope` that agrees with the request. Deliver those bytes again as
+   a new source under its own raw path with its own sidecar (step 3) — which is
+   not available for an arXiv `paper:`, a `link:`, or a GitHub `codebase:`,
+   whose ids are the same on every delivery. For those, record an attempt
+   failure (step 6). The refusal names which case you are in under
+   `details.reuse_scope_failures[].cause`:
+   `provenance_names_no_scoped_request` for evidence correlated elsewhere;
+   `manifest_record_changed_after_issuance` for a record rewritten since the
+   order was issued, repaired by restoring it exactly; and
+   `no_reuse_authorization_at_issuance` for a correctly correlated source in an
+   order issued before this affordance existed, repaired by finishing the order
+   without it and letting the next session's order see the workspace as it is.
+
+   The normalized record you write for a reused source must be the one
+   `normalize_sources.py` produces from the unchanged raw evidence: submission
+   re-normalizes and compares. Do not hand-edit it. If you already did, delete
+   it and re-run step 4 — `--all` skips a record it does not consider stale, so
+   an edited file survives a plain re-run.
+
 6. Record a structured failure for each scoped request you could **not** fulfil:
 
 ```bash
