@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased
+
+- **Fix: a delegated acquisition that fulfilled a request from evidence the workspace
+  already held was refused five times over, and never for the reason it was refused.** The
+  first refusal said the fulfilled evidence carried no provenance sidecar naming its
+  request, and told the acquirer to stamp `request_id` into the sidecar and re-run
+  `source_inventory.py`. Doing exactly that on a source `raw/` already holds edits
+  immutable raw evidence and rewrites a manifest record the order may not touch, so the
+  obedient acquirer was refused again — by manifest scope, then reconciliation, then
+  normalized scope, then raw scope. Four more `ORCHESTRATION_POSTCONDITION_FAILED`
+  envelopes, each describing a different artifact, none of them naming the constraint that
+  was actually broken.
+
+  The blast radius is any delegated workspace whose acquirer can satisfy a scoped request
+  from evidence it delivered earlier — the reuse path
+  `matching_normalized_source_records` exists to keep open. An operator holding the
+  cascade had no way to tell that the real answer was "this source was never correlated to
+  this request, and cannot be now"; the advice printed with the first refusal led directly
+  into the other four.
+
+  Delegated acquisition now refuses this once, up front, naming the reuse constraint: a
+  pre-existing manifest record may satisfy a scoped request only when the order itself
+  correlated it — its sidecar named that request and it already carried a normalized
+  record when the order was issued — and both are unchanged since. Three different states
+  fall outside that baseline and their repairs differ, so the refusal reports which one it
+  hit per source rather than asserting a reason: `provenance_names_no_scoped_request`,
+  `no_normalized_output_at_issuance`, and `manifest_record_changed_after_issuance`. The
+  remediation covers each — deliver the evidence as a new source under its own raw path
+  with its own sidecar when nothing correlated it, and for a correlated source that was
+  never normalized, record the attempt failure with `source_requests.py
+  record-attempt-failure`, normalize, and take a fresh session whose baseline correlates
+  it. That second state remains a dead end inside an order it was not correlated to;
+  giving it a route is design work rather than a message fix, and is not attempted here.
+  Two existing remediations were corrected to
+  stop pointing at the dead end: the correlation refusal now says the sidecar must be
+  stamped *at delivery* and that raw immutability is why a source the manifest already
+  holds cannot acquire one afterwards, and the reconciliation refusal now names
+  correlation-at-issuance rather than merely asking for "the unchanged scoped
+  pre-existing source".
+
+  **No guard was relaxed and no scope was widened.** `research.yml` declares
+  `raw: immutable: true`, and both fixes proposed downstream would have required an
+  untrusted acquirer to retro-edit a delivered provenance sidecar — which
+  `skills/research-acquire-delegated.md` forbids in as many words. The four scope guards
+  keep exactly the sets they had; the change is one earlier refusal and two corrected
+  remediations. The reuse path had no end-to-end test in either direction before this, so
+  it gained one, along with regression tests that pin each scope guard behaviourally.
+  Reported downstream as EW-BUG-005.
+
 ## 0.5.1 - 2026-08-17
 
 - **Fix: an acquisition action could not fulfil a source whose normalized record binds a
