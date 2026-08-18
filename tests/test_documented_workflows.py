@@ -762,7 +762,6 @@ class DocumentedWorkflowTests(unittest.TestCase):
             "acquisition_mode: delegated",
             "python3 scripts/source_requests.py list --status open --format json",
             "python3 scripts/source_inventory.py --report",
-            "python3 scripts/normalize_sources.py --all",
             "python3 scripts/source_requests.py fulfill --request-id",
             "python3 scripts/source_requests.py record-attempt-failure",
             "python3 scripts/question_resolve.py reopen --slug",
@@ -770,6 +769,33 @@ class DocumentedWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, skill)
+
+        # The normalization step is asserted on whole command lines rather than by
+        # substring. `--all` is a prefix of `--all --dry-run`, so a substring assertion on
+        # the prescriptive command also matches a read-only diagnostic — it would stay green
+        # with step 4 deleted outright, which is the opposite of what it exists to pin.
+        #
+        # And the prescriptive form has to be scoped. An acquisition order authorizes
+        # normalized output for the sources it scopes and nothing else, so `--all` writes
+        # records the order refuses as `unexpected_new_normalized` and rewrites any
+        # unrelated record `is_stale` considers stale into a `changed_outside_scope`
+        # refusal. This is the executable form of the same rule the controller's
+        # `MISSING_NORMALIZED_REMEDIATION` states.
+        normalize_commands = [
+            line.strip()
+            for line in skill.splitlines()
+            if line.strip().startswith("python3 scripts/normalize_sources.py")
+        ]
+        self.assertTrue(normalize_commands, "the skill no longer names a normalization command")
+        prescriptive = [line for line in normalize_commands if "--dry-run" not in line]
+        self.assertTrue(prescriptive, "the skill prescribes only a read-only normalization preview")
+        for command in prescriptive:
+            with self.subTest(command=command):
+                self.assertIn(
+                    "--source-id",
+                    command,
+                    "the prescribed normalization must be scoped to the sources this order names",
+                )
 
         collapsed = re.sub(r"\s+", " ", skill)
         # The three things an acquirer most easily gets wrong, stated outright.
@@ -891,7 +917,6 @@ class DocumentedWorkflowTests(unittest.TestCase):
             "openalex enrich --source-id",
             "before raw `web get`",
             "python3 scripts/source_inventory.py --report",
-            "python3 scripts/normalize_sources.py --all",
             "python3 scripts/source_requests.py fulfill --request-id",
             "python3 scripts/workspace_status.py --format json",
             "Do not run provider fetch commands",
@@ -906,6 +931,34 @@ class DocumentedWorkflowTests(unittest.TestCase):
             "route-exhaustion decision",
         ):
             self.assertIn(expected, skill)
+
+        # The same rule as the delegated skill, with the one difference that matters: this
+        # skill also covers acquiring outside an orchestration action, where `--all` is
+        # correct. Under an action it is not — an order authorizes normalized output for the
+        # sources it scopes and nothing else, so `--all` writes records the submission then
+        # refuses. Matched on whole command lines because `--all` is a prefix of
+        # `--all --dry-run`: a substring assertion would also be satisfied by a read-only
+        # diagnostic, and would stay green with the prescriptive step deleted.
+        normalize_commands = [
+            line.strip()
+            for line in skill.splitlines()
+            if line.strip().startswith("python3 scripts/normalize_sources.py")
+        ]
+        self.assertTrue(normalize_commands, "the skill no longer names a normalization command")
+        self.assertIn(
+            "normalize_sources.py --source-id",
+            skill,
+            "the skill never names normalizing by id, the only form an order accepts",
+        )
+        for command in normalize_commands:
+            if "--all" not in command or "--dry-run" in command:
+                continue
+            with self.subTest(command=command):
+                self.assertIn(
+                    "--source-id",
+                    skill.split(command, 1)[1][:1500],
+                    "an unscoped normalization is printed without the scoped form an order requires",
+                )
 
         for path in (
             AGENTS,
