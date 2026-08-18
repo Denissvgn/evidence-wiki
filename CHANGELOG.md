@@ -2,6 +2,82 @@
 
 ## Unreleased
 
+- **Security fix: postcondition verification could be made to run a program of the
+  acquirer's choosing.** Re-deriving a reused PDF record read `pdf_extractor.name` out of
+  the normalized file — the file the untrusted acquirer had just written — and passed it
+  through as a bare string. In the extraction library a bare string has one meaning, *a
+  resolved `pdftotext` executable path*, so the stamped value became `argv[0]` of a
+  subprocess run with the workspace as its working directory, in the middle of the check
+  that exists to decide whether the acquirer's output can be trusted. The extractor
+  allowlist was never consulted.
+
+  The same line also made the feature unusable in the direction it was written for. A
+  record this package produces stamps `pypdf`, and there is no executable by that name, so
+  every legitimate reuse of a PDF source failed as "normalized evidence could not be
+  re-derived from the raw evidence" — a refusal blaming the acquirer for the verifier's own
+  bug.
+
+  The stamped name is now resolved through the allowlist and reaches the extractor as a
+  real extractor identity. A name this package does not implement is a refusal naming it,
+  and an extractor this host does not have is a separate refusal naming that; neither
+  attempts to execute anything. Reported downstream as EW-BUG-005.
+
+- **Fix: verification could refuse an acquisition for a file verification itself had just
+  written.** Re-deriving a reused record runs the workspace's configured normalizer
+  adapter — an external program — and it ran before the post-action snapshots were taken,
+  with the workspace as its working directory. Anything it wrote on the way past was
+  attributed to the acquirer: a scratch file under `raw/` as immutable evidence changed, one
+  under the normalized tree as evidence rewritten, one under `docs/` as a tampered trusted
+  input. Deleting the file and resubmitting produced it again, so the refusal could not be
+  cleared and named the wrong party every time round.
+
+  Both post-action snapshots are now read before that check runs, and an adapter
+  re-derivation is confined to a bounded throwaway copy holding the trusted static inputs
+  and the one record's own raw evidence. Built-in extractors, which write nothing, still
+  re-derive in place.
+
+- **Fix: reuse verification held the evidence to the host it ran on.** `normalizer.version`
+  and `pdf_extractor.version` are stamped from whatever is installed at the moment of the
+  run and were part of the compared bytes, so an upgrade between issuance and submission, a
+  different virtualenv, or an order replayed across a version bump turned a legitimate reuse
+  into an accusation that the record had been hand-written. Both are now read back, the way
+  `created`, `updated` and `normalized_at` already were, matching this package's own
+  treatment of extractor versions as provenance rather than a rewrite trigger. The producer
+  *names* stay derived, so a record still cannot claim a producer that did not produce it.
+
+- **Fix: an acquisition order could be issued that no submission could complete.** The
+  baseline of reusable un-normalized sources admitted a kind the derivation check refuses
+  unconditionally, so the order required a normalized output and then refused the same
+  output; and the two reuse baselines were computed over two separate reads of the manifest,
+  so a file appearing or disappearing between them could put a source in neither or in both
+  — the second of which made every submission of that order fail as an invalid baseline.
+  Both baselines now come from one read and share one predicate about which kinds reuse can
+  cover. Re-derivation is also refused outright when a record names an input path outside
+  the fingerprinted raw roots, rather than confirming the body against bytes no baseline
+  pins, and cited `references_source_ids` are admitted only as ids the evidence manifest
+  holds.
+
+- **Fix: remediations that were refused for being followed.** The reconciliation refusal
+  advised re-running `normalize_sources.py --force`, which selects nothing, and the
+  missing-record refusal advised `--all`, which normalizes sources the order does not scope
+  and is then refused for doing so. Both now name `--source-id`, which repairs exactly the
+  record the refusal is about. Each cause of the reuse refusal carries its own repair
+  instead of one shared sentence that, for a correctly correlated source, described the
+  state being refused. Both refusals are also split per acquisition arm, so the provider arm
+  is no longer told to record an attempt failure its own fulfilment guard forbids, and the
+  provider arm now reports reuse before the guards that used to mask two of its three
+  causes. Selecting a source this package has no extractor for now refuses as
+  `SOURCE_NOT_NORMALIZABLE`, with a repair of its own, instead of reporting the whole
+  workspace unreadable.
+
+- **Fix: a submission re-derived every reused source three times.** `submit` verifies three
+  times by design — to prepare, to confirm, and to apply — and each pass re-ran the full
+  re-derivation, holding the driver session lock throughout while peers were refused
+  immediately. The verdict is now reached once per source per submission, keyed by the exact
+  bytes it is a statement about. The published work-order schema's baseline bounds were also
+  raised to cover what the controller emits and accepts, so a host validating an order can
+  no longer reject one the controller considers valid.
+
 - **An acquisition order can now fulfil a scoped request from a source it already
   correlated to that request but nothing had normalized yet.** An acquirer that delivered
   and inventoried evidence under an order that then failed, timed out, or rolled over
@@ -27,9 +103,12 @@
   read — the delivery's scope, its timing, its retriever — so a predicate over delivered
   metadata authorizes whatever the untrusted party decided to write. Reuse across requests
   needs an authorization from a trusted party, which this package does not yet have; until
-  it does, the answer for that evidence stays a second delivery under its own raw path, or
-  an attempt failure where the id is stable across deliveries (arXiv `paper:`, `link:`,
-  GitHub `codebase:`). That residual gap stays open on purpose.
+  it does, the answer for that evidence stays a second delivery under its own raw path.
+  Where the source id is stable across deliveries a second delivery cannot produce a
+  distinct record, and an attempt failure is the default answer. A second delivery *form*
+  exists for an arXiv `paper:` and for a `link:`, under preconditions
+  `docs/source-delivery.md` states, and does not exist at all for a GitHub `codebase:`
+  source. That residual gap stays open on purpose.
 
   **No mutable set widened, and `raw/` is still immutable.** Every `mutable_ids` in both
   arms is still `set()`. What widened is `allowed_new_ids` — what an action may *create* —
@@ -84,9 +163,7 @@
   untrusted acquirer to retro-edit a delivered provenance sidecar — which
   `skills/research-acquire-delegated.md` forbids in as many words. The four scope guards
   keep exactly the sets they had; the change is one earlier refusal and two corrected
-  remediations. The reuse path had no end-to-end test in either direction before this, so
-  it gained one, along with regression tests that pin each scope guard behaviourally.
-  Reported downstream as EW-BUG-005.
+  remediations. Reported downstream as EW-BUG-005.
 
 ## 0.5.1 - 2026-08-17
 

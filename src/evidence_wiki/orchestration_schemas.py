@@ -36,6 +36,17 @@ RESULT_ARTIFACT_PATH_PATTERN = (
     r".{1,512}$"
 )
 
+# The controller externalizes one protected baseline per pending action and bounds it by
+# how many baseline fields it knows (`INTEGRITY_BASELINE_FIELDS`) times how many entries a
+# scope guard may hold (`MAX_SCOPE_GUARD_ENTRIES`). Published here as literals for the same
+# reason `ACQUISITION_MODES` is: this package must not import workspace code to state the
+# wire contract. They are a *ceiling*, so they may lead the controller but must never
+# trail it -- a host validating this schema would otherwise reject an order the controller
+# both emits and accepts. `tests/test_orchestration_contract_schemas.py` computes the
+# field count an acquisition order actually carries and holds it under this bound.
+MAX_INTEGRITY_BASELINE_FIELDS = 15
+MAX_INTEGRITY_BASELINE_ENTRIES = 150_000
+
 SESSION_STATUSES = ("active", "paused", "complete", "blocked_on_sources", "no_ship", "failed")
 SESSION_PHASES = (
     "planning",
@@ -452,8 +463,16 @@ def _postcondition_schemas() -> list[dict[str, Any]]:
                     ),
                 },
                 "fingerprint": {"type": "string", "pattern": SHA256_PATTERN},
-                "field_count": {"type": "integer", "minimum": 1, "maximum": 12},
-                "entry_count": {"type": "integer", "minimum": 0, "maximum": 120000},
+                "field_count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_INTEGRITY_BASELINE_FIELDS,
+                },
+                "entry_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": MAX_INTEGRITY_BASELINE_ENTRIES,
+                },
             },
             ["path", "fingerprint", "field_count", "entry_count"],
         ),

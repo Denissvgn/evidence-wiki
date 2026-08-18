@@ -318,12 +318,14 @@ questions. Discovery may append only request-scoped candidates from enabled
 providers. Review may change only scoped candidate IDs. Acquisition may fulfill
 only scoped requests, transition only scoped candidates/questions, preserve all
 existing raw and normalized evidence, and create only outputs attributable to
-new fulfilled source IDs. An unchanged pre-existing source is reusable only on
-terms the controller fixed when it issued the order, and there are exactly two:
-its manifest record and normalized output both exactly match the protected
-baseline, or — for a source the order recorded as correlated to a scoped request
-with nothing normalized yet — its manifest record matches and its normalized
-output is newly written by `normalize_sources.py`. The second is verified by
+new fulfilled source IDs. Reuse of an unchanged pre-existing source rests on one
+precondition: the source's own sidecar already named a scoped request when the
+order was issued, and named a scoped candidate as well wherever there is a
+candidate store. From there the controller fixed exactly two terms, also at
+issuance: its manifest record and normalized output both exactly match the
+protected baseline, or — for a source the order recorded as correlated with nothing
+normalized yet — its manifest record matches and its normalized output is newly
+written by `normalize_sources.py`, selected by source id. The second is verified by
 re-normalizing the unchanged raw evidence and comparing the result, so a new file
 must also be a derived one. That check re-runs the normalizer the trusted
 `research.yml` configures, reads back only the record's timestamps and its
@@ -354,9 +356,13 @@ scope, its timing, its retriever — is written by that same party, so no predic
 over delivered metadata can authorize the pairing. Evidence already on disk but
 correlated elsewhere is delivered again as a new source with its own sidecar; most
 source ids are path-derived, so a distinct capture at a distinct path is a distinct
-record. Where the id is stable across deliveries — an arXiv `paper:`, a `link:`, a
-GitHub `codebase:` — there is no second path, and the outcome is an attempt failure
-recorded against the request.
+record. Two ids are not path-derived: an arXiv bundle directory named `arxiv-<id>`
+takes its id from the arXiv id, and a URL expanded from a link file — the GitHub
+repository link behind a `codebase:` record included — takes its id from the URL.
+Those need a second delivery *form* rather than a second path.
+`docs/source-delivery.md` states which forms exist and what each one requires,
+because each is conditional; a GitHub `codebase:` has no form at all. Where none
+applies, the outcome is an attempt failure recorded against the request.
 
 `blocked_on_sources`, `no_ship`, and `failed` remain terminal child-run states.
 The parent never reopens those records. For example, an initial research run

@@ -573,7 +573,19 @@ class ErrorEnvelopeTests(unittest.TestCase):
             "Provide one or more query terms.": "QUERY_MISSING",
             "Unknown question slug: q-1 (no page under wiki/questions/)": "QUESTION_UNKNOWN",
             "Unknown request id: req-missing (no record in sources/source-requests.jsonl)": "REQUEST_UNKNOWN",
-            "Unknown source id: paper:missing": "SOURCE_UNKNOWN",
+            (
+                "Unknown source id: paper:missing — the evidence manifest holds no record with that id. "
+                "No normalized records were written."
+            ): "SOURCE_UNKNOWN",
+            # Selecting a source this package cannot extract used to fall through to
+            # WORKSPACE_UNREADABLE, which is non-recoverable and reports a broken workspace
+            # for one delivery that simply has no extractor here. Now that `--source-id` is
+            # the prescribed selector rather than `--all`, this is the ordinary refusal.
+            (
+                "Source id is not eligible for normalization: raw:notes.bin — this package has no "
+                "extractor for that record's kind, or the raw evidence its kind requires is missing. "
+                "No normalized records were written."
+            ): "SOURCE_NOT_NORMALIZABLE",
             "Missing sibling workspace script: /workspace/scripts/lint.py": "TOOLING_MISSING",
             (
                 "Intake total cap exceeded: open questions total would be 3, "

@@ -307,6 +307,12 @@ _REMEDIATIONS = {
         "outside it, or replace a symlinked or mounted workspace subtree with a real directory."
     ),
     "SOURCE_UNKNOWN": "Run scripts/source_inventory.py --report and choose a source id present in the manifest.",
+    "SOURCE_NOT_NORMALIZABLE": (
+        "The manifest holds this source but no extractor in this package handles it. Check its kind and "
+        "raw_paths with scripts/source_inventory.py --report, or write the record by hand to the contract "
+        "in docs/normalized-source-format.md and check it with scripts/normalize_verify.py --source-id ID. "
+        "Nothing was written; drop the id from the selection to normalize the rest."
+    ),
     "TOOLING_MISSING": "Restore or upgrade the workspace scripts from the starter.",
     "INTAKE_TOTAL_CAP_EXCEEDED": (
         "Resolve, defer, reject, or raise run.max_open_questions_total after reviewing the workspace backlog."
@@ -680,6 +686,13 @@ def classify_error_code(message: str) -> str:
         return "ATTEMPT_FAILURE_CODE_INVALID"
     if text.startswith("Unknown source id:"):
         return "SOURCE_UNKNOWN"
+    # A named source the manifest does hold but this package cannot extract. Distinct from
+    # SOURCE_UNKNOWN because the repairs are opposite -- there the id is wrong, here the id
+    # is right and the record's kind has no extractor -- and distinct from the
+    # WORKSPACE_UNREADABLE fallback it used to reach, which is non-recoverable and tells a
+    # host the workspace is broken when one delivery simply is not normalizable here.
+    if text.startswith("Source id is not eligible for normalization:"):
+        return "SOURCE_NOT_NORMALIZABLE"
     if text.startswith("Missing sibling workspace script:") or text.startswith("Cannot load sibling workspace script:"):
         return "TOOLING_MISSING"
     if text.startswith("Missing packaged script:") or text.startswith("Cannot load packaged script:"):

@@ -52,16 +52,22 @@ Inputs:
   it, **deliver it again** as a new source (step 3), or record an attempt failure
   (step 6). Most source ids are derived from the delivered relative path, so a distinct
   capture at a distinct path is a distinct record — that is the identity model, not a
-  workaround, and every guard already allows it. Give the new capture a genuinely new
-  name under the delivery target its kind belongs to, not just a new directory: an arXiv
-  bundle directory named `arxiv-<id>` and a URL inside a link file take their ids from
-  the arXiv id and the URL rather than the path, and a PDF re-delivered under a filename
-  stem already paired with a LaTeX bundle disturbs the record that pairing produced.
-  Where no distinct id is reachable, record an attempt failure instead.
-- Reuse without re-delivery is available, but only for a source that was already
-  inventoried *and* normalized when the order was issued, whose sidecar already named
-  this request then, and whose manifest record and normalized output are unchanged: the
-  case where an earlier order for this request delivered evidence but did not complete.
+  workaround, and every guard already allows it. Some ids are not path-derived, and for
+  those a new path is not enough: an arXiv bundle directory named `arxiv-<id>` and a URL
+  inside a link file take their ids from the arXiv id and the URL, and a PDF re-delivered
+  under a filename stem already paired with a LaTeX bundle is merged into that pairing's
+  record. `docs/source-delivery.md` ("Provenance Sidecars") states the delivery form each
+  of those needs and what the form requires; a GitHub `codebase:` has no form at all.
+  Where none applies, record an attempt failure instead.
+- Reuse without re-delivery is available, but only for a source already inventoried when
+  the order was issued whose sidecar already named this request then: the case where an
+  earlier order for this request delivered evidence but did not complete. Two shapes
+  qualify. If something had already normalized it then, its manifest record *and* its
+  normalized output must both stay byte-identical. If nothing had, its manifest record
+  must stay byte-identical and the one normalized record it still owes is written inside
+  this action (step 4). You can recognise the second shape from the manifest alone: its
+  record's `provenance.request_id` names a scoped request and it has no file under
+  `sources/normalized/`. Step 5 spells both out.
 - Stamp a request's `scope` mapping into the same sidecar's `scope:` field, key for key,
   whenever the request declares one. `fulfill --require-scope` (step 5) makes that stamp
   load-bearing: it refuses a delivery that omits a scope key the request declares, or one
@@ -121,17 +127,39 @@ scope:                              # stamp this when the request declares a sco
    `scope:` field; step 5's `fulfill --require-scope` checks them against
    exactly what lands here.
 
-4. Inventory and normalize the delivery:
+4. Inventory the delivery, then normalize the sources this action authorizes — one
+   `--source-id` per source, all in a single run:
 
 ```bash
 python3 scripts/source_inventory.py --report
-python3 scripts/normalize_sources.py --all
+python3 scripts/normalize_sources.py --source-id ID1 --source-id ID2
 ```
+
+   Read those ids out of `sources/manifest.jsonl` after the inventory run rather than
+   composing them: inventory derives each id from the delivered path. The set is every
+   source this action delivered, plus every reused source that still owes a normalized
+   record — a manifest record whose `provenance.request_id` names a scoped request and
+   that has no file under `sources/normalized/` (step 5).
+
+   Always `--source-id`. Neither `--all` nor a bare `normalize_sources.py` will do: both
+   write an output for every eligible record that has none, the records an earlier order
+   left inventoried and un-normalized included, and each of those is refused at
+   submission as a normalized output no fulfilled source authorizes. `--all` also
+   rewrites every record it considers stale, in or out of scope, and a rewrite outside it
+   is refused as changed normalized evidence. Reading is safe:
+   `python3 scripts/normalize_sources.py --all --dry-run` writes nothing and names every
+   record `--all` would create or update.
+
+   Selection is exact and happens before any write: one id that is unknown, or eligible
+   for no normalizer, aborts the run with `Unknown source id` or `Source id is not
+   eligible for normalization` and writes nothing at all — including for the ids that
+   were fine. Repair or drop that delivery, then re-run the batch.
 
    Structured payloads (JSON price series, offer snapshots, supplier quotes) need a
    configured `normalization.adapters` entry to produce a normalized record — see
-   `docs/research-yml.md`. A source with no normalized record cannot fulfil a request, and
-   the postconditions will say so by source id.
+   `docs/research-yml.md`. Without one, that source is ineligible and takes the rest of
+   the batch down with it. A source with no normalized record cannot fulfil a request,
+   and the postconditions will say so by source id.
 
 5. Fulfil each request you delivered evidence for. Pass `--require-scope` — this
    pipeline stamps scope on every delivery (step 3), so the flag is safe to use
@@ -139,7 +167,7 @@ python3 scripts/normalize_sources.py --all
    open:
 
 ```bash
-python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id data--keepa--b0abc123 --require-scope --format json
+python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id data:keepa-b0abc123 --require-scope --format json
 ```
 
    `fulfill` refuses with `REQUEST_SCOPE_MISMATCH` when the delivered
@@ -147,8 +175,10 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    under `--require-scope` when the sidecar omits a key the request declares.
    Fix either by delivering the evidence the request actually describes or by
    re-checking the scope you stamped in step 3 — never by editing the sidecar
-   after the fact to force a match. A request or delivery that carries no
-   `scope` at all is unaffected by either check.
+   after the fact to force a match. A request that declares no `scope` is
+   unaffected by either check; a delivery that stamps none is not, because
+   `--require-scope` is precisely the flag that refuses an unstamped delivery
+   against a request that declares keys.
 
    That prohibition is not specific to `scope`. It governs `request_id` too, and
    more strictly: a sidecar you already delivered records what you fetched when
@@ -163,21 +193,29 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    manifest can fulfil a scoped request without being fetched again **only when
    its `.provenance.yml` already named that request before this order was
    issued**. That is the case where an earlier order delivered and inventoried
-   the evidence and stopped: skip step 3, run step 4 to produce the normalized
-   record it still owes, then fulfil it in step 5. If it was already normalized
-   then, leave it exactly as it is — its record and its normalized output must
-   both stay byte-identical, and re-running `normalize_sources.py --all` is
-   harmless because the normalizer skips a source whose `raw_fingerprint` is
-   unchanged.
+   the evidence and stopped: skip step 3, put that source id in step 4's run to
+   produce the normalized record it still owes, then fulfil it in step 5. If it
+   was already normalized then, leave it exactly as it is — its record and its
+   normalized output must both stay byte-identical, which means not normalizing
+   it again at all. Do not reach for `--all` as a precaution: the normalizer
+   skips an output it does not consider stale, but the raw fingerprint is only
+   one of five staleness triggers, and the other four — a record written before
+   structured-view sidecars existed, a changed normalizer version, a changed
+   adapter identity, a configured `pdf_extractor` that differs from the stamped
+   one — rewrite records you never meant to touch. The submission then refuses
+   the whole action for changing normalized evidence outside the fulfilled
+   scope, naming those files.
 
    A source stamped for **another** request, or for none, is not reusable, and
    nothing you can write makes it reusable. Not restamping the sidecar; not
    stamping a `scope` that agrees with the request. Deliver those bytes again as
-   a new source under its own raw path with its own sidecar (step 3) — which is
-   not available for an arXiv `paper:`, a `link:`, or a GitHub `codebase:`,
-   whose ids are the same on every delivery. For those, record an attempt
-   failure (step 6). The refusal names which case you are in under
-   `details.reuse_scope_failures[].cause`:
+   a new source under its own raw path with its own sidecar (step 3). Where the
+   id is not path-derived a new path is not enough, and `docs/source-delivery.md`
+   ("Provenance Sidecars") states the delivery form each such id needs and the
+   conditions that form carries; a GitHub `codebase:` has none. Where no form
+   applies — or a license, robots, or terms decision forbids the capture —
+   record an attempt failure (step 6). The refusal names which case you are in
+   under `details.reuse_scope_failures[].cause`:
    `provenance_names_no_scoped_request` for evidence correlated elsewhere;
    `manifest_record_changed_after_issuance` for a record rewritten since the
    order was issued, repaired by restoring it exactly; and
@@ -188,8 +226,9 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    The normalized record you write for a reused source must be the one
    `normalize_sources.py` produces from the unchanged raw evidence: submission
    re-normalizes and compares. Do not hand-edit it. If you already did, delete
-   it and re-run step 4 — `--all` skips a record it does not consider stale, so
-   an edited file survives a plain re-run.
+   it and re-run step 4 — a run skips a record it does not consider stale, so an
+   edited file survives a plain re-run — or re-run that one id with
+   `--source-id ID --force`.
 
 6. Record a structured failure for each scoped request you could **not** fulfil:
 
@@ -212,7 +251,7 @@ python3 scripts/source_requests.py record-attempt-failure \
 7. Reopen every scoped question whose blocking requests are now **all** fulfilled:
 
 ```bash
-python3 scripts/question_resolve.py reopen --slug example --agent-id ACQUIRER_ID --source-id data--keepa--b0abc123 --request-id req-1a2b3c4d5e
+python3 scripts/question_resolve.py reopen --slug example --agent-id ACQUIRER_ID --source-id data:keepa-b0abc123 --request-id req-1a2b3c4d5e
 ```
 
    A question with any still-unfulfilled blocking request stays blocked and untouched.
@@ -263,8 +302,10 @@ evidence-wiki orchestrate submit --target . --orchestration-id ORCH_ID \
   disk but uncorrelated was re-delivered as a new source, or recorded as an attempt
   failure; only a source whose sidecar already named a scoped request when the order was
   issued was reused unchanged.
-- `source_inventory.py --report` and `normalize_sources.py --all` completed, and every
-  fulfilled `source_id` has a normalized record.
+- `source_inventory.py --report` completed, and `normalize_sources.py` ran once over the
+  delivered source ids plus any reused source that still owed a normalized record — never
+  `--all`, never a bare run. Every fulfilled `source_id` has a normalized record, and a
+  reused source that was already normalized was not normalized again.
 - Questions were reopened only where **all** blocking requests are fulfilled; questions
   with a remaining unfulfilled request are byte-identical to before the action.
 - No candidate record was created or changed; delegated acquisition has no candidate store.
