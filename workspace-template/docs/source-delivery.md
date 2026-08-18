@@ -156,14 +156,14 @@ manifest record has no matching `provenance.request_id` is refused with
 
 The stamp is made at delivery time and only at delivery time. A source already in
 the manifest whose sidecar does not already name the request cannot be made to
-satisfy it later: `raw/` is immutable, and editing a delivered sidecar to add a
+satisfy it by editing that sidecar now: `raw/` is immutable, and adding a
 `request_id` turns a delivery-time record into an after-the-fact assertion by the
 party whose claims this contract exists to check. The orchestration baseline of
 reusable evidence is fingerprinted when the work order is issued, so a
 `request_id` that appears after that is a change to protected evidence — refused
 with `ORCHESTRATION_POSTCONDITION_FAILED`, not accepted as a correlation. When
-the bytes are already on disk but carry no `request_id` for the request in hand,
-deliver them again as a new source under the delivery target its kind belongs to,
+the bytes are already on disk and the order's reuse baseline (below) does not
+admit them, deliver them again as a new source under the target its kind owns,
 with its own sidecar, or record an attempt failure. Most manifest IDs are derived
 from the delivered relative path (see "Naming guidance" above), so a distinct
 capture at a distinct path is a distinct source carrying its own provenance —
@@ -181,17 +181,22 @@ as an actual capture under `raw/web/` rather than as a second link list. Where n
 distinct ID is reachable, the request cannot be satisfied by re-delivery at all:
 record an attempt failure.
 
-Reuse without re-delivery is available too, but only for a source that was already
-inventoried *and* normalized when the order was issued, whose sidecar already
-named this request then, and whose manifest record and normalized output are
-byte-unchanged — the case where an earlier order for the same request delivered
-evidence but did not complete. None of this is in tension with the idempotency
-guarantee below that re-delivering identical bytes changes nothing: that guarantee
-is about the *normalizer*, which skips a source whose `raw_fingerprint` is
-unchanged, while the orchestration postcondition asks the different question of
-whether this action produced a manifest record correlated to the request it claims
-to fulfil. Re-delivering the same bytes at a new path costs one more copy of them,
-not a violated guarantee.
+Reuse without re-delivery is available too, for a source the controller admitted
+to the order's reuse baseline when it issued the order — one whose sidecar
+already named this request then, or one that the same scope check `fulfill` runs
+would accept for this request. Its manifest record must stay byte-unchanged. One
+already normalized then must keep that exact normalized output as well; one
+inventoried but never normalized — the earlier order that delivered evidence and
+did not complete — is normalized inside the action instead, and the fulfilment is
+refused without that output. The baseline is computed by the controller from
+evidence that predates the order, so nothing an acquirer writes during the action
+can add to it. None of this is in tension with the idempotency guarantee below
+that re-delivering identical bytes changes nothing: that guarantee is about the
+*normalizer*, which skips a source whose `raw_fingerprint` is unchanged, while
+the orchestration postcondition asks the different question of whether this
+action produced a manifest record correlated to the request it claims to fulfil.
+Re-delivering the same bytes at a new path costs one more copy of them, not a
+violated guarantee.
 
 Provider-backed delivery is fail closed before this sidecar contract begins.
 Automated acquisition requires verified TLS, successful DNS resolution whose

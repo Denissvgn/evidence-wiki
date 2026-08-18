@@ -318,9 +318,13 @@ questions. Discovery may append only request-scoped candidates from enabled
 providers. Review may change only scoped candidate IDs. Acquisition may fulfill
 only scoped requests, transition only scoped candidates/questions, preserve all
 existing raw and normalized evidence, and create only outputs attributable to
-new fulfilled source IDs. An unchanged pre-existing source is reusable only
-when both its manifest record and normalized output exactly match the protected
-baseline.
+new fulfilled source IDs. An unchanged pre-existing source is reusable only on
+the terms the order's issuance-time baseline recorded for it: one that was
+already normalized then must match both its manifest record and its normalized
+output exactly, and one that was inventoried but not yet normalized then must
+match its manifest record exactly and have its normalized output created during
+the action, overwriting nothing. The second widens only what the action may
+create; nothing that existed when the order was issued becomes writable.
 
 A **delegated** acquisition action is bounded the same way, with three
 differences that follow from having no candidate store: it may not change
@@ -329,17 +333,21 @@ byte-identical (its failure lives in the attempt audit, not in the request), and
 it may append to that append-only audit but never rewrite an event that existed
 when the order was issued. Question files are mutable only for questions whose
 *every* blocking request was fulfilled. Pre-existing evidence is reusable on the
-same terms as above, correlated by `provenance.request_id` alone — and correlated
-*already*, at the moment the order was issued. That reusable baseline is
-fingerprinted at issue time from the manifest records whose merged
-`provenance.request_id` named a scoped request then, together with their
-normalized outputs; a delivery not yet inventoried or not yet normalized is not in
-it. A source already in the manifest cannot join the baseline afterwards, because
-`raw/` is immutable and a `request_id` stamped into a delivered sidecar after the
-fact is an assertion by the untrusted party rather than a record of what it
-fetched. Evidence already on disk but uncorrelated is delivered again as a new
-source with its own sidecar — most source ids are path-derived, so a distinct
-capture at a distinct path is a distinct record.
+same terms as above, from a baseline the controller computes when it issues the
+order and never afterwards. A source enters that baseline two ways: its merged
+`provenance.request_id` already named a scoped request then, or its provenance
+satisfies the scope check `source_requests.py fulfill` runs before it accepts a
+fulfilment, so the CLI and the postcondition admit the same reuse. Either way the
+order fingerprints the manifest record, and the normalized output where one
+existed then; which of the two arms applies is fixed at issue time rather than
+inferred afterwards from what the action left behind, and a delivery not yet
+inventoried is in neither arm. A source already in the manifest cannot join
+afterwards, because `raw/` is immutable and a `request_id` stamped into a
+delivered sidecar after the fact is an assertion by the untrusted party rather
+than a record of what it fetched — the reuse allowlist is written by the
+controller at issue time, never stamped by the acquirer. Evidence no baseline
+admits is delivered again as a new source with its own sidecar — most source ids
+are path-derived, so a distinct capture at a distinct path is a distinct record.
 
 `blocked_on_sources`, `no_ship`, and `failed` remain terminal child-run states.
 The parent never reopens those records. For example, an initial research run

@@ -48,20 +48,27 @@ Inputs:
   by editing that sidecar now. `raw/` is immutable, and a `request_id` added after
   delivery is an assertion by you about what you once fetched rather than a record made
   when you fetched it — the controller refuses it as a change to protected evidence.
-- When the evidence a request needs is already on disk but carries no `request_id` for
-  it, **deliver it again** as a new source (step 3), or record an attempt failure
-  (step 6). Most source ids are derived from the delivered relative path, so a distinct
-  capture at a distinct path is a distinct record — that is the identity model, not a
-  workaround, and every guard already allows it. Give the new capture a genuinely new
-  name under the delivery target its kind belongs to, not just a new directory: an arXiv
-  bundle directory named `arxiv-<id>` and a URL inside a link file take their ids from
-  the arXiv id and the URL rather than the path, and a PDF re-delivered under a filename
-  stem already paired with a LaTeX bundle disturbs the record that pairing produced.
-  Where no distinct id is reachable, record an attempt failure instead.
-- Reuse without re-delivery is available, but only for a source that was already
-  inventoried *and* normalized when the order was issued, whose sidecar already named
-  this request then, and whose manifest record and normalized output are unchanged: the
-  case where an earlier order for this request delivered evidence but did not complete.
+- When the evidence a request needs is already on disk and this order cannot reuse it
+  (next rule), **deliver it again** as a new source (step 3), or record an attempt
+  failure (step 6). Most source ids are derived from the delivered relative path, so a
+  distinct capture at a distinct path is a distinct record — that is the identity model,
+  not a workaround, and every guard already allows it. Give the new capture a genuinely
+  new name under the delivery target its kind belongs to, not just a new directory: an
+  arXiv bundle directory named `arxiv-<id>` and a URL inside a link file take their ids
+  from the arXiv id and the URL rather than the path, and a PDF re-delivered under a
+  filename stem already paired with a LaTeX bundle disturbs the record that pairing
+  produced. Where no distinct id is reachable, record an attempt failure instead.
+- Reuse without re-delivery is available for a source the controller admitted to this
+  order's reuse baseline when it issued the order: one whose sidecar already named this
+  request then, or one that the same scope check `fulfill` runs (step 5) would accept for
+  this request. You never make a source reusable yourself — the baseline is computed from
+  what was already inventoried before you were handed the order, which is why it can be
+  trusted, and a fulfilment outside it is refused at submission naming the source id. Its
+  manifest record must come out of the action byte-identical either way. A source already
+  normalized then must keep that exact normalized file too; a source inventoried but never
+  normalized — the earlier order that delivered evidence and did not complete — is
+  normalized *inside* this action, and the fulfilment is refused if you leave it
+  un-normalized.
 - Stamp a request's `scope` mapping into the same sidecar's `scope:` field, key for key,
   whenever the request declares one. `fulfill --require-scope` (step 5) makes that stamp
   load-bearing: it refuses a delivery that omits a scope key the request declares, or one
@@ -158,6 +165,25 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    The fix is the same shape as above — deliver the evidence again as a new
    source (step 3), or record an attempt failure (step 6).
 
+   Reuse is the other way through, and it needs no sidecar edit at all. When the
+   controller issued this order it recorded, per scoped request, which sources
+   already in the manifest that request may be fulfilled from: those whose sidecar
+   already named it, and those that the check just described would accept for it. That
+   list is the controller's; you cannot read it, only infer it from the rule, and
+   a fulfilment outside it is refused. Fulfil straight from such a `source_id` —
+   no second delivery, no re-stamping, and the manifest record itself must not
+   change. A source that already had a normalized record when the order was issued
+   must come out of the action with that exact file. A source inventoried but
+   never normalized — an earlier order that delivered evidence and then stopped —
+   is normalized here: run step 4's `normalize_sources.py --all`, because that new
+   output is expected inside this action and the fulfilment is refused without it.
+   Where the order admits no such source, re-delivery under a new raw path
+   (step 3) or an attempt failure (step 6) remains the answer, subject to the
+   naming caution in Operating Rules — an arXiv bundle, a URL from a link file,
+   and a GitHub `codebase:` source take their ids from the arXiv id or the URL
+   rather than the delivered path, so a plain second copy lands on the record
+   already in the manifest instead of beside it.
+
 6. Record a structured failure for each scoped request you could **not** fulfil:
 
 ```bash
@@ -226,10 +252,13 @@ evidence-wiki orchestrate submit --target . --orchestration-id ORCH_ID \
   `REQUEST_SCOPE_MISMATCH`/`REQUEST_SCOPE_MISSING` refusal was worked around by editing a
   sidecar after delivery.
 - Nothing under `raw/` that existed when the order was issued was edited, renamed, or
-  removed — a `request_id` added to a delivered sidecar least of all. Evidence already on
-  disk but uncorrelated was re-delivered as a new source, or recorded as an attempt
-  failure; only a source whose sidecar already named a scoped request when the order was
-  issued was reused unchanged.
+  removed — a `request_id` added to a delivered sidecar least of all. Evidence this
+  order's reuse baseline does not admit was re-delivered as a new source, or recorded as
+  an attempt failure; evidence it does admit was reused with its manifest record left
+  byte-identical.
+- A reused source that already had a normalized record when the order was issued still
+  has that exact file; one that had none was normalized during the action. Nothing else
+  under `sources/normalized/` was overwritten.
 - `source_inventory.py --report` and `normalize_sources.py --all` completed, and every
   fulfilled `source_id` has a normalized record.
 - Questions were reopened only where **all** blocking requests are fulfilled; questions
