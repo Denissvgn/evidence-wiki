@@ -3308,6 +3308,12 @@ def normalized_output_derivation_failure(
 #: submit, and the state every other caller sees -- disables memoisation entirely.
 _DERIVATION_VERDICTS: dict[tuple[str, str, str], dict[str, Any] | None] | None = None
 
+#: Inventory-derived raw attribution already computed during one ``submit``, keyed by the
+#: raw-tree content fingerprint the attribution is a statement about. Same lifecycle and
+#: rationale as ``_DERIVATION_VERDICTS``: ``submit_result`` verifies up to three times,
+#: and one derivation pass re-hashes every raw file.
+_RAW_ATTRIBUTION_MEMO: dict[str, dict[str, dict[str, Any]]] | None = None
+
 
 @contextmanager
 def derivation_verdict_memo() -> Iterator[None]:
@@ -3325,13 +3331,146 @@ def derivation_verdict_memo() -> Iterator[None]:
     one submit and discarded with it, because between submits the workspace is free to
     change.
     """
-    global _DERIVATION_VERDICTS
+    global _DERIVATION_VERDICTS, _RAW_ATTRIBUTION_MEMO
     previous = _DERIVATION_VERDICTS
+    previous_attribution = _RAW_ATTRIBUTION_MEMO
     _DERIVATION_VERDICTS = {}
+    _RAW_ATTRIBUTION_MEMO = {}
     try:
         yield
     finally:
         _DERIVATION_VERDICTS = previous
+        _RAW_ATTRIBUTION_MEMO = previous_attribution
+
+
+def derived_raw_attribution(
+    project_root: Path,
+    config: dict[str, Any],
+    *,
+    memo_key: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Re-run inventory derivation over the delivered raw tree, writing nothing.
+
+    Returns ``source_id -> {"raw_paths": [...], "files": {...}}`` where ``raw_paths`` is
+    the list inventory derives for that record over the tree as delivered, and ``files``
+    is the set of snapshot-level entries those paths denote: a regular-file entry denotes
+    itself, a directory-shaped entry (arXiv/LaTeX bundle, local code repo) denotes every
+    regular file beneath it, and every entry additionally denotes its
+    ``<entry>.provenance.yml`` sidecar.
+
+    This is the single predicate both raw-scope questions are answered from: which new
+    raw files a completed acquisition may create (the union of ``files`` over the
+    admitted record ids), and whether a new manifest record's declared ``raw_paths`` is
+    what inventory itself would derive (list equality against ``raw_paths``).
+
+    ``source_inventory.build_records`` is a read-only snapshot builder: it walks the raw
+    roots under the acquisition barrier lock (``raw/.locks/``, outside every configured
+    snapshot root) and writes neither the manifest nor the activity log. ``memo_key``
+    should be the current raw-tree content fingerprint so a memoised answer is only ever
+    returned for bytes that have not moved between verification passes.
+    """
+    cache = _RAW_ATTRIBUTION_MEMO
+    if cache is not None and memo_key is not None and memo_key in cache:
+        return cache[memo_key]
+    source_inventory = load_sibling_module("source_inventory")
+    try:
+        records, _warnings, _summary = source_inventory.build_records(project_root, config, {})
+    except OrchestrationControllerError:
+        raise
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - any derivation failure is the same verdict
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_POSTCONDITION_FAILED",
+            "delivered raw evidence could not be re-derived by source inventory rules",
+            recoverable=True,
+            remediation="Repair the raw tree so source_inventory.py --report succeeds, then resubmit.",
+            details={"error": str(exc)},
+        ) from exc
+    attribution: dict[str, dict[str, Any]] = {}
+    for record in records:
+        source_id = record.get("id") if isinstance(record, dict) else None
+        raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
+        if not isinstance(source_id, str) or not isinstance(raw_paths, list):
+            continue
+        files: set[str] = set()
+        for raw_path in raw_paths:
+            if not (
+                isinstance(raw_path, str)
+                and raw_path.startswith("raw/")
+                and safe_snapshot_relative_path(raw_path)
+            ):
+                continue
+            target = project_root / raw_path
+            try:
+                is_directory = target.is_dir() and not target.is_symlink()
+            except OSError:
+                is_directory = False
+            if is_directory:
+                # Inventory attributes the whole subtree to this one record (no member
+                # enumeration exists in the record), so the subtree is the record's unit
+                # of admission -- exactly what the snapshot's per-file entries will show.
+                for member in sorted(target.rglob("*")):
+                    try:
+                        if member.is_file() and not member.is_symlink():
+                            files.add(relative_workspace_path(project_root, member))
+                    except OSError:
+                        continue
+            else:
+                files.add(raw_path)
+            files.add(f"{raw_path}.provenance.yml")
+        attribution[source_id] = {
+            "raw_paths": [path for path in raw_paths if isinstance(path, str)],
+            "files": files,
+        }
+    if cache is not None and memo_key is not None:
+        cache[memo_key] = attribution
+    return attribution
+
+
+def raw_attribution_mismatches(
+    attribution: dict[str, dict[str, Any]],
+    new_records_by_id: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Each new record whose declared ``raw_paths`` is not what inventory derives.
+
+    List (pinned-order) equality, deliberately: inventory's output is deterministic --
+    the raw walk is sorted and the two multi-path merges append in that order -- and the
+    only sanctioned route to a manifest record is running inventory, so a legitimate
+    delivery reproduces the derived list byte for byte. Set equality would additionally
+    admit only reorderings and duplicates, and no shipped tool produces either. An id
+    inventory derives nothing for reports ``derived_raw_paths: null``: such a record is
+    not inventory-derivable and may not be created by an acquisition.
+    """
+    mismatches: dict[str, dict[str, Any]] = {}
+    for source_id in sorted(new_records_by_id):
+        record = new_records_by_id[source_id]
+        declared = record.get("raw_paths") if isinstance(record, dict) else None
+        entry = attribution.get(source_id)
+        derived = entry["raw_paths"] if entry is not None else None
+        if not isinstance(declared, list) or declared != derived:
+            mismatches[source_id] = {
+                "declared_raw_paths": declared if isinstance(declared, list) else None,
+                "derived_raw_paths": derived,
+            }
+    return mismatches
+
+
+def attributed_raw_paths(
+    attribution: dict[str, dict[str, Any]],
+    record_ids: set[str],
+) -> set[str]:
+    """The snapshot entries inventory attributes to the given record ids."""
+    allowed: set[str] = set()
+    for source_id in record_ids:
+        entry = attribution.get(source_id)
+        if entry is not None:
+            allowed |= entry["files"]
+    return allowed
+
+
+RAW_ATTRIBUTION_REMEDIATION = (
+    "Run source_inventory.py --report so every new record's raw_paths is exactly what "
+    "inventory derives from the delivered files; never hand-edit raw_paths."
+)
 
 
 def memoised_derivation_failure(
@@ -6645,16 +6784,27 @@ def verify_delegated_acquisition_postconditions(
         mutable_ids=set(),
         allowed_new_ids=set(current_raw_entries) - set(before_raw_entries),
     )
-    allowed_new_raw_paths: set[str] = set()
-    for source_id in expected_new_source_ids:
-        record = by_source_id.get(source_id)
-        raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
-        if not isinstance(raw_paths, list):
-            continue
-        for raw_path in raw_paths:
-            if isinstance(raw_path, str) and raw_path.startswith("raw/") and safe_snapshot_relative_path(raw_path):
-                allowed_new_raw_paths.add(raw_path)
-                allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
+    # One inventory-derivation pass over the delivered tree answers both raw-scope
+    # questions: whether each new record's raw_paths is what inventory itself derives
+    # (refusing the hand-edited raw_paths route), and which snapshot entries those
+    # records attribute (admitting a directory-shaped bundle's member files).
+    if expected_new_source_ids:
+        raw_attribution = derived_raw_attribution(
+            project_root, config, memo_key=current_raw_tree.get("fingerprint")
+        )
+    else:
+        raw_attribution = {}
+    attribution_mismatches = raw_attribution_mismatches(
+        raw_attribution,
+        {source_id: by_source_id.get(source_id) for source_id in expected_new_source_ids},
+    )
+    require(
+        not attribution_mismatches,
+        "delegated acquisition manifest raw_paths do not match inventory-derived attribution",
+        {"raw_attribution_mismatches": attribution_mismatches},
+        RAW_ATTRIBUTION_REMEDIATION,
+    )
+    allowed_new_raw_paths = attributed_raw_paths(raw_attribution, expected_new_source_ids)
     actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
     unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
     require(
@@ -7544,16 +7694,25 @@ def verify_action_postconditions(
             mutable_ids=set(),
             allowed_new_ids=set(current_raw_entries) - set(before_raw_entries),
         )
-        allowed_new_raw_paths: set[str] = set()
-        for source_id in expected_new_source_ids:
-            record = by_source_id.get(source_id)
-            raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
-            if not isinstance(raw_paths, list):
-                continue
-            for raw_path in raw_paths:
-                if isinstance(raw_path, str) and raw_path.startswith("raw/") and safe_snapshot_relative_path(raw_path):
-                    allowed_new_raw_paths.add(raw_path)
-                    allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
+        # Same predicate as the delegated arm, from the same single derivation pass:
+        # raw_paths must be inventory-derived, and attribution decides admission.
+        if expected_new_source_ids:
+            raw_attribution = derived_raw_attribution(
+                project_root, config, memo_key=current_raw_tree.get("fingerprint")
+            )
+        else:
+            raw_attribution = {}
+        attribution_mismatches = raw_attribution_mismatches(
+            raw_attribution,
+            {source_id: by_source_id.get(source_id) for source_id in expected_new_source_ids},
+        )
+        require(
+            not attribution_mismatches,
+            "acquisition manifest raw_paths do not match inventory-derived attribution",
+            {"raw_attribution_mismatches": attribution_mismatches},
+            RAW_ATTRIBUTION_REMEDIATION,
+        )
+        allowed_new_raw_paths = attributed_raw_paths(raw_attribution, expected_new_source_ids)
         actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
         unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
         require(
@@ -8222,17 +8381,6 @@ def verify_blocked_action_postconditions(
         "Restore existing normalized evidence and remove outputs not correlated to the scoped acquisition.",
     )
 
-    allowed_new_raw_paths: set[str] = set()
-    for record in correlated_records:
-        raw_paths = record.get("raw_paths") if isinstance(record.get("raw_paths"), list) else []
-        for raw_path in raw_paths:
-            if (
-                isinstance(raw_path, str)
-                and raw_path.startswith("raw/")
-                and safe_snapshot_relative_path(raw_path)
-            ):
-                allowed_new_raw_paths.add(raw_path)
-                allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
     current_raw_tree = raw_tree_snapshot(project_root, config, include_entries=True)
     before_raw_entries = raw_tree_before["entries"]
     current_raw_entries = current_raw_tree["entries"]
@@ -8243,6 +8391,33 @@ def verify_blocked_action_postconditions(
         mutable_ids=set(),
         allowed_new_ids=actual_new_raw_paths,
     )
+    # Same predicate as the completed arms, over the correlated record set: a newly
+    # appended correlated record's raw_paths must be what inventory derives, and the
+    # files inventory attributes to correlated records are the partial-delivery scope.
+    correlated_ids = {
+        str(record.get("id"))
+        for record in correlated_records
+        if isinstance(record.get("id"), str)
+    }
+    correlated_new_records = {
+        str(record.get("id")): record
+        for record in correlated_records
+        if isinstance(record.get("id"), str) and record.get("id") in actual_new_source_ids
+    }
+    if correlated_records and (correlated_new_records or actual_new_raw_paths):
+        raw_attribution = derived_raw_attribution(
+            project_root, config, memo_key=current_raw_tree.get("fingerprint")
+        )
+    else:
+        raw_attribution = {}
+    attribution_mismatches = raw_attribution_mismatches(raw_attribution, correlated_new_records)
+    require(
+        not attribution_mismatches,
+        "blocked acquisition manifest raw_paths do not match inventory-derived attribution",
+        {"raw_attribution_mismatches": attribution_mismatches},
+        RAW_ATTRIBUTION_REMEDIATION,
+    )
+    allowed_new_raw_paths = attributed_raw_paths(raw_attribution, correlated_ids)
     unexpected_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
     require(
         not any(raw_scope_violations.values()) and not unexpected_raw_paths,
@@ -8250,6 +8425,7 @@ def verify_blocked_action_postconditions(
         {
             "raw_scope_violations": raw_scope_violations,
             "unexpected_new_raw_paths": unexpected_raw_paths[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+            "allowed_new_raw_paths": sorted(allowed_new_raw_paths)[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
         },
         "Restore existing raw evidence and remove deliveries not referenced by a correlated manifest record.",
     )
