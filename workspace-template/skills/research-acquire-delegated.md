@@ -241,14 +241,24 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    ("Provenance Sidecars") states the delivery form each such id needs and the
    conditions that form carries; a GitHub `codebase:` has none. Where no form
    applies — or a license, robots, or terms decision forbids the capture —
-   record an attempt failure (step 6). The refusal names which case you are in
-   under `details.reuse_scope_failures[].cause`:
-   `provenance_names_no_scoped_request` for evidence correlated elsewhere;
+   record an attempt failure (step 6).
+
+   Both of those are open to you **only while the request is still open**. Once
+   you fulfil a request from a source, `source_requests.py` refuses to relink it
+   to a second delivery and refuses to record an attempt failure against it, so
+   this decision belongs here and not after step 5. If you fulfil anyway, the
+   submission names which case you were in under
+   `details.reuse_scope_failures[].cause` —
+   `provenance_names_no_scoped_request` for evidence correlated elsewhere,
    `manifest_record_changed_after_issuance` for a record rewritten since the
-   order was issued, repaired by restoring it exactly; and
-   `no_reuse_authorization_at_issuance` for a correctly correlated source in an
-   order issued before this affordance existed, repaired by finishing the order
-   without it and letting the next session's order see the workspace as it is.
+   order was issued, and `no_reuse_authorization_at_issuance` for a correctly
+   correlated source in an order issued before this affordance existed — and
+   `details.reuse_scope_failures[].repair` says what each one leaves you. None of
+   the three has a repair that gets the action accepted. Restoring a rewritten
+   record is required by the scope guards but only changes which of the other two
+   causes the refusal reports, and a correctly correlated source the order never
+   authorized stays unauthorized for the life of the order. The action cannot be
+   completed from that source at all.
 
    The normalized record you write for a reused source must be the one
    `normalize_sources.py` produces from the unchanged raw evidence: submission

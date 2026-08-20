@@ -126,9 +126,13 @@ _REMEDIATIONS = {
     "QUERY_MISSING": "Provide one or more query terms.",
     "QUESTION_UNKNOWN": "Use a question slug that exists under wiki/questions/.",
     "REQUEST_UNKNOWN": "List requests with scripts/source_requests.py list --format json and choose an existing id.",
+    # Two commands reach this code and the remediation has to answer both: recording an
+    # attempt failure against a fulfilled request, and relinking one to a second source.
+    # Written for the first alone, it told a caller that had attempted neither a failure nor
+    # an attempt about failed attempts.
     "REQUEST_ALREADY_FULFILLED": (
-        "A fulfilled request has evidence and no failed attempt to record; open a new request "
-        "if the delivered source turned out to be unusable."
+        "A fulfilled request has evidence: it takes no failed attempt and cannot be relinked to another "
+        "source. Open a new request if the delivered source turned out to be unusable."
     ),
     "ATTEMPT_FAILURE_CODE_INVALID": (
         "Use an acquisition-attempt failure code documented in docs/source-delivery.md."
@@ -678,9 +682,17 @@ def classify_error_code(message: str) -> str:
         return "QUERY_MISSING"
     if text.startswith("Unknown question slug:"):
         return "QUESTION_UNKNOWN"
-    if text.startswith("Unknown request id:") or "already fulfilled by a different source id" in lower:
+    if text.startswith("Unknown request id:"):
         return "REQUEST_UNKNOWN"
-    if text.startswith("Request already fulfilled:"):
+    # Two refusals, one state, and until now only one of them was classified. The
+    # `record-attempt-failure` guard writes the `Request already fulfilled:` prefix below;
+    # the `fulfill` relink guard writes `Request <id> is already fulfilled by source ...`,
+    # which matches no prefix here and used to fall through to the `WORKSPACE_UNREADABLE`
+    # tail -- non-recoverable, remediated as "check the workspace path and required starter
+    # files". An honest refusal of a relink was reported to hosts as a broken workspace they
+    # must not retry. The clause that was meant to catch it matched "already fulfilled by a
+    # different source id", a string this package has never raised.
+    if text.startswith("Request already fulfilled:") or "is already fulfilled by source" in lower:
         return "REQUEST_ALREADY_FULFILLED"
     if text.startswith("Unknown attempt failure code:"):
         return "ATTEMPT_FAILURE_CODE_INVALID"

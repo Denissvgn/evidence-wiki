@@ -5755,19 +5755,35 @@ class OrchestrationControllerTests(unittest.TestCase):
                 "a verification pass runs outside the per-submit memo",
             )
 
-    def test_each_acquisition_arm_offers_a_recourse_that_arm_actually_has(self):
-        """One set of reuse terms, two recourses, because the arms end requests differently.
+    def test_neither_acquisition_arm_offers_a_recourse_a_fulfilled_request_refuses(self):
+        """One set of reuse terms, and no second route from either arm, because there is none.
 
-        A delegated batch reports a request it could not satisfy as an attempt failure. The
-        provider arm has no such outcome — every scoped request must be fulfilled — so
-        telling it to record one would be advice its own fulfilment guard then refuses.
+        Both remediations used to end in an "otherwise" — record the attempt failure for the
+        delegated arm, acquire through another candidate for the provider one. Both are
+        printed only from `preexisting_reuse_scope_failures`, which is computed over the
+        acquirer's *fulfilled* list, so the request they speak about is already fulfilled by
+        the source being refused. `record-attempt-failure` refuses a fulfilled request
+        outright and `fulfill` refuses to relink one, which is where the second delivery and
+        the second candidate both end. `following_the_reuse_refusals_escapes_is_refused`
+        below walks all of that against the real scripts.
+
+        So the split between the arms is no longer which recourse each offers — neither has
+        one — but which dead end each arm's reader would otherwise have reached for, named
+        so it is not tried.
         """
         terms = CONTROLLER.REUSE_SCOPE_TERMS
         self.assertTrue(CONTROLLER.REUSE_SCOPE_REMEDIATION.startswith(terms))
         self.assertTrue(CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION.startswith(terms))
-        self.assertIn("record-attempt-failure", CONTROLLER.REUSE_SCOPE_REMEDIATION)
+        self.assertNotIn("record-attempt-failure", CONTROLLER.REUSE_SCOPE_REMEDIATION)
         self.assertNotIn("record-attempt-failure", CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION)
         self.assertIn("another selected candidate", CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION)
+        self.assertNotIn("another selected candidate", CONTROLLER.REUSE_SCOPE_REMEDIATION)
+        for constant in (
+            CONTROLLER.REUSE_SCOPE_REMEDIATION,
+            CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION,
+        ):
+            with self.subTest(advice=constant[-60:]):
+                self.assertIn(CONTROLLER.NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST, constant)
 
     def tampered_reuse_baseline(self, order: dict, value: list[str]) -> dict:
         for check in order["required_postconditions"]:
@@ -5897,6 +5913,251 @@ class OrchestrationControllerTests(unittest.TestCase):
                 caught.exception.details["reuse_scope_failures"],
             )
 
+    def order_over_a_source_delivered_first(
+        self,
+        root: Path,
+        *,
+        sidecar_request_id: str | None = "",
+    ) -> tuple[Path, str, str]:
+        """A live order whose scoped request is fulfilled by evidence delivered before it.
+
+        The only shape in which the reuse refusals can fire: the source is in
+        `manifest_record_fingerprints_before`, so it is pre-existing, and the request that
+        names it is `fulfilled`, so every escape those refusals could print is being printed
+        at a request `source_requests.py` will no longer let anyone touch.
+        """
+        target = self.init_workspace(root, question=True)
+        request_id = self.block_question(target)
+        source_id = self.deliver_for_request(target, request_id, sidecar_request_id=sidecar_request_id)
+        self.delegated_session(target)
+        code, order, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+        self.assertEqual(0, code, stderr)
+        self.assertEqual("delegated", order["acquisition_mode"])
+        self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+        return target, request_id, source_id
+
+    def stored_request(self, target: Path, request_id: str) -> dict:
+        path = target / "sources" / "source-requests.jsonl"
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                record = json.loads(line)
+                if record.get("request_id") == request_id:
+                    return record
+        raise AssertionError(f"no stored request {request_id}")
+
+    def test_following_the_reuse_refusals_escapes_is_refused(self):
+        """The printed advice, walked — and refused in the one state that can print it.
+
+        `preexisting_reuse_scope_failures` takes the acquirer's *fulfilled* list, so by the
+        time this refusal exists the scoped request is already fulfilled by the source being
+        refused. Both escapes the advice used to name are closed in exactly that state, and
+        both are performed here rather than reasoned about:
+
+        - `source_requests.py record-attempt-failure` refuses a fulfilled request outright;
+        - "deliver that evidence again as a new source under its own raw path" gets as far
+          as a clean second inventory — which is what made it look like a route — and then
+          `fulfill` refuses to relink the request to it.
+
+        Two commands, one refusal each, and the operator ends exactly where they started.
+        That is why neither is named any more, and why what is named instead is the state:
+        this request is fulfilled and takes neither.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id, source_id = self.order_over_a_source_delivered_first(
+                Path(tmpdir), sidecar_request_id=None
+            )
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, error)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
+            self.assertIn("reuses pre-existing evidence", error["message"], error)
+            failure = error["details"]["reuse_scope_failures"][0]
+            self.assertEqual(source_id, failure["source_id"])
+            self.assertEqual("provenance_names_no_scoped_request", failure["cause"], failure)
+            self.assertEqual(CONTROLLER.REUSE_SCOPE_REMEDIATION, error["remediation"])
+
+            # Escape one, exactly as it used to be printed.
+            attempt_code, attempt_error, _ = self.json_script(
+                SOURCE_REQUESTS,
+                [
+                    "--project-root", str(target), "record-attempt-failure",
+                    "--request-id", request_id, "--failure-code", "no_result",
+                    "--orchestration-id", "orch-test", "--action-id", "action-0001",
+                    "--format", "json",
+                ],
+            )
+            self.assertEqual(CONTROLLER.EXIT_INVALID, attempt_code, attempt_error)
+            self.assertEqual("REQUEST_ALREADY_FULFILLED", attempt_error["error_code"], attempt_error)
+            self.assertTrue(attempt_error["recoverable"], attempt_error)
+
+            # Escape two. The delivery and the inventory both succeed, which is the whole
+            # trap: nothing refuses until the request is asked to take the new source.
+            second_source_id = self.deliver_for_request(target, request_id, name="supplier-quote-again")
+            self.assertNotEqual(source_id, second_source_id)
+
+            relink_code, relink_error, _ = self.try_fulfil(target, request_id, second_source_id)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, relink_code, relink_error)
+            self.assertEqual("REQUEST_ALREADY_FULFILLED", relink_error["error_code"], relink_error)
+            self.assertTrue(relink_error["recoverable"], relink_error)
+            self.assertEqual(source_id, self.stored_request(target, request_id)["source_id"])
+
+            # And the advice the operator actually reads names neither of them.
+            for text in (error["remediation"], failure["repair"]):
+                with self.subTest(text=text[:60]):
+                    self.assertNotIn("record-attempt-failure", text)
+                    self.assertIn("already fulfilled", text)
+
+    def test_restoring_the_rewritten_record_only_renames_the_refusal(self):
+        """The third cause's repair, walked: it is required, and it is not a way through.
+
+        "Restore it exactly as the order recorded it" reads as the repair for
+        `manifest_record_changed_after_issuance`, and the restore genuinely is required —
+        the manifest-scope guard downstream refuses any rewritten pre-existing record. What
+        it is not is a route to an accepted action, because membership of this failure set
+        never depended on the rewrite: a source lands here by being pre-existing and in
+        neither reuse baseline, both settled at issuance, and only the *cause* is decided by
+        comparing today's record against the fingerprint. Restore it and the same guard
+        refuses the same source for the reason that was true all along.
+
+        So the repair is performed literally and the workspace resubmitted, exactly as the
+        sidecar-remediation precedent does it, and the second refusal is asserted rather
+        than an acceptance.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            source_id = self.deliver_for_request(target, request_id, sidecar_request_id=None)
+            self.delegated_session(target)
+            code, _, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            manifest = target / "sources" / "manifest.jsonl"
+            at_issuance = manifest.read_bytes()
+
+            # Stamp the sidecar and re-inventory, which is what puts the record out of step
+            # with the fingerprint the order took.
+            self.assertEqual(source_id, self.deliver_for_request(target, request_id))
+            self.assertNotEqual(at_issuance, manifest.read_bytes(), "the re-inventory rewrote nothing")
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+
+            code, error, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, error)
+            failure = error["details"]["reuse_scope_failures"][0]
+            self.assertEqual("manifest_record_changed_after_issuance", failure["cause"], failure)
+            self.assertFalse(failure["record_unchanged"], failure)
+            self.assertEqual(
+                CONTROLLER.REUSE_SCOPE_CAUSE_REPAIRS["manifest_record_changed_after_issuance"],
+                failure["repair"],
+            )
+
+            # The repair, performed exactly as it is printed.
+            manifest.write_bytes(at_issuance)
+
+            code, again, _ = self.submit_delegated(target)
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, again)
+            self.assertIn("reuses pre-existing evidence", again["message"], again)
+            restored = again["details"]["reuse_scope_failures"][0]
+            self.assertEqual(source_id, restored["source_id"])
+            self.assertTrue(restored["record_unchanged"], restored)
+            self.assertEqual(
+                "provenance_names_no_scoped_request",
+                restored["cause"],
+                "restoring the record cleared the refusal instead of renaming its cause",
+            )
+
+    def reconciliation_refusal_over_a_rewritten_record(self, target: Path, source_id: str) -> dict:
+        """Rebuild the fingerprinted normalized record, then submit, and return the failure.
+
+        `normalized_at` is second-resolution, so a rebuild in the same wall-clock second as
+        the original renders identical bytes and there is no refusal to reach. The stamp is
+        pinned rather than left to how fast the suite runs.
+        """
+        with mock.patch.object(NORMALIZE, "timestamp_utc", lambda: "2026-08-20T09:00:00Z"):
+            self.assert_json_script_ok(
+                NORMALIZE,
+                ["--project-root", str(target), "--source-id", source_id, "--force", "--format", "json"],
+            )
+        code, error, _ = self.submit_delegated(target)
+        self.assertEqual(CONTROLLER.EXIT_INVALID, code, error)
+        self.assertEqual(
+            "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+            error["message"],
+            error,
+        )
+        failure = next(
+            item for item in error["details"]["reconciliation_failures"] if item["source_id"] == source_id
+        )
+        self.assertTrue(failure["was_scoped_match"], failure)
+        self.assertEqual(CONTROLLER.RECONCILIATION_ARM_REPAIRS["scoped_match"], failure["repair"])
+        return error
+
+    def test_the_failed_outcome_costs_exactly_what_the_repair_says(self):
+        """The one escape nothing refuses, and the reason it is no longer offered as one.
+
+        `scoped_match` used to end "end the action with a failed outcome and start a new
+        session". It is not refused — and that is worse than being refused, because what it
+        does instead is accept. `prepare_submission` answers a `failed` outcome without
+        calling `verify_action_postconditions`, so the reconciliation guard that had just
+        refused this evidence never runs again; `run_fulfill` has already written
+        `fulfilled` and the source id into the request store and nothing rolls that back;
+        and routing scopes `open_requests`, so no later order ever sees this request.
+
+        All three are observed here on the workspace the advice was followed on. The
+        refusal is real first, then the advice is performed, and what is left behind is a
+        session that ended, a fulfilment the controller declined to verify still recorded
+        against the request, and no request left for the "new session" the advice promised
+        to route.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id, source_id = self.order_over_a_source_delivered_first(Path(tmpdir))
+            error = self.reconciliation_refusal_over_a_rewritten_record(target, source_id)
+            self.assertEqual(CONTROLLER.RECONCILIATION_REMEDIATION, error["remediation"])
+            rewritten = sorted((target / "sources" / "normalized").glob("*.md"))
+            unverified = {path: path.read_bytes() for path in rewritten}
+
+            code, session, stderr = self.submit_delegated(
+                target,
+                outcome="failed",
+                summary="Reconciliation refused the reused source and the rewrite is being kept.",
+            )
+
+            # `EXIT_INVALID` here is the session's terminal verdict, not a refusal: the
+            # submission was accepted, the action is recorded as completed, and no
+            # postcondition ran. A host reading the exit code alone cannot tell this apart
+            # from the refusal above, which is part of why the advice read as harmless.
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, stderr)
+            self.assertEqual("failed", session["phase"], session)
+            self.assertEqual("failed", session["status"], session)
+            self.assertEqual("action-0001", session["last_completed_action_id"], session)
+            self.assertEqual(
+                ["action-0001"], [record["action_id"] for record in session["failure_records"]], session
+            )
+
+            # Cost one: the fulfilment the controller refused to verify is still recorded.
+            stored = self.stored_request(target, request_id)
+            self.assertEqual("fulfilled", stored["status"], stored)
+            self.assertEqual(source_id, stored["source_id"], stored)
+
+            # Cost two: the request never reopens, so the promised new session has nothing
+            # to route and this evidence is never verified by anything.
+            self.assertEqual(
+                [],
+                [
+                    record["request_id"]
+                    for record in CONTROLLER.open_requests(target, CONTROLLER.load_config(target))
+                ],
+                "a fulfilled request is invisible to routing, so no later order revisits it",
+            )
+
+            # Cost three: the unverified bytes are simply still there.
+            for path, content in unverified.items():
+                with self.subTest(record=path.name):
+                    self.assertEqual(content, path.read_bytes())
+
     def test_the_reuse_baseline_authorises_exactly_one_normalized_record(self):
         """The unit-level view of what the arm widens: `allowed_new_normalized_paths`.
 
@@ -5980,6 +6241,74 @@ class OrchestrationControllerTests(unittest.TestCase):
                 "normalized evidence is not what normalizing the raw evidence produces",
                 failure["derivation_failure"]["reason"],
             )
+
+    def test_a_crashing_re_derivation_is_not_sent_to_the_rewrite_that_crashed(self):
+        """The same defect one layer inside the constant written to stop it.
+
+        `normalized_output_derivation_failure` ends in `except (Exception, SystemExit)`, so a
+        re-derivation that raises anything unclassified reports "normalized evidence could not
+        be re-derived from the raw evidence". That reason was the one crash verdict missing
+        from `UNVERIFIABLE_DERIVATION_REASONS`, which meant the arm-(b) rewrite claimed it:
+        `normalize_sources.py --source-id <id> --force` re-enters the normalizer that had just
+        raised, so the operator who followed the advice reached the same wall from the other
+        side.
+
+        One broken normalizer, observed through both doors. The verifier's re-derivation is
+        refused, and the rewrite it used to advise is run and refused too — which is the whole
+        argument for routing this verdict to the repair that tells the operator to fix the
+        host instead.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = self.init_workspace(root, question=True)
+            request_id = self.block_question(target)
+            source_id = self.deliver_for_request(target, request_id, normalize=False)
+            self.delegated_session(target)
+            code, _, stderr = self.controller(target, "next", "--orchestration-id", "orch-test")
+            self.assertEqual(0, code, stderr)
+            self.assert_json_script_ok(
+                NORMALIZE, ["--project-root", str(target), "--all", "--format", "json"]
+            )
+            self.fulfil_and_reopen(target, request_id, source_id, "test-question")
+
+            def broken_normalizer(*_args, **_kwargs):
+                raise SystemExit("the normalizer stopped partway through this source")
+
+            # Workspace scripts load siblings by path, so the controller holds its own copy
+            # of the module. Both doors are patched because both are the same broken
+            # normalizer, reached from the verifier and from the CLI in turn.
+            controller_copy = CONTROLLER.load_sibling_module("normalize_sources")
+            with mock.patch.object(controller_copy, "normalize_selected_record", broken_normalizer):
+                with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
+                    self.verify_delegated(target, self.hydrated_pending_order(target))
+
+            failure = caught.exception.details["reconciliation_failures"][0]
+            self.assertEqual(source_id, failure["source_id"])
+            self.assertTrue(failure["was_authorized_unnormalized"], failure)
+            self.assertEqual(
+                "normalized evidence could not be re-derived from the raw evidence",
+                failure["derivation_failure"]["reason"],
+                failure,
+            )
+            self.assertEqual(
+                CONTROLLER.RECONCILIATION_ARM_REPAIRS["authorized_unnormalized_unverifiable"],
+                failure["repair"],
+                failure,
+            )
+            self.assertNotIn("--force", failure["repair"], failure)
+
+            # The advice this verdict used to carry, run against the same broken normalizer.
+            with mock.patch.object(NORMALIZE, "normalize_selected_record", broken_normalizer):
+                rewrite_code, rewrite_error, _ = self.json_script(
+                    NORMALIZE,
+                    [
+                        "--project-root", str(target), "--source-id", source_id,
+                        "--force", "--format", "json",
+                    ],
+                )
+
+            self.assertNotEqual(0, rewrite_code, rewrite_error)
+            self.assertIn("stopped partway through", json.dumps(rewrite_error), rewrite_error)
 
     # -- delegated acquisition: blocked-path verification -----------------------------
 
@@ -7633,16 +7962,23 @@ class NormalizedOutputScopeTests(unittest.TestCase):
             with self.subTest(advice=constant[:60]):
                 self.assertNotIn("--all", constant)
 
-        # Same split as the reuse terms, and for the same reason: only the delegated arm
-        # can end a request it cannot serve with a recorded attempt failure.
+        # Same split as the reuse terms, and now for the same reason: this refusal is also
+        # computed over the acquirer's fulfilled list, so neither arm has a second route and
+        # each names only the dead end its own reader would otherwise reach for.
         self.assertTrue(CONTROLLER.RECONCILIATION_REMEDIATION.startswith(CONTROLLER.RECONCILIATION_TERMS))
         self.assertTrue(
             CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION.startswith(CONTROLLER.RECONCILIATION_TERMS)
         )
-        self.assertIn("record-attempt-failure", CONTROLLER.RECONCILIATION_REMEDIATION)
+        self.assertNotIn("record-attempt-failure", CONTROLLER.RECONCILIATION_REMEDIATION)
         self.assertNotIn("record-attempt-failure", CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION)
         self.assertIn("another selected candidate", CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION)
         self.assertNotIn("another selected candidate", CONTROLLER.RECONCILIATION_REMEDIATION)
+        for constant in (
+            CONTROLLER.RECONCILIATION_REMEDIATION,
+            CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION,
+        ):
+            with self.subTest(advice=constant[-60:]):
+                self.assertIn(CONTROLLER.NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST, constant)
 
     def test_every_reuse_scope_cause_carries_a_repair_that_is_not_the_shared_terms(self):
         """Each cause has its own repair, because they do not share one.
@@ -7705,6 +8041,90 @@ class NormalizedOutputScopeTests(unittest.TestCase):
         self.assertIn("normalized_at", repairs["scoped_match"])
         self.assertIn("repair", CONTROLLER.RECONCILIATION_TERMS)
         self.assertNotIn("--force", CONTROLLER.RECONCILIATION_TERMS)
+
+    #: Every string a reused source's refusal can print at an operator: the four
+    #: remediations the two guards attach, plus the per-source repair each carries.
+    def reuse_path_advice(self) -> dict[str, str]:
+        return {
+            "RECONCILIATION_REMEDIATION": CONTROLLER.RECONCILIATION_REMEDIATION,
+            "PROVIDER_RECONCILIATION_REMEDIATION": CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION,
+            "REUSE_SCOPE_REMEDIATION": CONTROLLER.REUSE_SCOPE_REMEDIATION,
+            "PROVIDER_REUSE_SCOPE_REMEDIATION": CONTROLLER.PROVIDER_REUSE_SCOPE_REMEDIATION,
+            **{f"REUSE_SCOPE_CAUSE_REPAIRS[{key!r}]": value for key, value in CONTROLLER.REUSE_SCOPE_CAUSE_REPAIRS.items()},
+            **{f"RECONCILIATION_ARM_REPAIRS[{key!r}]": value for key, value in CONTROLLER.RECONCILIATION_ARM_REPAIRS.items()},
+        }
+
+    def test_no_reuse_advice_names_a_command_a_fulfilled_request_refuses(self):
+        """The defect one level up from "the selector does not work": the *state* forbids it.
+
+        Every string swept here is printed from a guard whose input is the acquirer's
+        `fulfilled` list, so the request it advises about is already fulfilled by the source
+        being refused, and `source_requests.py` closes both doors out of that state:
+        `record-attempt-failure` refuses a fulfilled request, and `fulfill` refuses to
+        relink one to a second delivery. Four of these strings used to send the operator
+        through one of those doors anyway — two at `record-attempt-failure`, two at
+        "deliver that evidence again as a new source under its own raw path".
+
+        Naming a second delivery is not itself the defect; presenting it as a way out of
+        *this* order is. So the sweep is not "never say raw path" — that would push the
+        useful pointer at a later order out of the text too — but "wherever a second
+        delivery or a second candidate is named, say in the same breath that this request is
+        already fulfilled and cannot be relinked to it".
+
+        `following_the_reuse_refusals_escapes_is_refused` walks the two doors against the
+        real scripts; this pins the text so it cannot drift back on its own.
+        """
+        for name, advice in self.reuse_path_advice().items():
+            with self.subTest(constant=name):
+                self.assertNotIn(
+                    "record-attempt-failure",
+                    advice,
+                    "this advice is printed only for a request that is already fulfilled",
+                )
+                if "raw path" in advice or "another selected candidate" in advice:
+                    self.assertTrue(
+                        "already fulfilled" in advice or "cannot be relinked" in advice,
+                        "a second delivery is named without saying this request cannot take one",
+                    )
+
+        # The same sentence lived inline in the delegated correlation refusal, which reads
+        # the fulfilled list too. It is not a constant, so it is pinned by absence.
+        self.assertNotIn(
+            "deliver that evidence as a new source under its own raw path instead",
+            Path(CONTROLLER.__file__).read_text(encoding="utf-8"),
+            "a guard over fulfilled requests still advises a delivery that cannot be linked to one",
+        )
+
+    def test_the_scoped_match_repair_names_what_the_failed_outcome_costs(self):
+        """The advice that was not refused, and was worse than the advice that was.
+
+        This repair used to end "end the action with a failed outcome and start a new
+        session". Nothing refuses that — which is the whole problem. `prepare_submission`
+        answers a `failed` outcome without calling `verify_action_postconditions` at all, so
+        every evidence and scope guard is skipped; `run_fulfill` has already written
+        `fulfilled` and the source id into the request store and nothing rolls that back;
+        and routing scopes `open_requests`, so the request is invisible to every later
+        order. Following it converted a refusal into a permanent, silent acceptance of
+        evidence the controller had just declined to verify.
+
+        `the_failed_outcome_costs_exactly_what_the_repair_says` performs it and observes the
+        wreckage. Here the text is pinned: the outcome may be named, but never without its
+        price beside it.
+        """
+        repair = CONTROLLER.RECONCILIATION_ARM_REPAIRS["scoped_match"]
+        self.assertIn("failed outcome", repair, "the state this repair is about is unnamed")
+        for cost in (
+            "without any evidence or scope check running",
+            "leaves the fulfilment",
+            "no later order can see",
+        ):
+            with self.subTest(cost=cost):
+                self.assertIn(cost, repair, "the failed outcome is named without its cost")
+        self.assertNotIn(
+            "start a new session",
+            repair,
+            "a fresh session is not reachable from here without paying that price first",
+        )
 
     def test_every_unverifiable_derivation_reason_is_one_the_verifier_actually_reports(self):
         """A reason set matched by string equality is a set that can silently stop matching.
