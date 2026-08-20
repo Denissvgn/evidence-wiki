@@ -174,23 +174,34 @@ class DelegatedWorkspace:
             }
         config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
-    def block_question_on_a_request(self, workspace: Path) -> str:
-        """Reach `blocked_on_sources` the way research does: claim, request, block."""
-        self.run_script(CLAIM, ["claim", "--slug", QUESTION_SLUG, "--agent-id", "research-agent"], workspace)
+    def block_question_on_a_request(
+        self,
+        workspace: Path,
+        *,
+        slug: str = QUESTION_SLUG,
+        query: str = "Live supplier quote for B0ABC12345",
+    ) -> str:
+        """Reach `blocked_on_sources` the way research does: claim, request, block.
+
+        Parameterised by slug so a backlog spanning two questions is built by walking this
+        same route twice rather than by a second copy of it: a question blocked any other
+        way is not the state routing reads, and two routes into one state drift.
+        """
+        self.run_script(CLAIM, ["claim", "--slug", slug, "--agent-id", "research-agent"], workspace)
         request = self.run_script(
             REQUESTS,
             [
                 "add", "--kind", "other",
-                "--query-or-identifier", "Live supplier quote for B0ABC12345",
+                "--query-or-identifier", query,
                 "--rationale", "The question cannot be answered from delivered evidence.",
-                "--priority", "high", "--question-slug", QUESTION_SLUG,
+                "--priority", "high", "--question-slug", slug,
             ],
             workspace,
         )["request"]["request_id"]
         self.run_script(
             RESOLVE,
             [
-                "block", "--slug", QUESTION_SLUG, "--agent-id", "research-agent",
+                "block", "--slug", slug, "--agent-id", "research-agent",
                 "--blocked-reason", "No supplier quote has been delivered.",
                 "--request-id", request,
             ],
@@ -299,11 +310,17 @@ class DelegatedWorkspace:
 
     # -- reading durable state ---------------------------------------------------
 
+    def manifest_records(self, workspace: Path) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in (workspace / "sources" / "manifest.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+
     def source_id_for(self, workspace: Path, raw_path: str) -> str:
-        for line in (workspace / "sources" / "manifest.jsonl").read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
+        for record in self.manifest_records(workspace):
             if raw_path in record.get("raw_paths", []):
                 return str(record["id"])
         raise AssertionError(f"no manifest record for {raw_path}")
@@ -344,6 +361,21 @@ class DelegatedWorkspace:
 
     SECOND_SLUG = "needs-competitor-evidence"
 
+    def add_second_question(self, workspace: Path) -> None:
+        """A second question in the profile's own shape, so a backlog can span two of them.
+
+        Written by copying the one the profile created rather than by re-running init:
+        every field but the slug and the prose is exactly what an initialized workspace
+        carries, which is what keeps `workspace_status` reading it as an ordinary question.
+        """
+        questions = workspace / "wiki" / "questions"
+        (questions / f"{self.SECOND_SLUG}.md").write_text(
+            (questions / f"{QUESTION_SLUG}.md").read_text(encoding="utf-8")
+            .replace(f"slug: {QUESTION_SLUG}", f"slug: {self.SECOND_SLUG}")
+            .replace("What does the supplier quote for B0ABC12345?", "What do competitors charge?"),
+            encoding="utf-8",
+        )
+
     def build_backlog(self, root: Path) -> tuple[Path, dict[str, str]]:
         """Two blocked questions over three requests, none of them satisfiable yet.
 
@@ -358,15 +390,7 @@ class DelegatedWorkspace:
         """
         workspace = self.init_workspace(root, spare_question=False)
         self.configure(workspace, delegated=True)
-
-        profile_questions = workspace / "wiki" / "questions"
-        second = profile_questions / f"{self.SECOND_SLUG}.md"
-        second.write_text(
-            (profile_questions / f"{QUESTION_SLUG}.md").read_text(encoding="utf-8")
-            .replace(f"slug: {QUESTION_SLUG}", f"slug: {self.SECOND_SLUG}")
-            .replace("What does the supplier quote for B0ABC12345?", "What do competitors charge?"),
-            encoding="utf-8",
-        )
+        self.add_second_question(workspace)
 
         requests: dict[str, str] = {}
         for name, slug, query in (
@@ -407,6 +431,13 @@ class DelegatedWorkspace:
         )
 
     def deliver_for(self, workspace: Path, request_id: str) -> str:
+        """One genuinely new delivery, inventoried and normalized inside the pending order.
+
+        Normalized by source id rather than with `--all`, which is what an acquirer holding
+        an order for one request may do: `--all` also rewrites records the order does not
+        scope, and a fixture that happens to hold nothing else to normalize hides the
+        difference — see `NormalizeAllInsideAnOrderTests` for the state where it does not.
+        """
         destination = workspace / "raw" / "data"
         destination.mkdir(parents=True, exist_ok=True)
         payload = destination / PAYLOAD.name
@@ -421,8 +452,9 @@ class DelegatedWorkspace:
             yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
         )
         self.run_script(INVENTORY, ["--report"], workspace)
-        self.run_script(NORMALIZE, ["--all"], workspace)
-        return self.source_id_for(workspace, f"raw/data/{PAYLOAD.name}")
+        source_id = self.source_id_for(workspace, f"raw/data/{PAYLOAD.name}")
+        self.run_script(NORMALIZE, ["--source-id", source_id], workspace)
+        return source_id
 
     def question_frontmatter(self, workspace: Path, slug: str) -> str:
         return (workspace / "wiki" / "questions" / f"{slug}.md").read_text(encoding="utf-8")
@@ -542,14 +574,16 @@ class DelegatedWorkspace:
         self.assertEqual("acquisition", order["phase"])
         return order
 
-    def fulfil_and_reopen(self, workspace: Path, request_id: str, source_id: str) -> None:
+    def fulfil_and_reopen(
+        self, workspace: Path, request_id: str, source_id: str, *, slug: str = QUESTION_SLUG
+    ) -> None:
         self.run_script(
             REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
         )
         self.run_script(
             RESOLVE,
             [
-                "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
+                "reopen", "--slug", slug, "--agent-id", ACQUIRER,
                 "--source-id", source_id, "--request-id", request_id,
             ],
             workspace,
@@ -2724,6 +2758,177 @@ class ReusedSourceKindTests(DelegatedWorkspace, unittest.TestCase):
                 "verifying a PDF reuse spawns its extractor; a recorder that sees none of "
                 "them cannot testify that the tampered record spawned nothing",
             )
+
+    # -- the subtree a reused bundle does not open ------------------------------------
+
+    PLANTED_MEMBER = "sections/planted-appendix.tex"
+
+    def arrive_at_a_mixed_batch(self, root: Path) -> tuple[Path, dict[str, str], str, dict]:
+        """One order over two requests: one to be delivered new, one a pre-existing bundle.
+
+        Two questions with one blocking request each, because both requests are fulfilled
+        here: a question left blocked on a fulfilled request is a missing open link, which
+        `workspace_status` reports as `attention_required` and which freezes the session
+        before submission is ever reached.
+
+        The mixture is the whole point and neither half can be dropped. Attribution is only
+        derived when the action created at least one manifest record, so a pure-reuse order
+        computes no attribution at all and admits nothing from any subtree, expanded or not.
+        The reused bundle is what makes an expanded subtree exist to be over-admitted.
+        """
+        workspace = self.init_workspace(root)
+        self.configure(workspace, delegated=True)
+        self.add_second_question(workspace)
+        requests = {
+            "reused": self.block_question_on_a_request(workspace),
+            "delivered": self.block_question_on_a_request(
+                workspace, slug=self.SECOND_SLUG, query="Competitor offer snapshot"
+            ),
+        }
+        bundle_source_id = self.deliver_latex_before_the_order(workspace, requests["reused"])
+        self.start(workspace)
+        order = self.pending_order(workspace)
+        self.assertEqual(
+            sorted(requests.values()),
+            sorted(order["scope"]["request_ids"]),
+            f"the guard under test only runs on a batch carrying both kinds of fulfilment: {order}",
+        )
+        return workspace, requests, bundle_source_id, order
+
+    def assert_the_planted_file_is_inert_to_the_normalizer(
+        self, workspace: Path, source_id: str
+    ) -> None:
+        """The reused bundle still re-derives, with the planted file sitting inside it.
+
+        Reconciliation runs several checks before raw scope does, and it re-normalizes the
+        reused source from its raw evidence inside a sandbox that copies the whole
+        `latex_root` subtree -- planted file included. A plant the LaTeX reader picked up
+        would therefore be refused as a reuse that does not re-derive, and the raw-scope
+        guard this test is about would never be consulted: the test would go green on a
+        refusal that says nothing about admission scope at all.
+
+        `main.tex` neither `\\input`s nor `\\include`s the plant and the entrypoint is chosen
+        from the bundle's top level, so the reader never reaches it. Asserted rather than
+        assumed, through the controller's own re-derivation predicate, so that a normalizer
+        that later starts reading the whole tree fails here -- with the reason -- instead of
+        quietly turning the test below into a different one.
+        """
+        records = self.manifest_records(workspace)
+        record = next(item for item in records if item["id"] == source_id)
+        self.assertIsNone(
+            CONTROLLER.normalized_output_derivation_failure(
+                workspace,
+                CONTROLLER.load_config(workspace),
+                record,
+                self.normalized_record_for(workspace, source_id),
+                records,
+                NORMALIZE,
+            ),
+            "the planted file changed what normalizing the reused bundle produces, so this "
+            "fixture is refused by reconciliation and proves nothing about raw scope",
+        )
+
+    def test_a_completed_batch_may_not_write_into_a_reused_pre_existing_bundle(self):
+        """A bundle the action reused is not a subtree it may write into either.
+
+        `test_a_blocked_partial_delivery_may_not_write_into_a_pre_existing_bundle` pins this
+        for the blocked arm, and the blocked arm's own comment says the completed arms pass
+        their newly created ids alone "for the same reason". Nothing said it here: widening
+        the completed arm's allowed set from the new ids to every fulfilled id left the whole
+        suite green, because no fixture in it ever fulfilled one request from a new delivery
+        and another from a directory-shaped record the workspace already held.
+
+        That is the shape the hole needs. Attribution expands a directory-valued `raw_paths`
+        to every regular file beneath it, which is what makes a bundle deliverable at all and
+        is safe for a record the action itself created -- the acquirer wrote the whole
+        subtree. Applied to a record that already existed at issuance, the same expansion
+        admits anything dropped anywhere inside somebody else's payload, because inventory
+        attributes files to the record whose directory contains them and asks nothing about
+        who put them there.
+
+        The batch is mixed deliberately: the new delivery is what makes attribution get
+        derived at all, and the reused bundle is what gives the expansion a subtree to reach
+        into. So the refusal is asserted together with the allowed set, because "refused" on
+        its own is also what a fixture that never reached this guard would produce. The
+        allowed set being exactly the newly delivered record's own two paths -- with no
+        member of the reused bundle in it -- is the guard's own evidence that it evaluated
+        the ids the action created rather than everything it fulfilled.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, requests, bundle_source_id, order = self.arrive_at_a_mixed_batch(
+                Path(tmpdir)
+            )
+            bundle = f"raw/papers/{LATEX_BUNDLE_FIXTURE.name}"
+
+            # The honest half of the order: one request fetched, one served by normalizing
+            # the correlated bundle the workspace already held.
+            delivered_source_id = self.deliver_for(workspace, requests["delivered"])
+            self.fulfil_and_reopen(
+                workspace, requests["delivered"], delivered_source_id, slug=self.SECOND_SLUG
+            )
+            self.normalize_scoped_source(workspace, requests["reused"], bundle_source_id)
+            before = self.evidence_bytes(workspace)
+
+            planted = f"{bundle}/{self.PLANTED_MEMBER}"
+            planted_path = workspace / planted
+            planted_path.parent.mkdir(parents=True, exist_ok=True)
+            planted_path.write_text(
+                "\\section{Appendix}\nPlanted inside a bundle this action did not deliver.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            self.assert_the_planted_file_is_inert_to_the_normalizer(workspace, bundle_source_id)
+
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"], envelope)
+            self.assertTrue(envelope["recoverable"], envelope)
+            self.assertEqual(
+                "delegated acquisition changed raw evidence outside newly fulfilled manifest source scope",
+                envelope["message"],
+                envelope,
+            )
+            details = envelope["details"]
+            self.assertEqual(
+                [planted],
+                details["unexpected_new_raw_paths"],
+                "the refusal must name the planted file, and name only it: the bundle's own "
+                "members were in the issuance baseline, and the delivered payload is allowed",
+            )
+            self.assertEqual(
+                [f"raw/data/{PAYLOAD.name}", f"raw/data/{PAYLOAD.name}.provenance.yml"],
+                sorted(details["allowed_new_raw_paths"]),
+                "only the record this action created may contribute an expanded subtree; a "
+                "reused pre-existing bundle's members appearing here means the expansion "
+                "reached a record the acquirer did not write",
+            )
+            self.assertFalse(
+                any(details["raw_scope_violations"].values()),
+                f"nothing that existed at issuance was changed; the plant is a new file: {details}",
+            )
+            after = self.evidence_bytes(workspace)
+            self.assertEqual(
+                [planted],
+                sorted(set(after) - set(before)),
+                "a refused submission writes nothing of its own",
+            )
+            self.assertEqual(
+                dict(before.items()),
+                {path: after[path] for path in before},
+                "a refused submission leaves the evidence it read exactly as it found it",
+            )
+
+            # The control: the same batch with the plant removed is accepted. Without it a
+            # fixture that never reached the raw-scope guard -- refused for some earlier
+            # reason with an empty allowed set -- would satisfy every assertion above.
+            planted_path.unlink()
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(0, code, session)
+            self.assertEqual("research", session["phase"])
+            self.assertEqual("open", self.question_status(workspace))
+            self.assertIn("status: open", self.question_frontmatter(workspace, self.SECOND_SLUG))
 
 
 class NormalizeAllInsideAnOrderTests(DelegatedWorkspace, unittest.TestCase):
