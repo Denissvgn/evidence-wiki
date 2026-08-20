@@ -3378,6 +3378,20 @@ def derived_raw_attribution(
     except OrchestrationControllerError:
         raise
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - any derivation failure is the same verdict
+        # Losing the acquisition barrier lock to a live writer is not a broken raw tree,
+        # and telling the operator to repair one would be advice they cannot follow --
+        # nothing is wrong with the evidence and the next attempt may simply win. Read
+        # ``contended`` by attribute rather than catching the class: workspace scripts
+        # load siblings by path, so several copies of ``_workspace_locks`` coexist and an
+        # ``isinstance`` check does not survive across them (``_workspace_locks.py:97``).
+        if getattr(exc, "contended", False):
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                "delivered raw evidence could not be re-derived while another writer held the workspace",
+                recoverable=True,
+                remediation="Wait for the concurrent workspace writer to finish, then resubmit the same action id.",
+                details={"error": str(exc)},
+            ) from exc
         raise OrchestrationControllerError(
             "ORCHESTRATION_POSTCONDITION_FAILED",
             "delivered raw evidence could not be re-derived by source inventory rules",
@@ -8404,6 +8418,11 @@ def verify_blocked_action_postconditions(
         for record in correlated_records
         if isinstance(record.get("id"), str) and record.get("id") in actual_new_source_ids
     }
+    by_correlated_id = {
+        str(record.get("id")): record
+        for record in correlated_records
+        if isinstance(record.get("id"), str)
+    }
     if correlated_records and (correlated_new_records or actual_new_raw_paths):
         raw_attribution = derived_raw_attribution(
             project_root, config, memo_key=current_raw_tree.get("fingerprint")
@@ -8417,7 +8436,22 @@ def verify_blocked_action_postconditions(
         {"raw_attribution_mismatches": attribution_mismatches},
         RAW_ATTRIBUTION_REMEDIATION,
     )
-    allowed_new_raw_paths = attributed_raw_paths(raw_attribution, correlated_ids)
+    # Attribution expands a directory entry to its whole subtree, so it may only widen
+    # admission for records this action created. Handing it every correlated record --
+    # which the pre-expansion allowlist could safely do, because a bare directory string
+    # is never a snapshot entry and so admitted nothing -- would let a partial delivery
+    # write new files into a *pre-existing* correlated bundle's subtree. The completed
+    # arms pass their new ids alone for the same reason.
+    allowed_new_raw_paths = attributed_raw_paths(raw_attribution, set(correlated_new_records))
+    for source_id in correlated_ids - set(correlated_new_records):
+        record = by_correlated_id.get(source_id)
+        raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
+        if not isinstance(raw_paths, list):
+            continue
+        for raw_path in raw_paths:
+            if isinstance(raw_path, str) and raw_path.startswith("raw/") and safe_snapshot_relative_path(raw_path):
+                allowed_new_raw_paths.add(raw_path)
+                allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
     unexpected_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
     require(
         not any(raw_scope_violations.values()) and not unexpected_raw_paths,
