@@ -38,27 +38,47 @@
   bytes under examination attests nothing, whatever its blast radius.
 
   Both defects are closed by one change: the acquirer authors the bytes, and attribution is
-  derived rather than declared. A single read-only inventory derivation over the delivered
-  tree now answers both raw-scope questions — which new raw files an acquisition may create,
-  and whether a new record's `raw_paths` is what inventory itself would derive. A
-  directory-shaped entry admits the regular files beneath it, because that is what inventory
+  derived rather than declared. A single inventory derivation over the delivered tree — one
+  that writes neither the manifest nor the activity log, though taking the acquisition
+  barrier does write a holder file under `raw/.locks/` — now answers both raw-scope
+  questions: which new raw files an acquisition may create, and whether a new record's
+  `raw_paths` is what inventory itself would derive. A directory-shaped entry admits the
+  regular files beneath it, because that is what inventory
   attributes to that record; a declared list inventory does not derive is a refusal naming
   both lists. The derivation is memoised per submission by the raw-tree fingerprint, so
   verifying up to three times costs one pass.
 
-  **The identity anchor did not move.** `allowed_new_ids` at the manifest guard is still
-  exactly the controller-issued fulfilled set, every `mutable_ids` over evidence is still
-  `set()`, and the manifest-scope guard still fires before any raw-path logic. What changed
-  is per-record attribution — which files a record accounts for — not which records may
-  exist.
+  **The identity anchor did not move on the arms where that guard was ever the anchor.** On
+  the two completed arms — delegated and provider — `allowed_new_ids` at the manifest guard
+  is still exactly the controller-issued fulfilled set — the same call, unchanged by this
+  release. The blocked-partial arm never read that way and still does not: it passes the
+  additions it has just observed, so that guard admits any new record by construction, which
+  this change neither introduced nor leans on. What bounds a partial delivery's additions is the
+  correlation requirement immediately after that guard, which refuses any new manifest
+  record whose `provenance` does not name this action's scoped request and candidate with
+  the candidate agreeing; the raw files such a delivery may create are then attributed over
+  those correlated new records alone. On all three arms every `mutable_ids` over evidence is
+  still `set()`, so a pre-existing record that was changed or removed is still caught at
+  that guard, and the manifest-scope guard still fires before any raw-path logic. What
+  changed is per-record attribution — which files a record accounts for — not which records
+  may exist.
 
   **This is not fully bounded, and should not be read as such.** A bundle's subtree is its
   record's unit of admission, so a file placed inside a directory the acquirer marked as a
   bundle is admitted under that record: the derivation has no member list to hold it to,
-  because the record itself has none. Closing that needs an inventory-level member list
-  rather than a controller change, and it stays open on purpose. Separately, the normalized
-  bytes of a newly fulfilled record are still trusted as delivered — only reused sources are
-  re-derived and compared — and that boundary is unchanged by this release.
+  because the record itself has none. The other half of that admission is easy to miss, so
+  it is stated here: the file does not show up in the record's own account of itself either.
+  Neither `metadata.file_count` nor `raw_fingerprint` is re-derived or compared by this
+  check, so whatever the record declared stands; and for a dot-prefixed file beneath an
+  arXiv or LaTeX bundle, re-running inventory reproduces both byte-identically anyway,
+  because both filter through `should_skip` while admission does not. A local repository
+  record carries no `raw_fingerprint` at all. So such a file triggers no re-normalization,
+  and `raw_fingerprint` must not be read as "the bytes this record stands for": it is the
+  bytes normalization re-reads, which for a bundle is a subset of what the record admits.
+  Closing that needs an inventory-level member list rather than a controller change, and it
+  stays open on purpose. Separately, the normalized bytes of a newly fulfilled record are
+  still trusted as delivered — only reused sources are re-derived and compared — and that
+  boundary is unchanged by this release.
 
   Two behaviour changes follow for anyone driving the protocol. A manifest record inventory
   cannot re-derive is now refused where it previously passed, so a record an acquisition
@@ -112,9 +132,23 @@
 
   `metadata.file_count` and `metadata.codebase_intake.file_count` now count every regular
   file beneath the repository directory, which is the same subtree the record admits and
-  the snapshot walks. `should_skip` is unchanged and still decides which paths become
-  *records*: dotfiles are still not inventoried as separate sources, because how a record is
-  selected and how much evidence it admits are different questions.
+  the snapshot walks. Both still stop one past the intake limit rather than enumerate a
+  tree already refused, so a repository over the bound publishes `file_count: 10001` and not
+  its true total: past the limit that field is a verdict, not a census. `should_skip` is
+  unchanged and still decides which paths become *records*: dotfiles are still not
+  inventoried as separate sources, because how a record is selected and how much evidence it
+  admits are different questions.
+
+  **That subset mismatch is closed for local repositories and still open for bundles.** The
+  same shape survives one record kind over. `bundle_file_count`, which fills an arXiv or
+  LaTeX bundle's `metadata.file_count`, and `raw_fingerprint_paths`, which decides what a
+  `paper` record's `raw_fingerprint` covers, both still filter through `should_skip` over
+  the same directory the raw-tree snapshot walks unfiltered. Nothing contradicts itself
+  there the way it did for repositories, because a bundle record carries no `bounded` flag
+  to be contradicted — so the effect is quieter rather than absent: the count states less
+  than the tree the record admits, and a dot-prefixed file beneath the bundle falls outside
+  the fingerprint that decides re-normalization. Answering the same question for those two
+  functions is not part of this release.
 
   **This is not a workspace-wide bound, and should not be read as one.** The snapshot's
   limit totals across every configured raw source root while the intake limit is per
@@ -129,6 +163,102 @@
   resubmit rather than editing the manifest back. And a repository whose `.git` carries it
   past the limit now reports `bounded: false` with `review_required` where it previously
   reported bounded, which is the refusal arriving at intake instead of at submit.
+
+- **Fix: two more reuse-path remediations that were refused for being followed.** 0.5.2
+  closed that defect class for the `REUSE_SCOPE_*` causes only. Reconciliation held a reused
+  source to one of two arms and attached one shared remediation to both, and that
+  remediation named the record rewrite: the right recourse on the arm where the order
+  recorded no normalized output, and advice that cannot succeed on the arm where it recorded
+  one. Reuse there reconciles against the exact bytes the order fingerprinted, and every
+  normalization run restamps the second-resolution `normalized_at` those bytes include, so
+  following the printed advice returned the identical refusal, as many times as it was
+  followed.
+
+  What a host parsing the refusal envelope should expect. Each entry in
+  `details.reconciliation_failures[]` now carries its own `repair`, keyed to the arm and the
+  state that entry is in: the arm whose normalized bytes the order fingerprinted, the arm
+  that owes a record re-derived from unchanged raw evidence, and a third for that second
+  arm's failures where the re-derivation could not be performed at all, so the record's
+  bytes were never what failed. The terms common to both arms are stated once and point at
+  that field, the shape the reuse-scope refusal already had, on the delegated and provider
+  arms alike. The refusal message and the `was_scoped_match`, `was_authorized_unnormalized`,
+  `derivation_checked` and `derivation_failure` keys are unchanged.
+
+  Adapter identity was the second refusal. `frontmatter_for` derives `normalizer.name` from
+  the adapter `research.yml` configures, while `carry_version_stamps` deliberately carries
+  only versions, so a stamped name that disagreed was just different bytes: it came back as
+  "normalized evidence is not what normalizing the raw evidence produces", whose remediation
+  is about a hand-edited body — sending the operator to hunt for a prose edit while the two
+  lines that actually disagreed sat in the frontmatter and were never quoted back. The name
+  is now compared explicitly, before rendering, and refused under its own
+  `derivation_failure.reason`, "normalized evidence does not name the normalizer configured
+  for its kind", carrying the recorded `normalizer` and the `configured_normalizer` in keys
+  of their own. Separately, an adapter that raises `AdapterError` — most sharply, one
+  reporting a program identity `research.yml` does not authorize — no longer has its message
+  buried in the blanket clause's `error` string: it reports "the normalizer adapter this
+  workspace authorizes did not produce a record to compare against", which is one of the
+  verdicts a record rewrite cannot clear. Both reason strings are new, so a host matching on
+  `derivation_failure.reason` will see two values it has not seen before.
+
+- **Fix: refusing to relink a fulfilled request was reported to hosts as a broken
+  workspace.** `source_requests.py fulfill` refuses to point an already-fulfilled request at
+  a second source — an ordinary refusal of an ordinary mistake. Its message matched no
+  clause in `classify_error_code`: the clause written to catch it tested for "already
+  fulfilled by a different source id", a string this package has never raised anywhere. The
+  refusal therefore fell past every clause to the classifier's `WORKSPACE_UNREADABLE` tail,
+  which is declared non-recoverable and remediated as checking the workspace path and its
+  required starter files. A host was told the workspace was unreadable and must not be
+  retried, when nothing was wrong with the workspace and one relink simply was not allowed.
+
+  It classifies as `REQUEST_ALREADY_FULFILLED` now. A host branching on this envelope reads
+  `recoverable: true` where it previously read `false`, and that code where it previously
+  read `WORKSPACE_UNREADABLE` — the opposite direction to the five codes 0.5.0 declared
+  non-recoverable, and correct for the same reason those were: it is what the refusal always
+  meant. That code's registry remediation was written for `record-attempt-failure` alone and
+  now answers both commands that reach it, since a fulfilled request accepts neither a
+  recorded attempt failure nor a relink. Re-fulfilling a request with the *same* source id
+  is unchanged and still succeeds idempotently. The tests now assert `error_code` and
+  `recoverable` rather than a stderr substring, which is what let the mismatch ship.
+
+- **Fix: the reuse and reconciliation refusals stopped advising commands that refuse.**
+  Every escape those refusals printed was unfollowable in the only state that could print
+  it. Both the reuse-scope failure set and the reconciliation loop are computed over the
+  request store's own `fulfilled` records, so the request under discussion is already
+  fulfilled by the very source being refused — and `source_requests.py` closes both doors
+  out of that state: `record-attempt-failure` refuses a fulfilled request outright, and
+  `fulfill` refuses to relink one to a later delivery. The remediations advised one or both
+  anyway, as did two of the three per-cause repairs and the delegated correlation refusal.
+  An operator who followed the printed advice reached a second refusal for having followed
+  it.
+
+  Both doors were walked in tests rather than reasoned about, and neither is named now.
+  What the refusals state instead is the fact underneath all of them — a fulfilled request
+  has no second route — and, where the per-source repair cannot be performed, that this
+  order has none either. Two more escapes were found the same way and removed: the provider
+  arms' "acquire it through another selected candidate" bottoms out at that same relink
+  refusal, and `manifest_record_changed_after_issuance`'s "restore it exactly" is required
+  by the scope guards but never cleared this refusal, because membership in the order's
+  reuse baselines was fixed at issuance and no rewrite ever moved it — restoring the record
+  only changes which of the other two causes gets reported. The delegated acquirer skill,
+  which routed a refused reuse to both dead escapes, is corrected to the same effect.
+
+  One more `repair` changes, one level down and for the same reason. A re-derivation that
+  *crashes* reports the blanket reason "normalized evidence could not be re-derived from the
+  raw evidence", and that reason was missing from
+  `UNVERIFIABLE_DERIVATION_REASONS`, so it was answered with the record rewrite — which
+  re-enters the same normalizer that had just raised. It joins that set, so such a failure
+  now carries the repair pointing at `derivation_failure.error` instead.
+
+  **The `failed` outcome is disclosed here, not closed.** The `scoped_match` repair used to
+  offer ending the action with a failed outcome and starting a fresh session, as though that
+  were a clean exit. It is not one, and nothing refuses it: `prepare_submission` answers a
+  `failed` outcome without calling `verify_action_postconditions` at all, so no evidence or
+  scope check runs. The fulfilment the acquirer already wrote stays in the request store with
+  its `source_id`; `open_requests` selects on `status == "open"`, so no later order sees that
+  request again; and evidence the controller had just declined to verify is accepted
+  permanently. The repair names that cost now instead of naming the command, and a test
+  performs the outcome and observes each part of it. The hole itself is unchanged and stays
+  open on purpose.
 
 ## 0.5.2 - 2026-08-19
 
