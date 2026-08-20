@@ -147,6 +147,14 @@ PROVENANCE_FIELDS = (
     "terms_note",
     "notes",
 )
+# Fields that bind a capture to the request and candidate it was authorised by. They
+# are carried only on the record's primary `provenance`, because every consumer that
+# reads them — delegated fulfilment correlation above all — asks a question with one
+# answer: which request authorised this delivery. A record whose paired capture also
+# supplied a request_id would offer two answers to that scalar question, so
+# `additional_provenance` entries are stripped of them and correlation keeps reading
+# the primary alone.
+PROVENANCE_CORRELATION_FIELDS = frozenset({"request_id", "candidate_id"})
 PROVENANCE_CHECKSUM_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 INVENTORY_CHECKSUM_REQUIRED = "INVENTORY_CHECKSUM_REQUIRED"
@@ -1677,12 +1685,81 @@ def provenance_candidate_paths(record: dict[str, Any]) -> list[str]:
     return unique_values(candidates)
 
 
+def merge_sidecar_provenance(
+    project_root: Path,
+    record: dict[str, Any],
+    target_rel: str,
+    entry: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Validate one sidecar's fields for the delivered path it sits beside.
+
+    The checksum is verified against `target_rel` and nowhere else, which is why a
+    second capture's provenance is never folded into the first one's mapping: a
+    checksum only means anything next to the path whose bytes it was computed from.
+    """
+    provenance: dict[str, Any] = dict(entry["data"])
+    provenance["sidecar_path"] = entry["sidecar_path"]
+    license_value = provenance.get("license")
+    if isinstance(license_value, str) and license_value != "unresolved" and license_value not in SPDX_LICENSE_IDS:
+        warning = (
+            f"{entry['sidecar_path']}: provenance license is not in the SPDX allowlist: {license_value}"
+        )
+        provenance.pop("license", None)
+        append_record_warning(record, warning)
+        ensure_metadata(record)["review_required"] = True
+        warnings.append(warning)
+    checksum = provenance.get("checksum")
+    if checksum:
+        target = project_root / target_rel
+        if target.is_file():
+            actual = hash_file_contents(target)
+            verified = actual is not None and f"sha256:{actual}" == checksum
+            provenance["checksum_verified"] = verified
+            if not verified:
+                warning = f"provenance checksum mismatch for {target_rel} (sidecar {entry['sidecar_path']})"
+                append_record_warning(record, warning)
+                ensure_metadata(record)["review_required"] = True
+                warnings.append(warning)
+        else:
+            provenance["checksum_verified"] = False
+            warning = f"{entry['sidecar_path']}: checksum cannot be verified for a directory target"
+            append_record_warning(record, warning)
+            warnings.append(warning)
+    standards = provenance.get("standards")
+    if isinstance(standards, dict) and standards.get("review_required") is True:
+        warning = f"{entry['sidecar_path']}: standards metadata requires review"
+        append_record_warning(record, warning)
+        ensure_metadata(record)["review_required"] = True
+        warnings.append(warning)
+    return provenance
+
+
+def additional_provenance_entry(target_rel: str, provenance: dict[str, Any]) -> dict[str, Any]:
+    """One secondary capture's provenance, named by the path it describes."""
+    entry: dict[str, Any] = {"path": target_rel}
+    for field, value in provenance.items():
+        if field in PROVENANCE_CORRELATION_FIELDS:
+            continue
+        entry[field] = value
+    return entry
+
+
 def apply_provenance_sidecars(
     project_root: Path,
     records: list[dict[str, Any]],
     sidecars: dict[str, dict[str, Any]],
 ) -> list[str]:
-    """Merge sidecar provenance into matching records and verify checksums."""
+    """Merge sidecar provenance into matching records and verify checksums.
+
+    A record can own more than one delivered path — inventory folds a paired PDF into
+    the LaTeX bundle record that describes the same paper, so one manifest row carries
+    two captures that were retrieved separately and hash differently. The first
+    matching sidecar becomes the record's `provenance`; every other matching sidecar
+    becomes an `additional_provenance` entry rather than being discarded, because the
+    capture it describes was delivered and its origin, retrieval time, and checksum are
+    the only record of where those bytes came from.
+    """
     warnings: list[str] = []
     matched: set[str] = set()
     for record in records:
@@ -1690,53 +1767,23 @@ def apply_provenance_sidecars(
         primary = next((candidate for candidate in candidates if candidate in sidecars), None)
         if primary is None:
             continue
-        entry = sidecars[primary]
         matched.add(primary)
-        provenance: dict[str, Any] = dict(entry["data"])
-        provenance["sidecar_path"] = entry["sidecar_path"]
-        license_value = provenance.get("license")
-        if isinstance(license_value, str) and license_value != "unresolved" and license_value not in SPDX_LICENSE_IDS:
-            warning = (
-                f"{entry['sidecar_path']}: provenance license is not in the SPDX allowlist: {license_value}"
-            )
-            provenance.pop("license", None)
-            append_record_warning(record, warning)
-            ensure_metadata(record)["review_required"] = True
-            warnings.append(warning)
-        checksum = provenance.get("checksum")
-        if checksum:
-            target = project_root / primary
-            if target.is_file():
-                actual = hash_file_contents(target)
-                verified = actual is not None and f"sha256:{actual}" == checksum
-                provenance["checksum_verified"] = verified
-                if not verified:
-                    warning = f"provenance checksum mismatch for {primary} (sidecar {entry['sidecar_path']})"
-                    append_record_warning(record, warning)
-                    ensure_metadata(record)["review_required"] = True
-                    warnings.append(warning)
-            else:
-                provenance["checksum_verified"] = False
-                warning = f"{entry['sidecar_path']}: checksum cannot be verified for a directory target"
-                append_record_warning(record, warning)
-                warnings.append(warning)
-        record["provenance"] = provenance
-        standards = provenance.get("standards")
-        if isinstance(standards, dict) and standards.get("review_required") is True:
-            warning = f"{entry['sidecar_path']}: standards metadata requires review"
-            append_record_warning(record, warning)
-            ensure_metadata(record)["review_required"] = True
-            warnings.append(warning)
+        record["provenance"] = merge_sidecar_provenance(
+            project_root, record, primary, sidecars[primary], warnings
+        )
+        additional: list[dict[str, Any]] = []
         for extra in candidates:
             if extra == primary or extra not in sidecars:
                 continue
             matched.add(extra)
-            warning = (
-                f"{sidecars[extra]['sidecar_path']}: additional provenance sidecar not merged "
-                f"(record {record_label(record)} already carries provenance from {entry['sidecar_path']})"
+            additional.append(
+                additional_provenance_entry(
+                    extra,
+                    merge_sidecar_provenance(project_root, record, extra, sidecars[extra], warnings),
+                )
             )
-            append_record_warning(record, warning)
-            warnings.append(warning)
+        if additional:
+            record["additional_provenance"] = additional
     for target_rel in sorted(set(sidecars) - matched):
         warnings.append(f"{sidecars[target_rel]['sidecar_path']}: provenance sidecar matches no source record")
     return warnings

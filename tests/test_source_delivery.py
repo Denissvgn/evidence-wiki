@@ -507,6 +507,101 @@ class SourceDeliveryTests(unittest.TestCase):
             self.assertEqual(f"{pdf_rel}.provenance.yml", provenance["sidecar_path"])
             self.assertFalse([warning for warning in warnings if "provenance" in warning])
 
+    def test_paired_paper_carries_provenance_for_both_captures(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            bundle_rel = "raw/other/arXiv-2601.00001v1"
+            pdf_rel = "raw/pdf/2601.00001v1.pdf"
+            self.write_sidecar(
+                workspace,
+                bundle_rel,
+                {
+                    "origin_url": "https://arxiv.org/abs/2601.00001v1",
+                    "license": "CC-BY-4.0",
+                    "retrieved_at": "2026-06-10T12:00:00Z",
+                    "retrieved_by": "fetch_sources.py/arxiv",
+                    "request_id": "req-1a2b3c4d5e",
+                    "candidate_id": "cand-arxiv-bundle",
+                },
+            )
+            self.write_sidecar(
+                workspace,
+                pdf_rel,
+                {
+                    "origin_url": "https://arxiv.org/pdf/2601.00001v1",
+                    "license": "CC-BY-4.0",
+                    "retrieved_at": "2026-06-10T12:01:00Z",
+                    "retrieved_by": "fetch_sources.py/arxiv",
+                    "checksum": sha256_of(workspace / pdf_rel),
+                    "request_id": "req-1a2b3c4d5e",
+                    "candidate_id": "cand-arxiv-pdf",
+                },
+            )
+
+            records, warnings = self.build_records(workspace)
+            paper = self.record_by_id(records, "paper:2601.00001v1")
+
+            provenance = paper["provenance"]
+            self.assertEqual(f"{bundle_rel}.provenance.yml", provenance["sidecar_path"])
+            self.assertEqual("https://arxiv.org/abs/2601.00001v1", provenance["origin_url"])
+            self.assertEqual("2026-06-10T12:00:00Z", provenance["retrieved_at"])
+            self.assertEqual("req-1a2b3c4d5e", provenance["request_id"])
+            self.assertEqual("cand-arxiv-bundle", provenance["candidate_id"])
+            self.assertNotIn("checksum", provenance)
+            self.assertNotIn("checksum_verified", provenance)
+
+            additional = paper["additional_provenance"]
+            self.assertEqual(1, len(additional))
+            paired = additional[0]
+            self.assertEqual(pdf_rel, paired["path"])
+            self.assertEqual(f"{pdf_rel}.provenance.yml", paired["sidecar_path"])
+            self.assertEqual("https://arxiv.org/pdf/2601.00001v1", paired["origin_url"])
+            self.assertEqual("2026-06-10T12:01:00Z", paired["retrieved_at"])
+            self.assertEqual("CC-BY-4.0", paired["license"])
+            self.assertEqual(sha256_of(workspace / pdf_rel), paired["checksum"])
+            self.assertTrue(paired["checksum_verified"])
+            self.assertNotIn("request_id", paired)
+            self.assertNotIn("candidate_id", paired)
+            self.assertFalse([warning for warning in warnings if "provenance" in warning])
+
+    def test_paired_capture_checksum_is_verified_against_its_own_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            self.write_sidecar(
+                workspace,
+                "raw/other/arXiv-2601.00001v1",
+                {"origin_url": "https://arxiv.org/abs/2601.00001v1"},
+            )
+            self.write_sidecar(
+                workspace,
+                "raw/pdf/2601.00001v1.pdf",
+                {"retrieved_by": "fetch_sources.py/arxiv", "checksum": "sha256:" + "0" * 64},
+            )
+
+            records, warnings = self.build_records(workspace)
+            paper = self.record_by_id(records, "paper:2601.00001v1")
+
+            paired = paper["additional_provenance"][0]
+            self.assertEqual("raw/pdf/2601.00001v1.pdf", paired["path"])
+            self.assertFalse(paired["checksum_verified"])
+            self.assertTrue(paper["metadata"]["review_required"])
+            self.assertTrue(
+                any("checksum mismatch for raw/pdf/2601.00001v1.pdf" in warning for warning in warnings)
+            )
+
+    def test_unmatched_sidecar_still_reports_no_source_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            self.write_sidecar(
+                workspace,
+                "raw/other/arXiv-2601.00001v1/main.tex",
+                {"origin_url": "https://arxiv.org/abs/2601.00001v1"},
+            )
+
+            _, warnings = self.build_records(workspace)
+
+            self.assertTrue(any("matches no source record" in warning for warning in warnings))
+
     def test_sidecar_preserves_curation_metadata_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))

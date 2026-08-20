@@ -376,7 +376,7 @@ coverage facets cannot pass until the source is redelivered or replaced.
 Behavior in `source_inventory.py`:
 
 - Sidecars are never inventoried as sources themselves.
-- Valid fields are merged into the matching manifest record under a `provenance` object, together with `sidecar_path`. The match is by delivered path: a record claims the sidecar sitting next to its LaTeX bundle root, its raw file, or its paired PDF (primary path first; additional matching sidecars are reported, not merged).
+- Valid fields are merged into the matching manifest record under a `provenance` object, together with `sidecar_path`. The match is by delivered path: a record claims the sidecar sitting next to its LaTeX bundle root, its raw file, or its paired PDF (primary path first). A record that owns several delivered paths — a paired paper owns its bundle root and its PDF — carries the first matching sidecar as `provenance` and every further matching sidecar as an entry in `additional_provenance`, each naming the `path` it describes. A sidecar matching no record at all is still reported as unmatched.
 - A malformed sidecar (unparseable YAML, wrong field types) degrades to a parse warning in the inventory report; the run never fails because of it.
 - Invalid `source_status` or `delivery_failure_code` values are dropped with a
   warning, while valid `delivery_failure_detail` and
@@ -387,12 +387,17 @@ Behavior in `source_inventory.py`:
 - A non-null `license` that is not in the in-repo SPDX allowlist is dropped,
   marks the record `review_required`, and raises a warning. `license: null` is
   preserved as an explicit unknown.
-- When `checksum` is present and the target is a file, inventory recomputes the hash. The result is recorded as `provenance.checksum_verified`; a mismatch marks the record `review_required` and raises a prominent warning in the report. Directory targets cannot be checksum-verified and are warned about.
+- When `checksum` is present and the target is a file, inventory recomputes the hash. The result is recorded as `provenance.checksum_verified`; a mismatch marks the record `review_required` and raises a prominent warning in the report. Directory targets cannot be checksum-verified and are warned about. Each `additional_provenance` entry is verified the same way against its own `path`, which is why a second capture's fields are never folded into the first one's mapping: a checksum means something only beside the bytes it was computed from, so one mapping can hold exactly one.
 - High-trust deployments can opt into fail-closed inventory modes:
   `--reject-mismatch` excludes records whose sidecar checksum is present but not
   verified, and `--require-checksum` excludes records without
   `provenance.checksum_verified: true`. These modes filter records before the
-  manifest is written and exit non-zero when they refuse sources.
+  manifest is written and exit non-zero when they refuse sources. Both read the
+  record's primary `provenance` and nothing else, as does every other consumer of
+  a merged checksum; a failed checksum on an `additional_provenance` entry marks
+  the record `review_required` and warns in the report, but does not by itself
+  exclude the record. Treat that as the current boundary and not as a statement
+  that the paired capture verified.
 - Provenance and evidence-usability fields flow into normalized-record
   frontmatter on the next normalization, so exported citations carry
   `origin_url`, `license`, academic venue/status metadata, and unusable-evidence
@@ -409,8 +414,20 @@ and the errata sheet that amends it. The supported model is **two scoped source
 requests on the same question, both fulfilled in the same order**, each by its own
 capture with its own sidecar. This is not a workaround for a missing multi-file
 delivery form. It follows from the identity model stated above — a distinct capture at
-a distinct path is a distinct source carrying its own provenance — and there is no
-delivery in this contract that gives one manifest record two provenances to carry.
+a distinct path is a distinct source carrying its own provenance — and there is no way
+for an acquirer to *choose* to deliver two captures into one manifest record.
+
+One merge does put two captures on one record, and it is inventory's decision rather
+than the acquirer's: a paper delivered as both a LaTeX bundle and a PDF is folded into
+a single `paper` record, which then carries the bundle's sidecar as `provenance` and
+the PDF's as an `additional_provenance` entry (see
+[source-manifest.md](source-manifest.md)). That is a merge of two captures of *the same
+work*, performed after delivery by a heuristic the acquirer does not control, and it
+does not open a two-capture delivery form for two different pieces of evidence. The
+merged entry is stripped of `request_id` and `candidate_id`, so only the primary
+provenance correlates to a request, and everything below still holds: two facts still
+need two requests, two paths, and two sidecars.
+
 Three costs come with the model, and each is cheaper to plan for than to discover:
 
 - **Arity is exact at delivery.** One capture cannot fulfil two requests, because

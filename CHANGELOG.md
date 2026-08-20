@@ -66,6 +66,39 @@
   derivation that cannot run at all is a new recoverable refusal rather than a crash,
   repaired by making `source_inventory.py --report` succeed and resubmitting.
 
+- **Fix: a manifest record that owned two delivered captures kept only the first one's
+  provenance.** Inventory folds a paired PDF into the LaTeX-bundle record for the same
+  paper, so one manifest row can own two paths that were retrieved separately, at different
+  URLs, and hash differently. `fetch_sources.py` writes a sidecar beside each of them, and
+  only the first matching sidecar was merged: the second was reported as "additional
+  provenance sidecar not merged" and then discarded, taking the paired capture's
+  `origin_url`, `retrieved_at` and verified `checksum` with it. Nothing in the manifest
+  said where the PDF had come from. The bytes were never unaccounted for — both sidecars
+  already counted toward `raw_fingerprint`, so a correction to either still re-triggered
+  normalization — but the parsed fields were dropped, and no test exercised the path at
+  all. Every matching sidecar is merged now: the first still becomes `provenance`,
+  unchanged in shape, selection and checksum handling, and each further one becomes an
+  entry in a new record-level `additional_provenance` list that names the `path` it
+  describes and is checksum-verified against that path's own bytes rather than the
+  primary's. A sidecar matching no record at all is still reported as unmatched.
+
+  The correlation fields are deliberately stripped from those entries.
+  `provenance.request_id` is the only link between a delivered capture and the source
+  request that authorised it, and delegated fulfilment correlation reads it — with
+  `candidate_id` — as a scalar. A paired capture carrying a second copy would turn one
+  authorisation into an ambiguous pair, so correlation goes on reading the primary
+  `provenance` alone and this change moves nothing about which deliveries are authorised.
+  For the same reason the second sidecar's fields are not folded into the first one's
+  mapping: a `checksum` means something only beside the bytes it was computed from, and a
+  merged mapping would state a verified hash about the wrong file.
+
+  One consequence for anyone holding an open order. A record that gains
+  `additional_provenance` no longer fingerprints as it did before, so an order issued
+  before this change whose acquirer re-runs `source_inventory.py` and then submits can see
+  such a record refused as `manifest_record_changed_after_issuance` — the rewritten-since-
+  issuance cause, which is recoverable. Issue a fresh order and resubmit rather than
+  editing the manifest back.
+
 ## 0.5.2 - 2026-08-19
 
 - **Fix: two concurrent status reads could make each other fail.** Writing the status
