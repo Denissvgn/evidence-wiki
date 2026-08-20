@@ -1,11 +1,12 @@
 """CR-19: a directory-shaped raw delivery must be deliverable inside an acquisition order.
 
-RED BY DESIGN. Every test in this file asserts the *desired* end state and therefore
-FAILS on today's `orchestration_controller.py`. They are not marked `xfail` and are not
-skipped — this repository uses neither mechanism, and a suppressed regression test is a
-regression test nobody reads. They turn green when the unified attribution predicate
-lands (allowed new raw files become what `source_inventory.build_records` attributes to
-the fulfilled/correlated records, rather than the literal `raw_paths` strings).
+WRITTEN RED, KEPT AS REGRESSION TESTS. Every test here asserts the *desired* end state,
+and the first three failed on the controller as it stood when they were written. The
+unified attribution predicate has since landed — allowed new raw files became what
+`source_inventory.build_records` attributes to the fulfilled/correlated records, rather
+than the literal `raw_paths` strings — so all four pass today and stay as its regression
+tests. Nothing here is marked `xfail` or skipped: this repository uses neither mechanism,
+and a suppressed regression test is a regression test nobody reads.
 
 The defect, stated once:
 
@@ -34,13 +35,14 @@ instruct an operator to run: `workspace-template/skills/research-acquire.md` and
 synthetic fixture is what makes this a regression test for shipped documentation rather
 than for a test helper.
 
-The predicate has since landed and those three cases pass; they stay as its regression
-tests. The fourth case measures the opposite edge of the same predicate and was never red
-against a shipped state: expansion turns a directory entry into a whole subtree, so it may
-only widen admission for records the acquisition itself created. It fails only against the
-state between `1cda9e7` and the narrowing that followed it, where a blocked partial
-delivery could write new files into a PRE-EXISTING correlated bundle and have them
-admitted as residue.
+The fourth case measures the opposite edge of the same predicate: expansion turns a
+directory entry into a whole subtree, so it may only widen admission for records the
+acquisition itself created. Its red state is the window between `1cda9e7` and the
+narrowing that followed, where a blocked partial delivery could write new files into a
+PRE-EXISTING correlated bundle and have them admitted as residue — there it fails on
+behaviour, admitting what it should refuse. It also fails against states before
+`1cda9e7`, but on a payload field rather than on that behaviour, so only the window is
+evidence of the defect it pins.
 
 Nothing here asserts a line number: guards move, and the contract an operator sees is the
 error code, the refusal message, and the payload fields. Each failure message carries the
