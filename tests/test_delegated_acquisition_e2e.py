@@ -29,12 +29,14 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -1282,6 +1284,113 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
             )
             self.assertFalse(failure["record_unchanged"])
 
+    def assert_rebuilt_reuse_is_refused(self, workspace: Path, action_id: str, source_id: str) -> dict:
+        code, envelope = self.submit(workspace, action_id)
+        self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+        self.assertEqual(
+            "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+            envelope["message"],
+            envelope,
+        )
+        failure = next(
+            item
+            for item in envelope["details"]["reconciliation_failures"]
+            if item["source_id"] == source_id
+        )
+        self.assertTrue(failure["was_scoped_match"], failure)
+        self.assertFalse(failure["normalized_unchanged"], failure)
+        return envelope
+
+    def rebuild_the_normalized_record(self, workspace: Path, source_id: str, stamp: str) -> None:
+        """Exactly what the shared remediation used to print, with the clock pinned.
+
+        `normalized_at` is second-resolution, so two rebuilds inside one second render
+        identical bytes and the refusal being reproduced would not reproduce. That is a
+        property of how fast a test runs, not of the guard, so the stamp is fixed here
+        rather than left to the wall clock.
+        """
+        with mock.patch.object(NORMALIZE, "timestamp_utc", lambda: stamp):
+            self.run_script(NORMALIZE, ["--source-id", source_id, "--force"], workspace)
+
+    def test_rebuilding_a_fingerprinted_record_is_refused_and_only_restoring_it_helps(self):
+        """The arm-(a) half of the bug above: printed advice the operator cannot follow.
+
+        A source the order fingerprinted normalized reconciles on exactly those bytes. The
+        shared remediation told its operator to rewrite the record with
+        `normalize_sources.py --source-id <id> --force`, which is the right answer for the
+        *other* arm — the one where the order recorded no normalized output and the acquirer
+        owes a freshly derived record. Here it cannot work at all: the rebuild restamps
+        `normalized_at` and changes nothing else, and that stamp is inside the fingerprint,
+        so no number of rebuilds lands back on the bytes the order recorded.
+
+        So the advice is walked rather than read. Rebuild, submit, rebuild again, submit
+        again — the identical refusal both times, which is what an operator following the
+        printed text actually experienced. Then the repair the failure now names is performed,
+        and it is the one that ends it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, _, source_id, order = self.arrive_at_reuse(Path(tmpdir))
+            record = self.normalized_record_for(workspace, source_id)
+            fingerprinted = record.read_bytes()
+
+            self.rebuild_the_normalized_record(workspace, source_id, "2026-08-20T09:00:00Z")
+            rebuilt = record.read_bytes()
+            self.assertNotEqual(fingerprinted, rebuilt, "the rebuild rewrote nothing")
+            self.assertEqual(
+                [
+                    line
+                    for line in fingerprinted.decode("utf-8").splitlines()
+                    if not line.startswith("normalized_at:")
+                ],
+                [
+                    line
+                    for line in rebuilt.decode("utf-8").splitlines()
+                    if not line.startswith("normalized_at:")
+                ],
+                "the rebuild differs by more than the stamp, so this is not the arm-(a) trap",
+            )
+
+            envelope = self.assert_rebuilt_reuse_is_refused(workspace, order["action_id"], source_id)
+            failure = next(
+                item
+                for item in envelope["details"]["reconciliation_failures"]
+                if item["source_id"] == source_id
+            )
+            self.assertNotIn(
+                "--force",
+                failure["repair"],
+                "arm (a) is still being sent to the rewrite that restamps what it must restore",
+            )
+            self.assertNotIn("--force", envelope["remediation"], envelope)
+
+            # Following the old advice a second time. Different bytes, identical refusal.
+            self.rebuild_the_normalized_record(workspace, source_id, "2026-08-20T09:00:01Z")
+            self.assertNotEqual(rebuilt, record.read_bytes(), "the second rebuild rewrote nothing")
+            again = self.assert_rebuilt_reuse_is_refused(workspace, order["action_id"], source_id)
+            self.assertEqual(
+                failure["repair"],
+                next(
+                    item
+                    for item in again["details"]["reconciliation_failures"]
+                    if item["source_id"] == source_id
+                )["repair"],
+                "the second rebuild reached a different refusal, so the loop is not reproduced",
+            )
+
+            # The repair the failure names, performed literally: the record restored to the
+            # bytes the order fingerprinted.
+            record.write_bytes(fingerprinted)
+
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(
+                0,
+                code,
+                f"restoring the fingerprinted bytes is the advised repair and must resolve it: {session}",
+            )
+            self.assertEqual("research", session["phase"])
+            self.assertEqual(order["action_id"], session["last_completed_action_id"])
+
     # -- the reuse path that is allowed, and what it may still not touch ------------
 
     def test_the_documented_reuse_path_closes_the_loop(self):
@@ -1717,6 +1826,128 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
                 failure["derivation_failure"]["reason"],
                 failure,
             )
+
+    def reconciliation_derivation_failure(self, workspace: Path, action_id: str, source_id: str) -> dict:
+        """Submit, insist the reuse was refused by re-derivation, and return that failure."""
+        code, envelope = self.submit(workspace, action_id)
+        self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+        self.assertEqual(
+            "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+            envelope["message"],
+            envelope,
+        )
+        failure = next(
+            item
+            for item in envelope["details"]["reconciliation_failures"]
+            if item["source_id"] == source_id
+        )
+        self.assertTrue(failure["was_authorized_unnormalized"], failure)
+        self.assertTrue(failure["record_unchanged"], failure)
+        self.assertTrue(failure["derivation_checked"], failure)
+        return failure
+
+    def test_a_reused_record_naming_another_normalizer_is_refused_by_that_name(self):
+        """A producer identity the workspace does not configure is its own refusal.
+
+        `carry_version_stamps` carries `normalizer.version` out of the file so a host upgrade
+        between issuance and submission is not read as a forgery, and deliberately leaves
+        `normalizer.name` derived so a record cannot claim a producer that did not produce it.
+        Nothing said so, though: a stamped name that disagreed simply rendered different bytes
+        and was reported as "normalized evidence is not what normalizing the raw evidence
+        produces", whose remediation is about a hand-edited body. The operator was sent to
+        re-read prose while the two lines that disagreed sat in the frontmatter, unquoted.
+
+        Both sides are named now, which is the difference between a verdict and a diff an
+        operator has to reconstruct.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            self.normalize_and_close(workspace, request_id, source_id)
+            record = self.normalized_record_for(workspace, source_id)
+            stamped = record.read_text(encoding="utf-8")
+            configured = f"normalizer:\n  name: {ADAPTER_NAME}\n"
+            self.assertIn(configured, stamped, "the fixture no longer stamps the configured adapter")
+            record.write_text(
+                stamped.replace(configured, "normalizer:\n  name: retired-normalize\n", 1),
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            failure = self.reconciliation_derivation_failure(
+                workspace, order["action_id"], source_id
+            )
+            derivation = failure["derivation_failure"]
+
+            self.assertEqual(
+                "normalized evidence does not name the normalizer configured for its kind",
+                derivation["reason"],
+                derivation,
+            )
+            self.assertEqual("retired-normalize", derivation["normalizer"], derivation)
+            self.assertEqual(
+                ADAPTER_NAME,
+                derivation["configured_normalizer"],
+                "the refusal must name both identities, or the operator cannot see which moved",
+            )
+            # Record-side, so the rewrite is the repair: re-deriving restamps the configured
+            # identity, which is precisely what this record no longer carries.
+            self.assertEqual(
+                CONTROLLER.RECONCILIATION_ARM_REPAIRS["authorized_unnormalized"],
+                failure["repair"],
+                failure,
+            )
+
+    def test_an_adapter_reporting_an_unauthorised_identity_is_reported_as_the_adapter(self):
+        """The verifier's own tooling failing is not the acquirer having authored a body.
+
+        `research.yml` names the adapter and is pinned by the trusted-input guard, but the
+        program that name resolves to is not: an adapter redeployed on PATH between the
+        acquirer's `normalize_sources.py` run and the verifier's re-derivation is outside
+        everything this order fingerprints. The protocol catches it precisely — the run
+        reports an identity `research.yml` does not authorize and `AdapterError` says exactly
+        that — and the controller's blanket `except` then reported "normalized evidence could
+        not be re-derived from the raw evidence" and buried the sentence in `error`. The
+        acquirer's record is fine; the host is not, and only one of those is actionable.
+
+        The reuse is still refused, and must be: an identity the workspace never authorized is
+        not something to accept evidence on. What changes is that the refusal says whose
+        problem it is.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            self.normalize_and_close(workspace, request_id, source_id)
+
+            # The redeploy: same argv, same research.yml, a program now reporting itself as
+            # something the workspace never authorized.
+            with mock.patch.dict(os.environ, {"EW_STUB_NAME": "stub-normalize-ng"}):
+                failure = self.reconciliation_derivation_failure(
+                    workspace, order["action_id"], source_id
+                )
+            derivation = failure["derivation_failure"]
+
+            self.assertEqual(
+                "the normalizer adapter this workspace authorizes did not produce a record to compare against",
+                derivation["reason"],
+                derivation,
+            )
+            self.assertIn("stub-normalize-ng", derivation["error"], derivation)
+            self.assertIn("research.yml authorized", derivation["error"], derivation)
+            # And the repair follows the verdict rather than the arm alone. Rewriting the
+            # record runs the same adapter and fails in the same place, so this state is not
+            # sent to the rewrite: the loop being closed here is the one the arm repairs close.
+            self.assertEqual(
+                CONTROLLER.RECONCILIATION_ARM_REPAIRS["authorized_unnormalized_unverifiable"],
+                failure["repair"],
+                failure,
+            )
+            self.assertNotIn("--force", failure["repair"], failure)
+
+            # The control: with the authorized program back on PATH the same reuse is
+            # accepted, so the refusal above is about the adapter and not about the record.
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(0, code, session)
+            self.assertEqual("research", session["phase"])
 
     def test_an_authorised_reuse_may_not_author_its_structured_view_sidecar(self):
         """The sidecar is bound by the same re-derivation, not by the record's own digest.

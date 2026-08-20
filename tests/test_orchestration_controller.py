@@ -7609,15 +7609,28 @@ class NormalizedOutputScopeTests(unittest.TestCase):
         hand-edited record is empty; `--all` considers every eligible record in the workspace
         and an acquisition order authorizes output for the sources it scopes and nothing else,
         so following it lands on `unexpected_new_normalized` or on a scope guard whose
-        `mutable_ids` is empty. `--source-id` is the selector both refusals can honestly name.
+        `mutable_ids` is empty. `--source-id` is the selector these refusals can honestly name.
+
+        The reconciliation pair no longer names a selector itself. The rewrite it used to
+        advise is the recourse for one of its two arms only, so it moved to that arm's entry
+        in `RECONCILIATION_ARM_REPAIRS` and the shared terms point at it. What is asserted
+        here is unchanged in substance: wherever the rewrite *is* named it still carries the
+        selector that works, and `--all` is named nowhere.
         """
+        arm_repairs = CONTROLLER.RECONCILIATION_ARM_REPAIRS
+        for constant in (
+            CONTROLLER.MISSING_NORMALIZED_REMEDIATION,
+            arm_repairs["authorized_unnormalized"],
+        ):
+            with self.subTest(advice=constant[:60]):
+                self.assertIn("--source-id", constant)
         for constant in (
             CONTROLLER.RECONCILIATION_REMEDIATION,
             CONTROLLER.PROVIDER_RECONCILIATION_REMEDIATION,
             CONTROLLER.MISSING_NORMALIZED_REMEDIATION,
+            *arm_repairs.values(),
         ):
-            with self.subTest(remediation=constant[:60]):
-                self.assertIn("--source-id", constant)
+            with self.subTest(advice=constant[:60]):
                 self.assertNotIn("--all", constant)
 
         # Same split as the reuse terms, and for the same reason: only the delegated arm
@@ -7654,6 +7667,196 @@ class NormalizedOutputScopeTests(unittest.TestCase):
             with self.subTest(cause=cause):
                 self.assertNotIn(CONTROLLER.REUSE_SCOPE_TERMS, repair)
         self.assertIn("nothing done inside the order can add one", repairs["no_reuse_authorization_at_issuance"])
+
+    def test_only_the_reconciliation_repair_that_can_be_followed_names_the_rewrite(self):
+        """The same defect as the reuse causes above, one guard over.
+
+        Reconciliation holds a reused source to one of two arms and used to attach one shared
+        remediation to both. That remediation told the acquirer to rewrite the record with
+        `normalize_sources.py --source-id <id> --force`, which is the recourse for the arm
+        where the order recorded no normalized output — and is unfollowable for the arm where
+        it recorded one, because every run restamps the second-resolution `normalized_at` that
+        the fingerprint covers. Advice that cannot be followed is worse than no advice: it
+        reads as a repair and returns the identical refusal.
+
+        The rewrite is not even the recourse for every failure of the arm it belongs to. A
+        re-derivation that could not be *performed* — the adapter would not run, the sandbox
+        would not build, the source normalizes from inputs no baseline pins — is refused
+        before the record's bytes are compared, so rewriting them changes nothing and lands
+        on the same refusal. That state gets its own repair rather than the rewrite.
+        """
+        repairs = CONTROLLER.RECONCILIATION_ARM_REPAIRS
+        self.assertEqual(
+            {"scoped_match", "authorized_unnormalized", "authorized_unnormalized_unverifiable"},
+            set(repairs),
+        )
+        self.assertEqual(len(repairs), len(set(repairs.values())), "two states share one repair")
+        for arm, repair in repairs.items():
+            with self.subTest(arm=arm):
+                self.assertNotIn(CONTROLLER.RECONCILIATION_TERMS, repair)
+
+        # The rewrite belongs to exactly one of the three, and the terms must send the reader
+        # to the per-failure repair rather than carrying any of their answers themselves.
+        self.assertIn("--force", repairs["authorized_unnormalized"])
+        for arm in ("scoped_match", "authorized_unnormalized_unverifiable"):
+            with self.subTest(arm=arm):
+                self.assertNotIn("--force", repairs[arm])
+                self.assertNotIn("normalize_sources.py", repairs[arm])
+        self.assertIn("normalized_at", repairs["scoped_match"])
+        self.assertIn("repair", CONTROLLER.RECONCILIATION_TERMS)
+        self.assertNotIn("--force", CONTROLLER.RECONCILIATION_TERMS)
+
+    def test_every_unverifiable_derivation_reason_is_one_the_verifier_actually_reports(self):
+        """A reason set matched by string equality is a set that can silently stop matching.
+
+        `UNVERIFIABLE_DERIVATION_REASONS` decides which arm-(b) failures are told the rewrite
+        cannot help them, and it decides it by comparing `derivation_failure["reason"]` to
+        literals. Reasons are prose rather than an enumerated contract — no constant, no doc
+        row — so rewording one in `normalized_output_derivation_failure` would leave this set
+        matching nothing and quietly restore the unfollowable advice for every state in it.
+        Each member is therefore pinned to a literal the module still emits.
+        """
+        source = Path(CONTROLLER.__file__).read_text(encoding="utf-8")
+        emitted = {
+            node.value
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        # Guard the guard: `UNVERIFIABLE_DERIVATION_REASONS` is itself built from literals, so
+        # membership alone would be satisfied by the set's own definition. Every member has to
+        # appear on a `reason` key of a verdict this module returns.
+        reported = {
+            value.value
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Dict)
+            for key, value in zip(node.keys, node.values, strict=True)
+            if isinstance(key, ast.Constant)
+            and key.value == "reason"
+            and isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+        }
+        self.assertGreater(len(reported), 10, "the reason sweep found suspiciously few verdicts")
+        self.assertLessEqual(
+            CONTROLLER.UNVERIFIABLE_DERIVATION_REASONS,
+            reported,
+            "these reasons are matched by equality but no verdict in this module reports them",
+        )
+        self.assertLessEqual(CONTROLLER.UNVERIFIABLE_DERIVATION_REASONS, emitted)
+
+    def test_a_reconciliation_failure_carries_the_repair_for_the_arm_it_was_held_to(self):
+        """The arm the failure reports and the repair it attaches must be the same arm.
+
+        `was_scoped_match` had no test reference anywhere before this: the distinction the
+        whole refusal turns on was asserted by nothing, so attaching the wrong arm's repair —
+        or attaching one arm's to both, which is the defect being repaired — was invisible.
+        Both arms are reached here through their own baseline, exactly as the postcondition
+        does it: an entry in `matching_source_records_before` for the arm that was already
+        normalized at issuance, membership of `reusable_source_ids_before` for the arm that
+        was not. Each is failed on its manifest record alone, so no re-derivation runs and the
+        arm selection is the only thing under test.
+        """
+        normalize_sources = CONTROLLER.load_sibling_module("normalize_sources")
+        record = {"id": "raw:quote", "kind": "structured_data", "raw_paths": ["raw/data/quote.json"]}
+        issued = "sha256:" + "1" * 64
+        rewritten = "sha256:" + "2" * 64
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            def failure_for(*, scoped_match: bool) -> dict:
+                return CONTROLLER.reused_source_reconciliation_failure(
+                    root,
+                    {},
+                    "raw:quote",
+                    record=record,
+                    manifest_records=[record],
+                    normalized_root=root / "sources" / "normalized",
+                    matching_source_records_before=(
+                        {"raw:quote": {"record_fingerprint": issued, "normalized_fingerprint": issued}}
+                        if scoped_match
+                        else {}
+                    ),
+                    reusable_source_ids_before=set() if scoped_match else {"raw:quote"},
+                    manifest_records_before={"raw:quote": issued},
+                    current_record_fingerprint=rewritten,
+                    normalized_files_before={},
+                    normalize_sources=normalize_sources,
+                )
+
+            scoped = failure_for(scoped_match=True)
+            self.assertTrue(scoped["was_scoped_match"], scoped)
+            self.assertFalse(scoped["was_authorized_unnormalized"], scoped)
+            self.assertFalse(scoped["record_unchanged"], scoped)
+            self.assertEqual(CONTROLLER.RECONCILIATION_ARM_REPAIRS["scoped_match"], scoped["repair"])
+
+            authorized = failure_for(scoped_match=False)
+            self.assertFalse(authorized["was_scoped_match"], authorized)
+            self.assertTrue(authorized["was_authorized_unnormalized"], authorized)
+            self.assertFalse(authorized["record_unchanged"], authorized)
+            self.assertEqual(
+                CONTROLLER.RECONCILIATION_ARM_REPAIRS["authorized_unnormalized"],
+                authorized["repair"],
+            )
+            self.assertNotEqual(
+                scoped["repair"],
+                authorized["repair"],
+                "both arms were handed the same repair, which is the defect this reports",
+            )
+
+    def test_a_record_naming_another_normalizer_is_refused_by_name_not_by_bytes(self):
+        """The producer name is compared as an identity, not left to fall out of the bytes.
+
+        `carry_version_stamps` carries `normalizer.version` from the file and deliberately
+        leaves `normalizer.name` derived, so a record whose stamped name is not the one
+        configured for its kind renders different bytes — and used to be reported as
+        "normalized evidence is not what normalizing the raw evidence produces", whose
+        remediation is about a hand-edited body. The two lines that actually disagree were
+        never quoted back, so the operator had nothing to compare.
+
+        Absent on both sides is not a disagreement: a record for a kind that stamps no
+        producer block has nothing to be wrong about, and the byte comparison keeps the last
+        word over everything this does not answer.
+        """
+        identity = CONTROLLER.normalizer_identity_failure
+
+        self.assertIsNone(identity({"normalizer": {"name": "stub"}}, {"normalizer": {"name": "stub"}}))
+        self.assertIsNone(identity({}, {}), "neither side names a producer, so neither is wrong")
+
+        failure = identity(
+            {"normalizer": {"name": "evidence-wiki-normalizer", "version": "2"}},
+            {"normalizer": {"name": "retired-adapter", "version": "2"}},
+        )
+        self.assertEqual(
+            "normalized evidence does not name the normalizer configured for its kind",
+            failure["reason"],
+        )
+        self.assertEqual("retired-adapter", failure["normalizer"], failure)
+        self.assertEqual("evidence-wiki-normalizer", failure["configured_normalizer"], failure)
+
+        # A record whose producer block was deleted or corrupted into something that is not a
+        # producer object reaches here too, and the reason has to stay true of it: it names no
+        # normalizer rather than naming a different one, and `None` says exactly that instead
+        # of echoing a non-name back as though the record had claimed it.
+        for stamped in ({"normalizer": "stub"}, {"normalizer": None}, {}):
+            with self.subTest(stamped=stamped):
+                malformed = identity({"normalizer": {"name": "stub"}}, stamped)
+                self.assertEqual(
+                    "normalized evidence does not name the normalizer configured for its kind",
+                    malformed["reason"],
+                    "the reason asserts the record named something it did not name",
+                )
+                self.assertIsNone(malformed["normalizer"], malformed)
+                self.assertEqual("stub", malformed["configured_normalizer"], malformed)
+
+        # Versions are the half `carry_version_stamps` carries; comparing them here would
+        # undo the one thing that helper exists to allow.
+        self.assertIsNone(
+            identity(
+                {"normalizer": {"name": "stub", "version": "1.0.0"}},
+                {"normalizer": {"name": "stub", "version": "9.9.9"}},
+            ),
+            "a host upgrade is not a forged identity",
+        )
 
 
 if __name__ == "__main__":
