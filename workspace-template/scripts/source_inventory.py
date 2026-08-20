@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import stat
 import sys
 import uuid
 from datetime import date, datetime, timezone
@@ -1053,6 +1054,12 @@ def local_repo_file_count(repo_dir: Path, *, limit: int | None = None) -> int:
     ``CODEBASE_LOCAL_REPO_MARKERS``, so the excluded subset was not exotic: it is what makes
     the tree a repository at all.
 
+    "Regular file" here means what the snapshot means by it, checked the way the snapshot
+    checks it: ``lstat`` rather than ``is_file``, a real regular file rather than a symlink
+    to one, and a link count of exactly one. The snapshot refuses a symlink or a
+    multiply-linked file rather than enumerating it, so an entry of either kind is not
+    evidence this record admits and must not be measured as though it were.
+
     ``should_skip`` is deliberately not consulted, and equally deliberately not changed. It
     governs which paths become *records* -- dotfiles are not inventoried as separate sources
     -- and that is a different question from how much evidence a record admits. A local
@@ -1069,7 +1076,20 @@ def local_repo_file_count(repo_dir: Path, *, limit: int | None = None) -> int:
     """
     count = 0
     for path in repo_dir.rglob("*"):
-        if not path.is_file():
+        try:
+            metadata = path.lstat()
+        except OSError:
+            # An entry that cannot be inspected is one the snapshot will refuse on its
+            # own terms; it is not this count's business to decide that.
+            continue
+        # ``Path.is_file()`` resolves symlinks and accepts hardlinks, so it would count
+        # entries the snapshot never enumerates: it refuses a symlink outright, and
+        # refuses any regular file whose link count is not one. Counting them would put
+        # the same subset mismatch back that this function exists to remove, only with
+        # the excluded set on the other side.
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        if int(getattr(metadata, "st_nlink", 1) or 1) != 1:
             continue
         count += 1
         if limit is not None and count > limit:

@@ -64,6 +64,7 @@ not asserted here.
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -409,6 +410,73 @@ class CodebaseIntakeBoundTests(CodebaseWorkspace, unittest.TestCase):
     here. Both tests measure against the snapshot's own enumeration rather than against a
     restatement of its rule, because a restatement is exactly what drifted.
     """
+
+    def test_a_symlinked_member_does_not_move_the_bound(self):
+        """`is_file()` resolves symlinks; the snapshot refuses them. The bound follows the snapshot.
+
+        Aligning the *subset* was half the job. `is_file()` also answers True for a symlink
+        to a file, while the snapshot refuses one outright as "contains a symbolic link or
+        junction" -- so counting it would restore the same mismatch this class exists to
+        close, with the excluded set merely moved to the other side.
+
+        Only the configured source root and the repository root are symlink-checked during
+        discovery, so an entry *inside* a checkout reaches this count unfiltered.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.enable_codebase_analysis(workspace)
+            self.deliver_local_repository(workspace, request_id)
+            repo = workspace / REPO_RELATIVE
+
+            baseline = INVENTORY.local_repo_file_count(repo)
+            target = next(p for p in sorted(repo.rglob("*")) if p.is_file())
+            (repo / "linked.py").symlink_to(target)
+
+            self.assertEqual(
+                baseline,
+                INVENTORY.local_repo_file_count(repo),
+                "a symlink is not a file the snapshot will enumerate, so it is not evidence "
+                "this record admits and must not move its bound",
+            )
+
+    def test_a_multiply_linked_member_is_excluded_because_the_snapshot_refuses_it(self):
+        """A hardlink drops *both* copies from the bound, and the snapshot refuses the tree.
+
+        The snapshot admits only a "singly linked regular file", so a hardlink disqualifies
+        the original as much as the new name -- neither is a file it will enumerate. The
+        count therefore falls by one rather than rising by one, which looks wrong until you
+        see the other half asserted here: for that same tree the snapshot raises rather than
+        returning entries at all. Excluding them is what keeps the bound a statement about
+        the set the snapshot walks.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.enable_codebase_analysis(workspace)
+            self.deliver_local_repository(workspace, request_id)
+            repo = workspace / REPO_RELATIVE
+
+            baseline = INVENTORY.local_repo_file_count(repo)
+            target = next(p for p in sorted(repo.rglob("*")) if p.is_file())
+            try:
+                os.link(target, repo / "hardlinked.py")
+            except OSError as exc:  # pragma: no cover - platform without hardlink support
+                self.skipTest(f"hardlinks are unavailable on this platform: {exc}")
+
+            self.assertEqual(
+                baseline - 1,
+                INVENTORY.local_repo_file_count(repo),
+                "both names of a hardlinked file must leave the bound: the snapshot admits "
+                "only a singly linked regular file",
+            )
+            with self.assertRaises(Exception) as caught:
+                CONTROLLER.raw_tree_snapshot(
+                    workspace, CONTROLLER.load_config(workspace), include_entries=True
+                )
+            self.assertIn(
+                "singly linked regular file",
+                str(getattr(caught.exception, "message", caught.exception)),
+                "the exclusion has to track a real refusal, or it is just a different subset",
+            )
 
     def test_the_bound_is_measured_over_the_tree_the_raw_snapshot_walks(self):
         """The record's file count equals the snapshot's, over the directory it declares.
