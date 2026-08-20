@@ -38,10 +38,12 @@
   bytes under examination attests nothing, whatever its blast radius.
 
   Both defects are closed by one change: the acquirer authors the bytes, and attribution is
-  derived rather than declared. A single read-only inventory derivation over the delivered
-  tree now answers both raw-scope questions — which new raw files an acquisition may create,
-  and whether a new record's `raw_paths` is what inventory itself would derive. A
-  directory-shaped entry admits the regular files beneath it, because that is what inventory
+  derived rather than declared. A single inventory derivation over the delivered tree — one
+  that writes neither the manifest nor the activity log, though taking the acquisition
+  barrier does write a holder file under `raw/.locks/` — now answers both raw-scope
+  questions: which new raw files an acquisition may create, and whether a new record's
+  `raw_paths` is what inventory itself would derive. A directory-shaped entry admits the
+  regular files beneath it, because that is what inventory
   attributes to that record; a declared list inventory does not derive is a refusal naming
   both lists. The derivation is memoised per submission by the raw-tree fingerprint, so
   verifying up to three times costs one pass.
@@ -197,6 +199,66 @@
   workspace authorizes did not produce a record to compare against", which is one of the
   verdicts a record rewrite cannot clear. Both reason strings are new, so a host matching on
   `derivation_failure.reason` will see two values it has not seen before.
+
+- **Fix: refusing to relink a fulfilled request was reported to hosts as a broken
+  workspace.** `source_requests.py fulfill` refuses to point an already-fulfilled request at
+  a second source — an ordinary refusal of an ordinary mistake. Its message matched no
+  clause in `classify_error_code`: the clause written to catch it tested for "already
+  fulfilled by a different source id", a string this package has never raised anywhere. The
+  refusal therefore fell past every clause to the classifier's `WORKSPACE_UNREADABLE` tail,
+  which is declared non-recoverable and remediated as checking the workspace path and its
+  required starter files. A host was told the workspace was unreadable and must not be
+  retried, when nothing was wrong with the workspace and one relink simply was not allowed.
+
+  It classifies as `REQUEST_ALREADY_FULFILLED` now. A host branching on this envelope reads
+  `recoverable: true` where it previously read `false`, and that code where it previously
+  read `WORKSPACE_UNREADABLE` — the opposite direction to the five codes 0.5.0 declared
+  non-recoverable, and correct for the same reason those were: it is what the refusal always
+  meant. That code's registry remediation was written for `record-attempt-failure` alone and
+  now answers both commands that reach it, since a fulfilled request accepts neither a
+  recorded attempt failure nor a relink. Re-fulfilling a request with the *same* source id
+  is unchanged and still succeeds idempotently. The tests now assert `error_code` and
+  `recoverable` rather than a stderr substring, which is what let the mismatch ship.
+
+- **Fix: the reuse and reconciliation refusals stopped advising commands that refuse.**
+  Every escape those refusals printed was unfollowable in the only state that could print
+  it. Both the reuse-scope failure set and the reconciliation loop are computed over the
+  request store's own `fulfilled` records, so the request under discussion is already
+  fulfilled by the very source being refused — and `source_requests.py` closes both doors
+  out of that state: `record-attempt-failure` refuses a fulfilled request outright, and
+  `fulfill` refuses to relink one to a later delivery. The remediations advised one or both
+  anyway, as did two of the three per-cause repairs and the delegated correlation refusal.
+  An operator who followed the printed advice reached a second refusal for having followed
+  it.
+
+  Both doors were walked in tests rather than reasoned about, and neither is named now.
+  What the refusals state instead is the fact underneath all of them — a fulfilled request
+  has no second route — and, where the per-source repair cannot be performed, that this
+  order has none either. Two more escapes were found the same way and removed: the provider
+  arms' "acquire it through another selected candidate" bottoms out at that same relink
+  refusal, and `manifest_record_changed_after_issuance`'s "restore it exactly" is required
+  by the scope guards but never cleared this refusal, because membership in the order's
+  reuse baselines was fixed at issuance and no rewrite ever moved it — restoring the record
+  only changes which of the other two causes gets reported. The delegated acquirer skill,
+  which routed a refused reuse to both dead escapes, is corrected to the same effect.
+
+  One more `repair` changes, one level down and for the same reason. A re-derivation that
+  *crashes* reports the blanket reason "normalized evidence could not be re-derived from the
+  raw evidence", and that reason was missing from
+  `UNVERIFIABLE_DERIVATION_REASONS`, so it was answered with the record rewrite — which
+  re-enters the same normalizer that had just raised. It joins that set, so such a failure
+  now carries the repair pointing at `derivation_failure.error` instead.
+
+  **The `failed` outcome is disclosed here, not closed.** The `scoped_match` repair used to
+  offer ending the action with a failed outcome and starting a fresh session, as though that
+  were a clean exit. It is not one, and nothing refuses it: `prepare_submission` answers a
+  `failed` outcome without calling `verify_action_postconditions` at all, so no evidence or
+  scope check runs. The fulfilment the acquirer already wrote stays in the request store with
+  its `source_id`; `open_requests` selects on `status == "open"`, so no later order sees that
+  request again; and evidence the controller had just declined to verify is accepted
+  permanently. The repair names that cost now instead of naming the command, and a test
+  performs the outcome and observes each part of it. The hole itself is unchanged and stays
+  open on purpose.
 
 ## 0.5.2 - 2026-08-19
 
