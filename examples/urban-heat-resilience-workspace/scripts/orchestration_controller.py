@@ -3717,7 +3717,7 @@ NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST = (
     "There is no second route out of this refusal: this action already fulfilled the request from the "
     "source being refused, and a fulfilled request accepts neither a recorded attempt failure nor a "
     "relink to a later delivery. Only the per-source repair changes this verdict, and where the source "
-    "has none this order has no route from here"
+    "has none, this order has no route from here"
 )
 
 RECONCILIATION_REMEDIATION = (
