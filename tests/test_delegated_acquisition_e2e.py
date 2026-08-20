@@ -2577,6 +2577,514 @@ class NormalizeAllInsideAnOrderTests(DelegatedWorkspace, unittest.TestCase):
             self.assertTrue(envelope["recoverable"])
 
 
+class BetweenActionsDeliveryTests(DelegatedWorkspace, unittest.TestCase):
+    """The mid-session delivery route the contract recommends, walked end to end.
+
+    A capture that fulfils nothing — discovery residue, the snapshot a lookup step took on
+    the way to the artifact a request actually asks for — has nowhere to go inside an
+    acquisition order: a delegated acquisition may deliver nothing it does not fulfil, and
+    three guards say so. `docs/source-delivery.md` ("Lookup steps and intermediate
+    captures") and `skills/research-acquire-delegated.md` therefore send it *between*
+    actions — after one submission is accepted, before the next order is issued — delivered
+    **and inventoried together**, and **unstamped**. Every other fixture in this file
+    delivers either before the session starts or inside a pending order, so the one route
+    the shipped contract actively recommends was the one route nothing walked.
+
+    Both qualifiers in that sentence are walked, because each one is the difference between
+    an accepted order and a refused one. "Inventoried together": inventory is what turns
+    delivered bytes into a manifest record, and issuance fingerprints the manifest it finds,
+    so a capture inventoried between actions is *pre-existing evidence* to the next order,
+    while the same capture left un-inventoried is first recorded by the next acquirer's own
+    inventory run and lands inside that order as a new manifest record no scoped request
+    fulfils. "Unstamped": a stamped capture correlates to the request it names, which is what
+    puts it in that order's un-normalized reuse baseline and changes what the order permits.
+
+    Nothing here normalizes the capture, and that choice is what forces the in-order leg to
+    normalize with `--source-id`. `normalize_sources.py --all` — which `acquire()` and every
+    fixture built on it run — would normalize the mid-session capture too, and its output
+    belongs to no fulfilled source; the last test below measures that refusal rather than
+    leaving it as a claim in prose. Normalizing the capture between actions is equally
+    lawful and would make `--all` harmless again, but the un-normalized shape is the one the
+    advice describes, and it is the shape that costs an acquirer a flag it will not think to
+    pass. `NormalizeAllInsideAnOrderTests` pins the same hazard for a source the workspace
+    already held; this is the same hazard reached by following the advice.
+
+    The route's cost is asserted rather than argued away: a between-actions delivery is
+    bracketed by no work order. It passes through no postcondition, nothing compares the
+    workspace against the previous order's end state, and the next issuance simply adopts
+    whatever it finds. `assert_every_mutation_is_bracketed_by_an_order` still passes over
+    such a session — it accounts for fulfilments and question moves, and a capture that
+    fulfils nothing makes neither — which is exactly why the manifest gaining a record while
+    no order was live is asserted directly instead of being left to that audit.
+    """
+
+    SPARE_SLUG = "answerable-from-delivered-evidence"
+    CAPTURE_NAME = "keepa-b0mid00001.json"
+    CAPTURE_BODY = (
+        '{\n  "asin": "B0MID00001",\n  "supplier_quote": "7.10 EUR",\n  "offer_count": 2\n}\n'
+    )
+
+    # -- reading durable state ---------------------------------------------------------
+
+    def session_state(self, workspace: Path) -> dict:
+        return json.loads(
+            (workspace / "runs" / "orchestrations" / ORCHESTRATION_ID / "session.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def issuance_baseline(self, workspace: Path, action_id: str) -> dict:
+        """What the order recorded about the manifest it found, from the protected sidecar.
+
+        The fields are the order's own answer to "what was already here": which records
+        existed at issuance, and which of them this order authorises reuse of. Read here
+        rather than inferred, because the difference the stamp makes is a difference in this
+        list before it is a difference in any submission's verdict.
+        """
+        baseline = json.loads(
+            CONTROLLER.scope_integrity_baseline_path(
+                workspace, ORCHESTRATION_ID, action_id
+            ).read_text(encoding="utf-8")
+        )
+        return next(
+            item["fields"]
+            for item in baseline["postconditions"]
+            if item["check"] == "manifest_records_increased"
+        )
+
+    def requests_fulfilled_by(self, workspace: Path, source_id: str) -> list[str]:
+        return sorted(
+            str(record["request_id"])
+            for line in (
+                workspace / "sources" / "source-requests.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+            for record in [json.loads(line)]
+            if record.get("status") == "fulfilled" and record.get("source_id") == source_id
+        )
+
+    def normalized_records_naming(self, workspace: Path, source_id: str) -> list[str]:
+        return [
+            path.name
+            for path in sorted((workspace / "sources" / "normalized").glob("*.md"))
+            if source_id in path.read_text(encoding="utf-8")
+        ]
+
+    # -- the session shape this route needs --------------------------------------------
+
+    def complete_a_research_order(self, workspace: Path) -> str:
+        """Issue and close the research order the spare question earns.
+
+        The route is defined by where the delivery happens — after a submission is accepted
+        and before the next order is issued — so the session has to have completed an action
+        before the interesting one. Research is the cheap way there: a spare actionable
+        question outranks the blocked one, and answering it is the acquirer's own honest
+        work rather than a fixture edit.
+
+        The answer is deliberately uncited (`--allow-uncited`). Grounding it would need
+        evidence delivered before the session, which is the pre-session arm this class
+        exists to be different from; the acquisition leg that follows is where cited
+        evidence enters.
+        """
+        code, research = self.next_action(workspace)
+        self.assertEqual(0, code, research)
+        self.assertEqual("research", research["phase"], research)
+        self.assertEqual([self.SPARE_SLUG], research["scope"]["question_slugs"], research)
+        page = workspace / "wiki" / "synthesis" / "already-answerable.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            "---\ntype: synthesis\ncreated: 2026-08-19\nupdated: 2026-08-19\n"
+            "summary: This question needed no evidence the workspace lacked.\n---\n\n"
+            "# Already answerable\n\nThe question is answered from what the workspace states.\n",
+            encoding="utf-8",
+        )
+        self.run_script(
+            RESOLVE,
+            [
+                "answer", "--slug", self.SPARE_SLUG, "--agent-id", "research-agent",
+                "--answer-page", "wiki/synthesis/already-answerable.md",
+                "--allow-uncited", "--allow-unclaimed",
+            ],
+            workspace,
+        )
+        code, session = self.submit(workspace, research["action_id"])
+        self.assertEqual(0, code, session)
+        return str(research["action_id"])
+
+    def write_the_capture(self, workspace: Path, request_id: str | None) -> None:
+        """The bytes and the sidecar, with no command run over them yet.
+
+        Separate from the inventory step because "delivered **and inventoried together**" is
+        an instruction with two halves, and one test here omits the second one on purpose.
+        """
+        destination = workspace / "raw" / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        payload = destination / self.CAPTURE_NAME
+        payload.write_text(self.CAPTURE_BODY, encoding="utf-8", newline="\n")
+        sidecar: dict[str, object] = {
+            "origin_url": "https://api.keepa.test/product/B0MID00001",
+            "license": "CC-BY-4.0",
+            "retrieved_at": "2026-08-18T12:00:00Z",
+            "retrieved_by": ACQUIRER,
+            "checksum": f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}",
+        }
+        if request_id is not None:
+            sidecar["request_id"] = request_id
+        (destination / (self.CAPTURE_NAME + ".provenance.yml")).write_text(
+            yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
+        )
+
+    def deliver_between_actions(self, workspace: Path, request_id: str | None) -> str:
+        """The mid-session capture: delivered and inventoried together, normalized never.
+
+        `deliver_before_the_order` is this helper's pre-session sibling and takes the same
+        `request_id | None` affordance for the same reason — an unstamped sidecar is what
+        evidence acquired for no request looks like. What differs is only when it runs: here
+        a session is live, no order is pending, and the two commands this uses are the two
+        the delegation gate deliberately does not cover.
+        """
+        self.write_the_capture(workspace, request_id)
+        self.run_script(INVENTORY, ["--report"], workspace)
+        return self.source_id_for(workspace, f"raw/data/{self.CAPTURE_NAME}")
+
+    def arrive_after_a_between_actions_delivery(
+        self, root: Path, *, stamped: bool
+    ) -> tuple[Path, str, str, dict]:
+        """Research order completed, capture delivered in the gap, acquisition order issued.
+
+        The window is checked rather than assumed: the session is live and holds no pending
+        action while the delivery happens, and the manifest changes inside it. That pair is
+        the route's whole tradeoff stated as measurements — the workspace gained durable
+        evidence at a moment when no work order was accountable for it.
+        """
+        workspace, request_id = self.make_workspace(root, spare_question=True)
+        self.start(workspace)
+        self.complete_a_research_order(workspace)
+
+        session = self.session_state(workspace)
+        self.assertEqual("active", session["status"], session)
+        self.assertIsNone(
+            session["pending_action_id"],
+            "the delivery below is only 'between actions' if no order is pending",
+        )
+        manifest_before = self.evidence_state(workspace)["sources/manifest.jsonl"]
+
+        capture_id = self.deliver_between_actions(workspace, request_id if stamped else None)
+
+        self.assertNotEqual(
+            manifest_before,
+            self.evidence_state(workspace)["sources/manifest.jsonl"],
+            "the capture reached the manifest while no work order accounted for it",
+        )
+        order = self.pending_order(workspace)
+        self.assertEqual([request_id], order["scope"]["request_ids"], order)
+        return workspace, request_id, capture_id, order
+
+    def acquire_with_a_scoped_normalize(self, workspace: Path, request_id: str) -> str:
+        """`acquire()` with one flag changed: normalize this order's source, not every record.
+
+        `--all` would also normalize the capture delivered between actions, whose output no
+        fulfilled source owns. That is not a hypothetical difference — the last test in this
+        class runs `acquire()` unchanged and collects the refusal — and `--source-id` is what
+        the controller's own remediation tells a refused acquirer to use.
+        """
+        destination = workspace / "raw" / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        payload = destination / PAYLOAD.name
+        shutil.copy2(PAYLOAD, payload)
+        sidecar = yaml.safe_load(
+            PAYLOAD.with_name(PAYLOAD.name + ".provenance.yml").read_text(encoding="utf-8")
+        )
+        sidecar["retrieved_by"] = ACQUIRER
+        sidecar["request_id"] = request_id
+        sidecar["checksum"] = f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}"
+        (destination / (PAYLOAD.name + ".provenance.yml")).write_text(
+            yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
+        )
+        self.run_script(INVENTORY, ["--report"], workspace)
+        source_id = self.source_id_for(workspace, f"raw/data/{PAYLOAD.name}")
+        self.run_script(
+            REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
+        )
+        self.run_script(NORMALIZE, ["--source-id", source_id], workspace)
+        self.run_script(
+            RESOLVE,
+            [
+                "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
+                "--source-id", source_id, "--request-id", request_id,
+            ],
+            workspace,
+        )
+        return source_id
+
+    def fulfil_the_order_with(self, workspace: Path, request_id: str, source_id: str) -> None:
+        """Close the order on a source the workspace already holds, normalizing it here.
+
+        Normalization sits between the two mutations because `reopen` refuses a source
+        nothing has normalized; that ordering is the reuse leg's shape, not a preference.
+        """
+        self.run_script(
+            REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
+        )
+        self.run_script(NORMALIZE, ["--source-id", source_id], workspace)
+        self.run_script(
+            RESOLVE,
+            [
+                "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
+                "--source-id", source_id, "--request-id", request_id,
+            ],
+            workspace,
+        )
+
+    # -- the route the contract recommends ---------------------------------------------
+
+    def test_an_unstamped_capture_delivered_between_actions_survives_the_next_order(self):
+        """The recommended route, from the residue landing to the next order closing.
+
+        What has to hold for the advice to be worth giving: the capture survives the next
+        order's issuance as ordinary pre-existing evidence, the acquisition that follows is
+        accepted with it sitting there, and nothing in the order ever asks the acquirer to
+        account for it. The last part is the one worth pinning: an unstamped capture
+        correlates to no request, so the order records no reuse authorization for it, which
+        means it neither may nor must acquire a normalized record inside the action. It
+        fulfils nothing, and nothing requires it to.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, capture_id, order = self.arrive_after_a_between_actions_delivery(
+                Path(tmpdir), stamped=False
+            )
+
+            fields = self.issuance_baseline(workspace, order["action_id"])
+            self.assertIn(
+                capture_id,
+                fields["manifest_record_fingerprints_before"],
+                "the next order adopted the capture as evidence that was already there",
+            )
+            self.assertEqual(
+                [],
+                fields["reusable_source_ids_before"],
+                "an unstamped capture correlates to nothing, so this order authorises no "
+                "reuse of it and demands no normalized record for it",
+            )
+
+            source_id = self.acquire_with_a_scoped_normalize(workspace, request_id)
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(
+                0,
+                code,
+                f"a capture delivered between actions must not fail the next submission: {session}",
+            )
+            self.assertEqual("research", session["phase"], session)
+            self.assertEqual(order["action_id"], session["last_completed_action_id"])
+            self.assertEqual("open", self.question_status(workspace))
+
+            # The capture is still exactly what it was: correlated to nothing, spent on
+            # nothing, and un-normalized because nothing ever required otherwise.
+            self.assertEqual([request_id], self.requests_fulfilled_by(workspace, source_id))
+            self.assertEqual([], self.requests_fulfilled_by(workspace, capture_id))
+            self.assertEqual([], self.normalized_records_naming(workspace, capture_id))
+            self.assertEqual(
+                self.CAPTURE_BODY,
+                (workspace / "raw" / "data" / self.CAPTURE_NAME).read_text(encoding="utf-8"),
+            )
+
+            # The audit passes, and the reason it passes is the point: it accounts for
+            # fulfilments and question moves, and this delivery made neither. The manifest
+            # record it did make was checked by no postcondition at all — asserted in
+            # `arrive_after_a_between_actions_delivery`, where the window is still open.
+            checker = DelegatedAcquisitionChainTests(
+                "test_the_delegated_loop_closes_and_leaves_no_unaccounted_mutation"
+            )
+            checker.assert_every_mutation_is_bracketed_by_an_order(workspace)
+            report = LINT.run_checks(workspace, LINT.load_config(workspace))
+            self.assertEqual(0, report["stats"]["delegated_unattributed_fulfilments"])
+
+    # -- why the advice says "and inventoried together" ----------------------------------
+
+    def test_a_capture_left_un_inventoried_across_issuance_is_refused_inside_the_next_order(self):
+        """The same delivery with the second command omitted, and the bill arrives late.
+
+        Nothing about the bytes changes: same file, same unstamped sidecar, same window.
+        Only the inventory run is missing, and issuance fingerprints the raw tree as it
+        stands — so the stale capture is baselined into the raw tree and the raw-scope guard
+        will never mention it. What it is not is a manifest record. The next acquirer must
+        run inventory before it can fulfil anything, that run derives a record for the stale
+        file too, and the record is new, fulfilled by nothing, and refused.
+
+        The refusal is worth walking because of who receives it: an acquirer that did
+        nothing wrong, told that it added a manifest record outside fulfilled source scope,
+        for a delivery made in a window its own order knows nothing about. That is the whole
+        reason the instruction is "delivered **and inventoried together**" rather than
+        "delivered".
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir), spare_question=True)
+            self.start(workspace)
+            self.complete_a_research_order(workspace)
+            self.write_the_capture(workspace, None)
+
+            order = self.pending_order(workspace)
+            fields = self.issuance_baseline(workspace, order["action_id"])
+            self.assertIn(
+                f"raw/data/{self.CAPTURE_NAME}",
+                fields["raw_tree_before"]["entries"],
+                "issuance baselined the delivered bytes, so the raw tree has nothing new in "
+                "it and the raw-scope guard is not the one that speaks",
+            )
+            self.assertEqual(
+                {},
+                fields["manifest_record_fingerprints_before"],
+                "and the capture is a manifest record for nobody yet, which is the whole "
+                "difference between this test and the one above",
+            )
+
+            source_id = self.acquire_with_a_scoped_normalize(workspace, request_id)
+            capture_id = self.source_id_for(workspace, f"raw/data/{self.CAPTURE_NAME}")
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"], envelope)
+            self.assertEqual(
+                "delegated acquisition changed, removed, or added evidence-manifest records "
+                "outside fulfilled source scope",
+                envelope["message"],
+                envelope,
+            )
+            self.assertEqual(
+                {"removed": [], "added_outside_scope": [capture_id], "changed_outside_scope": []},
+                envelope["details"]["manifest_scope_violations"],
+                envelope,
+            )
+            self.assertEqual([source_id], envelope["details"]["fulfilled_source_ids"], envelope)
+            self.assertTrue(envelope["recoverable"])
+
+    # -- why the advice says "unstamped" ------------------------------------------------
+
+    def test_stamping_the_same_capture_makes_the_next_order_expect_something_of_it(self):
+        """The difference one sidecar field makes, measured on both sides of it.
+
+        Same session, same bytes, same delivery point; the sidecar either names the request
+        the next order will scope or names nothing. Stamped, the capture is un-normalized
+        evidence correlated to a scoped request, which is precisely the shape
+        `acquisition_reuse_baselines` admits: the order lists it as reusable, and an
+        acquirer may close the order on it by normalizing it inside the action — fetching
+        nothing, and citing a lookup-step snapshot as the evidence for the question.
+        Unstamped, the identical work is refused as reuse of evidence the order never
+        authorised.
+
+        So the advice is not stylistic. A stamp on a capture that was never meant to answer
+        anything changes what the next order permits, and the acquirer that follows the
+        stamp is not doing anything the contract can distinguish from honest reuse.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, capture_id, order = self.arrive_after_a_between_actions_delivery(
+                Path(tmpdir), stamped=True
+            )
+
+            self.assertEqual(
+                [capture_id],
+                self.issuance_baseline(workspace, order["action_id"])["reusable_source_ids_before"],
+                "a stamped, un-normalized capture of a reusable kind joins the reuse baseline",
+            )
+
+            self.fulfil_the_order_with(workspace, request_id, capture_id)
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(0, code, f"the stamp turned residue into an accepted fulfilment: {session}")
+            self.assertEqual("research", session["phase"], session)
+            self.assertEqual("open", self.question_status(workspace))
+            self.assertEqual([request_id], self.requests_fulfilled_by(workspace, capture_id))
+            self.assertEqual(
+                1,
+                len(self.normalized_records_naming(workspace, capture_id)),
+                "the reuse arm both permits and requires the one normalized record it owes",
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, capture_id, order = self.arrive_after_a_between_actions_delivery(
+                Path(tmpdir), stamped=False
+            )
+
+            self.assertEqual(
+                [],
+                self.issuance_baseline(workspace, order["action_id"])["reusable_source_ids_before"],
+            )
+
+            self.fulfil_the_order_with(workspace, request_id, capture_id)
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"], envelope)
+            self.assertIn(
+                "reuses pre-existing evidence that was not a scoped reconciliation match",
+                envelope["message"],
+                envelope,
+            )
+            failure = next(
+                item
+                for item in envelope["details"]["reuse_scope_failures"]
+                if item["source_id"] == capture_id
+            )
+            self.assertEqual("provenance_names_no_scoped_request", failure["cause"], failure)
+            self.assertIsNone(failure["provenance_request_id"], failure)
+            # Recoverable and still pending: the refusal is a repair request. The question
+            # is `open` here rather than `blocked`, because the acquirer's reopen was
+            # sanctioned by the pending order and applied before submission adjudicated
+            # anything — which is what the refusal now asks the acquirer to undo.
+            self.assertTrue(envelope["recoverable"])
+            self.assertEqual(
+                order["action_id"], self.session_state(workspace)["pending_action_id"], envelope
+            )
+
+    # -- the flag the route costs the acquirer -------------------------------------------
+
+    def test_normalizing_every_record_inside_the_order_is_refused_for_the_capture(self):
+        """The hazard the recommended route hands the next acquirer, walked once.
+
+        `acquire()` is this file's own depiction of the delegated loop and it normalizes
+        with `--all`, which is also what an acquirer reading a passing example would run.
+        Against a workspace that took the between-actions advice, `--all` reaches the
+        mid-session capture as well, and the order authorises normalized output only for the
+        source it fulfils. So the acquirer is refused for evidence a *previous* window
+        delivered, with a message that names only the file it just wrote.
+
+        This is the same refusal `NormalizeAllInsideAnOrderTests` pins for a source the
+        workspace already held. It is asserted again here because the state is reached by
+        following the shipped advice rather than by an accident of workspace history, and
+        because the first test's `--source-id` normalize is only justified if this is what
+        the alternative actually does.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, capture_id, order = self.arrive_after_a_between_actions_delivery(
+                Path(tmpdir), stamped=False
+            )
+
+            self.acquire(workspace, request_id)
+            capture_output = (
+                self.normalized_record_for(workspace, capture_id).relative_to(workspace).as_posix()
+            )
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"], envelope)
+            self.assertEqual(
+                "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
+                envelope["message"],
+                envelope,
+            )
+            self.assertEqual(
+                {
+                    "removed": [],
+                    "added_outside_scope": [capture_output],
+                    "changed_outside_scope": [],
+                },
+                envelope["details"]["normalized_scope_violations"],
+                "the refusal names the capture's output and only it",
+            )
+            self.assertTrue(envelope["recoverable"])
+
+
 class AuditAssertionTests(DelegatedWorkspace, unittest.TestCase):
     """The audit assertion above is load-bearing, not decoration.
 
