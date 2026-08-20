@@ -99,6 +99,37 @@
   issuance cause, which is recoverable. Issue a fresh order and resubmit rather than
   editing the manifest back.
 
+- **Fix: a local code repository could be stamped `bounded: true` and then refused as
+  unbounded.** `codebase_intake.bounded` was decided by a file count that filtered members
+  through `should_skip`, which withholds every dot-prefixed path, while the raw-tree
+  snapshot that consumes the promise fingerprints every regular file beneath the raw roots
+  and refuses the workspace with `ORCHESTRATION_WORKSPACE_UNSAFE` past its own 10,000-entry
+  limit. Two identical caps over two different sets: a 9,000-file checkout carrying a
+  3,000-object `.git` passed the intake bound and was then refused by the guard, the
+  refusal naming a tree the record had already declared admissible. `.git` is itself one of
+  the markers that makes a tree a repository, so the excluded subset was not an exotic case
+  — it is what every acquirer clones.
+
+  `metadata.file_count` and `metadata.codebase_intake.file_count` now count every regular
+  file beneath the repository directory, which is the same subtree the record admits and
+  the snapshot walks. `should_skip` is unchanged and still decides which paths become
+  *records*: dotfiles are still not inventoried as separate sources, because how a record is
+  selected and how much evidence it admits are different questions.
+
+  **This is not a workspace-wide bound, and should not be read as one.** The snapshot's
+  limit totals across every configured raw source root while the intake limit is per
+  repository, so several correctly bounded checkouts can still add up past it. Closing that
+  needs a workspace-wide accounting rather than a different predicate in inventory, and it
+  stays open on purpose.
+
+  Two consequences for anyone holding an open order. A local repository record containing
+  dot-prefixed files no longer fingerprints as it did, so an order issued before this change
+  whose acquirer re-runs `source_inventory.py --report` and then submits can see that record
+  refused as `manifest_record_changed_after_issuance` — recoverable; issue a fresh order and
+  resubmit rather than editing the manifest back. And a repository whose `.git` carries it
+  past the limit now reports `bounded: false` with `review_required` where it previously
+  reported bounded, which is the refusal arriving at intake instead of at submit.
+
 ## 0.5.2 - 2026-08-19
 
 - **Fix: two concurrent status reads could make each other fail.** Writing the status

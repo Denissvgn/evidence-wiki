@@ -134,6 +134,8 @@ Supported sources:
 
 Each codebase record includes `metadata.codebase_output_dir`, a generated artifact directory under `sources/`, for example `sources/code_wikis/codebase--github-example-project-a1b2c3d4e5`. Files inside detected local repositories are suppressed as separate raw records so the repo is normalized as one source evidence unit.
 
+For a local repository, `metadata.file_count` counts **every** regular file beneath the repository directory, dot-prefixed entries such as `.git/` included, and `metadata.codebase_intake.bounded` is that count measured against `metadata.codebase_intake.file_limit`. The whole subtree is counted because the whole subtree is what the record admits (see [Raw Path Attribution](#raw-path-attribution)) and what the orchestration controller fingerprints when it takes the raw evidence baseline. Suppressing dot-prefixed members from the count would let a repository be declared bounded on a subset and then refused as unbounded on the tree that is actually read.
+
 ## Raw Path Attribution
 
 `raw_paths` is derived, not declared. `source_inventory.py` decides which raw paths belong to a record by walking the delivered tree, and running `source_inventory.py --report` is the only sanctioned way a record's `raw_paths` comes to exist or change. A hand-edited list does not hold: the next inventory run derives the list again from the tree and drops the edit. An acquisition that appends a path to a new record by hand is refused, because the controller re-runs inventory's own derivation over the delivered evidence and compares, naming both the declared and the derived list in the refusal. Deliver the files, then run inventory.
