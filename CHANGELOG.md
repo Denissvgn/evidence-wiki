@@ -1,5 +1,71 @@
 # Changelog
 
+## Unreleased
+
+- **Fix: a directory-shaped `raw_paths` entry could not be delivered inside any acquisition
+  order.** A bundle record — an arXiv or LaTeX source archive, a local code repository —
+  declares exactly one `raw_paths` entry, the bundle directory itself. The raw-tree
+  snapshot records one entry per regular *file*, and each arm built its set of admitted
+  paths by adding the literal `raw_paths` string with no prefix expansion. The guard
+  therefore admitted none of what the fulfilled record declared: every file beneath the
+  directory came back as an unauthorised new raw path, and the refusal told the operator to
+  remove deliveries the fulfilled record itself referenced.
+
+  This broke in-order bundle acquisition on the delegated, provider and blocked-partial
+  arms alike, including the `arxiv download --format source --request-id ...` form of
+  `fetch_sources.py` that `docs/acquisition.md` and the acquisition skills instruct. No
+  workaround kept the evidence intact: the only way to stop the record naming a directory
+  is to stop the delivery being a bundle, which scatters one `raw:` record per file and
+  drops `metadata.arxiv_id`. It is admitted now, by the single change described in the next
+  entry. Reproduced on 0.5.2. Present by inspection at 0.5.1 — the mechanisms are
+  byte-identical there, but were never executed, so that is an inspection and not a
+  reproduction.
+
+- **Hardening: a `raw_paths` list appended by hand to a fulfilled manifest record
+  authorised the extra file.** The set of admitted raw paths was built from the acquirer's
+  own record bytes, so the party under check also decided what the check would allow. An
+  acquirer could deliver a file no inventory run had ever seen and attach it to a fulfilled
+  source by editing that source's manifest entry.
+
+  Deliberately not filed as a security fix, because the reachable effect was small and
+  saying otherwise would misrepresent it. The smuggled file was inert: normalization of a
+  record reads the path its kind selects, not an appended tail, so the extra bytes never
+  reached the record's normalized output or its checksums, and the next
+  `source_inventory.py --report` split the file back out into a record of its own. It also
+  granted nothing the acquirer did not already hold — for a source it fulfils, the acquirer
+  already authors both the manifest record and the normalized bytes, and neither is
+  re-derived. What it did cost was the meaning of the check: an allowlist computed from the
+  bytes under examination attests nothing, whatever its blast radius.
+
+  Both defects are closed by one change: the acquirer authors the bytes, and attribution is
+  derived rather than declared. A single read-only inventory derivation over the delivered
+  tree now answers both raw-scope questions — which new raw files an acquisition may create,
+  and whether a new record's `raw_paths` is what inventory itself would derive. A
+  directory-shaped entry admits the regular files beneath it, because that is what inventory
+  attributes to that record; a declared list inventory does not derive is a refusal naming
+  both lists. The derivation is memoised per submission by the raw-tree fingerprint, so
+  verifying up to three times costs one pass.
+
+  **The identity anchor did not move.** `allowed_new_ids` at the manifest guard is still
+  exactly the controller-issued fulfilled set, every `mutable_ids` over evidence is still
+  `set()`, and the manifest-scope guard still fires before any raw-path logic. What changed
+  is per-record attribution — which files a record accounts for — not which records may
+  exist.
+
+  **This is not fully bounded, and should not be read as such.** A bundle's subtree is its
+  record's unit of admission, so a file placed inside a directory the acquirer marked as a
+  bundle is admitted under that record: the derivation has no member list to hold it to,
+  because the record itself has none. Closing that needs an inventory-level member list
+  rather than a controller change, and it stays open on purpose. Separately, the normalized
+  bytes of a newly fulfilled record are still trusted as delivered — only reused sources are
+  re-derived and compared — and that boundary is unchanged by this release.
+
+  Two behaviour changes follow for anyone driving the protocol. A manifest record inventory
+  cannot re-derive is now refused where it previously passed, so a record an acquisition
+  creates has to come from running `source_inventory.py` rather than from an editor. And a
+  derivation that cannot run at all is a new recoverable refusal rather than a crash,
+  repaired by making `source_inventory.py --report` succeed and resubmitting.
+
 ## 0.5.2 - 2026-08-19
 
 - **Fix: two concurrent status reads could make each other fail.** Writing the status

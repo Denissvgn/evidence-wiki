@@ -217,6 +217,28 @@ The back-fill is manifest bookkeeping rather than fulfilment, so it is not gated
 by delegated acquisition: it stays available outside a pending acquisition work
 order, unlike `source_requests.py fulfill` and `record-attempt-failure`.
 
+Being ungated is not the same as being inert. The back-fill makes `facet_id`
+part of the request's **declared scope**, and
+`source_requests.py fulfill --require-scope` requires the delivered source's
+provenance sidecar to state every scope key the request declares. After the
+back-fill, that request can be fulfilled under `--require-scope` only by a
+delivery that stamps `facet_id` as well as whatever discriminating key the host
+already stamps: a source stamped only with, say, `component` is refused with
+`REQUEST_SCOPE_MISSING`, even though the same fulfilment succeeded before the
+link was recorded. Either stamp `facet_id` in the sidecar at delivery time
+alongside the discriminating key, or omit `--require-scope` when fulfilling
+back-filled requests; fulfilment without that flag is unaffected, because a key
+only the request declares is not a contradiction. See "Scope Matching" and
+"Choosing scope keys" in [source-delivery.md](source-delivery.md) for the
+matching layers and for what makes a scope key derivable on the delivering
+side.
+
+The back-fill is therefore bookkeeping only from the manifest's side. From the
+delivery's side it is a change in what a fulfilment must **state**, and one that
+outlives the link that introduced it, because `--clear-blocking-request-ids`
+leaves `scope.facet_id` on the request. Settle which scope keys a workspace's
+deliveries stamp before linking blocking requests to facets, not after.
+
 `evaluate` is deterministic: required facets pass only when they have at least
 `min_sources` accepted source IDs, no blocking request IDs, and no accepted
 source is marked unusable evidence by the local policy layer. Required facets

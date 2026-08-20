@@ -172,6 +172,17 @@ retrieval that actually happened — the `origin_url` and `retrieved_at` of the
 fetch that produced these bytes — plus the `request_id` this delivery answers. It
 is a second delivery of one retrieval, not a claim of a second retrieval.
 
+The handle is per capture, not per acquisition. When one acquisition answers several
+scoped requests, each delivered capture's sidecar carries the `request_id` of **its
+own** request rather than one handle repeated across the batch. `request_id` is a
+scalar naming one request, and the correlation check compares the request being
+fulfilled against the `provenance.request_id` merged onto the record that fulfils it,
+so a batch stamped with one handle correlates exactly one capture and every other
+fulfilment in it is refused with `ORCHESTRATION_POSTCONDITION_FAILED`. This rule is
+stated here rather than under fulfilment because the stamp is delivery-time only: the
+repair for a mis-stamped batch is to deliver those bytes again at their own paths
+with their own sidecars, never to correct the sidecars already on disk.
+
 Two kinds do not take their ID from the path, and a copy of one lands on the
 record already in the manifest rather than beside it: an arXiv bundle directory
 named exactly `arxiv-<id>` takes its ID from that arXiv ID, and each URL expanded
@@ -390,6 +401,108 @@ Behavior in `source_inventory.py`:
 
 Deliveries without sidecars (typically human drag-and-drop) behave exactly as before; provenance is additive.
 
+### Evidence composed of several captures
+
+Some facets are answered by more than one capture rather than by one document: a
+supplier offer and the freight quote a landed cost is computed from, a specification
+and the errata sheet that amends it. The supported model is **two scoped source
+requests on the same question, both fulfilled in the same order**, each by its own
+capture with its own sidecar. This is not a workaround for a missing multi-file
+delivery form. It follows from the identity model stated above — a distinct capture at
+a distinct path is a distinct source carrying its own provenance — and there is no
+delivery in this contract that gives one manifest record two provenances to carry.
+Three costs come with the model, and each is cheaper to plan for than to discover:
+
+- **Arity is exact at delivery.** One capture cannot fulfil two requests, because
+  `provenance.request_id` is a scalar and correlates a capture to exactly one request.
+  Where both requests declare `scope`, `reopen` refuses the pair outright with
+  `REQUEST_SCOPE_MISMATCH` (details `reason: ambiguous_assignment`), reporting that the
+  scoped requests compete for one supplied source. Where they declare none, there is no
+  scope to compete over and the refusal arrives later, from the delegated correlation
+  check at submission, as `ORCHESTRATION_POSTCONDITION_FAILED`. Two requests need two
+  captures at two paths with two sidecars.
+- **A partial outcome is not a partial success.** Fulfilling one request and recording
+  an attempt failure against the other is an *accepted* submission — a partial batch is
+  a completed action, not a refused one — and that is exactly what makes it expensive,
+  because nothing refuses it at the moment the damage is done. A blocked question is
+  reopened only when **every** request named in its `blocking_request_ids` was fulfilled
+  by the same action, and an order scopes only requests that are still open, so the
+  request fulfilled here can never be scoped into a later order. No later order can
+  satisfy that condition, the question stays `blocked` with a fulfilled request that
+  unblocks nothing, and the session eventually retires `blocked_on_sources` asking an
+  operator to reconcile the blocked questions with their source requests by hand. If
+  either capture is missing, record an attempt failure against **both** requests and
+  deliver neither.
+- **The pair is not corroboration and must not be reported as such.** `min_sources`
+  (see [coverage-manifest.md](coverage-manifest.md)) counts distinct accepted source
+  ids, and nothing in this package tests those sources for independence — no publisher,
+  domain, or authorship comparison exists anywhere — so two complementary inputs to one
+  computation satisfy a `min_sources` of 2 exactly as two independent witnesses to one
+  fact would. `evidence_strength` does not close the gap either: it is author-declared,
+  and the one consumer that reads it acts only on its negative values, so a
+  `corroborated` declaration is never checked against the evidence it describes. Say in
+  the facet description that these sources are complementary inputs rather than
+  corroborating witnesses, because the description is the only place a later reader can
+  learn it.
+
+### Lookup steps and intermediate captures
+
+Two-step retrieval is ordinary: a search or lookup response names the record, and a
+second fetch retrieves the artifact the request actually asks for. Under
+`orchestration.acquisition: delegated` only the second one may land. An acquisition
+action may deliver nothing it does not fulfil a request with, and that rule is enforced
+three guards deep, so an intermediate capture delivered under a raw root and inventoried
+alongside the artifact is refused even though it is honest evidence of how the artifact
+was found:
+
+- the manifest-scope guard admits a new manifest record only where the action fulfils a
+  scoped request with it, and reports the intermediate capture as added outside scope;
+- an exact accounting check then requires the set of newly appended manifest ids to
+  equal the set of fulfilled source ids, so a record is caught by arithmetic and not
+  only by membership; and
+- the raw-scope guard admits new files under the configured raw roots only where
+  inventory attributes them to one of those newly fulfilled sources, which catches the
+  capture that was delivered but never inventoried at all.
+
+All three refuse with `ORCHESTRATION_POSTCONDITION_FAILED`, which is recoverable: the
+action stays pending, and removing the residue and resubmitting is the repair.
+
+The residue has two lawful homes. Hold it **outside** every path listed in
+`research.yml` `raw.source_roots` for the duration of the order — the raw-tree baseline
+fingerprints those roots and nothing else, so a staging area elsewhere is invisible to
+all three guards. Or deliver it **between** actions, where it must be delivered **and
+inventoried together**: inventory and normalization are deliberately un-gated outside a
+pending order, and of the commands that mutate requests and questions only `fulfill`,
+`record-attempt-failure` and `reopen` are order-gated, so this is a supported window
+rather than a loophole in one.
+
+Two cautions bound that window, and both are measured rather than cautionary.
+
+Never leave a delivered file un-inventoried across an order issuance. Issuance
+fingerprints the raw roots as they stand, so the stale capture is baselined into the raw
+tree and the raw-scope guard will never mention it; what it is not is a manifest record.
+The next order's acquirer has to run inventory before it can fulfil anything, that run
+derives a record for the stale file too, and the record is new, fulfilled by nothing,
+and refused by the manifest-scope guard — a refusal whose cause was a delivery made
+under a previous order and whose message names only the current one.
+
+Deliver such residue **unstamped**, carrying no `provenance.request_id`. A stamped
+capture that nothing has normalized joins the un-normalized reuse baseline of any later
+order that scopes the request it names, provided its kind is one this package can
+re-normalize and its raw inputs all sit under configured roots. That baseline is bounded
+at 256 correlated ids, and issuance refuses to exceed it with
+`ORCHESTRATION_SCOPE_EXCEEDED` — raised here as non-recoverable, so the session cannot be
+repaired in place and the remedy is to normalize or archive the correlated evidence
+before starting acquisition. An unstamped capture never enters that count, which is the
+whole reason to withhold the stamp from bytes no request is being fulfilled with.
+
+What the between-actions window does not provide is verification. A delivery made there
+passes through no postcondition at all: nothing compares the workspace against the
+previous order's end state, and the next issuance simply adopts whatever it finds as its
+baseline. The provenance of such a capture is the host's attestation at delivery time
+rather than anything an action checked, which is the reason to prefer holding
+intermediate captures outside the raw roots wherever the choice is available.
+
 ## Post-Delivery Command Sequence
 
 From the workspace root, after each delivery batch:
@@ -540,12 +653,29 @@ produce the same string independently. Declare a key only when they can.
   text after stripping, with no case folding and no normalization, so two
   independent derivations of "the same" identifier are a
   `REQUEST_SCOPE_MISMATCH` waiting to happen.
+- **The delivery has to stamp the key as well.** A key discriminates only where both
+  sides carry it. Pairing compares the keys present on both sides and treats a key
+  present on only one as *compatible* rather than as a mismatch, so a key the request
+  declares and the delivery omits narrows nothing whatever. Where it is the only key,
+  every supplied source scores equally against every request, and any pairing with more
+  than one source genuinely in play is reported `decided_by: tie_break` and refused by
+  `reopen --require-decisive-scope` with `REQUEST_SCOPE_UNDECIDED`. A key that is right
+  in principle and unstamped in practice is indistinguishable from declaring no key at
+  all — which is why this condition belongs with the three above rather than with the
+  delivery instructions.
 
 The request↔delivery binding itself does not need a scope key. Under
 `orchestration.acquisition: delegated` the sidecar's `request_id` is mandatory
 and enforced by the orchestration postcondition, which is both stricter and
 narrower than any scope comparison. Scope answers "is this the right *kind* of
 evidence for this request", not "is this the right request".
+
+Take that division literally, because pairing reads `provenance.scope` and nothing
+else: the sidecar's `request_id` is never consulted while requests and sources are
+being matched. A delivery correlated to exactly the right request can still be paired
+to a different one when the declared scope keys do not separate them, and the pairing
+report will show no contradiction, because there was none to find. The correlation is
+checked afterwards by the orchestration postcondition, never by the pairing.
 
 A key set is well chosen when every key is derivable on both sides and at least
 one key varies within the question being reopened. A second key earns its place

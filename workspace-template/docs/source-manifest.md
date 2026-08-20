@@ -6,7 +6,7 @@
 
 - `id`: stable source identifier derived from the raw path.
 - `kind`: asset classification.
-- `raw_paths`: one or more POSIX-style paths relative to the workspace root.
+- `raw_paths`: one or more POSIX-style paths relative to the workspace root. Inventory derives this list from the delivered tree; see [Raw Path Attribution](#raw-path-attribution) for what more than one entry means and who decides it.
 - `status`: lifecycle status from `research.yml`, initially `discovered`.
 - `detected_at`: UTC timestamp for when the source ID was first discovered.
 
@@ -132,6 +132,19 @@ Supported sources:
 - Code archives classified from raw file extensions, recorded with `metadata.codebase_source_type: code_archive`.
 
 Each codebase record includes `metadata.codebase_output_dir`, a generated artifact directory under `sources/`, for example `sources/code_wikis/codebase--github-example-project-a1b2c3d4e5`. Files inside detected local repositories are suppressed as separate raw records so the repo is normalized as one source evidence unit.
+
+## Raw Path Attribution
+
+`raw_paths` is derived, not declared. `source_inventory.py` decides which raw paths belong to a record by walking the delivered tree, and running `source_inventory.py --report` is the only sanctioned way a record's `raw_paths` comes to exist or change. A hand-edited list does not hold: the next inventory run derives the list again from the tree and drops the edit. An acquisition that appends a path to a new record by hand is refused, because the controller re-runs inventory's own derivation over the delivered evidence and compares, naming both the declared and the derived list in the refusal. Deliver the files, then run inventory.
+
+Most records hold exactly one entry. Two merges produce more, and only these two:
+
+- PDF pairing folds a matched PDF into the logical `paper` record built from a LaTeX bundle, so that record holds the bundle path and the PDF path (see [LaTeX Bundle Records](#latex-bundle-records), [PDF Pairing Records](#pdf-pairing-records), and the first record under [Example Records](#example-records));
+- link parsing merges every raw link file that yields the same URL into one link record, so a URL delivered in two link files holds both files (see [Link Records](#link-records)).
+
+Ordinary raw data files get one entry each. There is no field or convention for grouping several unrelated raw files under one source id.
+
+A single entry may name a directory, and then it denotes the whole subtree beneath it. A LaTeX bundle directory and a local repository directory (see [Codebase Architecture Records](#codebase-architecture-records)) each appear as one path, and the files inside are suppressed as separate records because they already belong to that record. That subtree is also the record's unit of admission when an acquisition delivers it: every regular file beneath the directory is attributed to the record, **including a file that has nothing to do with the source**. Inventory records no member list to narrow this against, so a delivered directory must contain only the evidence its record stands for.
 
 ## Inventory Report
 
