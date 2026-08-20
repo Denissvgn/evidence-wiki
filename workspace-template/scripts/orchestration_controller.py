@@ -3131,6 +3131,48 @@ def carry_version_stamps(expected: dict[str, Any], stamped: dict[str, Any]) -> N
             derived["version"] = recorded.get("version")
 
 
+def normalizer_identity_failure(
+    expected: dict[str, Any],
+    stamped: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Refuse a record naming a producer other than the one configured for it, by name.
+
+    The other half of ``carry_version_stamps``. Versions travel from the file, so a host
+    upgrade is not a forgery; names stay derived, so a record cannot claim a producer that
+    did not produce it. What was missing was any *statement* about the name: a stamped
+    ``normalizer.name`` that disagrees with the configured one is a difference in the
+    rendered bytes like any other, so it fell through to "normalized evidence is not what
+    normalizing the raw evidence produces" -- whose remediation is about a hand-edited body.
+    An operator reading that goes looking for an edit to the prose, while the two lines that
+    actually disagree sit in the frontmatter and are never quoted back.
+
+    So the comparison is made explicitly and reported with both sides in their own keys, the
+    way ``stamped_pdf_extractor`` already reports the extractor it refused. Names only: the
+    versions have been carried by the time this runs, and comparing them here would undo the
+    one thing that helper exists to allow.
+
+    Absent on both sides is not a disagreement -- a record for a kind that stamps no producer
+    block has nothing to be wrong about, and the byte comparison still has the last word.
+
+    The reason says "does not name" rather than "names another", because a record whose
+    ``normalizer`` block was deleted or corrupted into something that is not a producer
+    object reaches here too, and reporting that one as naming a different normalizer would
+    assert something the file did not do. Either way ``normalizer`` carries what the record
+    names -- ``None`` when it names nothing usable -- beside the identity that was expected.
+    """
+    derived = expected.get("normalizer")
+    recorded = stamped.get("normalizer")
+    derived_name = derived.get("name") if isinstance(derived, dict) else None
+    recorded_name = recorded.get("name") if isinstance(recorded, dict) else None
+    if derived_name == recorded_name:
+        return None
+    return {
+        "reason": "normalized evidence does not name the normalizer configured for its kind",
+        "normalizer": recorded_name if isinstance(recorded_name, str) else None,
+        "configured_normalizer": derived_name if isinstance(derived_name, str) else None,
+    }
+
+
 def normalized_output_derivation_failure(
     project_root: Path,
     config: dict[str, Any],
@@ -3291,11 +3333,30 @@ def normalized_output_derivation_failure(
                 return {"reason": "normalized evidence cites source ids the evidence manifest does not hold"}
         expected_frontmatter["references_source_ids"] = stamped_references
         carry_version_stamps(expected_frontmatter, frontmatter)
+        # Beside the version carry, and deliberately: that helper's whole subject is these
+        # two producer blocks, and the name is the half it does *not* carry. Answered here,
+        # before rendering, because after `render_markdown` the difference is only bytes and
+        # the byte verdict blames hand-editing the body. `return` rather than `raise`: the
+        # blanket clause below would fold a raise back into the generic re-derivation reason.
+        identity_failure = normalizer_identity_failure(expected_frontmatter, frontmatter)
+        if identity_failure is not None:
+            return identity_failure
         expected_text = normalize_sources.render_markdown(source, expected_frontmatter)
     except OrchestrationControllerError:
         raise
     except RederivationSandboxError as exc:
         return {"reason": "the bounded workspace this re-derivation runs in could not be prepared", "error": str(exc)}
+    # Split out of the blanket clause for the reason `RederivationSandboxError` above it is:
+    # the adapter protocol raises this to say something precise -- most sharply, that the
+    # program it ran reported an identity `research.yml` does not authorize -- and folding
+    # that into "could not be re-derived" buries the one sentence the operator can act on
+    # inside `error`. Read off the module that raises it, so the class is the same object
+    # rather than a second copy of it loaded through another path.
+    except getattr(normalize_sources, "AdapterError", ()) as exc:
+        return {
+            "reason": "the normalizer adapter this workspace authorizes did not produce a record to compare against",
+            "error": str(exc),
+        }
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - any re-derivation failure is the same verdict
         return {"reason": "normalized evidence could not be re-derived from the raw evidence", "error": str(exc)}
     if expected_text.encode("utf-8") != payload:
@@ -3511,19 +3572,86 @@ def memoised_derivation_failure(
     return verdict
 
 
-# The terms are one sentence for both arms; the recourse when the reuse cannot be
-# repaired is not, for the same reason `REUSE_SCOPE_*` splits below. The rewrite command
-# is named exactly: plain `--force` selects nothing, because selection defaults to the
-# pending set, and `--all --force` rewrites every record in the workspace straight into a
-# `changed_outside_scope` refusal. `--source-id <id> --force` is the one form that repairs
-# the record this refusal is about and leaves the rest of the manifest alone.
+# The terms are one sentence for both arms; the recourse is not, for the same reason
+# `REUSE_SCOPE_*` splits below and with the same shape -- terms once, then a pointer at the
+# per-failure `repair`. The rewrite command this used to name for both arms is correct for
+# exactly one of them, and `RECONCILIATION_ARM_REPAIRS` is where it now lives.
 RECONCILIATION_TERMS = (
     "Reuse a pre-existing source only on the terms this order recorded for it: its manifest record "
     "byte-identical to what the order fingerprinted, and its normalized output either byte-identical to "
     "what the order fingerprinted or, where the order recorded none, the record normalize_sources.py "
-    "produces from the unchanged raw evidence. A hand-edited record is not stale, so plain "
-    "normalize_sources.py skips it: rewrite that one record with normalize_sources.py --source-id <id> "
-    "--force, which leaves every record outside this order's scope untouched"
+    "produces from the unchanged raw evidence. How that is repaired depends on which of the two arms this "
+    "source was held to and on what the check found, and reconciliation_failures[].repair names the one "
+    "this source needs"
+)
+
+# One repair per state that has its own, because they do not share one. The rewrite clause
+# was written for the arm where the order recorded no normalized output -- there it is
+# exactly right, and named exactly: plain `--force` selects nothing, because selection
+# defaults to the pending set, and `--all --force` rewrites every record in the workspace
+# straight into a `changed_outside_scope` refusal, so `--source-id <id> --force` is the one
+# form that repairs the record this refusal is about and leaves the rest of the manifest
+# alone.
+#
+# Emitted for the other arm it was advice that can never succeed. A source the order
+# fingerprinted normalized reconciles on those exact bytes, and `normalized_at` is
+# second-resolution and restamped by every run: re-normalizing rewrites the one field that
+# has to come back unchanged, so the operator who follows it is refused again, identically,
+# for having followed it. What is actually recoverable there is the bytes themselves, or a
+# new session whose order fingerprints the workspace as the rebuild left it.
+#
+# The third key is the same failure one level down, inside the arm the rewrite *does* serve:
+# a re-derivation that could not be performed is refused before the record's bytes are ever
+# compared, so rewriting them is the same dead end. `UNVERIFIABLE_DERIVATION_REASONS` below
+# is which verdicts those are.
+RECONCILIATION_ARM_REPAIRS = {
+    "scoped_match": (
+        "This order fingerprinted both this source's manifest record and its normalized output at "
+        "issuance, so only those exact bytes reconcile, and re-normalizing cannot reproduce them: every "
+        "run restamps normalized_at, which is part of what was fingerprinted. Restore the record and the "
+        "normalized output as the order fingerprinted them. If the rewrite is what this workspace should "
+        "keep, then this order cannot be satisfied from this source at all: end the action with a failed "
+        "outcome and start a new session, whose order fingerprints the workspace as the rewrite left it."
+    ),
+    "authorized_unnormalized": (
+        "This order recorded no normalized output for this source and authorizes the single record it "
+        "owes, re-derived from the unchanged raw evidence. A hand-edited record is not stale, so plain "
+        "normalize_sources.py skips it: rewrite that one record with normalize_sources.py --source-id "
+        "<id> --force, which leaves every record outside this order's scope untouched. Its manifest "
+        "record still has to be byte-identical to what the order fingerprinted."
+    ),
+    "authorized_unnormalized_unverifiable": (
+        "The re-derivation this reuse rests on could not be performed at all, so rewriting the record "
+        "cannot change the verdict; derivation_failure.reason says what stopped it. Where that names this "
+        "host -- a normalizer adapter that would not run, or a bounded workspace that could not be "
+        "prepared -- repair the host and resubmit the same action id, leaving the record as it is. Where "
+        "it names what this order pinned -- a source normalized from artifacts or paths no baseline "
+        "fingerprints, or a kind this package does not normalize -- no reuse of this source can be "
+        "verified under this order at all."
+    ),
+}
+
+# The arm-(b) verdicts the rewrite above cannot clear, split out for the reason the arms
+# themselves are: advice that reads as a repair and returns the identical refusal is the
+# defect. Each of these is reached before the record's own bytes are ever compared -- the
+# check could not run, or the reuse is structurally out of this order's reach -- so
+# `normalize_sources.py --source-id <id> --force` either fails in the same place the
+# verification did or rewrites a record whose content was never the problem.
+#
+# Deliberately not here: "normalized evidence names a PDF extractor this package does not
+# implement" and "...is unavailable on this host". Those *are* record-side. The rewrite
+# re-derives under the extractor `research.yml` configures and restamps the record with it,
+# which is exactly the repair, and adding them would send a fixable state to the "repair the
+# host" text instead.
+UNVERIFIABLE_DERIVATION_REASONS = frozenset(
+    {
+        "the reused source normalizes from artifacts this order does not fingerprint",
+        "the reused source normalizes from workspace paths no raw-evidence baseline pins",
+        "the workspace source paths this re-derivation needs are unusable",
+        "this package's normalizer does not handle the reused source's kind",
+        "the bounded workspace this re-derivation runs in could not be prepared",
+        "the normalizer adapter this workspace authorizes did not produce a record to compare against",
+    }
 )
 
 RECONCILIATION_REMEDIATION = (
@@ -3748,10 +3876,24 @@ def reused_source_reconciliation_failure(
     # reaches the derivation, and saying `derivation_failure: None` there would read as
     # "the body was examined and matched" -- sending the operator to repair the record and
     # fail again on a body nothing looked at.
+    #
+    # The arm is also the repair, and is named once so the booleans and the advice cannot
+    # come apart. Both arms used to be told to re-normalize the record, which is the recourse
+    # for exactly one of them, and not for every failure even of that one:
+    # `RECONCILIATION_ARM_REPAIRS` carries who can follow the rewrite and what the rest do
+    # instead.
+    scoped_match = isinstance(expected, dict)
+    if scoped_match:
+        arm = "scoped_match"
+    elif isinstance(derivation, dict) and derivation.get("reason") in UNVERIFIABLE_DERIVATION_REASONS:
+        arm = "authorized_unnormalized_unverifiable"
+    else:
+        arm = "authorized_unnormalized"
     failure: dict[str, Any] = {
         "source_id": source_id,
-        "was_scoped_match": isinstance(expected, dict),
-        "was_authorized_unnormalized": not isinstance(expected, dict),
+        "was_scoped_match": scoped_match,
+        "was_authorized_unnormalized": not scoped_match,
+        "repair": RECONCILIATION_ARM_REPAIRS[arm],
         "record_unchanged": record_unchanged,
         "normalized_unchanged": normalized_as_authorized,
         "derivation_checked": derivation_checked,
