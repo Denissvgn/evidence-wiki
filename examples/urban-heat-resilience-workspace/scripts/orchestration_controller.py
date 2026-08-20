@@ -3424,11 +3424,31 @@ def derived_raw_attribution(
     admitted record ids), and whether a new manifest record's declared ``raw_paths`` is
     what inventory itself would derive (list equality against ``raw_paths``).
 
-    ``source_inventory.build_records`` is a read-only snapshot builder: it walks the raw
-    roots under the acquisition barrier lock (``raw/.locks/``, outside every configured
-    snapshot root) and writes neither the manifest nor the activity log. ``memo_key``
-    should be the current raw-tree content fingerprint so a memoised answer is only ever
-    returned for bytes that have not moved between verification passes.
+    ``source_inventory.build_records`` writes neither the manifest nor the activity log,
+    which is what makes it usable as a verification predicate -- but it is not literally
+    read-only. Taking the acquisition barrier creates ``raw/.locks/`` and writes a holder
+    file into it, so this call does touch the workspace. Every shipped ``raw.source_roots``
+    lists the evidence subtrees (``raw/papers``, ``raw/web``, ...) and never bare ``raw``,
+    so the barrier sits outside every snapshot root and no fingerprint sees it. Nothing
+    enforces that: ``configured_raw_source_roots`` accepts bare ``raw``, and under such a
+    config the holder file is inside a snapshot root, its ``pid`` and ``created_at`` move
+    the raw-tree fingerprint, and the verification passes report the acquirer as having
+    changed raw evidence it never touched. Closing that means rejecting the root or
+    excluding ``raw/.locks`` from the snapshot, not moving this call off the barrier.
+    ``memo_key``
+    should be the current raw-tree content fingerprint, which reuses an answer only while
+    every regular file under the raw roots is byte-identical.
+
+    That is a claim about regular files and nothing more, so it is not the stronger claim
+    it reads as -- "the tree the derivation saw is unchanged". ``raw_tree_snapshot`` records
+    an entry per regular file and none for a directory, so creating an empty directory --
+    a ``.git/`` marker, an empty bundle folder -- leaves the key byte-identical while
+    changing what ``build_records`` derives from the same tree. The memo is kept as it is
+    because what it actually rests on is the ``submit`` scope: its three passes run back to
+    back inside the driver session lock, which no peer driver can take, and each derivation
+    walks the raw roots under the acquisition barrier. What it does not rest on is the key
+    being sufficient on its own, and a memo asked to survive concurrent out-of-band edits
+    would have to key on the entry list rather than on file bytes.
     """
     cache = _RAW_ATTRIBUTION_MEMO
     if cache is not None and memo_key is not None and memo_key in cache:
@@ -3597,8 +3617,16 @@ RECONCILIATION_TERMS = (
 # fingerprinted normalized reconciles on those exact bytes, and `normalized_at` is
 # second-resolution and restamped by every run: re-normalizing rewrites the one field that
 # has to come back unchanged, so the operator who follows it is refused again, identically,
-# for having followed it. What is actually recoverable there is the bytes themselves, or a
-# new session whose order fingerprints the workspace as the rebuild left it.
+# for having followed it. What is actually recoverable there is the bytes themselves, and
+# nothing else is -- which that arm's repair now says, instead of pointing at a fresh
+# session as though one could be reached from here. It cannot be reached cleanly: the only
+# outcome that ends this action without re-running these checks is `failed`, and
+# `prepare_submission` takes that branch without calling `verify_action_postconditions` at
+# all, so it accepts the fulfilment this guard is refusing rather than withdrawing it. The
+# request stays `fulfilled` with its `source_id` in the store, no later order sees it
+# again (`open_requests` selects on status), and evidence the controller refused to verify
+# is in the workspace permanently. That is a worse end than the refusal, so the repair
+# names its cost rather than its command.
 #
 # The third key is the same failure one level down, inside the arm the rewrite *does* serve:
 # a re-derivation that could not be performed is refused before the record's bytes are ever
@@ -3609,9 +3637,13 @@ RECONCILIATION_ARM_REPAIRS = {
         "This order fingerprinted both this source's manifest record and its normalized output at "
         "issuance, so only those exact bytes reconcile, and re-normalizing cannot reproduce them: every "
         "run restamps normalized_at, which is part of what was fingerprinted. Restore the record and the "
-        "normalized output as the order fingerprinted them. If the rewrite is what this workspace should "
-        "keep, then this order cannot be satisfied from this source at all: end the action with a failed "
-        "outcome and start a new session, whose order fingerprints the workspace as the rewrite left it."
+        "normalized output as the order fingerprinted them; that is the only repair this refusal has. If "
+        "the rewrite is what this workspace should keep, this order cannot be satisfied from this source "
+        "at all, and it has no clean way to end either: ending the action with a failed outcome is "
+        "accepted without any evidence or scope check running at all, leaves the fulfilment and its "
+        "source id recorded as if verified, and leaves behind a request no later order can see, because "
+        "routing scopes open requests only. Take that as abandoning the session, never as a way past "
+        "this refusal."
     ),
     "authorized_unnormalized": (
         "This order recorded no normalized output for this source and authorizes the single record it "
@@ -3627,7 +3659,10 @@ RECONCILIATION_ARM_REPAIRS = {
         "prepared -- repair the host and resubmit the same action id, leaving the record as it is. Where "
         "it names what this order pinned -- a source normalized from artifacts or paths no baseline "
         "fingerprints, or a kind this package does not normalize -- no reuse of this source can be "
-        "verified under this order at all."
+        "verified under this order at all. Where it says only that the re-derivation could not be "
+        "performed, derivation_failure.error carries what was raised: normalizing this source is broken "
+        "here for a reason neither the record nor this order can name, and rewriting the record runs the "
+        "same normalizer into the same failure."
     ),
 }
 
@@ -3637,6 +3672,16 @@ RECONCILIATION_ARM_REPAIRS = {
 # check could not run, or the reuse is structurally out of this order's reach -- so
 # `normalize_sources.py --source-id <id> --force` either fails in the same place the
 # verification did or rewrites a record whose content was never the problem.
+#
+# The blanket verdict is here too, and was the one omission that reproduced the very defect
+# this set exists to stop. `normalized_output_derivation_failure` ends in
+# `except (Exception, SystemExit)`, so any re-derivation that *crashes* is reported as
+# "normalized evidence could not be re-derived from the raw evidence" -- a check that could
+# not run, not a record that did not match. Left out of this set it fell through to the
+# rewrite, whose `normalize_sources.py --source-id <id> --force` re-enters the same
+# normalizer that just raised. The named crash reasons above were split out of this same
+# clause precisely so their operators would not be sent there; the residue deserves the same
+# answer, and the repair's last sentence is written for it.
 #
 # Deliberately not here: "normalized evidence names a PDF extractor this package does not
 # implement" and "...is unavailable on this host". Those *are* record-side. The rewrite
@@ -3651,12 +3696,32 @@ UNVERIFIABLE_DERIVATION_REASONS = frozenset(
         "this package's normalizer does not handle the reused source's kind",
         "the bounded workspace this re-derivation runs in could not be prepared",
         "the normalizer adapter this workspace authorizes did not produce a record to compare against",
+        "normalized evidence could not be re-derived from the raw evidence",
     }
 )
 
+# Every refusal that carries this tail is computed over the acquirer's *fulfilled* list, so
+# the request it speaks about is already fulfilled by the very source being refused. That is
+# what made the escapes these remediations used to name unfollowable rather than merely
+# clumsy, and both were walked before being removed: `source_requests.py
+# record-attempt-failure` refuses a fulfilled request outright, and a second delivery "under
+# its own raw path" inventories cleanly and is then refused by `fulfill`, which will not
+# relink a fulfilled request to a different source. Acquiring through another candidate ends
+# at the same relink refusal.
+#
+# So none of them is named. What is named is the fact underneath all three -- a fulfilled
+# request has no second route -- and, where the per-source repair cannot be performed, that
+# this order has none either. "There is no route from here" is worse news than a command and
+# better advice than one that is refused for having been followed.
+NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST = (
+    "There is no second route out of this refusal: this action already fulfilled the request from the "
+    "source being refused, and a fulfilled request accepts neither a recorded attempt failure nor a "
+    "relink to a later delivery. Only the per-source repair changes this verdict, and where the source "
+    "has none this order has no route from here"
+)
+
 RECONCILIATION_REMEDIATION = (
-    f"{RECONCILIATION_TERMS}. Otherwise deliver that evidence again as a new source under its own raw path, "
-    "or record the attempt failure with source_requests.py record-attempt-failure using this action id."
+    f"{RECONCILIATION_TERMS}. {NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST}."
 )
 
 # Selection is the whole of this advice, which is why it is one constant rather than the
@@ -3672,15 +3737,16 @@ MISSING_NORMALIZED_REMEDIATION = (
 )
 
 PROVIDER_RECONCILIATION_REMEDIATION = (
-    f"{RECONCILIATION_TERMS}. Otherwise acquire it through another selected candidate for this request."
+    f"{RECONCILIATION_TERMS}. {NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST}. Acquiring the evidence again "
+    "through another selected candidate produces a source this request cannot be relinked to either."
 )
 
-# Both arms name the same terms; they differ only in what to do with a request the reuse
-# cannot serve. The delegated acquirer records an attempt failure against this action --
-# per-request outcomes are how a delegated batch reports a request it could not satisfy.
-# The provider arm has no such outcome: every scoped request must be fulfilled, so the
-# route there is another candidate, and telling it otherwise would be advice its own
-# fulfilment guard refuses.
+# Both arms name the same terms, and differ only in which dead escape their own acquirer
+# would otherwise reach for: an attempt failure recorded against this action for the
+# delegated arm, another selected candidate for the provider arm. Neither is a route,
+# because this refusal is computed over `fulfilled` -- see
+# `NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST` above -- so each arm names the one its reader
+# would try and says why it is refused, rather than advising it.
 REUSE_SCOPE_TERMS = (
     "Reuse only a source this order named at issuance: one whose .provenance.yml already named this request, "
     "unchanged since, either carrying a normalized record then or normalized inside this order. The repair "
@@ -3688,33 +3754,51 @@ REUSE_SCOPE_TERMS = (
 )
 
 REUSE_SCOPE_REMEDIATION = (
-    f"{REUSE_SCOPE_TERMS}, or record the attempt failure with source_requests.py record-attempt-failure "
-    "using this action id."
+    f"{REUSE_SCOPE_TERMS}. {NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST}."
 )
 
 PROVIDER_REUSE_SCOPE_REMEDIATION = (
-    f"{REUSE_SCOPE_TERMS}, or acquire it through another selected candidate for this request."
+    f"{REUSE_SCOPE_TERMS}. {NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST}. Acquiring the evidence again "
+    "through another selected candidate produces a source this request cannot be relinked to either."
 )
 
 # One repair per cause, because the causes do not share one. The sentence that used to
 # serve all three told the acquirer its source satisfied every clause of the reuse
 # terms — true for two of them, and precisely wrong for the third, where the source does
 # satisfy them and the order simply predates the authorization it would have needed.
+#
+# None of the three ends with a command, and that is the honest shape rather than an
+# oversight. The failure set is built from sources that are in `manifest_records_before`
+# and in neither reuse baseline, and those baselines were fixed at issuance, so nothing
+# done during the order can move a source into one. The request is fulfilled by the source
+# besides, so the second delivery two of these used to advise cannot be linked to it. What
+# each repair owes its reader is therefore the truth about its own cause plus a plain
+# statement that this order has no route -- the rewritten-record cause included, whose
+# restore the manifest-scope guard downstream requires and which still leaves this refusal
+# standing, under whichever of the other two causes was true all along.
 REUSE_SCOPE_CAUSE_REPAIRS = {
     "provenance_names_no_scoped_request": (
         "This source's .provenance.yml names another request or none. Correlation is acquirer-written, so "
-        "restamping it authorizes nothing and never makes it reusable; deliver that evidence again as a new "
-        "source under its own raw path with its own sidecar."
+        "restamping it authorizes nothing and never makes it reusable, and this order has no repair that "
+        "does: the request it was used for is already fulfilled by it, so a fresh delivery under its own "
+        "raw path with its own sidecar cannot be linked to that request either. Such a delivery is what a "
+        "later order needs; it is not a way out of this one."
     ),
     "manifest_record_changed_after_issuance": (
         "This source's manifest record was rewritten after the order was issued, so what it says now is no "
-        "evidence of what it said then. Restore it exactly as the order recorded it."
+        "evidence of what it said then, and the rewrite has to be undone whatever else follows: restore the "
+        "record exactly as the order recorded it. Restoring it does not make this source reusable, though. "
+        "Every source this refusal reports was outside both of the order's reuse baselines before the "
+        "rewrite as well, and those baselines were fixed at issuance, so what restoring the record changes "
+        "is only which of the other two causes this refusal reports — and neither of those has a repair "
+        "inside this order either."
     ),
     "no_reuse_authorization_at_issuance": (
         "This source is correlated and unchanged; the order simply recorded no reuse authorization for it, "
         "and nothing done inside the order can add one. Leave it alone and let a later order — issued while "
-        "it is correlated and un-normalized — reuse it, or deliver that evidence again as a new source under "
-        "its own raw path."
+        "it is correlated and un-normalized — reuse it. This order has no repair for it: the request it was "
+        "used for is already fulfilled by it, so a fresh delivery under its own raw path cannot be linked "
+        "to that request either."
     ),
 }
 
@@ -6720,10 +6804,19 @@ def verify_delegated_acquisition_postconditions(
         "fulfilled evidence is not linked to its source request by a provenance sidecar",
         {"correlation_failures": correlation_failures},
         (
+            # The first sentence is the live repair, and it is live only for a source this
+            # action delivered: its raw path and its manifest record are both new, so the
+            # scope guards admit the restamp and the re-inventory. For a source the manifest
+            # already held it is not, which the rest used to answer with a second delivery --
+            # dead for the same reason every other escape on this path is, since this guard
+            # also reads the acquirer's `fulfilled` list. Say so rather than sending the
+            # acquirer to `fulfill` to find out.
             "Stamp request_id into each source's .provenance.yml as you deliver it, naming the request it "
             "fulfils, then re-run source_inventory.py before fulfilling. Raw evidence is immutable, so a "
-            "source the manifest already holds cannot be given one afterwards; deliver that evidence as a "
-            "new source under its own raw path instead."
+            "source the manifest already holds cannot be given one afterwards, and a second delivery does "
+            "not rescue it either: this request is already fulfilled by the source being refused and will "
+            "not relink to one. A fresh delivery under its own raw path, with its own sidecar, is what a "
+            "later order needs."
         ),
     )
 

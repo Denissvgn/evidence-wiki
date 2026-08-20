@@ -720,10 +720,11 @@ number — the rule is when to bump, not whether.
 resolved on `PATH`, outside the workspace, so replacing that program changes what
 normalization produces while every fingerprinted input still matches. If the redeployed
 binary reports an identity `research.yml` does not authorize, the adapter run fails its
-identity check and the submission fails with the reason `normalized evidence could not
-be re-derived from the raw evidence` — the identity mismatch itself is in the
-accompanying `error` detail rather than in the reason, so read the detail before
-suspecting the record. Pin the adapter binary for the duration of an order, and redeploy
+identity check and the submission fails with the reason `the normalizer adapter this
+workspace authorizes did not produce a record to compare against` — the reason names the
+adapter, not the record, so the record is not what to suspect. The accompanying `error`
+detail carries the mismatch itself: the identity the program reported and the one
+`research.yml` authorized. Pin the adapter binary for the duration of an order, and redeploy
 it where a `version` bump belongs: between sessions.
 
 ### Failure is closed

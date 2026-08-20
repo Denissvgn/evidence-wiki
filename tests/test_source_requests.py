@@ -349,12 +349,103 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertFalse(payload["updated"])
 
-            # Relinking to a different source id is refused.
+            # Relinking to a different source id is refused, and refused as the thing it
+            # is. Asserting the stderr substring alone is what let the envelope drift: the
+            # message said "already fulfilled" the whole time while the code underneath it
+            # was `WORKSPACE_UNREADABLE`.
             code, _, stderr = self.run_requests(
                 "--project-root", str(target), "fulfill", "--request-id", request_id, "--source-id", "paper:other"
             )
             self.assertEqual(2, code)
             self.assertIn("already fulfilled", stderr)
+            code, envelope, _ = self.error_envelope(
+                target, "fulfill", "--request-id", request_id, "--source-id", "paper:other"
+            )
+            self.assertEqual(2, code, envelope)
+            self.assertEqual("REQUEST_ALREADY_FULFILLED", envelope["error_code"], envelope)
+            self.assertTrue(envelope["recoverable"], envelope)
+
+    def test_both_already_fulfilled_refusals_classify_as_the_same_recoverable_code(self):
+        """One state, two commands, and until now two very different verdicts for a host.
+
+        A fulfilled request refuses in two places: `record-attempt-failure` will not record
+        an attempt against it, and `fulfill` will not relink it to a second source. The
+        first message begins `Request already fulfilled:` and was classified; the second
+        begins `Request <id> is already fulfilled by source ...` and matched nothing, so it
+        fell through to the `WORKSPACE_UNREADABLE` tail — `recoverable: false`, remediated
+        as "check the workspace path and required starter files". A correct, ordinary
+        refusal was reported to its caller as a broken workspace it must not retry.
+
+        The clause that was supposed to catch it looked for "already fulfilled by a
+        different source id", a string this package has never raised, which is exactly the
+        kind of drift a stderr-substring assertion cannot see. Both doors are walked here
+        and both are asserted on `error_code` and `recoverable`.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.init_workspace(Path(tmpdir))
+            request_id = self.add_request(target)["request"]["request_id"]
+            source_id = self.deliver_and_inventory(target)
+            code, _, stderr = self.requests_json(
+                target, "fulfill", "--request-id", request_id, "--source-id", source_id
+            )
+            self.assertEqual(0, code, stderr)
+
+            relink_code, relink, _ = self.error_envelope(
+                target, "fulfill", "--request-id", request_id, "--source-id", "paper:elsewhere"
+            )
+            attempt_code, attempt, _ = self.error_envelope(
+                target,
+                "record-attempt-failure",
+                "--request-id", request_id,
+                "--failure-code", "no_result",
+                "--orchestration-id", "orch-test",
+                "--action-id", "action-0001",
+            )
+
+            for name, code, envelope in (
+                ("relink", relink_code, relink),
+                ("attempt failure", attempt_code, attempt),
+            ):
+                with self.subTest(refusal=name):
+                    self.assertEqual(2, code, envelope)
+                    self.assertEqual("REQUEST_ALREADY_FULFILLED", envelope["error_code"], envelope)
+                    self.assertTrue(envelope["recoverable"], envelope)
+                    self.assertEqual(
+                        ERRORS.remediation_for("REQUEST_ALREADY_FULFILLED"),
+                        envelope["remediation"],
+                        envelope,
+                    )
+            self.assertNotIn("workspace path", relink["remediation"].lower(), relink)
+
+            # The state itself is untouched by either refusal.
+            self.assertEqual("fulfilled", self.artifact_lines(target)[0]["status"])
+            self.assertEqual(source_id, self.artifact_lines(target)[0]["source_id"])
+
+    def test_the_classifier_names_no_message_this_package_never_raises(self):
+        """The dead clause, pinned so it cannot come back by being retyped.
+
+        `classify_error_code` matches on literal text, so a clause naming a sentence no
+        script emits is silently inert — it reads as coverage and provides none. The two
+        `already fulfilled` refusals are therefore checked against the messages the scripts
+        actually build, taken from `source_requests.py` rather than retyped here.
+        """
+        source = (SCRIPTS / "source_requests.py").read_text(encoding="utf-8")
+        self.assertNotIn("already fulfilled by a different source id", source)
+        self.assertNotIn(
+            "already fulfilled by a different source id",
+            (SCRIPTS / "_script_errors.py").read_text(encoding="utf-8"),
+            "the classifier still matches a message no script in this package raises",
+        )
+        for message in (
+            "Request req-1 is already fulfilled by source paper:x; "
+            "record a new request instead of relinking it.",
+            "Request already fulfilled: req-1 was fulfilled by source paper:x; "
+            "a fulfilled request has no failed attempt to record.",
+        ):
+            with self.subTest(message=message[:48]):
+                code = ERRORS.classify_error_code(message)
+                self.assertEqual("REQUEST_ALREADY_FULFILLED", code)
+                self.assertTrue(ERRORS.default_recoverable(code))
 
     def test_fulfill_rejects_unknown_request_and_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
