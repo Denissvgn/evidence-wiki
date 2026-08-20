@@ -1039,13 +1039,42 @@ def iter_local_code_repos(
     return repos, warnings
 
 
-def local_repo_file_count(project_root: Path, repo_dir: Path, *, limit: int | None = None) -> int:
+def local_repo_file_count(repo_dir: Path, *, limit: int | None = None) -> int:
+    """Count every regular file under a local repository, dot-prefixed entries included.
+
+    This count decides ``codebase_intake.bounded``, and the promise that flag makes is
+    consumed by the controller's raw tree snapshot, which fingerprints one entry per regular
+    file beneath the raw roots with no skip predicate and refuses the workspace once that
+    enumeration passes its own 10,000-entry cap. Measuring the bound over a *subset* of what
+    the snapshot walks makes the two caps incomparable: filtering through ``should_skip``
+    here withheld every dot-prefixed path, so a checkout whose ``.git`` carried the
+    difference was stamped bounded and then refused as unbounded, the refusal naming a tree
+    the record had already declared admissible. ``.git`` is one of
+    ``CODEBASE_LOCAL_REPO_MARKERS``, so the excluded subset was not exotic: it is what makes
+    the tree a repository at all.
+
+    ``should_skip`` is deliberately not consulted, and equally deliberately not changed. It
+    governs which paths become *records* -- dotfiles are not inventoried as separate sources
+    -- and that is a different question from how much evidence a record admits. A local
+    repository record declares the whole directory in ``raw_paths``, so every regular file
+    beneath it is attributed to the record and has to be measured by it.
+
+    What this closes is the subset mismatch, not every way the two limits can disagree. The
+    snapshot's cap is over all configured raw roots combined while this one is per
+    repository, so ``bounded`` remains a statement about one repository rather than a
+    guarantee about the workspace: several repositories, or one repository beside enough
+    other raw evidence, can still total past the snapshot's limit with every record
+    correctly bounded. Reconciling that needs a workspace-wide accounting, not a different
+    predicate here.
+    """
     count = 0
     for path in repo_dir.rglob("*"):
-        if not path.is_file() or should_skip(path.relative_to(project_root)):
+        if not path.is_file():
             continue
         count += 1
         if limit is not None and count > limit:
+            # Over the limit is all the caller can act on, so stop walking rather than
+            # enumerate a tree that has already been refused.
             return count
     return count
 
@@ -1060,7 +1089,7 @@ def build_local_codebase_record(
 ) -> dict[str, Any]:
     relative_path = repo_dir.relative_to(project_root).as_posix()
     source_id = stable_codebase_id(relative_path, PurePosixPath(relative_path).name)
-    file_count = local_repo_file_count(project_root, repo_dir, limit=CODEBASE_MAX_LOCAL_REPO_FILES)
+    file_count = local_repo_file_count(repo_dir, limit=CODEBASE_MAX_LOCAL_REPO_FILES)
     accepted = file_count <= CODEBASE_MAX_LOCAL_REPO_FILES
     warnings = [] if accepted else [
         (
