@@ -184,8 +184,11 @@ class DelegatedWorkspace:
         """Reach `blocked_on_sources` the way research does: claim, request, block.
 
         Parameterised by slug so a backlog spanning two questions is built by walking this
-        same route twice rather than by a second copy of it: a question blocked any other
-        way is not the state routing reads, and two routes into one state drift.
+        same route twice rather than by writing a second helper. Routing reads the state
+        this route produces -- a claimed question, an open request linked to it, and the
+        question blocked on that request. A question blocked some other way can look the
+        same in the fixture and route differently, and two helpers reaching one state
+        drift apart as soon as either is edited.
         """
         self.run_script(CLAIM, ["claim", "--slug", slug, "--agent-id", "research-agent"], workspace)
         request = self.run_script(
