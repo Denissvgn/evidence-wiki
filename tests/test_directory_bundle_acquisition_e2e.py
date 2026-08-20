@@ -34,6 +34,14 @@ instruct an operator to run: `workspace-template/skills/research-acquire.md` and
 synthetic fixture is what makes this a regression test for shipped documentation rather
 than for a test helper.
 
+The predicate has since landed and those three cases pass; they stay as its regression
+tests. The fourth case measures the opposite edge of the same predicate and was never red
+against a shipped state: expansion turns a directory entry into a whole subtree, so it may
+only widen admission for records the acquisition itself created. It fails only against the
+state between `1cda9e7` and the narrowing that followed it, where a blocked partial
+delivery could write new files into a PRE-EXISTING correlated bundle and have them
+admitted as residue.
+
 Nothing here asserts a line number: guards move, and the contract an operator sees is the
 error code, the refusal message, and the payload fields. Each failure message carries the
 observed refusal and its `unexpected_new_raw_paths` payload, so the red output reads as a
@@ -46,6 +54,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -279,13 +288,26 @@ class ProviderDirectoryBundleTests(unittest.TestCase):
 
     # -- walk a real session to a pending provider acquisition order -----------------
 
-    def walk_to_acquisition(self, root: Path) -> tuple[Path, str, str, dict]:
+    def walk_to_acquisition(
+        self,
+        root: Path,
+        *,
+        between_actions: Callable[[Path, str, str], None] | None = None,
+    ) -> tuple[Path, str, str, dict]:
         """research -> discovery -> candidate_review -> acquisition, all through the loop.
 
         The order has to be a genuine one: the raw-scope guard compares a `raw/` tree
         snapshot taken when the order was ISSUED against the tree at submission, so an
         order fabricated after the delivery would compare the wrong two trees and could
         not reproduce the defect.
+
+        `between_actions`, when given, is called with `(target, request_id, candidate_id)`
+        in the gap the completed candidate review leaves — after that submission, before
+        the acquisition order is issued. That gap is the only place a caller can put
+        evidence that must be BOTH pre-existing at issuance and stamped for the request
+        and candidate this order will scope, because the candidate id does not exist until
+        discovery has run. It is also the delivery route the shipped contract recommends
+        for a capture that fulfils nothing.
         """
         target = self.init_workspace(root, question=True)
         self.enable_academic_providers(target)
@@ -369,6 +391,13 @@ class ProviderDirectoryBundleTests(unittest.TestCase):
             artifacts=["sources/discovery/candidates.jsonl"],
         )
         self.assertEqual(0, code, stderr)
+
+        if between_actions is not None:
+            self.assertIsNone(
+                CONTROLLER.load_session(target, "orch-test").get("pending_action_id"),
+                "a between-actions delivery must happen while no work order brackets it",
+            )
+            between_actions(target, request_id, candidate_id)
 
         _, acquisition_order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
         self.assertEqual("acquisition", acquisition_order["phase"], acquisition_order)
@@ -549,6 +578,129 @@ class ProviderDirectoryBundleTests(unittest.TestCase):
                     "the session to report phase 'paused'",
                     code, payload, target,
                 ),
+            )
+
+    def test_a_blocked_partial_delivery_may_not_write_into_a_pre_existing_bundle(self):
+        """A bundle the action did not create is not a subtree it may write into.
+
+        The attribution predicate the test above depends on expands a directory-valued
+        `raw_paths` to every regular file beneath it. That expansion is what makes a
+        bundle deliverable at all, and it is safe for a record the action itself created:
+        the acquirer wrote the whole subtree, so admitting the whole subtree admits only
+        its own work.
+
+        Applied to a record that ALREADY EXISTED when the order was issued, the same
+        expansion is a licence to write anywhere inside somebody else's payload. A
+        pre-existing correlated bundle would let a partial delivery drop arbitrary new
+        files into its subtree and have every one of them admitted, because inventory
+        attributes files to the record whose directory contains them and asks nothing
+        about who put them there. The residue a blocked partial delivery is allowed to
+        leave is scoped to records the action created; a pre-existing correlated record
+        contributes its literal declared paths and nothing more, which is exactly what it
+        contributed before expansion existed.
+
+        Getting a record into that state is the whole difficulty, and the gap between a
+        completed candidate review and the acquisition order is the only place it fits:
+        the candidate id does not exist until discovery has run, and the record must be in
+        the manifest before issuance. Delivered and inventoried there, the bundle is
+        pre-existing evidence correlated to the request and candidate the next order
+        scopes — which is also the between-actions route the shipped delivery contract
+        recommends for a capture that fulfils nothing.
+
+        A file is then planted deep inside that subtree while the order is open, and the
+        submission must be refused naming it. The allowed set is asserted alongside the
+        refusal, because "refused" on its own is also what a fixture that never reached
+        this arm would produce: the two literal declared paths are the guard's own
+        evidence that it evaluated a pre-existing record, and the absence of the bundle's
+        own member files from the unexpected set is its evidence that they were in the
+        issuance baseline rather than newly delivered.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delivered: dict[str, str] = {}
+
+            def deliver_bundle_between_actions(
+                workspace: Path, request_id: str, candidate_id: str
+            ) -> None:
+                delivered["relative"] = write_directory_bundle(
+                    workspace,
+                    request_id=request_id,
+                    candidate_id=candidate_id,
+                    retrieved_by="fetch_sources.py/arxiv",
+                )
+                self.assert_json_script_ok(
+                    INVENTORY, ["--project-root", str(workspace), "--report", "--format", "json"]
+                )
+                delivered["source_id"] = self.assert_bundle_is_one_record(
+                    workspace, delivered["relative"]
+                )
+
+            target, _, _, order = self.walk_to_acquisition(
+                root, between_actions=deliver_bundle_between_actions
+            )
+            relative = delivered["relative"]
+            self.assertEqual(
+                [delivered["source_id"]],
+                [str(record["id"]) for record in self.manifest_records(target)],
+                "the bundle record must be the manifest state the acquisition order inherits",
+            )
+
+            planted = f"{relative}/sections/planted-appendix.tex"
+            planted_path = target / planted
+            planted_path.parent.mkdir(parents=True, exist_ok=True)
+            planted_path.write_text(
+                "\\section{Appendix}\nPlanted inside a bundle this action did not deliver.\n",
+                encoding="utf-8",
+            )
+
+            code, payload, stderr = self.submit(
+                root, target, order["action_id"],
+                outcome="blocked",
+                summary="Fetched more of the bundle but could not finish; recording a partial delivery.",
+                artifacts=[relative, f"{relative}.provenance.yml", "sources/manifest.jsonl"],
+            )
+            self.assertEqual(
+                CONTROLLER.EXIT_INVALID,
+                code,
+                diagnose(
+                    "blocked-partial",
+                    "the planted file to be refused (exit "
+                    f"{CONTROLLER.EXIT_INVALID}) rather than admitted as partial-delivery residue",
+                    code, payload, target,
+                ),
+            )
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", payload["error_code"], payload)
+            self.assertTrue(payload["recoverable"], payload)
+            self.assertIn(
+                "changed raw evidence outside correlated partial deliveries",
+                payload["message"],
+                payload,
+            )
+            details = payload["details"]
+            self.assertEqual(
+                [planted],
+                details["unexpected_new_raw_paths"],
+                "the refusal must name the planted file, and name only it: the bundle's own "
+                f"members were delivered before issuance. Raw tree: {raw_tree_files(target)}",
+            )
+            self.assertEqual(
+                [relative, f"{relative}.provenance.yml"],
+                sorted(details["allowed_new_raw_paths"]),
+                "a pre-existing correlated record may contribute only its literal declared "
+                "paths; anything wider means the subtree expansion reached it",
+            )
+            self.assertEqual(
+                [delivered["source_id"]],
+                [str(record["id"]) for record in self.manifest_records(target)],
+                "a refused partial delivery must leave the manifest as it found it",
+            )
+            session = CONTROLLER.load_session(target, "orch-test")
+            self.assertEqual("active", session["status"], session)
+            self.assertEqual(
+                order["action_id"],
+                session["pending_action_id"],
+                "the refusal must leave the same order open for the acquirer to correct and "
+                f"resubmit, not pause or close the session: {stderr}",
             )
 
 
