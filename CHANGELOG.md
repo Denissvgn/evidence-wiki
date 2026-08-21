@@ -48,6 +48,143 @@
   stated where it is relied upon rather than assumed away. Verified by reverting only the
   production change and confirming the refusal tests fail while both `--require-checksum`
   controls still pass.
+- **Fix: a file delivered under a dot path inside a bundle was admitted by the record that
+  owns it and counted by nothing.** An arXiv or LaTeX bundle record declares one `raw_paths`
+  entry — the bundle directory — and no member list anywhere, so the whole subtree beneath
+  it is the record's unit of admission: the controller expands that directory-shaped entry
+  into every regular file beneath it with no skip predicate, and the raw tree snapshot
+  fingerprints one entry per regular file the same way. `bundle_file_count`, which fills the
+  record's `metadata.file_count`, filtered members through `should_skip` instead — and
+  applied that predicate to the path relative to the *workspace* rather than to the bundle,
+  so one dot component anywhere in the prefix suppressed the whole subtree under it. A file
+  written to `<bundle>/.build/main.aux` was therefore admitted under the record and
+  invisible in it: the count did not move, and `raw_fingerprint`, which filters the same
+  way, came back byte-identical, so the delivery triggered no re-normalization either.
+
+  `metadata.file_count` now counts every regular file beneath the bundle directory,
+  dot-prefixed members included, which is the same subtree the record admits and the
+  snapshot walks. It classifies entries the way the snapshot classifies them — `lstat`
+  rather than `is_file`, a real regular file rather than a symlink to one, a link count of
+  exactly one — because the snapshot refuses a symlink or a multiply-linked file rather than
+  enumerating it, and counting either would put the same subset mismatch back with the
+  excluded set merely moved to the other side. `should_skip` is unchanged and still decides
+  which paths become *records*: dotfiles are still not inventoried as separate sources,
+  because how a record is selected and how much evidence it admits are different questions.
+
+  Narrowing the other side was measured and rejected. Teaching raw-path attribution to skip
+  dot paths makes the counts agree just as well and refuses a lawfully delivered local code
+  repository on its own `.git/HEAD` — the defect the local-repository entry below closes,
+  arriving from the other direction. Widening the count is the direction that leaves both
+  record kinds consistent with the tree the snapshot walks.
+
+  **The fingerprint half is disclosed, not closed.** `raw_fingerprint_paths` still filters
+  through `should_skip`, deliberately: it names the bytes normalization re-reads, not the
+  bytes the record admits, and widening it would contradict what that field is for rather
+  than repair it. A dot-prefixed member beneath a bundle therefore still reproduces a
+  byte-identical `raw_fingerprint` and still triggers no re-normalization. Nor is the count
+  a member list: nothing in the record bounds what a delivered bundle may contain, and
+  closing that needs an inventory-level member list rather than a wider predicate here.
+
+  Two refusals to expect for anyone holding an open order. A bundle record with a
+  dot-prefixed member no longer fingerprints as it did, and the acquirer's mandatory
+  `source_inventory.py --report` re-derives every record in the manifest, not only the ones
+  its order fulfils. So an order issued before this change and submitted after it can be
+  refused two ways. Where the rewritten record is one the order fulfils, the refusal is
+  `manifest_record_changed_after_issuance`. Where it is any other pre-existing record — an
+  unrelated paper whose bundle happens to carry a `.latexmkrc` — the submit fails the
+  manifest scope guard first: `ORCHESTRATION_POSTCONDITION_FAILED`, "changed, removed, or
+  added evidence-manifest records outside fulfilled source scope", with
+  `manifest_scope_violations.changed_outside_scope` naming that untouched record. Its
+  printed remediation, "Restore existing and out-of-scope manifest records", cannot be
+  reached by re-running inventory, which derives the same new count again. Both are
+  recoverable the same way and by the same route: issue a fresh order against the
+  re-inventoried manifest and resubmit, rather than editing counts back by hand. The same
+  holds for every record whose count this release moved, local repositories included.
+  Reproduced on 0.5.2.
+- **Fix: a stray file delivered during a blocked acquisition could be reported as a broken
+  raw tree.** A `blocked` acquisition submission records a partial delivery: something was
+  fetched, nothing was fulfilled. Its raw-scope guard asks inventory to attribute the
+  delivered files to the manifest records the order correlates, and both consumers of that
+  attribution — the `raw_paths` cross-check and the set of admitted new files — are keyed
+  on the correlated records the action *appended*. A delivery that continues an earlier one
+  appends none: the correlated record was already in the manifest when the order was
+  issued. In that state the attribution pass has no consumer and its result was discarded
+  whatever it contained, the admitted set coming entirely from the literal declared paths
+  of the pre-existing correlated records.
+
+  It was derived anyway: the gate also fired whenever the delivery had added any file at
+  all beneath the configured raw source roots, which is exactly what a stray delivery does
+  and what a continued one usually does. Deriving attribution re-walks and re-hashes
+  the whole raw tree, and it can fail. When it failed, the raise travelled out ahead of a
+  refusal that had already been decided: the operator was told "delivered raw evidence
+  could not be re-derived by source inventory rules" and sent to repair a raw tree that was
+  not broken, while the one file that was actually wrong was never named. The refusal that
+  fits — "blocked acquisition changed raw evidence outside correlated partial deliveries",
+  carrying the stray path in `unexpected_new_raw_paths` — was reachable only when the
+  derivation happened to succeed.
+
+  The gate now fires on the correlated records the action appended and on nothing else,
+  which is the shape both completed arms already had — each gates on the id set its own
+  consumers read, though the sets themselves differ: the completed arms use the
+  controller-issued fulfilled ids, this arm the manifest additions it has just observed.
+  Nothing else in the block moved. A partial delivery that does append a correlated record
+  still derives attribution exactly once and is still cross-checked against it, and since
+  both consumers iterate that id set alone, not one delivery's admitted paths change on any
+  arm. What changes is the delivery that appends nothing: it is judged on the files it left
+  rather than on whether an unconsulted derivation happened to survive. The two refusals
+  that derivation could raise — a raw tree inventory cannot read, and a peer holding the
+  acquisition barrier — therefore stop reaching this case, and a continued delivery stops
+  paying for a tree walk whose answer was thrown away.
+
+  Introduced with the attribution predicate described in the next entry and fixed before
+  either shipped: 0.5.2 asks no derivation on this arm, so no released version can produce
+  the substitution. Reproduced on this branch.
+- **Fix: the memoised raw attribution could be reused for a tree it was never derived
+  from, and the refusal it feeds did not say which declared path was unaccounted for.** One
+  `submit` verifies the same workspace up to three times, so the inventory derivation is
+  memoised for the run, and the key was the raw-tree content fingerprint alone. That
+  fingerprint is a statement about regular files — the raw-tree snapshot records an entry per
+  file and none for a directory — so creating an empty directory left the key byte-identical
+  while changing what inventory derives from the same tree. An empty `.git/` is one of the
+  markers that turns a directory into a local-repository record: on either side of that one
+  `mkdir` the same tree derives a different record set, and the second and third verification
+  passes were answered with the first pass's attribution.
+
+  The memo now keys on that fingerprint composed with a digest of the directory set the
+  derivation walked — directory names only, no file bytes re-hashed — so an answer is reused
+  only while both are unchanged. The composition is internal to the derivation, so every call
+  site still passes the one fingerprint it already holds, and one accepted submission still
+  costs exactly one derivation pass. The raw-tree snapshot was deliberately not widened to
+  record directories: its entries are also the raw-scope guards' universe, so a directory
+  appearing among them would surface as an unexpected new raw path and refuse legitimate
+  deliveries — trading a stale memo for a broken bundle acquisition.
+
+  The refusal for a record whose `raw_paths` is not what inventory derives now carries a
+  third field beside the two lists, `declared_not_derived`: the declared paths inventory
+  accounts for none of, in declared order. Both lists side by side say only that they
+  disagree, which on a hand-appended path left the operator to diff them by eye, and the
+  standing advice — re-run `source_inventory.py --report` — does not repair a hand-edited
+  record, so following it reached a second, honest refusal rather than the fix. The new
+  field names the path to remove, and the advice is unchanged. It supplements the
+  pinned-order equality test and never replaces it, and it is one-sided on purpose: it
+  reports what a record declared that inventory accounts for nowhere, so it is empty
+  whenever every declared path is accounted for. A reorder, a duplicate, and a declared
+  list that omits a derived path are all still mismatches, each reporting an empty
+  `declared_not_derived` — read that as "nothing surplus was declared", not as "the lists
+  agree".
+
+  Mirrored alongside, as hygiene rather than a fix: the bundle-directory expansion inside the
+  derivation now applies the raw-tree snapshot's own file predicate — one `lstat`, link-like
+  entries refused, regular files whose link count is not one refused — where it had used
+  `Path.is_file()`, which resolves symlinks and accepts hardlinks. No behaviour changes
+  today, because the snapshot refuses such a file before the expansion is ever consulted;
+  that agreement was incidental, and is now stated.
+
+  Both defects arrived with the derived-attribution predicate described in the entries below
+  and were caught before any release carried them, so there is no released version to
+  reproduce them on. Both were reproduced on this branch by reverting the repair and watching
+  the test fail: the mismatch payload missing its field, and a derivation across one `mkdir`
+  answered from the stale memo.
 
 - **Fix: a directory-shaped `raw_paths` entry could not be delivered inside any acquisition
   order.** A bundle record — an arXiv or LaTeX source archive, a local code repository —
@@ -186,16 +323,16 @@
   inventoried as separate sources, because how a record is selected and how much evidence it
   admits are different questions.
 
-  **That subset mismatch is closed for local repositories and still open for bundles.** The
-  same shape survives one record kind over. `bundle_file_count`, which fills an arXiv or
-  LaTeX bundle's `metadata.file_count`, and `raw_fingerprint_paths`, which decides what a
-  `paper` record's `raw_fingerprint` covers, both still filter through `should_skip` over
-  the same directory the raw-tree snapshot walks unfiltered. Nothing contradicts itself
-  there the way it did for repositories, because a bundle record carries no `bounded` flag
-  to be contradicted — so the effect is quieter rather than absent: the count states less
-  than the tree the record admits, and a dot-prefixed file beneath the bundle falls outside
-  the fingerprint that decides re-normalization. Answering the same question for those two
-  functions is not part of this release.
+  **That subset mismatch is closed for local repositories, and for bundle counts by the
+  entry above.** The same shape survived one record kind over: `bundle_file_count`, which
+  fills an arXiv or LaTeX bundle's `metadata.file_count`, filtered through `should_skip` over
+  the same directory the raw-tree snapshot walks unfiltered, and it is widened in this same
+  release. Nothing contradicted itself there the way it did for repositories, because a
+  bundle record carries no `bounded` flag to be contradicted — the effect was quieter rather
+  than absent: the count stated less than the tree the record admits.
+  `raw_fingerprint_paths`, which decides what a `paper` record's `raw_fingerprint` covers,
+  still filters that way and is deliberately left as it is, so a dot-prefixed file beneath a
+  bundle still falls outside the fingerprint that decides re-normalization.
 
   **This is not a workspace-wide bound, and should not be read as one.** The snapshot's
   limit totals across every configured raw source root while the intake limit is per

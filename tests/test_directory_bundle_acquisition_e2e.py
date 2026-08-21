@@ -4,9 +4,9 @@ WRITTEN RED, KEPT AS REGRESSION TESTS. Every test here asserts the *desired* end
 and the first three failed on the controller as it stood when they were written. The
 unified attribution predicate has since landed — allowed new raw files became what
 `source_inventory.build_records` attributes to the fulfilled/correlated records, rather
-than the literal `raw_paths` strings — so all four pass today and stay as its regression
-tests. Nothing here is marked `xfail` or skipped: this repository uses neither mechanism,
-and a suppressed regression test is a regression test nobody reads.
+than the literal `raw_paths` strings — so every test here passes today and stays as its
+regression test. Nothing here is marked `xfail` or skipped: this repository uses neither
+mechanism, and a suppressed regression test is a regression test nobody reads.
 
 The defect, stated once:
 
@@ -43,6 +43,16 @@ PRE-EXISTING correlated bundle and have them admitted as residue — there it fa
 behaviour, admitting what it should refuse. It also fails against states before
 `1cda9e7`, but on a payload field rather than on that behaviour, so only the window is
 evidence of the defect it pins.
+
+The fifth case measures what that same arm SAYS when it refuses. A continued partial
+delivery appends no correlated record, which leaves the attribution predicate with an
+empty question and no consumer for its answer — but the guard derived it anyway, and
+derivation re-walks the whole raw tree and can raise. When it raised, the refusal an
+operator needed — this delivered file is correlated to nothing — was replaced by an
+unrelated one about a broken raw tree, naming no file at all. Its red state is bounded by
+the same window as the fourth case's, and for the same reason: before `1cda9e7` this arm
+asked no derivation and so had nothing to raise, so the substitution it pins was reachable
+only between that commit and the narrowing of the gate that called it.
 
 Nothing here asserts a line number: guards move, and the contract an operator sees is the
 error code, the refusal message, and the payload fields. Each failure message carries the
@@ -266,6 +276,69 @@ class DelegatedDirectoryBundleTests(DelegatedWorkspace, unittest.TestCase):
                 diagnose("delegated", "the delegated order to be accepted (exit 0)", code, envelope, workspace),
             )
 
+    def test_a_dot_path_member_of_a_delivered_bundle_is_both_admitted_and_counted(self):
+        """Admission and the record's own account of itself, asserted in the same delivery.
+
+        A bundle's subtree is its record's unit of admission, so a file the acquirer writes
+        under a dot path inside the delivered directory is admitted: attribution expands the
+        directory entry with no skip predicate, and the order is accepted. The record's
+        ``metadata.file_count`` used to filter that same subtree through ``should_skip``, so
+        the delivery was admitted and invisible at once -- the count stated less than the
+        tree the record admits, and nothing in the manifest showed the extra member had
+        arrived.
+
+        Both halves are asserted here rather than in separate places, because it is the
+        pairing that was wrong: either alone reads as reasonable.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            order = self.pending_order(workspace)
+
+            relative = write_directory_bundle(
+                workspace, request_id=request_id, retrieved_by=ACQUIRER
+            )
+            bundle = workspace / relative
+            (bundle / ".build").mkdir()
+            (bundle / ".build" / "main.aux").write_text("\\relax\n", encoding="utf-8")
+
+            self.run_script(DELEGATED_INVENTORY, ["--report"], workspace)
+            source_id = self.assert_bundle_is_one_record(workspace, relative)
+            record = next(r for r in manifest_records(workspace) if r["id"] == source_id)
+            members = sorted(
+                path.relative_to(workspace).as_posix() for path in bundle.rglob("*") if path.is_file()
+            )
+            self.assertEqual(
+                [
+                    f"{relative}/.build/main.aux",
+                    f"{relative}/00README.json",
+                    f"{relative}/main.tex",
+                ],
+                members,
+            )
+            self.assertEqual(
+                len(members),
+                record["metadata"]["file_count"],
+                "the record must count every regular file it admits, dot-prefixed members "
+                f"included; record was {record}",
+            )
+
+            self.run_script(DELEGATED_NORMALIZE, ["--source-id", source_id], workspace)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            code, envelope = self.submit(
+                workspace,
+                order["action_id"],
+                artifacts=[relative, f"{relative}.provenance.yml", "sources/manifest.jsonl"],
+            )
+            self.assertEqual(
+                0,
+                code,
+                "a dot-path member inside the delivered bundle is admitted under the record "
+                "that declares the directory; refusing it here would contradict the count "
+                f"asserted above. envelope: {json.dumps(envelope, indent=2, sort_keys=True)}",
+            )
+
 
 class ProviderDirectoryBundleTests(unittest.TestCase):
     """The provider (non-delegated) and blocked-partial arms, on the controller harness.
@@ -420,6 +493,46 @@ class ProviderDirectoryBundleTests(unittest.TestCase):
             f"got {records[0]['raw_paths']} against raw tree {raw_tree_files(target)}",
         )
         return str(records[0]["id"])
+
+    def order_over_a_pre_existing_bundle(self, root: Path) -> tuple[Path, dict, str, str]:
+        """An acquisition order whose one correlated manifest record pre-dates its issuance.
+
+        Both blocked-partial cases below start from this state and it is the awkward one to
+        reach, so it is built once here rather than copied into each. The bundle is
+        delivered and inventoried in the gap `walk_to_acquisition` leaves between the
+        completed candidate review and the order, which is the only point where evidence
+        can be BOTH pre-existing at issuance and stamped for the request and candidate the
+        order will scope. What that buys either test is a correlated record the action
+        under test did not append.
+        """
+        delivered: dict[str, str] = {}
+
+        def deliver_bundle_between_actions(
+            workspace: Path, request_id: str, candidate_id: str
+        ) -> None:
+            delivered["relative"] = write_directory_bundle(
+                workspace,
+                request_id=request_id,
+                candidate_id=candidate_id,
+                retrieved_by="fetch_sources.py/arxiv",
+            )
+            self.assert_json_script_ok(
+                INVENTORY, ["--project-root", str(workspace), "--report", "--format", "json"]
+            )
+            delivered["source_id"] = self.assert_bundle_is_one_record(
+                workspace, delivered["relative"]
+            )
+
+        target, _, _, order = self.walk_to_acquisition(
+            root, between_actions=deliver_bundle_between_actions
+        )
+        self.assertEqual(
+            [delivered["source_id"]],
+            [str(record["id"]) for record in self.manifest_records(target)],
+            "the bundle record must be the manifest state the acquisition order inherits, "
+            "so that the action under test appends no correlated record of its own",
+        )
+        return target, order, delivered["relative"], delivered["source_id"]
 
     # -- provider arm: the documented first-party command ----------------------------
 
@@ -619,33 +732,7 @@ class ProviderDirectoryBundleTests(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            delivered: dict[str, str] = {}
-
-            def deliver_bundle_between_actions(
-                workspace: Path, request_id: str, candidate_id: str
-            ) -> None:
-                delivered["relative"] = write_directory_bundle(
-                    workspace,
-                    request_id=request_id,
-                    candidate_id=candidate_id,
-                    retrieved_by="fetch_sources.py/arxiv",
-                )
-                self.assert_json_script_ok(
-                    INVENTORY, ["--project-root", str(workspace), "--report", "--format", "json"]
-                )
-                delivered["source_id"] = self.assert_bundle_is_one_record(
-                    workspace, delivered["relative"]
-                )
-
-            target, _, _, order = self.walk_to_acquisition(
-                root, between_actions=deliver_bundle_between_actions
-            )
-            relative = delivered["relative"]
-            self.assertEqual(
-                [delivered["source_id"]],
-                [str(record["id"]) for record in self.manifest_records(target)],
-                "the bundle record must be the manifest state the acquisition order inherits",
-            )
+            target, order, relative, source_id = self.order_over_a_pre_existing_bundle(root)
 
             planted = f"{relative}/sections/planted-appendix.tex"
             planted_path = target / planted
@@ -692,7 +779,7 @@ class ProviderDirectoryBundleTests(unittest.TestCase):
                 "paths; anything wider means the subtree expansion reached it",
             )
             self.assertEqual(
-                [delivered["source_id"]],
+                [source_id],
                 [str(record["id"]) for record in self.manifest_records(target)],
                 "a refused partial delivery must leave the manifest as it found it",
             )
@@ -703,6 +790,125 @@ class ProviderDirectoryBundleTests(unittest.TestCase):
                 session["pending_action_id"],
                 "the refusal must leave the same order open for the acquirer to correct and "
                 f"resubmit, not pause or close the session: {stderr}",
+            )
+
+    def test_a_stray_delivery_is_refused_as_a_stray_file_when_derivation_fails(self):
+        """A stray file is named as a stray file even when re-derivation cannot run.
+
+        The blocked-partial raw guard has two consumers of inventory attribution, and both
+        are keyed on the correlated records this action APPENDED. A continued partial
+        delivery appends nothing: the correlated record was already in the manifest when
+        the order was issued, so that id set is empty, attribution can only ever answer
+        the empty question, and its result is discarded whatever it says. Everything
+        admitted in that state comes from the literal `raw_paths` of the pre-existing
+        correlated records, and a file outside them is refused by name.
+
+        Deriving attribution anyway is therefore work with no consumer — and it is worse
+        than wasted, because the derivation re-walks and re-inventories the whole raw tree
+        and can fail. When it fails it raises, and the raise preempts a refusal that was
+        already fully determined: the operator is told "delivered raw evidence could not
+        be re-derived by source inventory rules" and sent to repair a raw tree that is not
+        broken, while the one file that is actually wrong is never named. The verdict is
+        replaced by an unrelated diagnosis, so the operator cannot act on either.
+
+        The failure is forced here rather than waited for. `build_records` is patched to
+        raise, and the submission must still be refused as a stray delivery naming
+        `raw/papers/stray-unrelated.txt`, which is the diagnosis an operator can act on.
+        The derivation must also not be reached at all, which is asserted directly: with
+        no consumer for its answer, running it can only cost a tree walk and risk this
+        substitution.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target, order, relative, source_id = self.order_over_a_pre_existing_bundle(root)
+
+            stray = "raw/papers/stray-unrelated.txt"
+            stray_path = target / stray
+            stray_path.parent.mkdir(parents=True, exist_ok=True)
+            stray_path.write_text(
+                "Landed under raw/ during the order and correlated to nothing.\n",
+                encoding="utf-8",
+            )
+
+            # Patch the sibling module the controller under test is actually holding:
+            # every controller module memoises its own siblings, so a separately loaded
+            # copy of source_inventory would never be consulted and this test would pass
+            # without having forced anything.
+            source_inventory = CONTROLLER.load_sibling_module("source_inventory")
+            derivations: list[int] = []
+
+            def failing_build_records(*_args, **_kwargs):
+                derivations.append(1)
+                raise RuntimeError("synthetic inventory derivation failure")
+
+            with mock.patch.object(source_inventory, "build_records", failing_build_records):
+                code, payload, stderr = self.submit(
+                    root, target, order["action_id"],
+                    outcome="blocked",
+                    summary="Fetched something unrelated and stopped; recording a partial delivery.",
+                    artifacts=[relative, f"{relative}.provenance.yml", "sources/manifest.jsonl"],
+                )
+
+            self.assertEqual(
+                CONTROLLER.EXIT_INVALID,
+                code,
+                diagnose(
+                    "blocked-partial",
+                    f"the stray file to be refused (exit {CONTROLLER.EXIT_INVALID})",
+                    code, payload, target,
+                ),
+            )
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", payload["error_code"], payload)
+            self.assertTrue(payload["recoverable"], payload)
+            self.assertIn(
+                "changed raw evidence outside correlated partial deliveries",
+                payload["message"],
+                diagnose(
+                    "blocked-partial",
+                    "the stray file to be diagnosed as a stray file",
+                    code, payload, target,
+                ),
+            )
+            self.assertNotIn(
+                "could not be re-derived",
+                payload["message"],
+                diagnose(
+                    "blocked-partial",
+                    "the raw tree not to be blamed for a delivery that is merely uncorrelated",
+                    code, payload, target,
+                ),
+            )
+            details = payload["details"]
+            self.assertEqual(
+                [stray],
+                details["unexpected_new_raw_paths"],
+                "the refusal must name the stray file, and name only it: the bundle's own "
+                f"members were delivered before issuance. Raw tree: {raw_tree_files(target)}",
+            )
+            self.assertEqual(
+                [relative, f"{relative}.provenance.yml"],
+                sorted(details["allowed_new_raw_paths"]),
+                "with nothing appended, admission is the literal declared paths of the "
+                "pre-existing correlated record and nothing else",
+            )
+            self.assertEqual(
+                0,
+                len(derivations),
+                "attribution has no consumer when the action appended no correlated record, "
+                f"so it must not be derived at all; observed {len(derivations)} pass(es). {stderr}",
+            )
+            self.assertEqual(
+                [source_id],
+                [str(record["id"]) for record in self.manifest_records(target)],
+                "a refused partial delivery must leave the manifest as it found it",
+            )
+            session = CONTROLLER.load_session(target, "orch-test")
+            self.assertEqual("active", session["status"], session)
+            self.assertEqual(
+                order["action_id"],
+                session["pending_action_id"],
+                "the refusal must leave the same order open for the acquirer to remove the "
+                f"stray file and resubmit: {stderr}",
             )
 
 
