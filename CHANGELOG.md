@@ -40,6 +40,52 @@
   Introduced with the attribution predicate described in the next entry and fixed before
   either shipped: 0.5.2 asks no derivation on this arm, so no released version can produce
   the substitution. Reproduced on this branch.
+- **Fix: the memoised raw attribution could be reused for a tree it was never derived
+  from, and the refusal it feeds did not say which declared path was unaccounted for.** One
+  `submit` verifies the same workspace up to three times, so the inventory derivation is
+  memoised for the run, and the key was the raw-tree content fingerprint alone. That
+  fingerprint is a statement about regular files — the raw-tree snapshot records an entry per
+  file and none for a directory — so creating an empty directory left the key byte-identical
+  while changing what inventory derives from the same tree. An empty `.git/` is one of the
+  markers that turns a directory into a local-repository record: on either side of that one
+  `mkdir` the same tree derives a different record set, and the second and third verification
+  passes were answered with the first pass's attribution.
+
+  The memo now keys on that fingerprint composed with a digest of the directory set the
+  derivation walked — directory names only, no file bytes re-hashed — so an answer is reused
+  only while both are unchanged. The composition is internal to the derivation, so every call
+  site still passes the one fingerprint it already holds, and one accepted submission still
+  costs exactly one derivation pass. The raw-tree snapshot was deliberately not widened to
+  record directories: its entries are also the raw-scope guards' universe, so a directory
+  appearing among them would surface as an unexpected new raw path and refuse legitimate
+  deliveries — trading a stale memo for a broken bundle acquisition.
+
+  The refusal for a record whose `raw_paths` is not what inventory derives now carries a
+  third field beside the two lists, `declared_not_derived`: the declared paths inventory
+  accounts for none of, in declared order. Both lists side by side say only that they
+  disagree, which on a hand-appended path left the operator to diff them by eye, and the
+  standing advice — re-run `source_inventory.py --report` — does not repair a hand-edited
+  record, so following it reached a second, honest refusal rather than the fix. The new
+  field names the path to remove, and the advice is unchanged. It supplements the
+  pinned-order equality test and never replaces it, and it is one-sided on purpose: it
+  reports what a record declared that inventory accounts for nowhere, so it is empty
+  whenever every declared path is accounted for. A reorder, a duplicate, and a declared
+  list that omits a derived path are all still mismatches, each reporting an empty
+  `declared_not_derived` — read that as "nothing surplus was declared", not as "the lists
+  agree".
+
+  Mirrored alongside, as hygiene rather than a fix: the bundle-directory expansion inside the
+  derivation now applies the raw-tree snapshot's own file predicate — one `lstat`, link-like
+  entries refused, regular files whose link count is not one refused — where it had used
+  `Path.is_file()`, which resolves symlinks and accepts hardlinks. No behaviour changes
+  today, because the snapshot refuses such a file before the expansion is ever consulted;
+  that agreement was incidental, and is now stated.
+
+  Both defects arrived with the derived-attribution predicate described in the entries below
+  and were caught before any release carried them, so there is no released version to
+  reproduce them on. Both were reproduced on this branch by reverting the repair and watching
+  the test fail: the mismatch payload missing its field, and a derivation across one `mkdir`
+  answered from the stale memo.
 
 - **Fix: a directory-shaped `raw_paths` entry could not be delivered inside any acquisition
   order.** A bundle record — an arXiv or LaTeX source archive, a local code repository —
