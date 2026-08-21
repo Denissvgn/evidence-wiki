@@ -10,11 +10,13 @@
   `strict_checksum_refusals` read the record's primary `provenance` and nothing else, so a
   record whose second capture had been proven mismatched — `checksum_verified: false`
   against the bytes actually delivered — passed the mismatch-rejecting mode untouched. That
-  is now a refusal, and the refusal names the capture: the offending `path` appears in the
-  warning text and in the error envelope under `details.refusals[].path`, so an operator
-  reading a refused run can tell which of the record's captures failed rather than only
-  which record was dropped. A record with several failing captures raises one refusal per
-  capture; `details.source_ids` and the envelope's count stay counts of sources.
+  is now a refusal, and a secondary capture's refusal names it: the offending `path`
+  appears in the warning text and in the error envelope under `details.refusals[].path`, so
+  an operator reading a refused run can tell which of the record's captures failed rather
+  than only which record was dropped. A primary-capture mismatch is unchanged and still
+  names the record alone, carrying no `path` — nothing on the record says which delivered
+  path the primary `provenance` describes. A record with several failing captures raises one
+  refusal per capture; `details.source_ids` and the envelope's count stay counts of sources.
 
   This is a narrowing of an opt-in flag, and it is disclosed as such. A workspace that runs
   `source_inventory.py --reject-mismatch` over multi-capture records may see it exit

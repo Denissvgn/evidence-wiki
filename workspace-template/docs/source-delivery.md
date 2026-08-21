@@ -399,11 +399,13 @@ Behavior in `source_inventory.py`:
   failed verification is refused even though its primary provenance — the LaTeX
   bundle root — carries no checksum at all, and a link record whose primary capture
   verified is refused when a second link file naming the same URL did not. The
-  refusal names the offending capture: its `path` appears in the warning text and in
-  the error envelope under `details.refusals[].path`, so the operator can tell which
-  of the record's captures failed rather than only which record was dropped. A record
-  with several failing captures raises one refusal per capture, all naming that
-  record.
+  refusal of a *secondary* capture names it: its `path` appears in the warning text
+  and in the error envelope under `details.refusals[].path`, so the operator can tell
+  which of the record's captures failed rather than only which record was dropped. A
+  primary-capture mismatch is unchanged and still names the record alone, without a
+  `path`: nothing on the record records which delivered path the primary `provenance`
+  describes, and naming one here would be a guess rather than a reading. A record with
+  several failing captures raises one refusal per capture, all naming that record.
 - `--require-checksum` stays primary-only, and that is a constraint rather than an
   omission. The two flags ask different questions. A checksum that is present and
   did not verify is positive evidence about a specific capture, so it is asked of
