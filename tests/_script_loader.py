@@ -120,7 +120,10 @@ def load_module(name: str, path: str | Path) -> ModuleType:
         cached = _MODULE_CACHE.get(key)
         if cached is not None:
             return cached
-        module = _execute(name, script)
+        # Executed from ``key``, not from ``script``: the cached identity and the
+        # module's own ``__file__`` then agree, so a script that derives paths from
+        # ``__file__`` reads the same spelling this cache keyed it under.
+        module = _execute(name, key)
         _MODULE_CACHE[key] = module
         return module
 

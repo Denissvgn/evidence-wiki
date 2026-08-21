@@ -151,7 +151,9 @@ class NoPrivateLoadersTests(unittest.TestCase):
     including deliberately unparseable.
     """
 
-    TEST_CODE_DIRS = ("", "seam_cases")
+    # Excluded by name rather than by listing what to include, so a directory of test
+    # code added later is swept without anyone remembering to add it here.
+    NON_TEST_CODE_DIRS = frozenset({"fixtures", "__pycache__"})
 
     def test_code_under_test_parses(self):
         """The sweep below is only a guarantee if it read every file it should."""
@@ -172,4 +174,8 @@ class NoPrivateLoadersTests(unittest.TestCase):
 
     def _test_sources(self) -> list[Path]:
         root = REPO_ROOT / "tests"
-        return sorted(path for directory in self.TEST_CODE_DIRS for path in (root / directory).glob("*.py"))
+        return sorted(
+            path
+            for path in root.rglob("*.py")
+            if self.NON_TEST_CODE_DIRS.isdisjoint(path.relative_to(root).parts[:-1])
+        )
