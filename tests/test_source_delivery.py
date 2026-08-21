@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -589,6 +590,263 @@ class SourceDeliveryTests(unittest.TestCase):
                 any("checksum mismatch for raw/pdf/2601.00001v1.pdf" in warning for warning in warnings)
             )
 
+    def write_paired_sidecars(self, workspace: Path, pdf_checksum: str) -> str:
+        """Bundle sidecar without a checksum plus a PDF sidecar carrying `pdf_checksum`."""
+        pdf_rel = "raw/pdf/2601.00001v1.pdf"
+        self.write_sidecar(
+            workspace,
+            "raw/other/arXiv-2601.00001v1",
+            {"origin_url": "https://arxiv.org/abs/2601.00001v1"},
+        )
+        self.write_sidecar(
+            workspace,
+            pdf_rel,
+            {"retrieved_by": "fetch_sources.py/arxiv", "checksum": pdf_checksum},
+        )
+        return pdf_rel
+
+    def test_reject_mismatch_refuses_the_record_whose_secondary_capture_did_not_verify(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            pdf_rel = self.write_paired_sidecars(workspace, "sha256:" + "0" * 64)
+
+            code, stdout, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--reject-mismatch",
+            )
+
+        self.assertEqual(1, code, stderr)
+        report = json.loads(stdout)
+        self.assertEqual(2, report["total"], report)
+        self.assertEqual(
+            {"paired": 0, "pdf_only": 0, "latex_only": 0, "ambiguous": 0},
+            report["pairing_counts"],
+            report,
+        )
+        self.assertIn(
+            f"strict checksum refusal: paper:2601.00001v1 capture {pdf_rel} "
+            "checksum is present but not verified",
+            report["warnings"],
+            report,
+        )
+
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_MISMATCH", envelope["error_code"], envelope)
+        self.assertEqual(["paper:2601.00001v1"], envelope["details"]["source_ids"], envelope)
+        refusals = envelope["details"]["refusals"]
+        self.assertEqual(1, len(refusals), envelope)
+        self.assertEqual("paper:2601.00001v1", refusals[0]["source_id"], envelope)
+        self.assertEqual("checksum_mismatch", refusals[0]["reason"], envelope)
+        self.assertEqual(pdf_rel, refusals[0]["path"], envelope)
+        self.assertIn(pdf_rel, refusals[0]["message"], envelope)
+
+    def test_reject_mismatch_admits_the_record_whose_secondary_capture_verified(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            pdf_rel = "raw/pdf/2601.00001v1.pdf"
+            self.write_paired_sidecars(workspace, sha256_of(workspace / pdf_rel))
+
+            code, stdout, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--reject-mismatch",
+            )
+
+        self.assertEqual(0, code, stderr)
+        report = json.loads(stdout)
+        self.assertEqual(3, report["total"], report)
+        self.assertEqual(
+            [],
+            [warning for warning in report["warnings"] if "strict checksum refusal" in warning],
+            report,
+        )
+
+    def test_require_checksum_refuses_the_paired_record_for_its_primary_capture_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            pdf_rel = self.write_paired_sidecars(workspace, "sha256:" + "0" * 64)
+
+            code, _, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--require-checksum",
+            )
+
+        self.assertEqual(1, code, stderr)
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_REQUIRED", envelope["error_code"], envelope)
+        refusals = envelope["details"]["refusals"]
+        self.assertEqual(
+            [],
+            [refusal for refusal in refusals if refusal["reason"] != "checksum_required"],
+            envelope,
+        )
+        self.assertEqual([], [refusal for refusal in refusals if "path" in refusal], envelope)
+        self.assertEqual([], [refusal for refusal in refusals if pdf_rel in refusal["message"]], envelope)
+        paper_refusals = [refusal for refusal in refusals if refusal["source_id"] == "paper:2601.00001v1"]
+        self.assertEqual(1, len(paper_refusals), envelope)
+
+    def write_two_link_captures(self, workspace: Path) -> tuple[str, str]:
+        """Two link files naming one URL: the first verifies, the second does not.
+
+        Inventory folds both into a single link record, so the record's primary capture
+        is a regular file that verifies while its secondary capture is a proven mismatch.
+        """
+        verified_rel = "raw/links/capture-a.txt"
+        mismatched_rel = "raw/links/capture-b.txt"
+        for rel in (verified_rel, mismatched_rel):
+            (workspace / rel).write_text("https://github.com/example/fixture-repo\n")
+        self.write_sidecar(workspace, verified_rel, {"checksum": sha256_of(workspace / verified_rel)})
+        self.write_sidecar(workspace, mismatched_rel, {"checksum": "sha256:" + "0" * 64})
+        return verified_rel, mismatched_rel
+
+    def test_reject_mismatch_refuses_a_link_record_whose_second_link_file_did_not_verify(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            _, mismatched_rel = self.write_two_link_captures(workspace)
+
+            code, _, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--reject-mismatch",
+            )
+
+        self.assertEqual(1, code, stderr)
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_MISMATCH", envelope["error_code"], envelope)
+        self.assertEqual(
+            ["link:github-example-fixture-repo-5f629f49ca"], envelope["details"]["source_ids"], envelope
+        )
+        refusals = envelope["details"]["refusals"]
+        self.assertEqual(1, len(refusals), envelope)
+        self.assertEqual(mismatched_rel, refusals[0]["path"], envelope)
+
+    def test_require_checksum_admits_a_link_record_whose_second_link_file_did_not_verify(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            self.write_two_link_captures(workspace)
+
+            code, _, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--require-checksum",
+            )
+
+        self.assertEqual(1, code, stderr)
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_REQUIRED", envelope["error_code"], envelope)
+        self.assertNotIn(
+            "link:github-example-fixture-repo-5f629f49ca", envelope["details"]["source_ids"], envelope
+        )
+
+    def test_both_strict_flags_still_name_the_capture_that_mismatched(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            pdf_rel = self.write_paired_sidecars(workspace, "sha256:" + "0" * 64)
+
+            code, _, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--require-checksum",
+                "--reject-mismatch",
+            )
+
+        self.assertEqual(1, code, stderr)
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_MISMATCH", envelope["error_code"], envelope)
+        paper_refusals = [
+            refusal
+            for refusal in envelope["details"]["refusals"]
+            if refusal["source_id"] == "paper:2601.00001v1"
+        ]
+        self.assertEqual(
+            ["checksum_required", "checksum_mismatch"],
+            [refusal["reason"] for refusal in paper_refusals],
+            envelope,
+        )
+        self.assertEqual([pdf_rel], [refusal["path"] for refusal in paper_refusals if "path" in refusal], envelope)
+        self.assertEqual(3, len(envelope["details"]["source_ids"]), envelope)
+        self.assertIn("refused 3 sources", envelope["message"], envelope)
+
+    def test_a_record_raises_one_refusal_for_each_capture_that_mismatched(self):
+        record = {
+            "id": "paper:2601.00001v1",
+            "provenance": {"checksum": "sha256:" + "a" * 64, "checksum_verified": True},
+            "additional_provenance": [
+                {"path": "raw/pdf/first.pdf", "checksum": "sha256:" + "0" * 64, "checksum_verified": False},
+                {"path": "raw/pdf/second.pdf", "checksum": "sha256:" + "1" * 64, "checksum_verified": False},
+            ],
+        }
+
+        _, _, refusals = INVENTORY.strict_checksum_refusals(
+            [record], require_checksum=False, reject_mismatch=True
+        )
+
+        self.assertEqual(
+            ["raw/pdf/first.pdf", "raw/pdf/second.pdf"],
+            [refusal["path"] for refusal in refusals],
+            record,
+        )
+        self.assertEqual(["paper:2601.00001v1"], INVENTORY.strict_refusal_details(refusals)["source_ids"], record)
+        self.assertIn("refused 1 source ", INVENTORY.strict_refusal_message(refusals), record)
+
+    def verified_primary_with_unverified_capture(self) -> dict:
+        """A record whose primary capture verified and whose secondary capture did not."""
+        return {
+            "id": "paper:2601.00001v1",
+            "provenance": {"checksum": "sha256:" + "a" * 64, "checksum_verified": True},
+            "additional_provenance": [
+                {
+                    "path": "raw/pdf/2601.00001v1.pdf",
+                    "checksum": "sha256:" + "0" * 64,
+                    "checksum_verified": False,
+                }
+            ],
+        }
+
+    def test_require_checksum_keeps_a_record_whose_secondary_capture_did_not_verify(self):
+        record = self.verified_primary_with_unverified_capture()
+
+        kept, warnings, refusals = INVENTORY.strict_checksum_refusals(
+            [record], require_checksum=True, reject_mismatch=False
+        )
+
+        self.assertEqual([record], kept, record)
+        self.assertEqual([], warnings, record)
+        self.assertEqual([], refusals, record)
+
+    def test_reject_mismatch_refuses_a_record_whose_primary_capture_verified(self):
+        record = self.verified_primary_with_unverified_capture()
+
+        kept, warnings, refusals = INVENTORY.strict_checksum_refusals(
+            [record], require_checksum=False, reject_mismatch=True
+        )
+
+        self.assertEqual([], kept, record)
+        self.assertEqual(1, len(refusals), record)
+        self.assertEqual("raw/pdf/2601.00001v1.pdf", refusals[0]["path"], record)
+        self.assertEqual("checksum_mismatch", refusals[0]["reason"], record)
+        self.assertEqual([refusals[0]["message"]], warnings, record)
+
     def test_unmatched_sidecar_still_reports_no_source_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
@@ -1137,6 +1395,177 @@ class SourceDeliveryTests(unittest.TestCase):
             after = self.record_by_id(records, "paper:2601.00001v1")["raw_fingerprint"]
 
             self.assertNotEqual(before, after, "sidecar bytes must count toward the raw fingerprint")
+
+
+class BundleFileCountTests(unittest.TestCase):
+    """What a bundle record's ``metadata.file_count`` counts, measured against what it admits.
+
+    An arXiv or LaTeX bundle record declares exactly one ``raw_paths`` entry -- the bundle
+    directory -- and no member list anywhere. The controller expands that directory-shaped
+    entry into every regular file beneath it when it decides which delivered raw files the
+    record accounts for, and the raw tree snapshot fingerprints one entry per regular file
+    the same way, so the subtree is the record's unit of admission. ``file_count`` is the
+    record's own account of that subtree, and the two have to count the same set.
+
+    They did not. The count filtered members through ``should_skip``, which withholds every
+    dot-prefixed path, so a file planted under a dot path inside a delivered bundle was
+    admitted under the record and invisible in it. The predicate was applied to the path
+    relative to the *workspace*, so a single dot component anywhere in the prefix suppressed
+    the whole subtree beneath it.
+
+    ``raw_fingerprint`` is the other half of that invisibility and is not closed here.
+    `raw_fingerprint_paths` filters the same way on purpose -- it names the bytes
+    normalization re-reads, not the bytes the record admits -- so a dot-prefixed member
+    still reproduces a byte-identical fingerprint and triggers no re-normalization. That
+    residue is asserted below rather than left to be discovered, so the count fix is not
+    read as more than it is.
+
+    The two classification tests measure against the snapshot's own rule rather than
+    against a restatement of it, because a restatement is exactly what drifted the first
+    time.
+    """
+
+    BUNDLE_RELATIVE = "raw/other/arXiv-2601.00001v1"
+    SOURCE_ID = "paper:2601.00001v1"
+
+    def copy_workspace(self, root: Path) -> Path:
+        workspace = root / "workspace"
+        shutil.copytree(ARXIV_FIXTURE, workspace)
+        return workspace
+
+    def bundle_record(self, workspace: Path) -> dict:
+        config = INVENTORY.load_config(workspace)
+        records, _warnings, _summary = INVENTORY.build_records(workspace, config, previous_detected_at={})
+        matches = [record for record in records if record.get("id") == self.SOURCE_ID]
+        self.assertEqual(1, len(matches), records)
+        record = matches[0]
+        # The fixture pairs a PDF into this record, so ``raw_paths`` holds two entries and
+        # the bundle directory is the one ``file_count`` is a count of.
+        self.assertEqual(self.BUNDLE_RELATIVE, record["latex_root"], record)
+        self.assertIn(self.BUNDLE_RELATIVE, record["raw_paths"], record)
+        return record
+
+    def test_a_dot_prefixed_member_moves_the_bundle_file_count(self):
+        """A file the record admits must be a file the record counts, dot path or not.
+
+        Two members are planted: one under a dot-prefixed *directory* and one dot-prefixed
+        *file* at the bundle root. Both are admitted under this record by the controller's
+        attribution, and neither moved ``file_count`` while the count filtered through
+        ``should_skip`` -- the directory case because one dot component suppressed its whole
+        subtree.
+
+        The count is asserted as an exact total against every regular file on disk beneath
+        the bundle rather than as an increment, so the assertion states what the field means
+        rather than only that it changed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            bundle = workspace / self.BUNDLE_RELATIVE
+
+            before = self.bundle_record(workspace)
+            self.assertEqual(3, before["metadata"]["file_count"], before)
+
+            (bundle / ".build").mkdir()
+            (bundle / ".build" / "main.aux").write_text("\\relax\n", encoding="utf-8")
+            (bundle / ".latexmkrc").write_text("$pdf_mode = 1;\n", encoding="utf-8")
+
+            after = self.bundle_record(workspace)
+
+            on_disk = sorted(path.relative_to(workspace).as_posix() for path in bundle.rglob("*") if path.is_file())
+            self.assertEqual(
+                [
+                    f"{self.BUNDLE_RELATIVE}/.build/main.aux",
+                    f"{self.BUNDLE_RELATIVE}/.latexmkrc",
+                    f"{self.BUNDLE_RELATIVE}/00README.json",
+                    f"{self.BUNDLE_RELATIVE}/main.tex",
+                    f"{self.BUNDLE_RELATIVE}/sections/intro.tex",
+                ],
+                on_disk,
+            )
+            self.assertEqual(
+                len(on_disk),
+                after["metadata"]["file_count"],
+                "every regular file the bundle admits must be counted by the record that "
+                f"admits it, dot-prefixed members included; record was {after}",
+            )
+
+    def test_a_dot_prefixed_member_still_leaves_the_raw_fingerprint_identical(self):
+        """The disclosed residue, pinned: the count moves and the fingerprint does not.
+
+        `raw_fingerprint_paths` selects the bytes normalization re-reads, and it filters
+        dot-prefixed paths on purpose, so a dot-prefixed member beneath a bundle still
+        triggers no re-normalization. Widening the count does not widen that, and this test
+        exists so the boundary is stated by the suite rather than inferred from it. Closing
+        it needs an inventory-level member list, not a wider predicate.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            bundle = workspace / self.BUNDLE_RELATIVE
+
+            before = self.bundle_record(workspace)
+            (bundle / ".latexmkrc").write_text("$pdf_mode = 1;\n", encoding="utf-8")
+            after = self.bundle_record(workspace)
+
+            self.assertEqual(
+                before["metadata"]["file_count"] + 1,
+                after["metadata"]["file_count"],
+                after,
+            )
+            self.assertEqual(
+                before["raw_fingerprint"],
+                after["raw_fingerprint"],
+                "a dot-prefixed bundle member is outside the fingerprint on purpose: this "
+                f"residue is disclosed, not closed; record was {after}",
+            )
+
+    def test_a_symlinked_member_does_not_move_the_bundle_file_count(self):
+        """`is_file()` resolves symlinks; the snapshot refuses them. The count follows the snapshot.
+
+        Widening the subset was half the job. The raw tree snapshot refuses a symlink
+        outright as "contains a symbolic link or junction" rather than enumerating it, so a
+        symlinked member is not evidence this record admits and counting it would restore
+        the same mismatch with the excluded set merely moved to the other side.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            bundle = workspace / self.BUNDLE_RELATIVE
+
+            before = self.bundle_record(workspace)
+            (bundle / "linked.tex").symlink_to(bundle / "main.tex")
+            after = self.bundle_record(workspace)
+
+            self.assertEqual(
+                before["metadata"]["file_count"],
+                after["metadata"]["file_count"],
+                "a symlink is not a file the snapshot will enumerate, so it is not evidence "
+                f"this record admits and must not move its count; record was {after}",
+            )
+
+    def test_a_multiply_linked_member_leaves_the_count_with_both_of_its_names(self):
+        """A hardlink drops *both* copies from the count, because the snapshot refuses the tree.
+
+        The snapshot admits only a "singly linked regular file", so a hardlink disqualifies
+        the original as much as the new name. The count therefore falls by one rather than
+        rising by one, which looks wrong until the other half is seen: for that same tree the
+        snapshot refuses rather than returning entries at all.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            bundle = workspace / self.BUNDLE_RELATIVE
+
+            before = self.bundle_record(workspace)
+            try:
+                os.link(bundle / "main.tex", bundle / "hardlinked.tex")
+            except OSError as exc:  # pragma: no cover - platform without hardlink support
+                self.skipTest(f"hardlinks are unavailable on this platform: {exc}")
+            after = self.bundle_record(workspace)
+
+            self.assertEqual(
+                before["metadata"]["file_count"] - 1,
+                after["metadata"]["file_count"],
+                "both names of a hardlinked member must leave the count: the snapshot admits "
+                f"only a singly linked regular file; record was {after}",
+            )
 
 
 if __name__ == "__main__":
