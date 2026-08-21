@@ -590,6 +590,263 @@ class SourceDeliveryTests(unittest.TestCase):
                 any("checksum mismatch for raw/pdf/2601.00001v1.pdf" in warning for warning in warnings)
             )
 
+    def write_paired_sidecars(self, workspace: Path, pdf_checksum: str) -> str:
+        """Bundle sidecar without a checksum plus a PDF sidecar carrying `pdf_checksum`."""
+        pdf_rel = "raw/pdf/2601.00001v1.pdf"
+        self.write_sidecar(
+            workspace,
+            "raw/other/arXiv-2601.00001v1",
+            {"origin_url": "https://arxiv.org/abs/2601.00001v1"},
+        )
+        self.write_sidecar(
+            workspace,
+            pdf_rel,
+            {"retrieved_by": "fetch_sources.py/arxiv", "checksum": pdf_checksum},
+        )
+        return pdf_rel
+
+    def test_reject_mismatch_refuses_the_record_whose_secondary_capture_did_not_verify(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            pdf_rel = self.write_paired_sidecars(workspace, "sha256:" + "0" * 64)
+
+            code, stdout, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--reject-mismatch",
+            )
+
+        self.assertEqual(1, code, stderr)
+        report = json.loads(stdout)
+        self.assertEqual(2, report["total"], report)
+        self.assertEqual(
+            {"paired": 0, "pdf_only": 0, "latex_only": 0, "ambiguous": 0},
+            report["pairing_counts"],
+            report,
+        )
+        self.assertIn(
+            f"strict checksum refusal: paper:2601.00001v1 capture {pdf_rel} "
+            "checksum is present but not verified",
+            report["warnings"],
+            report,
+        )
+
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_MISMATCH", envelope["error_code"], envelope)
+        self.assertEqual(["paper:2601.00001v1"], envelope["details"]["source_ids"], envelope)
+        refusals = envelope["details"]["refusals"]
+        self.assertEqual(1, len(refusals), envelope)
+        self.assertEqual("paper:2601.00001v1", refusals[0]["source_id"], envelope)
+        self.assertEqual("checksum_mismatch", refusals[0]["reason"], envelope)
+        self.assertEqual(pdf_rel, refusals[0]["path"], envelope)
+        self.assertIn(pdf_rel, refusals[0]["message"], envelope)
+
+    def test_reject_mismatch_admits_the_record_whose_secondary_capture_verified(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            pdf_rel = "raw/pdf/2601.00001v1.pdf"
+            self.write_paired_sidecars(workspace, sha256_of(workspace / pdf_rel))
+
+            code, stdout, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--reject-mismatch",
+            )
+
+        self.assertEqual(0, code, stderr)
+        report = json.loads(stdout)
+        self.assertEqual(3, report["total"], report)
+        self.assertEqual(
+            [],
+            [warning for warning in report["warnings"] if "strict checksum refusal" in warning],
+            report,
+        )
+
+    def test_require_checksum_refuses_the_paired_record_for_its_primary_capture_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            pdf_rel = self.write_paired_sidecars(workspace, "sha256:" + "0" * 64)
+
+            code, _, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--require-checksum",
+            )
+
+        self.assertEqual(1, code, stderr)
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_REQUIRED", envelope["error_code"], envelope)
+        refusals = envelope["details"]["refusals"]
+        self.assertEqual(
+            [],
+            [refusal for refusal in refusals if refusal["reason"] != "checksum_required"],
+            envelope,
+        )
+        self.assertEqual([], [refusal for refusal in refusals if "path" in refusal], envelope)
+        self.assertEqual([], [refusal for refusal in refusals if pdf_rel in refusal["message"]], envelope)
+        paper_refusals = [refusal for refusal in refusals if refusal["source_id"] == "paper:2601.00001v1"]
+        self.assertEqual(1, len(paper_refusals), envelope)
+
+    def write_two_link_captures(self, workspace: Path) -> tuple[str, str]:
+        """Two link files naming one URL: the first verifies, the second does not.
+
+        Inventory folds both into a single link record, so the record's primary capture
+        is a regular file that verifies while its secondary capture is a proven mismatch.
+        """
+        verified_rel = "raw/links/capture-a.txt"
+        mismatched_rel = "raw/links/capture-b.txt"
+        for rel in (verified_rel, mismatched_rel):
+            (workspace / rel).write_text("https://github.com/example/fixture-repo\n")
+        self.write_sidecar(workspace, verified_rel, {"checksum": sha256_of(workspace / verified_rel)})
+        self.write_sidecar(workspace, mismatched_rel, {"checksum": "sha256:" + "0" * 64})
+        return verified_rel, mismatched_rel
+
+    def test_reject_mismatch_refuses_a_link_record_whose_second_link_file_did_not_verify(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            _, mismatched_rel = self.write_two_link_captures(workspace)
+
+            code, _, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--reject-mismatch",
+            )
+
+        self.assertEqual(1, code, stderr)
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_MISMATCH", envelope["error_code"], envelope)
+        self.assertEqual(
+            ["link:github-example-fixture-repo-5f629f49ca"], envelope["details"]["source_ids"], envelope
+        )
+        refusals = envelope["details"]["refusals"]
+        self.assertEqual(1, len(refusals), envelope)
+        self.assertEqual(mismatched_rel, refusals[0]["path"], envelope)
+
+    def test_require_checksum_admits_a_link_record_whose_second_link_file_did_not_verify(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            self.write_two_link_captures(workspace)
+
+            code, _, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--require-checksum",
+            )
+
+        self.assertEqual(1, code, stderr)
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_REQUIRED", envelope["error_code"], envelope)
+        self.assertNotIn(
+            "link:github-example-fixture-repo-5f629f49ca", envelope["details"]["source_ids"], envelope
+        )
+
+    def test_both_strict_flags_still_name_the_capture_that_mismatched(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            pdf_rel = self.write_paired_sidecars(workspace, "sha256:" + "0" * 64)
+
+            code, _, stderr = self.run_inventory_capture(
+                workspace,
+                "--format",
+                "json",
+                "--report",
+                "--dry-run",
+                "--require-checksum",
+                "--reject-mismatch",
+            )
+
+        self.assertEqual(1, code, stderr)
+        envelope = json.loads(stderr)
+        self.assertEqual("INVENTORY_CHECKSUM_MISMATCH", envelope["error_code"], envelope)
+        paper_refusals = [
+            refusal
+            for refusal in envelope["details"]["refusals"]
+            if refusal["source_id"] == "paper:2601.00001v1"
+        ]
+        self.assertEqual(
+            ["checksum_required", "checksum_mismatch"],
+            [refusal["reason"] for refusal in paper_refusals],
+            envelope,
+        )
+        self.assertEqual([pdf_rel], [refusal["path"] for refusal in paper_refusals if "path" in refusal], envelope)
+        self.assertEqual(3, len(envelope["details"]["source_ids"]), envelope)
+        self.assertIn("refused 3 sources", envelope["message"], envelope)
+
+    def test_a_record_raises_one_refusal_for_each_capture_that_mismatched(self):
+        record = {
+            "id": "paper:2601.00001v1",
+            "provenance": {"checksum": "sha256:" + "a" * 64, "checksum_verified": True},
+            "additional_provenance": [
+                {"path": "raw/pdf/first.pdf", "checksum": "sha256:" + "0" * 64, "checksum_verified": False},
+                {"path": "raw/pdf/second.pdf", "checksum": "sha256:" + "1" * 64, "checksum_verified": False},
+            ],
+        }
+
+        _, _, refusals = INVENTORY.strict_checksum_refusals(
+            [record], require_checksum=False, reject_mismatch=True
+        )
+
+        self.assertEqual(
+            ["raw/pdf/first.pdf", "raw/pdf/second.pdf"],
+            [refusal["path"] for refusal in refusals],
+            record,
+        )
+        self.assertEqual(["paper:2601.00001v1"], INVENTORY.strict_refusal_details(refusals)["source_ids"], record)
+        self.assertIn("refused 1 source ", INVENTORY.strict_refusal_message(refusals), record)
+
+    def verified_primary_with_unverified_capture(self) -> dict:
+        """A record whose primary capture verified and whose secondary capture did not."""
+        return {
+            "id": "paper:2601.00001v1",
+            "provenance": {"checksum": "sha256:" + "a" * 64, "checksum_verified": True},
+            "additional_provenance": [
+                {
+                    "path": "raw/pdf/2601.00001v1.pdf",
+                    "checksum": "sha256:" + "0" * 64,
+                    "checksum_verified": False,
+                }
+            ],
+        }
+
+    def test_require_checksum_keeps_a_record_whose_secondary_capture_did_not_verify(self):
+        record = self.verified_primary_with_unverified_capture()
+
+        kept, warnings, refusals = INVENTORY.strict_checksum_refusals(
+            [record], require_checksum=True, reject_mismatch=False
+        )
+
+        self.assertEqual([record], kept, record)
+        self.assertEqual([], warnings, record)
+        self.assertEqual([], refusals, record)
+
+    def test_reject_mismatch_refuses_a_record_whose_primary_capture_verified(self):
+        record = self.verified_primary_with_unverified_capture()
+
+        kept, warnings, refusals = INVENTORY.strict_checksum_refusals(
+            [record], require_checksum=False, reject_mismatch=True
+        )
+
+        self.assertEqual([], kept, record)
+        self.assertEqual(1, len(refusals), record)
+        self.assertEqual("raw/pdf/2601.00001v1.pdf", refusals[0]["path"], record)
+        self.assertEqual("checksum_mismatch", refusals[0]["reason"], record)
+        self.assertEqual([refusals[0]["message"]], warnings, record)
+
     def test_unmatched_sidecar_still_reports_no_source_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.copy_workspace(Path(tmpdir))
