@@ -8743,7 +8743,7 @@ def verify_blocked_action_postconditions(
         for record in correlated_records
         if isinstance(record.get("id"), str)
     }
-    if correlated_records and (correlated_new_records or actual_new_raw_paths):
+    if correlated_new_records:
         raw_attribution = derived_raw_attribution(
             project_root, config, memo_key=current_raw_tree.get("fingerprint")
         )
