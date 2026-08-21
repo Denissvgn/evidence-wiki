@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import sys
@@ -26,20 +25,10 @@ from tests._pack_policy_rule_fixture import (  # noqa: E402
     deliver_quote,
     write_coverage_manifest,
 )
+from tests._script_loader import load_script as load_script_module  # noqa: E402
 
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 RESOLVE = load_script_module("research_question_resolve_coverage", "question_resolve.py")

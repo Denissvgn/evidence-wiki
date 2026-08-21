@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -17,6 +16,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
 import yaml
+
+from tests._script_loader import load_module as load_script_module
+from tests._script_loader import load_module_uncached
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -122,18 +124,6 @@ OPENALEX_CLOSED_WORK = {
 }
 
 
-def load_script_module(name: str, path: Path):
-    if not path.is_file():
-        raise AssertionError(f"Missing script: {path}")
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 @contextlib.contextmanager
 def patched_argv(*args: str):
     old = sys.argv
@@ -156,7 +146,10 @@ def tar_gz_bytes(members: dict[str, bytes]) -> bytes:
 
 class FetchSourcesTests(unittest.TestCase):
     def setUp(self):
-        self.fetch = load_script_module("research_fetch_sources", FETCH_PATH)
+        # Loaded fresh: ``install_*_transport`` below writes the module's transport,
+        # clock and sleep globals and never puts them back, so re-execution is what
+        # gives each case an unstubbed fetch_sources to start from.
+        self.fetch = load_module_uncached("research_fetch_sources", FETCH_PATH)
 
     def build_workspace(self, root: Path, acquisition: dict | None = None) -> Path:
         workspace = root / "workspace"

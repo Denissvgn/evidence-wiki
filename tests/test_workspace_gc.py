@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import subprocess
@@ -11,24 +10,15 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tests._script_loader import load_module as load_script_module
+from tests._script_loader import load_module_uncached
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 INIT_SCRIPT_PATH = SCRIPTS / "init_research_workspace.py"
 RUN_CONTROLLER_SCRIPT_PATH = SCRIPTS / "run_controller.py"
 GC_SCRIPT_PATH = SCRIPTS / "workspace_gc.py"
 LOCKS_SCRIPT_PATH = SCRIPTS / "_workspace_locks.py"
-
-
-def load_script_module(name: str, path: Path):
-    if not path.is_file():
-        raise AssertionError(f"missing workspace script: {path}")
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 class WorkspaceGcTests(unittest.TestCase):
@@ -312,7 +302,9 @@ class WorkspaceGcFatalErrorTests(unittest.TestCase):
     """
 
     def run_failing_gc(self, *extra: str) -> tuple[int, str, str]:
-        module = load_script_module("workspace_gc_fatal", GC_SCRIPT_PATH)
+        # Loaded fresh: the next line breaks ``build_report`` permanently and never
+        # restores it, so this module object must belong to this call alone.
+        module = load_module_uncached("workspace_gc_fatal", GC_SCRIPT_PATH)
         module.build_report = lambda *args, **kwargs: (_ for _ in ()).throw(
             OSError("archive directory is not writable")
         )

@@ -18,12 +18,12 @@ Every test injects a fake opener and a fake resolver: this file must never touch
 network or DNS.
 """
 
-import importlib.util
-import sys
 import traceback
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from tests._script_loader import load_module_uncached
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -32,18 +32,6 @@ TRANSPORT_PATH = SCRIPTS / "_acquisition_transport.py"
 EXECUTOR_MODULE_NAME = "cr5_executor_acquisition_transport"
 DECLARED_CREDENTIAL = "KEEPA_API_KEY"
 SECRET_VALUE = "keepa-live-9f3a2b7c-do-not-log"
-
-
-def load_script_module(name: str, path: Path):
-    if not path.is_file():
-        raise AssertionError(f"Missing script: {path}")
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 @dataclass(frozen=True)
@@ -143,7 +131,7 @@ def rendered_error_text(exc: BaseException) -> str:
 class ExecutorTestCase(unittest.TestCase):
     def setUp(self):
         # Re-executing the module gives every test a clean secret-redaction registry.
-        self.transport = load_script_module(EXECUTOR_MODULE_NAME, TRANSPORT_PATH)
+        self.transport = load_module_uncached(EXECUTOR_MODULE_NAME, TRANSPORT_PATH)
         self.addCleanup(self.transport.reset_registered_secrets)
         self.resolver = RecordingResolver()
         self.opener = RecordingOpener()

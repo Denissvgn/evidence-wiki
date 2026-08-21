@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -14,6 +13,8 @@ from unittest import mock
 
 import yaml
 
+from tests._script_loader import load_module as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 MCP_SCRIPT_PATH = SCRIPTS / "serve_mcp.py"
@@ -25,16 +26,6 @@ QUERY_INDEX_SCRIPT_PATH = SCRIPTS / "query_index.py"
 SOURCE_REQUESTS_SCRIPT_PATH = SCRIPTS / "source_requests.py"
 WORKSPACE_STATUS_SCRIPT_PATH = SCRIPTS / "workspace_status.py"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
-
-
-def load_script_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 MCP = load_script_module("research_mcp_server", MCP_SCRIPT_PATH)

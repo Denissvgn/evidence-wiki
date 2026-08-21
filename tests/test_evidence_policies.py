@@ -1,4 +1,3 @@
-import importlib.util
 import json
 import sys
 import tempfile
@@ -31,21 +30,14 @@ from tests._pack_policy_rule_fixture import (  # noqa: E402
     structured_view_bytes,
     write_structured_view,
 )
+from tests._script_loader import load_module  # noqa: E402
 
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 POLICY_HELPER_PATH = SCRIPTS / "_evidence_policies.py"
 
 
 def load_policy_helper():
-    if not POLICY_HELPER_PATH.is_file():
-        raise AssertionError(f"missing workspace script: {POLICY_HELPER_PATH}")
-    spec = importlib.util.spec_from_file_location("evidence_policies_under_test", POLICY_HELPER_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {POLICY_HELPER_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module("evidence_policies_under_test", POLICY_HELPER_PATH)
 
 
 def write_frontmatter(path: Path, frontmatter: dict[str, Any], body: str = "# Source\n") -> None:

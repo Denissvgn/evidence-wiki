@@ -1,7 +1,6 @@
 import ast
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -19,18 +18,10 @@ from unittest import mock
 
 import yaml
 
+from tests._script_loader import load_module as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
-
-
-def load_script_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 INIT = load_script_module("orchestration_controller_init", SCRIPTS / "init_research_workspace.py")

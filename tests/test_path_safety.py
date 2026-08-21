@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import shutil
@@ -10,22 +9,13 @@ from pathlib import Path
 
 import yaml
 
+from tests._script_loader import load_script as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 MINIMAL_FIXTURE = FIXTURES / "minimal-project"
 ARXIV_FIXTURE = FIXTURES / "arxiv-source-project"
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 INVENTORY = load_script_module("path_safety_source_inventory", "source_inventory.py")

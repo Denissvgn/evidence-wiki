@@ -15,14 +15,14 @@ red test.
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from tests._script_loader import load_script
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "workspace-template" / "scripts"
 
@@ -99,14 +99,7 @@ def add_question_metadata(workspace: Path, slug: str) -> str:
 
 def load_structured_view():
     """The sidecar reader, so fixtures write exactly what the evaluator will accept."""
-    path = SCRIPTS / "_structured_view.py"
-    spec = importlib.util.spec_from_file_location("structured_view_for_pack_fixture", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script("structured_view_for_pack_fixture", "_structured_view.py")
 
 
 def structured_view_bytes(document: Any) -> bytes:
@@ -156,14 +149,7 @@ def write_structured_view(structured: Any, sidecar: Path, payload: bytes) -> str
 
 def load_intake_questions():
     """The supported intake writer used by the cross-CR integration fixtures."""
-    path = SCRIPTS / "intake_questions.py"
-    spec = importlib.util.spec_from_file_location("intake_questions_for_pack_fixture", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script("intake_questions_for_pack_fixture", "intake_questions.py")
 
 
 def intake_question(

@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import subprocess
@@ -10,20 +9,11 @@ from pathlib import Path
 
 import yaml
 
+from tests._script_loader import load_script as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 REQUESTS = load_script_module("research_source_requests", "source_requests.py")

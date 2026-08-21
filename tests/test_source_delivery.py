@@ -1,6 +1,5 @@
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
 import shutil
@@ -12,6 +11,8 @@ from unittest import mock
 
 import yaml
 
+from tests._script_loader import load_script as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARXIV_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "arxiv-source-project"
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -20,17 +21,6 @@ SOURCE_DISCOVERY_DOC = REPO_ROOT / "workspace-template" / "docs" / "source-disco
 SOURCE_MANIFEST_DOC = REPO_ROOT / "workspace-template" / "docs" / "source-manifest.md"
 NORMALIZED_SOURCE_DOC = REPO_ROOT / "workspace-template" / "docs" / "normalized-source-format.md"
 SOURCE_DELIVERY_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "source-delivery"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 INVENTORY = load_script_module("source_delivery_inventory", "source_inventory.py")

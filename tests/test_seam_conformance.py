@@ -104,6 +104,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from tests._script_loader import load_module
 from tests.seam_cases import REFUSAL, SUCCESS, SeamCase
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -194,13 +195,7 @@ def discovered_case_modules() -> dict[str, ModuleType]:
 def load_script_module(script: str) -> ModuleType:
     """Load one workspace script in-process, the way an embedding host would."""
     path = SCRIPTS / script
-    spec = importlib.util.spec_from_file_location(f"seam_conformance_{path.stem}", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module(f"seam_conformance_{path.stem}", path)
 
 
 def as_refusal(exc: Exception) -> Exception | None:
