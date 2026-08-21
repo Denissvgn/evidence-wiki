@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **Fix: the machine export dropped every capture a source record delivered beyond the
+  first.** A manifest record can own more than one delivered path — inventory folds a
+  paired paper's PDF into the LaTeX-bundle record for the same work — and each capture was
+  retrieved separately, carrying its own origin URL, retrieval time, licence and checksum
+  as an `additional_provenance` entry. `export_answers.py` read `provenance` once and
+  nothing else, so an exported citation described the first capture and stayed silent about
+  the rest. A consumer reading the export document could not tell that a second capture
+  existed at all, let alone where its bytes came from.
+
+  The checksum is the part that mattered. Verification is per-capture by construction — a
+  hash means something only beside the bytes it was computed from — so a paired capture
+  that fails to verify records `checksum_verified: false` on its own entry and never on the
+  primary's. Read through the export, such a record was indistinguishable from one whose
+  single capture verified cleanly: the failure was not reported as false, it was absent.
+  The workspace had already marked the record `review_required` and warned about it, and
+  none of that reached the document downstream agents actually read.
+
+  Each citation now carries `additional_provenance[]`, one entry per further capture, with
+  that capture's `path`, `origin_url`, `retrieved_at`, `license`, `checksum` and
+  `checksum_verified`. The key is emitted only when a record delivered more than one
+  capture, matching how `checksum` and `academic` are already attached, so existing
+  citations keep their shape and no other exported field moves. `request_id` and
+  `candidate_id` stay out, as they are stripped from the entries themselves: which request
+  authorised a delivery has exactly one answer per record, and every consumer reads it from
+  `provenance` alone. `sidecar_path` stays out for the reason the primary's does — it
+  locates inventory's input inside the workspace, while a citation reports where the bytes
+  came from rather than which file said so. An entry that names no path is not carried at
+  all but reported in `warnings[]`, because a `checksum_verified: false` against a capture
+  the consumer cannot identify asserts a verdict about a file it cannot go and look at —
+  and dropping it quietly would be this same defect one level down. Found by inspection of
+  the export against the
+  manifest contract at 0.5.2, and reproduced there: the new assertions fail with the field
+  absent before the change and pass after it.
+
 - **Fix: a directory-shaped `raw_paths` entry could not be delivered inside any acquisition
   order.** A bundle record — an arXiv or LaTeX source archive, a local code repository —
   declares exactly one `raw_paths` entry, the bundle directory itself. The raw-tree
