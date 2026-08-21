@@ -231,6 +231,13 @@ class DelegatedArmShape2(DelegatedWorkspace, unittest.TestCase):
                 [f"raw/data/{PAYLOAD.name}"],
                 mismatches[quote_id]["derived_raw_paths"],
             )
+            # The two lists say they disagree; this says which declared path is the one
+            # inventory accounts for nowhere, which is the path the operator must remove.
+            self.assertEqual(
+                [f"raw/data/{DISCOVERY_NAME}"],
+                mismatches[quote_id]["declared_not_derived"],
+                envelope,
+            )
 
     # -- (i) CR-19: a directory-shaped bundle delivered in-order now completes -------
 
@@ -680,13 +687,17 @@ class ProviderArmShape2(unittest.TestCase):
 
 
 class AttributionInvariantsShape2(DelegatedWorkspace, unittest.TestCase):
-    """The two properties the predicate's soundness and cost both rest on.
+    """The properties the predicate's soundness and cost both rest on.
 
     Both were measured while the design was chosen but lived only in scratch probes.
     They are tests because the backlog names them as the vehicles for two standing
     claims: that derivation is deterministic (the controller now depends on it, so a
     future non-deterministic inventory change becomes a submit-breaking bug), and that
     one submit costs exactly one derivation pass despite verifying up to three times.
+
+    Saving that cost has a property of its own, the same mechanism read from the other
+    side: the key an answer is memoised under has to be sufficient for the tree that
+    answer describes, or the saving is a wrong answer returned quickly.
     """
 
     maxDiff = None
@@ -749,6 +760,75 @@ class AttributionInvariantsShape2(DelegatedWorkspace, unittest.TestCase):
                     "compares raw_paths by pinned order, so non-deterministic "
                     "derivation would refuse legitimate deliveries",
                 )
+
+    # -- an empty directory the raw fingerprint cannot see still busts the memo -------
+
+    def test_an_added_empty_directory_is_not_answered_from_the_memo(self):
+        """A tree that gained an empty directory must be derived again, not recalled.
+
+        `raw_tree_snapshot` records an entry per regular *file* and none for a directory,
+        so its fingerprint cannot tell these two trees apart. `source_inventory` can: an
+        empty `.git/` is one of the markers that makes a directory a local repository, so
+        the same tree derives a different record set on either side of one `mkdir`. A memo
+        keyed on the fingerprint alone would answer the second question with the first
+        tree's answer.
+
+        The memo is only live inside `derivation_verdict_memo()`; outside it the cache is
+        None and the memo is a no-op, so the context is entered here explicitly.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            self.pending_order(workspace)
+            self.deliver_for(workspace, request_id)
+            # A checkout the workspace reads as ordinary raw files until a marker makes
+            # it a repository. Both settings are operator config the shipped template
+            # documents and the harness workspace leaves off.
+            config_path = workspace / "research.yml"
+            document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            document["raw"]["source_roots"] = sorted({*document["raw"]["source_roots"], "raw/code"})
+            document.setdefault("integrations", {}).setdefault("codebase_analysis", {})["enabled"] = True
+            config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+            checkout = workspace / "raw" / "code" / "conductivity-tools"
+            checkout.mkdir(parents=True)
+            (checkout / "measure.py").write_text("value = 1\n", encoding="utf-8")
+            self.write_sidecar(workspace, "raw/code/conductivity-tools/measure.py", request_id)
+
+            config = D_CONTROLLER.load_config(workspace)
+            before_fingerprint = D_CONTROLLER.raw_tree_snapshot(workspace, config)["fingerprint"]
+            with D_CONTROLLER.derivation_verdict_memo():
+                before = D_CONTROLLER.derived_raw_attribution(
+                    workspace, config, memo_key=before_fingerprint
+                )
+                (checkout / ".git").mkdir()
+                after_fingerprint = D_CONTROLLER.raw_tree_snapshot(workspace, config)["fingerprint"]
+                after = D_CONTROLLER.derived_raw_attribution(
+                    workspace, config, memo_key=before_fingerprint
+                )
+
+            self.assertEqual(
+                before_fingerprint,
+                after_fingerprint,
+                "the empty directory must leave the raw-tree fingerprint byte-identical, "
+                "or this case says nothing about what that fingerprint cannot see",
+            )
+
+            def derived_paths(attribution):
+                return {source_id: entry["raw_paths"] for source_id, entry in attribution.items()}
+
+            self.assertNotEqual(
+                derived_paths(before),
+                derived_paths(after),
+                "derivation after the empty directory returned the attribution memoised "
+                "before it; the memoised answer is stale",
+            )
+            self.assertIn(
+                ["raw/code/conductivity-tools"],
+                list(derived_paths(after).values()),
+                "inventory must read the empty .git/ as the marker that makes the "
+                "directory one local-repository record",
+            )
 
     def test_one_submit_costs_exactly_one_derivation_pass(self):
         """`submit` verifies up to three times; derivation must run once, not three times.
