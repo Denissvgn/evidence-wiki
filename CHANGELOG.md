@@ -5,7 +5,7 @@
 - **Fix: the machine export dropped every capture a source record delivered beyond the
   first.** A manifest record can own more than one delivered path — inventory folds a
   paired paper's PDF into the LaTeX-bundle record for the same work — and each capture was
-  retrieved separately, carrying its own origin URL, retrieval time, licence and checksum
+  retrieved separately, carrying its own origin URL, retrieval time, license and checksum
   as an `additional_provenance` entry. `export_answers.py` read `provenance` once and
   nothing else, so an exported citation described the first capture and stayed silent about
   the rest. A consumer reading the export document could not tell that a second capture
