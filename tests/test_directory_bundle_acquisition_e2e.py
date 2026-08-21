@@ -276,6 +276,69 @@ class DelegatedDirectoryBundleTests(DelegatedWorkspace, unittest.TestCase):
                 diagnose("delegated", "the delegated order to be accepted (exit 0)", code, envelope, workspace),
             )
 
+    def test_a_dot_path_member_of_a_delivered_bundle_is_both_admitted_and_counted(self):
+        """Admission and the record's own account of itself, asserted in the same delivery.
+
+        A bundle's subtree is its record's unit of admission, so a file the acquirer writes
+        under a dot path inside the delivered directory is admitted: attribution expands the
+        directory entry with no skip predicate, and the order is accepted. The record's
+        ``metadata.file_count`` used to filter that same subtree through ``should_skip``, so
+        the delivery was admitted and invisible at once -- the count stated less than the
+        tree the record admits, and nothing in the manifest showed the extra member had
+        arrived.
+
+        Both halves are asserted here rather than in separate places, because it is the
+        pairing that was wrong: either alone reads as reasonable.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            order = self.pending_order(workspace)
+
+            relative = write_directory_bundle(
+                workspace, request_id=request_id, retrieved_by=ACQUIRER
+            )
+            bundle = workspace / relative
+            (bundle / ".build").mkdir()
+            (bundle / ".build" / "main.aux").write_text("\\relax\n", encoding="utf-8")
+
+            self.run_script(DELEGATED_INVENTORY, ["--report"], workspace)
+            source_id = self.assert_bundle_is_one_record(workspace, relative)
+            record = next(r for r in manifest_records(workspace) if r["id"] == source_id)
+            members = sorted(
+                path.relative_to(workspace).as_posix() for path in bundle.rglob("*") if path.is_file()
+            )
+            self.assertEqual(
+                [
+                    f"{relative}/.build/main.aux",
+                    f"{relative}/00README.json",
+                    f"{relative}/main.tex",
+                ],
+                members,
+            )
+            self.assertEqual(
+                len(members),
+                record["metadata"]["file_count"],
+                "the record must count every regular file it admits, dot-prefixed members "
+                f"included; record was {record}",
+            )
+
+            self.run_script(DELEGATED_NORMALIZE, ["--source-id", source_id], workspace)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            code, envelope = self.submit(
+                workspace,
+                order["action_id"],
+                artifacts=[relative, f"{relative}.provenance.yml", "sources/manifest.jsonl"],
+            )
+            self.assertEqual(
+                0,
+                code,
+                "a dot-path member inside the delivered bundle is admitted under the record "
+                "that declares the directory; refusing it here would contradict the count "
+                f"asserted above. envelope: {json.dumps(envelope, indent=2, sort_keys=True)}",
+            )
+
 
 class ProviderDirectoryBundleTests(unittest.TestCase):
     """The provider (non-delegated) and blocked-partial arms, on the controller harness.

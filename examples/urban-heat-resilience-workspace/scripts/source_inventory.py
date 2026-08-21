@@ -538,12 +538,57 @@ def select_entrypoint(
     return None, None, candidates, warnings
 
 
-def bundle_file_count(project_root: Path, bundle_dir: Path) -> int:
-    return sum(
-        1
-        for path in bundle_dir.rglob("*")
-        if path.is_file() and not should_skip(path.relative_to(project_root))
-    )
+def bundle_file_count(bundle_dir: Path) -> int:
+    """Count every regular file inside a LaTeX or arXiv bundle, dot-prefixed entries included.
+
+    A bundle record declares exactly one ``raw_paths`` entry -- the bundle directory -- and
+    no member list, so the whole subtree beneath it is the record's unit of admission. The
+    controller expands that directory-shaped entry into every regular file beneath it with
+    no skip predicate when it decides which delivered raw files a record accounts for, and
+    the raw tree snapshot fingerprints one entry per regular file the same way. Filtering
+    members through ``should_skip`` here measured a strict subset of that: a dot-prefixed
+    file planted inside a delivered bundle was admitted under the record while
+    ``metadata.file_count`` did not move, so the record's own account of how much evidence
+    it holds disagreed with the tree it admits, and the disagreement was silent.
+
+    "Regular file" here means what the snapshot means by it, checked the way the snapshot
+    checks it: ``lstat`` rather than ``is_file``, a real regular file rather than a symlink
+    to one, and a link count of exactly one. The snapshot refuses a symlink or a
+    multiply-linked file rather than enumerating it, so an entry of either kind is not
+    evidence this record admits and must not be measured as though it were. Counting them
+    would put the same subset mismatch back that this function exists to remove, only with
+    the excluded set on the other side. The exclusion tracks a real refusal rather than
+    inventing a subset of its own: a bundle holding either entry sits under a raw source
+    root, so the snapshot refuses the whole workspace rather than returning a smaller
+    enumeration, and no count this function could state would make that tree deliverable.
+
+    ``should_skip`` is deliberately not consulted, and equally deliberately not changed. It
+    governs which paths become *records* -- dotfiles are not inventoried as separate sources
+    -- and that is a different question from how much evidence a record admits. A bundle
+    record declares the whole directory in ``raw_paths``, so every regular file beneath it
+    is attributed to the record and has to be measured by it.
+
+    What this closes is the count, not every way a bundle can hold more than it says.
+    ``raw_fingerprint`` covers the paths ``raw_fingerprint_paths`` selects, which do filter
+    through ``should_skip``, so a dot-prefixed member still reproduces a byte-identical
+    fingerprint and triggers no re-normalization; and no member list exists anywhere in the
+    record to hold a delivered bundle to its own contents. Both remain open on purpose:
+    closing either needs an inventory-level member list, not a different predicate here.
+    """
+    count = 0
+    for path in bundle_dir.rglob("*"):
+        try:
+            metadata = path.lstat()
+        except OSError:
+            # An entry that cannot be inspected is one the snapshot will refuse on its
+            # own terms; it is not this count's business to decide that.
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        if int(getattr(metadata, "st_nlink", 1) or 1) != 1:
+            continue
+        count += 1
+    return count
 
 
 def readme_string(readme: dict[str, Any] | None, key: str) -> str | None:
@@ -586,7 +631,7 @@ def build_bundle_record(
     metadata: dict[str, Any] = {
         "bundle_type": "arxiv" if arxiv_id else "latex_bundle",
         "entrypoint_source": entrypoint_source,
-        "file_count": bundle_file_count(project_root, bundle_dir),
+        "file_count": bundle_file_count(bundle_dir),
     }
     readme_path = bundle_dir / "00README.json"
     if readme_path.exists():

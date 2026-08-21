@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+- **Fix: a file delivered under a dot path inside a bundle was admitted by the record that
+  owns it and counted by nothing.** An arXiv or LaTeX bundle record declares one `raw_paths`
+  entry — the bundle directory — and no member list anywhere, so the whole subtree beneath
+  it is the record's unit of admission: the controller expands that directory-shaped entry
+  into every regular file beneath it with no skip predicate, and the raw tree snapshot
+  fingerprints one entry per regular file the same way. `bundle_file_count`, which fills the
+  record's `metadata.file_count`, filtered members through `should_skip` instead — and
+  applied that predicate to the path relative to the *workspace* rather than to the bundle,
+  so one dot component anywhere in the prefix suppressed the whole subtree under it. A file
+  written to `<bundle>/.build/main.aux` was therefore admitted under the record and
+  invisible in it: the count did not move, and `raw_fingerprint`, which filters the same
+  way, came back byte-identical, so the delivery triggered no re-normalization either.
+
+  `metadata.file_count` now counts every regular file beneath the bundle directory,
+  dot-prefixed members included, which is the same subtree the record admits and the
+  snapshot walks. It classifies entries the way the snapshot classifies them — `lstat`
+  rather than `is_file`, a real regular file rather than a symlink to one, a link count of
+  exactly one — because the snapshot refuses a symlink or a multiply-linked file rather than
+  enumerating it, and counting either would put the same subset mismatch back with the
+  excluded set merely moved to the other side. `should_skip` is unchanged and still decides
+  which paths become *records*: dotfiles are still not inventoried as separate sources,
+  because how a record is selected and how much evidence it admits are different questions.
+
+  Narrowing the other side was measured and rejected. Teaching raw-path attribution to skip
+  dot paths makes the counts agree just as well and refuses a lawfully delivered local code
+  repository on its own `.git/HEAD` — the defect the local-repository entry below closes,
+  arriving from the other direction. Widening the count is the direction that leaves both
+  record kinds consistent with the tree the snapshot walks.
+
+  **The fingerprint half is disclosed, not closed.** `raw_fingerprint_paths` still filters
+  through `should_skip`, deliberately: it names the bytes normalization re-reads, not the
+  bytes the record admits, and widening it would contradict what that field is for rather
+  than repair it. A dot-prefixed member beneath a bundle therefore still reproduces a
+  byte-identical `raw_fingerprint` and still triggers no re-normalization. Nor is the count
+  a member list: nothing in the record bounds what a delivered bundle may contain, and
+  closing that needs an inventory-level member list rather than a wider predicate here.
+
+  Two refusals to expect for anyone holding an open order. A bundle record with a
+  dot-prefixed member no longer fingerprints as it did, and the acquirer's mandatory
+  `source_inventory.py --report` re-derives every record in the manifest, not only the ones
+  its order fulfils. So an order issued before this change and submitted after it can be
+  refused two ways. Where the rewritten record is one the order fulfils, the refusal is
+  `manifest_record_changed_after_issuance`. Where it is any other pre-existing record — an
+  unrelated paper whose bundle happens to carry a `.latexmkrc` — the submit fails the
+  manifest scope guard first: `ORCHESTRATION_POSTCONDITION_FAILED`, "changed, removed, or
+  added evidence-manifest records outside fulfilled source scope", with
+  `manifest_scope_violations.changed_outside_scope` naming that untouched record. Its
+  printed remediation, "Restore existing and out-of-scope manifest records", cannot be
+  reached by re-running inventory, which derives the same new count again. Both are
+  recoverable the same way and by the same route: issue a fresh order against the
+  re-inventoried manifest and resubmit, rather than editing counts back by hand. The same
+  holds for every record whose count this release moved, local repositories included.
+  Reproduced on 0.5.2.
 - **Fix: a stray file delivered during a blocked acquisition could be reported as a broken
   raw tree.** A `blocked` acquisition submission records a partial delivery: something was
   fetched, nothing was fulfilled. Its raw-scope guard asks inventory to attribute the
@@ -224,16 +277,16 @@
   inventoried as separate sources, because how a record is selected and how much evidence it
   admits are different questions.
 
-  **That subset mismatch is closed for local repositories and still open for bundles.** The
-  same shape survives one record kind over. `bundle_file_count`, which fills an arXiv or
-  LaTeX bundle's `metadata.file_count`, and `raw_fingerprint_paths`, which decides what a
-  `paper` record's `raw_fingerprint` covers, both still filter through `should_skip` over
-  the same directory the raw-tree snapshot walks unfiltered. Nothing contradicts itself
-  there the way it did for repositories, because a bundle record carries no `bounded` flag
-  to be contradicted — so the effect is quieter rather than absent: the count states less
-  than the tree the record admits, and a dot-prefixed file beneath the bundle falls outside
-  the fingerprint that decides re-normalization. Answering the same question for those two
-  functions is not part of this release.
+  **That subset mismatch is closed for local repositories, and for bundle counts by the
+  entry above.** The same shape survived one record kind over: `bundle_file_count`, which
+  fills an arXiv or LaTeX bundle's `metadata.file_count`, filtered through `should_skip` over
+  the same directory the raw-tree snapshot walks unfiltered, and it is widened in this same
+  release. Nothing contradicted itself there the way it did for repositories, because a
+  bundle record carries no `bounded` flag to be contradicted — the effect was quieter rather
+  than absent: the count stated less than the tree the record admits.
+  `raw_fingerprint_paths`, which decides what a `paper` record's `raw_fingerprint` covers,
+  still filters that way and is deliberately left as it is, so a dot-prefixed file beneath a
+  bundle still falls outside the fingerprint that decides re-normalization.
 
   **This is not a workspace-wide bound, and should not be read as one.** The snapshot's
   limit totals across every configured raw source root while the intake limit is per

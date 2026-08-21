@@ -83,8 +83,10 @@ Bundle metadata may include:
 - `metadata.entrypoint_source`: `readme`, `fallback_name`, or `fallback_documentclass`.
 - `metadata.entrypoint_candidates`: top-level candidates from README metadata.
 - `metadata.texlive_version`: TeX Live version from README metadata.
-- `metadata.file_count`: count of non-hidden files inside the bundle.
+- `metadata.file_count`: count of every regular file inside the bundle directory, dot-prefixed members included.
 - `metadata.warnings`: non-fatal detection warnings.
+
+For a bundle, `metadata.file_count` counts **every** regular file beneath the bundle directory, dot-prefixed members such as `.latexmkrc` or a `.build/` subdirectory included, and classifies entries the way the orchestration controller's raw tree snapshot does: a symbolic link and a multiply-linked file are excluded, because the snapshot refuses either rather than enumerating it. The whole subtree is counted because the whole subtree is what the record admits (see [Raw Path Attribution](#raw-path-attribution)) and what the controller fingerprints when it takes the raw evidence baseline. Suppressing dot-prefixed members from the count let a delivered bundle hold a file its own record never accounted for. The count is not a member list and does not bound what a bundle may contain: `raw_fingerprint` still covers only the paths normalization re-reads, which exclude dot-prefixed members, so such a file moves `metadata.file_count` without triggering re-normalization.
 
 ## PDF Pairing Records
 
@@ -134,7 +136,7 @@ Supported sources:
 
 Each codebase record includes `metadata.codebase_output_dir`, a generated artifact directory under `sources/`, for example `sources/code_wikis/codebase--github-example-project-a1b2c3d4e5`. Files inside detected local repositories are suppressed as separate raw records so the repo is normalized as one source evidence unit.
 
-For a local repository, `metadata.file_count` counts **every** regular file beneath the repository directory, dot-prefixed entries such as `.git/` included, and `metadata.codebase_intake.bounded` is that count measured against `metadata.codebase_intake.file_limit`. The whole subtree is counted because the whole subtree is what the record admits (see [Raw Path Attribution](#raw-path-attribution)) and what the orchestration controller fingerprints when it takes the raw evidence baseline. Suppressing dot-prefixed members from the count would let a repository be declared bounded on a subset and then refused as unbounded on the tree that is actually read.
+For a local repository, `metadata.file_count` counts **every** regular file beneath the repository directory, dot-prefixed entries such as `.git/` included, and `metadata.codebase_intake.bounded` is that count measured against `metadata.codebase_intake.file_limit`. The whole subtree is counted because the whole subtree is what the record admits (see [Raw Path Attribution](#raw-path-attribution)) and what the orchestration controller fingerprints when it takes the raw evidence baseline. Suppressing dot-prefixed members from the count would let a repository be declared bounded on a subset and then refused as unbounded on the tree that is actually read. Both this count and `metadata.codebase_intake.file_count` stop one past the intake limit rather than enumerate a tree already refused, so a repository over the bound publishes `file_count: 10001` and not its true total: past the limit that field is a verdict, not a census.
 
 ## Raw Path Attribution
 
