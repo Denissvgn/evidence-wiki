@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- **Fix: a stray file delivered during a blocked acquisition could be reported as a broken
+  raw tree.** A `blocked` acquisition submission records a partial delivery: something was
+  fetched, nothing was fulfilled. Its raw-scope guard asks inventory to attribute the
+  delivered files to the manifest records the order correlates, and both consumers of that
+  attribution — the `raw_paths` cross-check and the set of admitted new files — are keyed
+  on the correlated records the action *appended*. A delivery that continues an earlier one
+  appends none: the correlated record was already in the manifest when the order was
+  issued. In that state the attribution pass has no consumer and its result was discarded
+  whatever it contained, the admitted set coming entirely from the literal declared paths
+  of the pre-existing correlated records.
+
+  It was derived anyway: the gate also fired whenever the delivery had added any file at
+  all beneath the configured raw source roots, which is exactly what a stray delivery does
+  and what a continued one usually does. Deriving attribution re-walks and re-hashes
+  the whole raw tree, and it can fail. When it failed, the raise travelled out ahead of a
+  refusal that had already been decided: the operator was told "delivered raw evidence
+  could not be re-derived by source inventory rules" and sent to repair a raw tree that was
+  not broken, while the one file that was actually wrong was never named. The refusal that
+  fits — "blocked acquisition changed raw evidence outside correlated partial deliveries",
+  carrying the stray path in `unexpected_new_raw_paths` — was reachable only when the
+  derivation happened to succeed.
+
+  The gate now fires on the correlated records the action appended and on nothing else,
+  which is the shape both completed arms already had — each gates on the id set its own
+  consumers read, though the sets themselves differ: the completed arms use the
+  controller-issued fulfilled ids, this arm the manifest additions it has just observed.
+  Nothing else in the block moved. A partial delivery that does append a correlated record
+  still derives attribution exactly once and is still cross-checked against it, and since
+  both consumers iterate that id set alone, not one delivery's admitted paths change on any
+  arm. What changes is the delivery that appends nothing: it is judged on the files it left
+  rather than on whether an unconsulted derivation happened to survive. The two refusals
+  that derivation could raise — a raw tree inventory cannot read, and a peer holding the
+  acquisition barrier — therefore stop reaching this case, and a continued delivery stops
+  paying for a tree walk whose answer was thrown away.
+
+  Introduced with the attribution predicate described in the next entry and fixed before
+  either shipped: 0.5.2 asks no derivation on this arm, so no released version can produce
+  the substitution. Reproduced on this branch.
+
 - **Fix: a directory-shaped `raw_paths` entry could not be delivered inside any acquisition
   order.** A bundle record — an arXiv or LaTeX source archive, a local code repository —
   declares exactly one `raw_paths` entry, the bundle directory itself. The raw-tree
