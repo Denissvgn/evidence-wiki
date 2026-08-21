@@ -966,6 +966,187 @@ optional_facets:
             self.assertEqual(checksum, citation["checksum"])
             self.assertIs(True, citation["checksum_verified"])
 
+    def test_citation_surfaces_every_capture_the_record_delivered(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            record = dict(MANIFEST_RECORD)
+            record["additional_provenance"] = [
+                {
+                    "path": "raw/papers/bench-survey.pdf",
+                    "sidecar_path": "raw/papers/bench-survey.pdf.provenance.yml",
+                    "origin_url": "https://example.org/bench-survey.pdf",
+                    "retrieved_at": "2026-06-09T12:01:00Z",
+                    "license": "CC-BY-4.0",
+                    "checksum": "sha256:" + "b" * 64,
+                    "checksum_verified": True,
+                }
+            ]
+            (target / "sources" / "manifest.jsonl").write_text(json.dumps(record) + "\n")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            citation = self.question_by_slug(document, "benchmarks")["citations"][0]
+            self.assertEqual(
+                [
+                    {
+                        "path": "raw/papers/bench-survey.pdf",
+                        "origin_url": "https://example.org/bench-survey.pdf",
+                        "retrieved_at": "2026-06-09T12:01:00Z",
+                        "license": "CC-BY-4.0",
+                        "checksum": "sha256:" + "b" * 64,
+                        "checksum_verified": True,
+                    }
+                ],
+                citation["additional_provenance"],
+                msg=json.dumps(document, indent=2, sort_keys=True),
+            )
+
+    def test_citation_shows_a_paired_capture_whose_checksum_failed_to_verify(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            record = dict(MANIFEST_RECORD)
+            record["provenance"] = {
+                **MANIFEST_RECORD["provenance"],
+                "checksum": "sha256:" + "a" * 64,
+                "checksum_verified": True,
+            }
+            record["additional_provenance"] = [
+                {
+                    "path": "raw/papers/bench-survey.pdf",
+                    "origin_url": "https://example.org/bench-survey.pdf",
+                    "checksum": "sha256:" + "c" * 64,
+                    "checksum_verified": False,
+                }
+            ]
+            (target / "sources" / "manifest.jsonl").write_text(json.dumps(record) + "\n")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            citation = self.question_by_slug(document, "benchmarks")["citations"][0]
+            rendered = json.dumps(document, indent=2, sort_keys=True)
+            self.assertEqual(1, len(citation["additional_provenance"]), msg=rendered)
+            paired = citation["additional_provenance"][0]
+            self.assertEqual("raw/papers/bench-survey.pdf", paired["path"], msg=rendered)
+            self.assertIs(False, paired["checksum_verified"], msg=rendered)
+            self.assertIs(True, citation["checksum_verified"], msg=rendered)
+
+    def test_citation_keeps_request_correlation_out_of_a_paired_capture(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            record = dict(MANIFEST_RECORD)
+            record["additional_provenance"] = [
+                {
+                    "path": "raw/papers/bench-survey.pdf",
+                    "origin_url": "https://example.org/bench-survey.pdf",
+                    "request_id": "req-0001",
+                    "candidate_id": "cand-0001",
+                }
+            ]
+            (target / "sources" / "manifest.jsonl").write_text(json.dumps(record) + "\n")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            citation = self.question_by_slug(document, "benchmarks")["citations"][0]
+            rendered = json.dumps(document, indent=2, sort_keys=True)
+            paired = citation["additional_provenance"][0]
+            self.assertEqual("raw/papers/bench-survey.pdf", paired["path"], msg=rendered)
+            self.assertNotIn("request_id", paired, msg=rendered)
+            self.assertNotIn("candidate_id", paired, msg=rendered)
+
+    def test_citation_omits_additional_provenance_when_one_capture_was_delivered(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            citation = self.question_by_slug(document, "benchmarks")["citations"][0]
+            self.assertNotIn(
+                "additional_provenance",
+                citation,
+                msg=json.dumps(document, indent=2, sort_keys=True),
+            )
+
+    def test_export_warns_about_a_paired_capture_that_names_no_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            record = dict(MANIFEST_RECORD)
+            record["additional_provenance"] = [
+                "raw/papers/bench-survey.pdf",
+                {"path": "raw/papers/bench-survey.pdf"},
+                {"checksum_verified": False},
+            ]
+            (target / "sources" / "manifest.jsonl").write_text(json.dumps(record) + "\n")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            rendered = json.dumps(document, indent=2, sort_keys=True)
+            citation = self.question_by_slug(document, "benchmarks")["citations"][0]
+            self.assertEqual(
+                [{"path": "raw/papers/bench-survey.pdf"}],
+                citation["additional_provenance"],
+                msg=rendered,
+            )
+            self.assertEqual(
+                [
+                    "Question 'benchmarks' cites source whose additional provenance entry "
+                    "1 names no path: raw:bench-survey-2026",
+                    "Question 'benchmarks' cites source whose additional provenance entry "
+                    "3 names no path: raw:bench-survey-2026",
+                ],
+                document["warnings"],
+                msg=rendered,
+            )
+
+    def test_citation_omits_additional_provenance_when_no_entry_names_a_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            record = dict(MANIFEST_RECORD)
+            record["additional_provenance"] = [{"checksum": "sha256:" + "d" * 64}]
+            (target / "sources" / "manifest.jsonl").write_text(json.dumps(record) + "\n")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            rendered = json.dumps(document, indent=2, sort_keys=True)
+            citation = self.question_by_slug(document, "benchmarks")["citations"][0]
+            self.assertNotIn("additional_provenance", citation, msg=rendered)
+            self.assertEqual(
+                [
+                    "Question 'benchmarks' cites source whose additional provenance entry "
+                    "1 names no path: raw:bench-survey-2026"
+                ],
+                document["warnings"],
+                msg=rendered,
+            )
+
+    def test_citation_keeps_paired_captures_in_the_order_the_record_delivered_them(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            record = dict(MANIFEST_RECORD)
+            record["additional_provenance"] = [
+                {"path": "raw/papers/bench-survey.pdf", "checksum_verified": True},
+                {"path": "raw/papers/bench-survey-appendix.pdf", "checksum_verified": False},
+            ]
+            (target / "sources" / "manifest.jsonl").write_text(json.dumps(record) + "\n")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            citation = self.question_by_slug(document, "benchmarks")["citations"][0]
+            self.assertEqual(
+                [
+                    {"path": "raw/papers/bench-survey.pdf", "checksum_verified": True},
+                    {"path": "raw/papers/bench-survey-appendix.pdf", "checksum_verified": False},
+                ],
+                citation["additional_provenance"],
+                msg=json.dumps(document, indent=2, sort_keys=True),
+            )
+
     def test_citation_surfaces_academic_publication_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))
