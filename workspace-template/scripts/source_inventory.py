@@ -242,12 +242,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--require-checksum",
         action="store_true",
-        help="Strict mode: refuse records that do not have provenance.checksum_verified=true.",
+        help=(
+            "Strict mode: refuse records that do not have provenance.checksum_verified=true. "
+            "Asks this of the record's primary capture only."
+        ),
     )
     parser.add_argument(
         "--reject-mismatch",
         action="store_true",
-        help="Strict mode: refuse records whose provenance checksum is present but not verified.",
+        help=(
+            "Strict mode: refuse records whose provenance checksum is present but not verified, "
+            "including the checksum of any secondary capture the record delivered."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -2254,12 +2260,48 @@ def provenance_for_record(record: dict[str, Any]) -> dict[str, Any]:
     return provenance if isinstance(provenance, dict) else {}
 
 
+def unverified_additional_capture_paths(record: dict[str, Any]) -> list[str]:
+    """Paths of the record's secondary captures whose checksum is present but unverified.
+
+    A record can deliver more than one capture — a paired paper's LaTeX bundle and its
+    PDF, a link URL harvested from two link files — and each `additional_provenance`
+    entry carries the checksum of its own path. A checksum that is present and did not
+    verify is a mismatch wherever it sits, so a mismatch-rejecting run has to read these
+    entries too. An *absent* checksum is a different question and is deliberately not
+    reported here; `strict_checksum_refusals` says why it stays on the primary.
+    """
+    additional = record.get("additional_provenance")
+    if not isinstance(additional, list):
+        return []
+    paths: list[str] = []
+    for entry in additional:
+        if not isinstance(entry, dict):
+            continue
+        if not isinstance(entry.get("checksum"), str) or entry.get("checksum_verified") is True:
+            continue
+        # Every entry is built by additional_provenance_entry, which always names a path.
+        paths.append(str(entry.get("path")))
+    return paths
+
+
 def strict_checksum_refusals(
     records: list[dict[str, Any]],
     *,
     require_checksum: bool,
     reject_mismatch: bool,
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, str]]]:
+    """Split records into those the strict modes admit and the refusals they raise.
+
+    The two modes ask different questions, and only one of them reaches past the
+    record's primary capture. `reject_mismatch` asks whether any checksum the record
+    carries failed against the bytes beside it, which is positive evidence about a
+    specific capture and so is asked of every capture the record delivered.
+    `require_checksum` asks whether a verified checksum is present at all, which is
+    evidence about nothing in particular, and is asked of the primary capture alone:
+    a secondary capture may legitimately arrive without a checksum, and a primary that
+    is a bundle root can never be verified, so demanding one everywhere would refuse
+    correct deliveries for an absence.
+    """
     if not require_checksum and not reject_mismatch:
         return records, [], []
 
@@ -2272,19 +2314,45 @@ def strict_checksum_refusals(
         checksum_verified = provenance.get("checksum_verified") is True
         record_id = record_label(record)
 
-        reason: str | None = None
+        record_refusals: list[dict[str, str]] = []
         if reject_mismatch and checksum_present and not checksum_verified:
-            reason = "checksum_mismatch"
-            message = f"strict checksum refusal: {record_id} checksum is present but not verified"
+            record_refusals.append(
+                {
+                    "source_id": record_id,
+                    "reason": "checksum_mismatch",
+                    "message": f"strict checksum refusal: {record_id} checksum is present but not verified",
+                }
+            )
         elif require_checksum and not checksum_verified:
-            reason = "checksum_required"
-            message = f"strict checksum refusal: {record_id} missing verified checksum"
-        else:
+            record_refusals.append(
+                {
+                    "source_id": record_id,
+                    "reason": "checksum_required",
+                    "message": f"strict checksum refusal: {record_id} missing verified checksum",
+                }
+            )
+        if reject_mismatch:
+            # Whatever the primary did, a secondary capture may still have mismatched,
+            # and the operator needs the path of each one that did.
+            record_refusals.extend(
+                {
+                    "source_id": record_id,
+                    "reason": "checksum_mismatch",
+                    "path": path,
+                    "message": (
+                        f"strict checksum refusal: {record_id} capture {path} "
+                        "checksum is present but not verified"
+                    ),
+                }
+                for path in unverified_additional_capture_paths(record)
+            )
+
+        if not record_refusals:
             kept.append(record)
             continue
 
-        warnings.append(message)
-        refusals.append({"source_id": record_id, "reason": reason, "message": message})
+        warnings.extend(refusal["message"] for refusal in record_refusals)
+        refusals.extend(record_refusals)
     return kept, warnings, refusals
 
 
@@ -2295,7 +2363,8 @@ def strict_refusal_error_code(refusals: list[dict[str, str]]) -> str:
 
 
 def strict_refusal_message(refusals: list[dict[str, str]]) -> str:
-    count = len(refusals)
+    # One record can raise a refusal per offending capture; the count is of sources.
+    count = len(unique_values([refusal["source_id"] for refusal in refusals]))
     noun = "source" if count == 1 else "sources"
     reasons = {refusal.get("reason") for refusal in refusals}
     if "checksum_mismatch" in reasons:
@@ -2305,7 +2374,7 @@ def strict_refusal_message(refusals: list[dict[str, str]]) -> str:
 
 def strict_refusal_details(refusals: list[dict[str, str]]) -> dict[str, Any]:
     return {
-        "source_ids": [refusal["source_id"] for refusal in refusals],
+        "source_ids": unique_values([refusal["source_id"] for refusal in refusals]),
         "refusals": refusals,
     }
 

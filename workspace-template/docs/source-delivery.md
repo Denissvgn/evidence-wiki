@@ -392,12 +392,35 @@ Behavior in `source_inventory.py`:
   `--reject-mismatch` excludes records whose sidecar checksum is present but not
   verified, and `--require-checksum` excludes records without
   `provenance.checksum_verified: true`. These modes filter records before the
-  manifest is written and exit non-zero when they refuse sources. Both read the
-  record's primary `provenance` and nothing else, as does every other consumer of
-  a merged checksum; a failed checksum on an `additional_provenance` entry marks
-  the record `review_required` and warns in the report, but does not by itself
-  exclude the record. Treat that as the current boundary and not as a statement
-  that the paired capture verified.
+  manifest is written and exit non-zero when they refuse sources.
+- `--reject-mismatch` reads every capture a record delivered: the primary
+  `provenance` and each `additional_provenance` entry. A checksum that is present
+  and did not verify is a mismatch wherever it sits, so a paired paper whose PDF
+  failed verification is refused even though its primary provenance — the LaTeX
+  bundle root — carries no checksum at all, and a link record whose primary capture
+  verified is refused when a second link file naming the same URL did not. The
+  refusal names the offending capture: its `path` appears in the warning text and in
+  the error envelope under `details.refusals[].path`, so the operator can tell which
+  of the record's captures failed rather than only which record was dropped. A record
+  with several failing captures raises one refusal per capture, all naming that
+  record.
+- `--require-checksum` stays primary-only, and that is a constraint rather than an
+  omission. The two flags ask different questions. A checksum that is present and
+  did not verify is positive evidence about a specific capture, so it is asked of
+  every capture. A checksum that is *absent* is evidence of nothing, and demanding
+  one everywhere would refuse correct deliveries: a secondary capture may arrive
+  without a checksum, and a capture whose target is a directory can never be
+  verified at all — which is why the flag would refuse every paired paper, whose
+  primary capture is the bundle root. `--require-checksum` therefore asks only that
+  the record's primary `provenance` verified, and a record whose sole unverified
+  checksum sits on a secondary capture is still admitted under it.
+- Every other consumer of a merged checksum — lint, the evidence gates, and
+  normalized-record export — still reads the primary `provenance` alone. Outside
+  `--reject-mismatch`, a failed checksum on an `additional_provenance` entry marks
+  the record `review_required` and warns in the report without excluding it, and an
+  exported citation reports the primary capture's `checksum_verified` and no other.
+  Treat that as the current boundary and not as a statement that every capture of
+  the record verified.
 - Provenance and evidence-usability fields flow into normalized-record
   frontmatter on the next normalization, so exported citations carry
   `origin_url`, `license`, academic venue/status metadata, and unusable-evidence

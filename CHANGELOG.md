@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+- **Change: `--reject-mismatch` now refuses a record whose secondary capture's checksum did
+  not verify, where before it admitted one.** A record can deliver more than one capture:
+  inventory folds a paired PDF into the LaTeX-bundle record for the same paper, and it folds
+  every link file naming the same URL into one link record. Each further capture's sidecar
+  becomes an `additional_provenance` entry carrying the checksum of its own path.
+  `strict_checksum_refusals` read the record's primary `provenance` and nothing else, so a
+  record whose second capture had been proven mismatched — `checksum_verified: false`
+  against the bytes actually delivered — passed the mismatch-rejecting mode untouched. That
+  is now a refusal, and the refusal names the capture: the offending `path` appears in the
+  warning text and in the error envelope under `details.refusals[].path`, so an operator
+  reading a refused run can tell which of the record's captures failed rather than only
+  which record was dropped. A record with several failing captures raises one refusal per
+  capture; `details.source_ids` and the envelope's count stay counts of sources.
+
+  This is a narrowing of an opt-in flag, and it is disclosed as such. A workspace that runs
+  `source_inventory.py --reject-mismatch` over multi-capture records may see it exit
+  non-zero and drop a record on the next run where the previous release wrote that record to
+  the manifest. That is the flag doing what its name says — the mismatch was always real,
+  was always warned about, and always marked the record `review_required`; only the
+  exclusion was missing. Nothing changes for a run without the flag, and nothing changes for
+  a record that never grew an `additional_provenance` entry.
+
+  **`--require-checksum` stays primary-only, deliberately.** The two flags ask different
+  questions. A checksum that is present and did not verify is positive evidence about a
+  specific capture, so it is now asked of every capture. A checksum that is *absent* is
+  evidence of nothing, and demanding one from every capture would refuse correct
+  deliveries — a secondary capture may legitimately arrive without one, and a capture whose
+  target is a directory can never be verified at all, which is why the requirement would
+  refuse every paired paper, whose primary capture is the bundle root. A record whose sole
+  unverified checksum sits on a secondary capture is therefore still admitted under
+  `--require-checksum` alone, pinned end to end by its own test.
+
+  Rated low, not a security fix, and the severity is stated here rather than left to
+  inference. The mismatch was never silent: it always warned in the report and always marked
+  the record `review_required`, so no run was told the delivery was clean. Two claims that
+  would have narrowed it further were checked and do not hold, and are recorded here rather
+  than repeated: a multi-capture record's primary capture is *not* always a directory, and a
+  link record built from two link files can carry `provenance.checksum_verified: true`
+  alongside a mismatched `additional_provenance` entry, which an exported citation reports as
+  the record's verification status. Every consumer other than `--reject-mismatch` — lint, the
+  evidence gates, export — still reads the primary `provenance` alone; that boundary is now
+  stated where it is relied upon rather than assumed away. Verified by reverting only the
+  production change and confirming the refusal tests fail while both `--require-checksum`
+  controls still pass.
+
 - **Fix: a directory-shaped `raw_paths` entry could not be delivered inside any acquisition
   order.** A bundle record — an arXiv or LaTeX source archive, a local code repository —
   declares exactly one `raw_paths` entry, the bundle directory itself. The raw-tree
