@@ -3370,9 +3370,10 @@ def normalized_output_derivation_failure(
 _DERIVATION_VERDICTS: dict[tuple[str, str, str], dict[str, Any] | None] | None = None
 
 #: Inventory-derived raw attribution already computed during one ``submit``, keyed by the
-#: raw-tree content fingerprint the attribution is a statement about. Same lifecycle and
-#: rationale as ``_DERIVATION_VERDICTS``: ``submit_result`` verifies up to three times,
-#: and one derivation pass re-hashes every raw file.
+#: raw-tree content fingerprint *and* the directory set under those same roots -- together,
+#: the tree the attribution is a statement about. Same lifecycle and rationale as
+#: ``_DERIVATION_VERDICTS``: ``submit_result`` verifies up to three times, and one
+#: derivation pass re-hashes every raw file.
 _RAW_ATTRIBUTION_MEMO: dict[str, dict[str, dict[str, Any]]] | None = None
 
 
@@ -3402,6 +3403,50 @@ def derivation_verdict_memo() -> Iterator[None]:
     finally:
         _DERIVATION_VERDICTS = previous
         _RAW_ATTRIBUTION_MEMO = previous_attribution
+
+
+def raw_tree_directory_digest(project_root: Path, config: dict[str, Any]) -> str:
+    """Digest the directory set under the immutable raw roots, hashing no file bytes.
+
+    Completes the raw-attribution memo key, which a raw-tree content fingerprint cannot
+    complete on its own: ``raw_tree_snapshot`` records an entry per regular file and none
+    for a directory, so that fingerprint cannot tell an unchanged tree from one that gained
+    an empty directory -- and an empty directory is something ``source_inventory`` reads.
+    An empty ``.git/`` is one of the markers that makes a directory a local repository.
+
+    Directory names only: no ``stat`` of the files beneath them and no digest of their
+    bytes, so this costs one walk of a tree the caller's own fingerprint has already
+    walked. Tolerant by design -- anything unreadable or link-like under ``raw/`` is the
+    raw-tree guards' business and they refuse it on their own terms. This returns a digest,
+    never a verdict.
+
+    Scoped to ``configured_raw_source_roots``, deliberately the same roots the fingerprint
+    it completes is taken over, and read beside that fingerprint rather than under the
+    acquisition barrier the derivation takes. Neither is the derivation's own reach:
+    ``integrations.codebase_analysis.source_roots`` may name a root outside
+    ``raw.source_roots``, and such a root is outside the raw-tree fingerprint just as it is
+    outside this digest -- a gap in what the raw baselines cover at all, which composing
+    this key neither widens nor closes. Between the two the key can only go stale in the
+    direction of an extra derivation pass, never a reused answer.
+    """
+    directories: set[str] = set()
+    for relative_root in configured_raw_source_roots(config):
+        root = project_root / relative_root.as_posix()
+        for current, _dirnames, _filenames in os.walk(root):
+            try:
+                walked = PurePosixPath(Path(current).relative_to(root).as_posix())
+            except ValueError:  # pragma: no cover - os.walk yields only paths under root
+                continue
+            directories.add((relative_root / walked).as_posix())
+    # NUL separates because it is the one byte a POSIX path component cannot contain, so
+    # no directory set can be spelled as another set's joined form. A newline separator
+    # would rest that on paths never containing one, which is a convention rather than a
+    # rule -- and this digest exists precisely so the key determines the value.
+    # ``surrogateescape`` because ``os.walk`` hands back undecodable bytes as surrogates
+    # and a plain ``encode`` raises on them. An empty directory whose name is not valid
+    # UTF-8 reaches here without the snapshot having seen it -- the snapshot joins file
+    # paths only -- and a digest that raised there would be a verdict, which this is not.
+    return hashlib.sha256("\0".join(sorted(directories)).encode("utf-8", "surrogateescape")).hexdigest()
 
 
 def derived_raw_attribution(
@@ -3436,23 +3481,30 @@ def derived_raw_attribution(
     changed raw evidence it never touched. Closing that means rejecting the root or
     excluding ``raw/.locks`` from the snapshot, not moving this call off the barrier.
     ``memo_key``
-    should be the current raw-tree content fingerprint, which reuses an answer only while
-    every regular file under the raw roots is byte-identical.
+    should be the current raw-tree content fingerprint, and is not the whole memo key.
+    That fingerprint is a claim about regular files and nothing more, so on its own it does
+    not say what it reads as -- "the tree the derivation saw is unchanged".
+    ``raw_tree_snapshot`` records an entry per regular file and none for a directory, so
+    creating an empty directory -- a ``.git/`` marker, an empty bundle folder -- leaves it
+    byte-identical while changing what ``build_records`` derives from the same tree. What
+    is memoised on is therefore that fingerprint composed with
+    ``raw_tree_directory_digest``, so the directory set has to be unchanged too before an
+    answer is reused. Composed here rather than at the call sites, which keep passing the
+    one fingerprint they already hold.
 
-    That is a claim about regular files and nothing more, so it is not the stronger claim
-    it reads as -- "the tree the derivation saw is unchanged". ``raw_tree_snapshot`` records
-    an entry per regular file and none for a directory, so creating an empty directory --
-    a ``.git/`` marker, an empty bundle folder -- leaves the key byte-identical while
-    changing what ``build_records`` derives from the same tree. The memo is kept as it is
-    because what it actually rests on is the ``submit`` scope: its three passes run back to
-    back inside the driver session lock, which no peer driver can take, and each derivation
-    walks the raw roots under the acquisition barrier. What it does not rest on is the key
-    being sufficient on its own, and a memo asked to survive concurrent out-of-band edits
-    would have to key on the entry list rather than on file bytes.
+    Widening ``raw_tree_snapshot`` to record directories would answer the same question and
+    must not be done: those entries are also the raw-scope guards' universe, so a directory
+    appearing among them would surface as an unexpected new raw path and refuse legitimate
+    deliveries.
     """
     cache = _RAW_ATTRIBUTION_MEMO
-    if cache is not None and memo_key is not None and memo_key in cache:
-        return cache[memo_key]
+    entry_key = (
+        f"{memo_key}\0{raw_tree_directory_digest(project_root, config)}"
+        if cache is not None and memo_key is not None
+        else None
+    )
+    if cache is not None and entry_key is not None and entry_key in cache:
+        return cache[entry_key]
     source_inventory = load_sibling_module("source_inventory")
     try:
         records, _warnings, _summary = source_inventory.build_records(project_root, config, {})
@@ -3505,8 +3557,19 @@ def derived_raw_attribution(
                 # of admission -- exactly what the snapshot's per-file entries will show.
                 for member in sorted(target.rglob("*")):
                     try:
-                        if member.is_file() and not member.is_symlink():
-                            files.add(relative_workspace_path(project_root, member))
+                        metadata = member.lstat()
+                        # The raw-tree snapshot's own rule for what counts as a file, so
+                        # this expansion admits exactly the entries that snapshot shows:
+                        # it refuses a link-like entry outright and refuses any regular
+                        # file whose link count is not one, while ``Path.is_file()``
+                        # resolves symlinks and accepts hardlinks.
+                        if path_is_link_like(member, metadata):
+                            continue
+                        if not stat.S_ISREG(metadata.st_mode):
+                            continue
+                        if int(getattr(metadata, "st_nlink", 1) or 1) != 1:
+                            continue
+                        files.add(relative_workspace_path(project_root, member))
                     except OSError:
                         continue
             else:
@@ -3516,8 +3579,8 @@ def derived_raw_attribution(
             "raw_paths": [path for path in raw_paths if isinstance(path, str)],
             "files": files,
         }
-    if cache is not None and memo_key is not None:
-        cache[memo_key] = attribution
+    if cache is not None and entry_key is not None:
+        cache[entry_key] = attribution
     return attribution
 
 
@@ -3534,6 +3597,20 @@ def raw_attribution_mismatches(
     admit only reorderings and duplicates, and no shipped tool produces either. An id
     inventory derives nothing for reports ``derived_raw_paths: null``: such a record is
     not inventory-derivable and may not be created by an acquisition.
+
+    Each mismatch names three things, because "these two lists are not equal" does not say
+    which path is the unaccounted one: both lists, and ``declared_not_derived`` -- the
+    declared paths inventory accounts for none of, in declared order. An id inventory
+    derives nothing for reports every declared path there.
+
+    That third field supplements the equality test and never replaces it, and it is
+    one-sided on purpose: it answers "what did this record claim that inventory does not
+    account for", so it is empty whenever every declared path is accounted for, however the
+    two lists disagree -- a reorder, a duplicate, or a declared list that simply omits a
+    path inventory derives. Read an empty difference as "nothing surplus was declared", not
+    as "the lists agree"; what the lists do is the equality test's answer, printed beside
+    it. A ``raw_paths`` that is not a list reports ``null`` for both the declared list and
+    the difference, there being no list to subtract from.
     """
     mismatches: dict[str, dict[str, Any]] = {}
     for source_id in sorted(new_records_by_id):
@@ -3542,9 +3619,17 @@ def raw_attribution_mismatches(
         entry = attribution.get(source_id)
         derived = entry["raw_paths"] if entry is not None else None
         if not isinstance(declared, list) or declared != derived:
+            derived_present = (
+                {path for path in derived if isinstance(path, str)} if isinstance(derived, list) else set()
+            )
             mismatches[source_id] = {
                 "declared_raw_paths": declared if isinstance(declared, list) else None,
                 "derived_raw_paths": derived,
+                "declared_not_derived": (
+                    [path for path in declared if not (isinstance(path, str) and path in derived_present)]
+                    if isinstance(declared, list)
+                    else None
+                ),
             }
     return mismatches
 
