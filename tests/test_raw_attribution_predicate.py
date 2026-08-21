@@ -300,6 +300,55 @@ class DelegatedArmShape2(DelegatedWorkspace, unittest.TestCase):
             code, envelope = self.complete_and_submit(workspace, order, request_id, source_id)
             self.assertEqual(0, code, envelope)
 
+    # -- (ii) reordering a paired record's raw_paths must refuse, not pass ------------
+
+    def test_reordered_pairing_raw_paths_now_refused_naming_the_mismatch(self):
+        """Attribution equality is pinned-order, so a swapped pair is not the same list.
+
+        Inventory emits the two paths of a paper+PDF pairing in one deterministic order.
+        A record declaring the same two paths in the other order was not produced by
+        running inventory, so it must be refused exactly like a hand-appended path.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            order = self.pending_order(workspace)
+            relative = f"raw/papers/{LATEX_BUNDLE_FIXTURE.name}"
+            shutil.copytree(LATEX_BUNDLE_FIXTURE, workspace / relative)
+            self.sidecar(workspace, relative, request_id, "https://example.org/bundle")
+            pdf_rel = "raw/papers/2601.00002v1.pdf"
+            (workspace / pdf_rel).write_bytes(
+                synthetic_pdf(["Synthetic benchmark paper.", "The unit price is 12.50 EUR."])
+            )
+            self.sidecar(workspace, pdf_rel, request_id, "https://example.org/bundle.pdf")
+            self.run_script(D_INVENTORY, ["--report"], workspace)
+            manifest = workspace / "sources" / "manifest.jsonl"
+            records = [
+                json.loads(line)
+                for line in manifest.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            merged = [record for record in records if len(record.get("raw_paths", [])) > 1]
+            self.assertTrue(merged, "expected the paper+PDF pairing to merge into one record")
+            source_id = merged[0]["id"]
+            derived = list(merged[0]["raw_paths"])
+            self.assertEqual(2, len(derived), derived)
+            reordered = list(reversed(derived))
+            # Same two paths, same set of attributed files: only the order differs.
+            lines = []
+            for record in records:
+                if record.get("id") == source_id:
+                    record["raw_paths"] = reordered
+                lines.append(json.dumps(record))
+            manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            code, envelope = self.complete_and_submit(workspace, order, request_id, source_id)
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn(MISMATCH_MESSAGE, envelope.get("message", ""), envelope)
+            mismatches = envelope.get("details", {}).get("raw_attribution_mismatches", {})
+            self.assertIn(source_id, mismatches, envelope)
+            self.assertEqual(reordered, mismatches[source_id]["declared_raw_paths"], envelope)
+            self.assertEqual(derived, mismatches[source_id]["derived_raw_paths"], envelope)
+
     def test_same_url_link_merge_attribution_equality_holds(self):
         """The link-merge multi-raw_paths record derives byte-identically.
 
@@ -655,6 +704,40 @@ class ProviderArmShape2(unittest.TestCase):
             self.assertNotEqual(0, code, payload)
             self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", payload["error_code"])
             self.assertIn(MANIFEST_GUARD_MESSAGE, payload["message"])
+
+    # -- (v) provider control: a file inventory never saw is refused at raw scope ----
+
+    def test_provider_stray_file_written_after_inventory_still_refused(self):
+        """The provider arm's raw-scope guard refuses a delivery no record attributes.
+
+        Writing the stray before inventory makes it a manifest record, and the
+        manifest-scope guard refuses first -- the raw-scope block below it is never
+        reached. Writing it after every inventory run leaves no record naming it, so
+        this is the guard that has to say no.
+        """
+        raw_scope_message = (
+            "acquisition changed raw evidence outside newly fulfilled manifest source scope"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target, request_id, candidate_id, order = self.walk_to_acquisition(root)
+            self.write_directory_bundle(target, request_id=request_id, candidate_id=candidate_id)
+            self.fulfil_bundle(target, request_id, candidate_id, order)
+            stray = target / "raw" / "papers" / "stray-unrelated.txt"
+            stray.write_text("an extra delivery\n", encoding="utf-8")
+            code, payload, _ = self.submit(
+                root, target, order["action_id"],
+                summary="Delivered a bundle, then wrote a file inventory never saw.",
+            )
+            self.assertNotEqual(0, code, payload)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", payload["error_code"], payload)
+            self.assertIn(raw_scope_message, payload.get("message", ""), payload)
+            self.assertNotIn(MANIFEST_GUARD_MESSAGE, payload.get("message", ""), payload)
+            self.assertEqual(
+                ["raw/papers/stray-unrelated.txt"],
+                payload.get("details", {}).get("unexpected_new_raw_paths"),
+                payload,
+            )
 
     # -- (iv) provider arm planted marker: still admitted, measured ------------------
 
