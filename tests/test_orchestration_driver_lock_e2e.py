@@ -43,7 +43,6 @@ chosen to be "probably long enough". The one genuine time *budget* is criterion
 the constant.
 """
 
-import importlib.util
 import json
 import os
 import signal
@@ -54,6 +53,8 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+
+from tests._script_loader import load_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -127,13 +128,7 @@ with module.driver_session_lock(
 
 def load_deployed_module(name: str, path: Path):
     """Load a module out of the *initialized workspace*, not the template."""
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:  # pragma: no cover - defensive
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module(name, path)
 
 
 class DriverLockWorkspace:

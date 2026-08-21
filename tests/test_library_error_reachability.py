@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -64,6 +63,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import yaml
+
+from tests._script_loader import load_script as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -111,18 +112,6 @@ EXPECTED_FAMILY: dict[str, type[errors.EvidenceWikiError]] = {
     "ORCHESTRATION_WORKSPACE_HEALTH_CHANGED": errors.OrchestrationError,
     "ORCHESTRATION_DRIVER_BUSY": errors.OrchestrationError,
 }
-
-
-def load_script_module(name: str, filename: str):
-    """Load one packaged script under a private module name."""
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:  # pragma: no cover - fixture guard
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 #: Wall-clock stamp the competing driver publishes in its holder block. Frozen

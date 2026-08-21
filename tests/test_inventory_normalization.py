@@ -1,29 +1,19 @@
 import contextlib
-import importlib.util
 import io
 import json
 import shutil
-import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+
+from tests._script_loader import load_module as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "arxiv-source-project"
 CODEBASE_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "codebase-analysis-project"
 INVENTORY_PATH = REPO_ROOT / "workspace-template" / "scripts" / "source_inventory.py"
 NORMALIZE_PATH = REPO_ROOT / "workspace-template" / "scripts" / "normalize_sources.py"
-
-
-def load_script_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 INVENTORY = load_script_module("research_source_inventory", INVENTORY_PATH)

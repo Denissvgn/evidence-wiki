@@ -1,9 +1,7 @@
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,33 +9,15 @@ from typing import Any
 
 import yaml
 
+from tests._script_loader import load_isolated_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
 
 
 def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    loader_path = SCRIPTS / "_workspace_module_loader.py"
-    if path != loader_path and loader_path.is_file():
-        loader_name = f"{name}_isolated_loader"
-        loader_spec = importlib.util.spec_from_file_location(loader_name, loader_path)
-        if loader_spec is None or loader_spec.loader is None:
-            raise RuntimeError(f"Cannot load workspace module loader from {loader_path}")
-        loader_module = importlib.util.module_from_spec(loader_spec)
-        sys.modules[loader_name] = loader_module
-        try:
-            loader_spec.loader.exec_module(loader_module)
-        finally:
-            sys.modules.pop(loader_name, None)
-        return loader_module.load_workspace_module(SCRIPTS, path.stem)
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_isolated_module(name, SCRIPTS / filename)
 
 
 INIT = load_script_module("autonomous_fixture_init", "init_research_workspace.py")

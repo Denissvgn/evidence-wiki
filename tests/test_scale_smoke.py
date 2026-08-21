@@ -1,23 +1,13 @@
-import importlib.util
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from tests._script_loader import load_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOLS = REPO_ROOT / "tools"
 RUN_SCALE = os.environ.get("EVIDENCE_WIKI_RUN_SCALE") == "1"
-
-
-def load_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 SCALE = load_module("scale_benchmark", TOOLS / "scale_benchmark.py")

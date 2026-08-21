@@ -34,11 +34,9 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,6 +45,7 @@ from unittest import mock
 import yaml
 
 from tests._provider_plugin_fixture import ACQUISITION_PROVIDER_ID, installed_provider_plugins
+from tests._script_loader import load_module as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -71,18 +70,6 @@ ARTIFACT_FILENAME = "keepa-fixture-b0fixture1.json"
 PRODUCT_RESPONSE = json.dumps({"title": "Fixture Widget", "currency": "USD"}).encode("utf-8")
 HISTORY_RESPONSE = b"date,price\n2026-01-01,19.99\n2026-01-02,18.49\n"
 PLANNED_RESPONSES = (PRODUCT_RESPONSE, HISTORY_RESPONSE)
-
-
-def load_script_module(name: str, path: Path):
-    if not path.is_file():
-        raise AssertionError(f"Missing script: {path}")
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def tree_snapshot(root: Path) -> dict[str, bytes | None]:
