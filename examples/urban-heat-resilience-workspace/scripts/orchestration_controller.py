@@ -3438,11 +3438,15 @@ def raw_tree_directory_digest(project_root: Path, config: dict[str, Any]) -> str
             except ValueError:  # pragma: no cover - os.walk yields only paths under root
                 continue
             directories.add((relative_root / walked).as_posix())
+    # NUL separates because it is the one byte a POSIX path component cannot contain, so
+    # no directory set can be spelled as another set's joined form. A newline separator
+    # would rest that on paths never containing one, which is a convention rather than a
+    # rule -- and this digest exists precisely so the key determines the value.
     # ``surrogateescape`` because ``os.walk`` hands back undecodable bytes as surrogates
     # and a plain ``encode`` raises on them. An empty directory whose name is not valid
     # UTF-8 reaches here without the snapshot having seen it -- the snapshot joins file
     # paths only -- and a digest that raised there would be a verdict, which this is not.
-    return hashlib.sha256("\n".join(sorted(directories)).encode("utf-8", "surrogateescape")).hexdigest()
+    return hashlib.sha256("\0".join(sorted(directories)).encode("utf-8", "surrogateescape")).hexdigest()
 
 
 def derived_raw_attribution(
