@@ -538,8 +538,15 @@ def workspace_delegates_acquisition(config: dict[str, Any]) -> bool:
         raise SystemExit(f"Invalid research.yml: {exc.message}") from exc
 
 
-def require_in_order_request_mutation(project_root: Path, config: dict[str, Any], request_id: str) -> None:
-    require_sanctioned_mutation(
+def require_in_order_request_mutation(
+    project_root: Path, config: dict[str, Any], request_id: str
+) -> dict[str, Any] | None:
+    """Gate the mutation and hand back the order that sanctioned it, if any.
+
+    ``None`` means no order is in play -- an ungated workspace, or no live session -- and
+    the caller writes through as it always has.
+    """
+    return require_sanctioned_mutation(
         project_root,
         workspace_delegates_acquisition(config),
         request_id=request_id,
