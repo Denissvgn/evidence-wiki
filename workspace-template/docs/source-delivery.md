@@ -416,13 +416,16 @@ Behavior in `source_inventory.py`:
   primary capture is the bundle root. `--require-checksum` therefore asks only that
   the record's primary `provenance` verified, and a record whose sole unverified
   checksum sits on a secondary capture is still admitted under it.
-- Every other consumer of a merged checksum — lint, the evidence gates, and
-  normalized-record export — still reads the primary `provenance` alone. Outside
-  `--reject-mismatch`, a failed checksum on an `additional_provenance` entry marks
-  the record `review_required` and warns in the report without excluding it, and an
-  exported citation reports the primary capture's `checksum_verified` and no other.
-  Treat that as the current boundary and not as a statement that every capture of
-  the record verified.
+- Lint, the evidence gates, and normalized-record export still read the primary
+  `provenance` alone. Outside `--reject-mismatch`, a failed checksum on an
+  `additional_provenance` entry marks the record `review_required` and warns in the
+  report without excluding it. Treat that as the current boundary and not as a
+  statement that every capture of the record verified.
+- An exported citation is the exception: it carries each `additional_provenance`
+  entry through as its own object, so a consumer reading the export sees every
+  capture's `path` and `checksum_verified` rather than the primary's alone. What it
+  still cannot see is which delivered path the *primary* `provenance` describes —
+  that path is not recorded on the record.
 - Provenance and evidence-usability fields flow into normalized-record
   frontmatter on the next normalization, so exported citations carry
   `origin_url`, `license`, academic venue/status metadata, and unusable-evidence
