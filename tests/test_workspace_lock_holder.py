@@ -489,7 +489,15 @@ class ContentionSignalTests(unittest.TestCase):
                     self.assertTrue(handle.locked)
                     # Acquired by breaking the abandoned lock, so the dead
                     # owner's token is gone rather than merely waited out.
-                    self.assertNotIn("dead", exclusive_path.read_text(encoding="utf-8"))
+                    # Compared as the parsed token, not as a substring of the
+                    # file: the successor writes a random hex token, "dead" is
+                    # itself valid hex, and a token that happens to contain it
+                    # would fail an otherwise passing run.
+                    self.assertNotEqual(
+                        "dead",
+                        locks._read_exclusive_ownership_token(exclusive_path),
+                        exclusive_path.read_text(encoding="utf-8"),
+                    )
         finally:
             locks.LOCK_BACKENDS = old_backends
 
