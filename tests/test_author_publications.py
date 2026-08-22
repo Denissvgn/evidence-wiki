@@ -18,6 +18,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -97,8 +98,25 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
     def _reset_transport(self):
         DISCOVER.OPENALEX_TRANSPORT = None
         DISCOVER.OPENALEX_LAST_REQUEST_AT = None
+        # Restored to the module's real callables rather than to this suite's stubs.
+        # Every test module that loads discover_sources.py shares one module object,
+        # so installing a frozen clock in a cleanup would hand it to all of them.
+        DISCOVER.OPENALEX_CLOCK = time.monotonic
+        DISCOVER.OPENALEX_SLEEP = time.sleep
+
+    def test_the_cleanup_restores_the_real_pacing_hooks(self):
+        """This cleanup used to install stubs, which the shared module then kept.
+
+        Every test module that loads ``discover_sources`` shares one object, so a
+        cleanup handing back a frozen clock and a no-op sleep gave them to all of them.
+        """
         DISCOVER.OPENALEX_CLOCK = lambda: 0.0
         DISCOVER.OPENALEX_SLEEP = lambda _seconds: None
+
+        self._reset_transport()
+
+        self.assertIs(time.monotonic, DISCOVER.OPENALEX_CLOCK)
+        self.assertIs(time.sleep, DISCOVER.OPENALEX_SLEEP)
 
     def install_transport(self, transport) -> None:
         DISCOVER.OPENALEX_TRANSPORT = transport
