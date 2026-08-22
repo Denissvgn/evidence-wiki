@@ -154,6 +154,23 @@ def _sanctions_question(work_order: dict[str, Any] | None, question_slug: str) -
     return question_slug in _scope_ids(work_order, "question_slugs")
 
 
+def is_delegated_acquisition_order(work_order: dict[str, Any] | None) -> bool:
+    """Is this order the one kind whose bookkeeping the controller commits itself?
+
+    Sanctioning and this question are deliberately separate. ``_sanctions_question`` is
+    phase-agnostic because scope is the authorization, so a *research* order legitimately
+    sanctions a reopen -- and that reopen must keep writing straight through, because no
+    acquisition submission will ever come along to commit it. Only a delegated acquisition
+    order has a verification pass that can.
+    """
+    if not isinstance(work_order, dict):
+        return False
+    return (
+        work_order.get("phase") == ACQUISITION_PHASE
+        and work_order.get("acquisition_mode") == DELEGATED_ACQUISITION_MODE
+    )
+
+
 def require_sanctioned_mutation(
     project_root: Path,
     delegated: bool,
@@ -163,24 +180,43 @@ def require_sanctioned_mutation(
     error_code: str,
     subject: str,
     remediation: str,
-) -> None:
+) -> dict[str, Any] | None:
     """Raise when a live session exists and none of its pending orders sanction this change.
 
     ``delegated`` is the caller's already-validated acquisition mode. A workspace that does
     not delegate is never gated: its acquisition happens through work orders the controller
     issues to its own providers, and nothing about the CLI changes.
+
+    Returns the entry of the order that sanctioned the change, or ``None`` when no gate
+    applied -- an ungated workspace, or no live session. The caller needs the order itself,
+    not merely permission: this is the only code that already knows which order you are
+    inside, and whether that order is one whose bookkeeping the controller will commit.
+    ``None`` therefore means "write through", and so does an entry for an order that
+    :func:`is_delegated_acquisition_order` rejects.
     """
     if not delegated:
-        return
+        return None
     live = live_pending_orders(project_root)
     if not live:
-        return
-    for entry in live:
-        work_order = entry["work_order"]
-        if request_id is not None and _sanctions_request(work_order, request_id):
-            return
-        if question_slug is not None and _sanctions_question(work_order, question_slug):
-            return
+        return None
+    sanctioning = [
+        entry
+        for entry in live
+        if (request_id is not None and _sanctions_request(entry["work_order"], request_id))
+        or (question_slug is not None and _sanctions_question(entry["work_order"], question_slug))
+    ]
+    if sanctioning:
+        # Which entry is returned now decides whether the caller writes through or files a
+        # claim, so it may not fall out of the order the sessions happened to sort in. Two
+        # live sessions can scope one question slug -- a research order and a delegated
+        # acquisition order -- and the acquisition order is the answer whenever it is
+        # present. Writing through while one is pending would mutate exactly the state that
+        # order freezes, which is the hole this mechanism closes; claiming under a research
+        # order that never commits is visible and recoverable, and a silent bypass is not.
+        for entry in sanctioning:
+            if is_delegated_acquisition_order(entry["work_order"]):
+                return entry
+        return sanctioning[0]
     raise DelegationGateError(
         error_code,
         (
