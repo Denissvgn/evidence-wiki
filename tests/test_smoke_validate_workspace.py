@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import shutil
@@ -23,17 +22,8 @@ from tests._provider_plugin_fixture import (  # noqa: E402
     installed_provider_plugins,
     refresh_provider_plugin_caches,
 )
-
-
-def load_script_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
+from tests._script_loader import load_module as load_script_module  # noqa: E402
+from tests._script_loader import load_module_uncached  # noqa: E402
 
 INIT = load_script_module("research_workspace_init_for_smoke_tests", INIT_SCRIPT_PATH)
 SMOKE = load_script_module("research_workspace_smoke_validate", SMOKE_SCRIPT_PATH)
@@ -490,8 +480,12 @@ class SmokeValidateRegisteredProviderTests(unittest.TestCase):
         that a future change breaking any one of them fails on this test rather than
         silently downgrading an authorization defect to a report nobody blocks on.
         """
-        status = load_script_module("registered_provider_workspace_status", STATUS_SCRIPT_PATH)
-        controller = load_script_module("registered_provider_controller", CONTROLLER_SCRIPT_PATH)
+        # Loaded fresh: these two reach provider registration through sibling modules
+        # they cache on themselves, and the loader keeps those copies out of
+        # ``sys.modules``, so the fixture's cache refresh cannot reach them. A shared
+        # instance would answer from whether the distribution was installed last time.
+        status = load_module_uncached("registered_provider_workspace_status", STATUS_SCRIPT_PATH)
+        controller = load_module_uncached("registered_provider_controller", CONTROLLER_SCRIPT_PATH)
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.create_workspace(Path(tmpdir))
             self.authorize(target, acquisition=[ACQUISITION_PROVIDER_ID])
@@ -513,7 +507,10 @@ class SmokeValidateRegisteredProviderTests(unittest.TestCase):
 
     def test_an_installed_registration_leaves_the_workspace_operable(self):
         """The same workspace, with the distribution present, must not be gated at all."""
-        controller = load_script_module("registered_provider_controller", CONTROLLER_SCRIPT_PATH)
+        # Fresh for the same reason as above: this case installs the distribution, and a
+        # shared controller would carry that registration into the case that asserts its
+        # absence is refused.
+        controller = load_module_uncached("registered_provider_controller", CONTROLLER_SCRIPT_PATH)
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.create_workspace(Path(tmpdir))
             self.authorize(target, acquisition=[ACQUISITION_PROVIDER_ID])

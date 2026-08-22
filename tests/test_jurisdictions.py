@@ -8,28 +8,17 @@ contacts a provider, so it runs even when discovery is disabled.
 """
 
 import contextlib
-import importlib.util
 import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from tests._script_loader import load_script as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 FIXTURE_YAML = REPO_ROOT / "tests" / "fixtures" / "discovery" / "jurisdictions.yml"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys = __import__("sys")
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 DISCOVER = load_script_module("discover_sources_jurisdictions_under_test", "discover_sources.py")

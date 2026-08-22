@@ -1,6 +1,4 @@
-import importlib.util
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,22 +13,12 @@ from tests._mutation_fault_harness import (
     generated_temp,
     inject_once,
 )
+from tests._script_loader import load_script as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 MATRIX_PATH = REPO_ROOT / "tests" / "fixtures" / "mutation-fault-recovery" / "matrix.yml"
 ATOMIC_BOUNDARIES = ("before_temp_write", "after_temp_write", "before_replace", "after_replace")
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def path_matches_name(fragment: str):

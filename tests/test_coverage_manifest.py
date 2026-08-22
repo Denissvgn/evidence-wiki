@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import sys
@@ -28,22 +27,11 @@ from tests._pack_policy_rule_fixture import (  # noqa: E402
     intake_question,
     write_coverage_manifest,
 )
+from tests._script_loader import load_module as load_script_module  # noqa: E402
 
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
 COVERAGE_SCRIPT_PATH = SCRIPTS / "coverage_manifest.py"
-
-
-def load_script_module(name: str, path: Path):
-    if not path.is_file():
-        raise AssertionError(f"missing workspace script: {path}")
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 INIT = load_script_module("research_coverage_manifest_init", SCRIPTS / "init_research_workspace.py")

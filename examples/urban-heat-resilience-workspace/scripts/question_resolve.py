@@ -1610,18 +1610,25 @@ def transition_resolution(
         return result
 
 
-def require_in_order_question_mutation(project_root: Path, config: dict[str, Any], slug: str) -> None:
+def require_in_order_question_mutation(
+    project_root: Path, config: dict[str, Any], slug: str
+) -> dict[str, Any] | None:
     """Refuse reopening a question that no pending work order scopes, under delegation.
 
     A workspace that does not delegate acquisition is never gated: its questions are
     reopened by an in-workspace acquire agent inside its own work order, or by an operator
     who is not driving a protocol at all.
+
+    Returns the sanctioning order entry, or ``None`` when no gate applied. A reopen
+    sanctioned by a *research* order comes back here too, and is not a claim: scope is the
+    authorization, so a research order legitimately reopens its own questions, and no
+    acquisition submission will follow to commit anything on its behalf.
     """
     try:
         delegated = is_delegated(orchestration_config(config))
     except OrchestrationConfigError as exc:
         raise ResolveError(EXIT_INVALID, exc.error_code, f"invalid research.yml: {exc.message}") from exc
-    require_sanctioned_mutation(
+    return require_sanctioned_mutation(
         project_root,
         delegated,
         question_slug=slug,

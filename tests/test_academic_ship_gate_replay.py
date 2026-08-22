@@ -1,10 +1,8 @@
 import argparse
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +12,8 @@ from xml.sax.saxutils import escape
 
 import yaml
 
+from tests._script_loader import load_script as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "academic-replay"
@@ -22,17 +22,6 @@ TITLE = "Synthetic Retrieval Paper"
 AUTHORS = ["Ada Lovelace", "Grace Hopper"]
 DOI = "10.5555/synthetic-retrieval-paper"
 OPENALEX_ID = "W260100001"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 VERIFY = load_script_module("academic_replay_verify", "verify_citations.py")

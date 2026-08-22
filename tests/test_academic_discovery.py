@@ -1,12 +1,11 @@
 """Focused tests for request-backed arXiv/OpenAlex discovery."""
 
 import contextlib
-import importlib.util
 import io
 import json
 import os
-import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,19 +13,10 @@ from urllib.error import HTTPError, URLError
 
 import yaml
 
+from tests._script_loader import load_script as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 DISCOVER = load_script_module("academic_discovery_under_test", "discover_sources.py")
@@ -90,6 +80,35 @@ class AcademicDiscoveryTests(unittest.TestCase):
         DISCOVER.OPENALEX_TRANSPORT = None
         DISCOVER.ARXIV_LAST_REQUEST_AT = None
         DISCOVER.OPENALEX_LAST_REQUEST_AT = None
+        # The clock and sleep hooks are restored to the real callables the module
+        # defines, not left on this suite's stubs: every test module that loads
+        # discover_sources.py now shares one module object, so a frozen clock left
+        # behind here would make a rate-limit assertion anywhere else pass without
+        # measuring anything.
+        DISCOVER.ARXIV_CLOCK = time.monotonic
+        DISCOVER.OPENALEX_CLOCK = time.monotonic
+        DISCOVER.ARXIV_SLEEP = time.sleep
+        DISCOVER.OPENALEX_SLEEP = time.sleep
+
+    def test_the_cleanup_restores_the_real_pacing_hooks(self):
+        """Stubs left in a cleanup would reach every suite, because the module is shared.
+
+        Each test module used to load its own copy of ``discover_sources``, so a stubbed
+        clock could not outlive the suite that installed it. One module object now serves
+        every loader, and a frozen clock surviving this cleanup would make a rate-limit
+        assertion elsewhere pass while measuring nothing.
+        """
+        DISCOVER.ARXIV_CLOCK = lambda: 0.0
+        DISCOVER.OPENALEX_CLOCK = lambda: 0.0
+        DISCOVER.ARXIV_SLEEP = lambda _seconds: None
+        DISCOVER.OPENALEX_SLEEP = lambda _seconds: None
+
+        self._restore()
+
+        self.assertIs(time.monotonic, DISCOVER.ARXIV_CLOCK)
+        self.assertIs(time.monotonic, DISCOVER.OPENALEX_CLOCK)
+        self.assertIs(time.sleep, DISCOVER.ARXIV_SLEEP)
+        self.assertIs(time.sleep, DISCOVER.OPENALEX_SLEEP)
 
     def workspace(self, root: Path, *, providers: list[str], custom_store: bool = True) -> Path:
         target = root / "ws"

@@ -1,5 +1,4 @@
 import errno
-import importlib.util
 import json
 import os
 import subprocess
@@ -12,18 +11,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._script_loader import load_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCKS_PATH = REPO_ROOT / "workspace-template" / "scripts" / "_workspace_locks.py"
 
 
 def load_locks_module():
-    spec = importlib.util.spec_from_file_location("workspace_locks_under_test", LOCKS_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load {LOCKS_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module("workspace_locks_under_test", LOCKS_PATH)
 
 
 class WorkspaceLockTests(unittest.TestCase):

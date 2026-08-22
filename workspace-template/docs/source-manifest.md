@@ -6,7 +6,7 @@
 
 - `id`: stable source identifier derived from the raw path.
 - `kind`: asset classification.
-- `raw_paths`: one or more POSIX-style paths relative to the workspace root.
+- `raw_paths`: one or more POSIX-style paths relative to the workspace root. Inventory derives this list from the delivered tree; see [Raw Path Attribution](#raw-path-attribution) for what more than one entry means and who decides it.
 - `status`: lifecycle status from `research.yml`, initially `discovered`.
 - `detected_at`: UTC timestamp for when the source ID was first discovered.
 
@@ -22,6 +22,7 @@
 - `raw_fingerprint`: `sha256:`-prefixed content hash of the raw inputs for `paper`, `pdf`, `html`, CSV/TSV `table`, and `structured_data` records (source files plus any paired PDF and provenance sidecars). Normalization re-generates a record only when this value changes, enabling incremental re-normalization. Omitted for kinds whose normalized output is not derived from raw bytes (links, codebase records).
 - `url`: HTTP(S) URL parsed from a raw link file.
 - `provenance`: delivery provenance merged from a `.provenance.yml` sidecar delivered next to the raw file or directory (see `source-delivery.md`): `origin_url`, `url`, `license`, `retrieved_at`, `retrieved_by`, `checksum`, `sha256`, `checksum_verified`, optional `request_id`, `candidate_id`, `scope` (mapping of what this delivery answers, matched against the fulfilled request's own scope — see `source-delivery.md`), `terms_url`, `terms_note`, `notes`, official web metadata (`source_type`, `jurisdiction`, `publisher`, `date_metadata`, `evidence_usability_override`, `supported_evidence_areas`, `curation_notes`), standards registry metadata (`standards` mapping), currentness fields (`effective_date`, `publication_date`, `validity_period`, `date_not_available`, `source_status`), delivery failure fields (`delivery_failure_code`, `delivery_failure_detail`, `delivery_failure_remediation`), GitHub fields (`repository_owner`, `repository_name`, `repository_full_name`, `repository_artifact_kind`, `repository_ref`, `commit_sha`, `downloaded_archive_url`), academic enrichment fields (`provider_license_slug`, `license_source`, `openalex_title_lag`, `openalex_identity_conflict`, `openalex_reported_title`, `openalex_reported_authors`, `openalex_reported_publication_year`, `openalex_identity_evidence`, `doi_resolution`), plus the `sidecar_path` it was read from. Valid `delivery_failure_code` values are `tls_verification_failed`, `http_error`, `javascript_required`, `official_error_page`, `not_found`, `content_too_sparse`, `license_or_terms_unknown`, `robots_or_terms_blocked`, and `manual_review_required`; invalid codes are dropped with a warning. Sidecar files are never inventoried as sources themselves; malformed sidecars degrade to report warnings; checksum mismatches mark the record `review_required`. Non-null licenses must match the starter's in-repo SPDX allowlist; invalid license strings warn, mark the record `review_required`, and are not propagated. `license: null` is preserved as explicit uncertainty, while ambiguous provider license slugs are preserved in `provider_license_slug` with `license: unresolved` unless the adapter can map them to an unambiguous SPDX id. When OpenAlex enrichment records a wrong-work conflict, `doi_resolution` records the independent DOI.org/DataCite redirect-only HEAD check with `status`, `resolved_url`, and `matches_arxiv_id`; only an arXiv abs redirect for the local arXiv id sets `matches_arxiv_id: true`. Automated web curation checks use these provenance fields to count missing license/terms status, source notes, origin URLs, verified checksums, selected candidate ids, and audited evidence-usability overrides.
+- `additional_provenance`: provenance for the record's *other* delivered paths, present only when a record owns more than one path and more than one of them was delivered with a sidecar. The commonest case is a paired paper: inventory folds the PDF into the LaTeX-bundle record, both captures were retrieved separately, and each has its own sidecar. Each entry is a mapping carrying `path` (the delivered path it describes), `sidecar_path`, and the same validated fields the `provenance` object carries, with one deliberate exception — `request_id` and `candidate_id` are stripped. Those two fields answer "which source request authorised this delivery", a question with exactly one answer per record, and every consumer that reads them (delegated fulfilment correlation above all) reads `provenance` alone; a second copy would make a scalar authorisation ambiguous. Entries are ordered by the record's own path order, LaTeX bundle root first and then `raw_paths`, and `checksum_verified` in an entry reports the hash of *that* entry's `path` — never the primary's. `--reject-mismatch` reads every capture, so a checksum that is present and did not verify in an entry excludes the record just as it does in the primary. Lint, the evidence gates, and `--require-checksum` read `provenance` alone, so for those a failed entry marks the record `review_required` and warns rather than excluding it; see `source-delivery.md`. Older manifests omit the field entirely, and a record with only one sidecar never grows it.
 - `evidence_usable`: `false` when provenance records a delivery failure or unavailable/error source status. Omitted means usable for compatibility with older manifests.
 - `unusable_evidence_reasons`: stable reason codes explaining why evidence cannot satisfy required facets, such as `source_status:error_page`, `delivery_failure_code:official_error_page`, or `delivery_failure_code:tls_verification_failed`.
 - `metadata.codebase_source_type`: `repo_link`, `local_repo`, or `code_archive` for optional codebase architecture evidence.
@@ -82,8 +83,10 @@ Bundle metadata may include:
 - `metadata.entrypoint_source`: `readme`, `fallback_name`, or `fallback_documentclass`.
 - `metadata.entrypoint_candidates`: top-level candidates from README metadata.
 - `metadata.texlive_version`: TeX Live version from README metadata.
-- `metadata.file_count`: count of non-hidden files inside the bundle.
+- `metadata.file_count`: count of every regular file inside the bundle directory, dot-prefixed members included.
 - `metadata.warnings`: non-fatal detection warnings.
+
+For a bundle, `metadata.file_count` counts **every** regular file beneath the bundle directory, dot-prefixed members such as `.latexmkrc` or a `.build/` subdirectory included, and classifies entries the way the orchestration controller's raw tree snapshot does: a symbolic link and a multiply-linked file are excluded, because the snapshot refuses either rather than enumerating it. The whole subtree is counted because the whole subtree is what the record admits (see [Raw Path Attribution](#raw-path-attribution)) and what the controller fingerprints when it takes the raw evidence baseline. Suppressing dot-prefixed members from the count let a delivered bundle hold a file its own record never accounted for. The count is not a member list and does not bound what a bundle may contain: `raw_fingerprint` still covers only the paths normalization re-reads, which exclude dot-prefixed members, so such a file moves `metadata.file_count` without triggering re-normalization.
 
 ## PDF Pairing Records
 
@@ -133,6 +136,21 @@ Supported sources:
 
 Each codebase record includes `metadata.codebase_output_dir`, a generated artifact directory under `sources/`, for example `sources/code_wikis/codebase--github-example-project-a1b2c3d4e5`. Files inside detected local repositories are suppressed as separate raw records so the repo is normalized as one source evidence unit.
 
+For a local repository, `metadata.file_count` counts **every** regular file beneath the repository directory, dot-prefixed entries such as `.git/` included, and `metadata.codebase_intake.bounded` is that count measured against `metadata.codebase_intake.file_limit`. The whole subtree is counted because the whole subtree is what the record admits (see [Raw Path Attribution](#raw-path-attribution)) and what the orchestration controller fingerprints when it takes the raw evidence baseline. Suppressing dot-prefixed members from the count would let a repository be declared bounded on a subset and then refused as unbounded on the tree that is actually read. Both this count and `metadata.codebase_intake.file_count` stop one past the intake limit rather than enumerate a tree already refused, so a repository over the bound publishes `file_count: 10001` and not its true total: past the limit that field is a verdict, not a census.
+
+## Raw Path Attribution
+
+`raw_paths` is derived, not declared. `source_inventory.py` decides which raw paths belong to a record by walking the delivered tree, and running `source_inventory.py --report` is the only sanctioned way a record's `raw_paths` comes to exist or change. A hand-edited list does not hold: the next inventory run derives the list again from the tree and drops the edit. An acquisition that appends a path to a new record by hand is refused, because the controller re-runs inventory's own derivation over the delivered evidence and compares, naming both the declared and the derived list in the refusal. Deliver the files, then run inventory.
+
+Most records hold exactly one entry. Two merges produce more, and only these two:
+
+- PDF pairing folds a matched PDF into the logical `paper` record built from a LaTeX bundle, so that record holds the bundle path and the PDF path (see [LaTeX Bundle Records](#latex-bundle-records), [PDF Pairing Records](#pdf-pairing-records), and the first record under [Example Records](#example-records));
+- link parsing merges every raw link file that yields the same URL into one link record, so a URL delivered in two link files holds both files (see [Link Records](#link-records)).
+
+Ordinary raw data files get one entry each. There is no field or convention for grouping several unrelated raw files under one source id.
+
+A single entry may name a directory, and then it denotes the whole subtree beneath it. A LaTeX bundle directory and a local repository directory (see [Codebase Architecture Records](#codebase-architecture-records)) each appear as one path, and the files inside are suppressed as separate records because they already belong to that record. That subtree is also the record's unit of admission when an acquisition delivers it: every regular file beneath the directory is attributed to the record, **including a file that has nothing to do with the source**. Inventory records no member list to narrow this against, so a delivered directory must contain only the evidence its record stands for.
+
 ## Inventory Report
 
 `source_inventory.py` supports two report formats:
@@ -167,9 +185,12 @@ python3 scripts/source_inventory.py --report --reject-mismatch
 python3 scripts/source_inventory.py --report --require-checksum
 ```
 
-`--reject-mismatch` filters out records whose sidecar checksum is present but
-not verified. `--require-checksum` filters out records without
-`provenance.checksum_verified: true`. Both modes apply before manifest writing
+`--reject-mismatch` filters out records where a sidecar checksum is present but
+not verified in any capture the record delivered — the primary `provenance` or any
+`additional_provenance` entry. `--require-checksum` filters out records without
+`provenance.checksum_verified: true`, and asks that of the primary capture alone:
+a bundle root can never verify, so requiring one everywhere would refuse every
+paired paper. Both modes apply before manifest writing
 and return exit code `1` when records are refused; JSON mode emits the shared
 error envelope with `INVENTORY_CHECKSUM_MISMATCH` or
 `INVENTORY_CHECKSUM_REQUIRED`.

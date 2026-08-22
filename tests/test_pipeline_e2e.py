@@ -6,7 +6,6 @@ a language model and is tested separately via skill smoke-tests.
 """
 
 import contextlib
-import importlib.util
 import io
 import json
 import shutil
@@ -15,6 +14,8 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+
+from tests._script_loader import load_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARXIV_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "arxiv-source-project"
@@ -26,13 +27,7 @@ QUERY_PATH = REPO_ROOT / "workspace-template" / "scripts" / "query_index.py"
 
 
 def _load_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module(name, path)
 
 
 INVENTORY = _load_module("research_source_inventory_e2e", INVENTORY_PATH)

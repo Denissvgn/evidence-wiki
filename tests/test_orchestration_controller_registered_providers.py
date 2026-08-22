@@ -16,7 +16,6 @@ what it was before registration existed.
 """
 
 import contextlib
-import importlib.util
 import io
 import json
 import sys
@@ -35,17 +34,7 @@ from tests._provider_plugin_fixture import (  # noqa: E402
     DISCOVERY_PROVIDER_ID,
     installed_provider_plugins,
 )
-
-
-def load_script_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
+from tests._script_loader import load_module as load_script_module  # noqa: E402
 
 CONTROLLER = load_script_module("registered_providers_controller", SCRIPTS / "orchestration_controller.py")
 PLUGINS = load_script_module("registered_providers_plugins", SCRIPTS / "_provider_plugins.py")

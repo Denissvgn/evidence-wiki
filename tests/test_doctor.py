@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -14,19 +13,10 @@ from tests._provider_plugin_fixture import (
     DISCOVERY_PROVIDER_ID,
     installed_provider_plugins,
 )
+from tests._script_loader import load_module as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCTOR_PATH = REPO_ROOT / "workspace-template" / "scripts" / "doctor.py"
-
-
-def load_script_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def make_workspace(root: Path) -> Path:

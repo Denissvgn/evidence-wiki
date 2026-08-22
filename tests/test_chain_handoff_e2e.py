@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import shutil
@@ -14,32 +13,11 @@ from pathlib import Path
 
 import yaml
 
+from tests._script_loader import load_isolated_module as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "chain-handoff"
 INIT_SCRIPT_PATH = REPO_ROOT / "workspace-template" / "scripts" / "init_research_workspace.py"
-
-
-def load_script_module(name: str, path: Path):
-    loader_path = path.parent / "_workspace_module_loader.py"
-    if path != loader_path and loader_path.is_file():
-        loader_name = f"{name}_isolated_loader"
-        loader_spec = importlib.util.spec_from_file_location(loader_name, loader_path)
-        if loader_spec is None or loader_spec.loader is None:
-            raise RuntimeError(f"Cannot load workspace module loader from {loader_path}")
-        loader_module = importlib.util.module_from_spec(loader_spec)
-        sys.modules[loader_name] = loader_module
-        try:
-            loader_spec.loader.exec_module(loader_module)
-        finally:
-            sys.modules.pop(loader_name, None)
-        return loader_module.load_workspace_module(path.parent, path.stem)
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 @contextlib.contextmanager

@@ -678,13 +678,54 @@ an adapter for a record only when:
   the record was built from.
 
 Otherwise the record is left alone and reported as `skipped_existing`. `--force`
-rebuilds regardless, as for any other kind.
+rebuilds regardless, as for any other kind. Both levers rewrite files an open
+acquisition order may already be reusing as evidence — see "Rebuilding while an order is
+pending" before pulling either one.
 
 This is also the boundary for hand-written records. A kind with **no** adapter mapped is
 not eligible for normalization at all, so a record you write for it is never
 regenerated — that is the safe place to write records yourself. Mapping a kind to an
 adapter hands that kind to the adapter: a hand-written record for a mapped kind names a
 producer the workspace did not authorize, so the next run replaces it.
+
+### Rebuilding while an order is pending
+
+**Do not pull the rebuild lever while an acquisition order is pending.** `research.yml`
+is a trusted static input of an orchestration session, so editing it under a pending
+action is refused as `ORCHESTRATION_TRUSTED_INPUT_CHANGED`, naming the file among the
+changed paths. Restoring the file — which is what that refusal advises — does not undo
+the rebuild it already triggered, so it clears the first refusal and exposes a second:
+the rebuilt bytes are still on disk, and reconciliation reports that pre-existing
+fulfilled evidence is not an unchanged exact scoped reconciliation match. Recovering
+from that means restoring the rebuilt records' own bytes as well as the configuration.
+Bump `version` between sessions, or after `submit` — never with an order pending.
+
+**The blast radius is every record of that kind, not just the one being reused.** The
+default selector treats a record as pending when its output is missing *or* stale, and
+an identity change marks every adapter-mapped record stale at once, so one pull rewrites
+all of them — including records the pending action never scoped. The normalized-scope
+guard then refuses the submission over evidence the acquirer never touched, which is why
+the second refusal rarely names only the record the order was reusing.
+
+**A version bump alone is safe for reuse verification.** `normalizer.version` and
+`pdf_extractor.version` are read back out of the record when a reuse is re-derived,
+rather than compared against this installation: they are provenance about the tools, not
+tamper evidence, and binding a reuse verdict to them would refuse a legitimate reuse
+after an ordinary upgrade. A bump between issuance and submission therefore does not by
+itself break a reuse. It is the rebuild the bump *triggers* that is unsafe, not the
+number — the rule is when to bump, not whether.
+
+**Redeploying the adapter binary is the same hazard, and no guard can see it.**
+`research.yml` is fingerprinted as a trusted input, but the adapter program it names is
+resolved on `PATH`, outside the workspace, so replacing that program changes what
+normalization produces while every fingerprinted input still matches. If the redeployed
+binary reports an identity `research.yml` does not authorize, the adapter run fails its
+identity check and the submission fails with the reason `the normalizer adapter this
+workspace authorizes did not produce a record to compare against` — the reason names the
+adapter, not the record, so the record is not what to suspect. The accompanying `error`
+detail carries the mismatch itself: the identity the program reported and the one
+`research.yml` authorized. Pin the adapter binary for the duration of an order, and redeploy
+it where a `version` bump belongs: between sessions.
 
 ### Failure is closed
 

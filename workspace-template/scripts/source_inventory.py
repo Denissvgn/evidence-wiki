@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import stat
 import sys
 import uuid
 from datetime import date, datetime, timezone
@@ -147,6 +148,14 @@ PROVENANCE_FIELDS = (
     "terms_note",
     "notes",
 )
+# Fields that bind a capture to the request and candidate it was authorised by. They
+# are carried only on the record's primary `provenance`, because every consumer that
+# reads them — delegated fulfilment correlation above all — asks a question with one
+# answer: which request authorised this delivery. A record whose paired capture also
+# supplied a request_id would offer two answers to that scalar question, so
+# `additional_provenance` entries are stripped of them and correlation keeps reading
+# the primary alone.
+PROVENANCE_CORRELATION_FIELDS = frozenset({"request_id", "candidate_id"})
 PROVENANCE_CHECKSUM_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 INVENTORY_CHECKSUM_REQUIRED = "INVENTORY_CHECKSUM_REQUIRED"
@@ -233,12 +242,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--require-checksum",
         action="store_true",
-        help="Strict mode: refuse records that do not have provenance.checksum_verified=true.",
+        help=(
+            "Strict mode: refuse records that do not have provenance.checksum_verified=true. "
+            "Asks this of the record's primary capture only."
+        ),
     )
     parser.add_argument(
         "--reject-mismatch",
         action="store_true",
-        help="Strict mode: refuse records whose provenance checksum is present but not verified.",
+        help=(
+            "Strict mode: refuse records whose provenance checksum is present but not verified, "
+            "including the checksum of any secondary capture the record delivered."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -529,12 +544,57 @@ def select_entrypoint(
     return None, None, candidates, warnings
 
 
-def bundle_file_count(project_root: Path, bundle_dir: Path) -> int:
-    return sum(
-        1
-        for path in bundle_dir.rglob("*")
-        if path.is_file() and not should_skip(path.relative_to(project_root))
-    )
+def bundle_file_count(bundle_dir: Path) -> int:
+    """Count every regular file inside a LaTeX or arXiv bundle, dot-prefixed entries included.
+
+    A bundle record declares exactly one ``raw_paths`` entry -- the bundle directory -- and
+    no member list, so the whole subtree beneath it is the record's unit of admission. The
+    controller expands that directory-shaped entry into every regular file beneath it with
+    no skip predicate when it decides which delivered raw files a record accounts for, and
+    the raw tree snapshot fingerprints one entry per regular file the same way. Filtering
+    members through ``should_skip`` here measured a strict subset of that: a dot-prefixed
+    file planted inside a delivered bundle was admitted under the record while
+    ``metadata.file_count`` did not move, so the record's own account of how much evidence
+    it holds disagreed with the tree it admits, and the disagreement was silent.
+
+    "Regular file" here means what the snapshot means by it, checked the way the snapshot
+    checks it: ``lstat`` rather than ``is_file``, a real regular file rather than a symlink
+    to one, and a link count of exactly one. The snapshot refuses a symlink or a
+    multiply-linked file rather than enumerating it, so an entry of either kind is not
+    evidence this record admits and must not be measured as though it were. Counting them
+    would put the same subset mismatch back that this function exists to remove, only with
+    the excluded set on the other side. The exclusion tracks a real refusal rather than
+    inventing a subset of its own: a bundle holding either entry sits under a raw source
+    root, so the snapshot refuses the whole workspace rather than returning a smaller
+    enumeration, and no count this function could state would make that tree deliverable.
+
+    ``should_skip`` is deliberately not consulted, and equally deliberately not changed. It
+    governs which paths become *records* -- dotfiles are not inventoried as separate sources
+    -- and that is a different question from how much evidence a record admits. A bundle
+    record declares the whole directory in ``raw_paths``, so every regular file beneath it
+    is attributed to the record and has to be measured by it.
+
+    What this closes is the count, not every way a bundle can hold more than it says.
+    ``raw_fingerprint`` covers the paths ``raw_fingerprint_paths`` selects, which do filter
+    through ``should_skip``, so a dot-prefixed member still reproduces a byte-identical
+    fingerprint and triggers no re-normalization; and no member list exists anywhere in the
+    record to hold a delivered bundle to its own contents. Both remain open on purpose:
+    closing either needs an inventory-level member list, not a different predicate here.
+    """
+    count = 0
+    for path in bundle_dir.rglob("*"):
+        try:
+            metadata = path.lstat()
+        except OSError:
+            # An entry that cannot be inspected is one the snapshot will refuse on its
+            # own terms; it is not this count's business to decide that.
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        if int(getattr(metadata, "st_nlink", 1) or 1) != 1:
+            continue
+        count += 1
+    return count
 
 
 def readme_string(readme: dict[str, Any] | None, key: str) -> str | None:
@@ -577,7 +637,7 @@ def build_bundle_record(
     metadata: dict[str, Any] = {
         "bundle_type": "arxiv" if arxiv_id else "latex_bundle",
         "entrypoint_source": entrypoint_source,
-        "file_count": bundle_file_count(project_root, bundle_dir),
+        "file_count": bundle_file_count(bundle_dir),
     }
     readme_path = bundle_dir / "00README.json"
     if readme_path.exists():
@@ -1031,13 +1091,61 @@ def iter_local_code_repos(
     return repos, warnings
 
 
-def local_repo_file_count(project_root: Path, repo_dir: Path, *, limit: int | None = None) -> int:
+def local_repo_file_count(repo_dir: Path, *, limit: int | None = None) -> int:
+    """Count every regular file under a local repository, dot-prefixed entries included.
+
+    This count decides ``codebase_intake.bounded``, and the promise that flag makes is
+    consumed by the controller's raw tree snapshot, which fingerprints one entry per regular
+    file beneath the raw roots with no skip predicate and refuses the workspace once that
+    enumeration passes its own 10,000-entry cap. Measuring the bound over a *subset* of what
+    the snapshot walks makes the two caps incomparable: filtering through ``should_skip``
+    here withheld every dot-prefixed path, so a checkout whose ``.git`` carried the
+    difference was stamped bounded and then refused as unbounded, the refusal naming a tree
+    the record had already declared admissible. ``.git`` is one of
+    ``CODEBASE_LOCAL_REPO_MARKERS``, so the excluded subset was not exotic: it is what makes
+    the tree a repository at all.
+
+    "Regular file" here means what the snapshot means by it, checked the way the snapshot
+    checks it: ``lstat`` rather than ``is_file``, a real regular file rather than a symlink
+    to one, and a link count of exactly one. The snapshot refuses a symlink or a
+    multiply-linked file rather than enumerating it, so an entry of either kind is not
+    evidence this record admits and must not be measured as though it were.
+
+    ``should_skip`` is deliberately not consulted, and equally deliberately not changed. It
+    governs which paths become *records* -- dotfiles are not inventoried as separate sources
+    -- and that is a different question from how much evidence a record admits. A local
+    repository record declares the whole directory in ``raw_paths``, so every regular file
+    beneath it is attributed to the record and has to be measured by it.
+
+    What this closes is the subset mismatch, not every way the two limits can disagree. The
+    snapshot's cap is over all configured raw roots combined while this one is per
+    repository, so ``bounded`` remains a statement about one repository rather than a
+    guarantee about the workspace: several repositories, or one repository beside enough
+    other raw evidence, can still total past the snapshot's limit with every record
+    correctly bounded. Reconciling that needs a workspace-wide accounting, not a different
+    predicate here.
+    """
     count = 0
     for path in repo_dir.rglob("*"):
-        if not path.is_file() or should_skip(path.relative_to(project_root)):
+        try:
+            metadata = path.lstat()
+        except OSError:
+            # An entry that cannot be inspected is one the snapshot will refuse on its
+            # own terms; it is not this count's business to decide that.
+            continue
+        # ``Path.is_file()`` resolves symlinks and accepts hardlinks, so it would count
+        # entries the snapshot never enumerates: it refuses a symlink outright, and
+        # refuses any regular file whose link count is not one. Counting them would put
+        # the same subset mismatch back that this function exists to remove, only with
+        # the excluded set on the other side.
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        if int(getattr(metadata, "st_nlink", 1) or 1) != 1:
             continue
         count += 1
         if limit is not None and count > limit:
+            # Over the limit is all the caller can act on, so stop walking rather than
+            # enumerate a tree that has already been refused.
             return count
     return count
 
@@ -1052,7 +1160,7 @@ def build_local_codebase_record(
 ) -> dict[str, Any]:
     relative_path = repo_dir.relative_to(project_root).as_posix()
     source_id = stable_codebase_id(relative_path, PurePosixPath(relative_path).name)
-    file_count = local_repo_file_count(project_root, repo_dir, limit=CODEBASE_MAX_LOCAL_REPO_FILES)
+    file_count = local_repo_file_count(repo_dir, limit=CODEBASE_MAX_LOCAL_REPO_FILES)
     accepted = file_count <= CODEBASE_MAX_LOCAL_REPO_FILES
     warnings = [] if accepted else [
         (
@@ -1677,12 +1785,81 @@ def provenance_candidate_paths(record: dict[str, Any]) -> list[str]:
     return unique_values(candidates)
 
 
+def merge_sidecar_provenance(
+    project_root: Path,
+    record: dict[str, Any],
+    target_rel: str,
+    entry: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Validate one sidecar's fields for the delivered path it sits beside.
+
+    The checksum is verified against `target_rel` and nowhere else, which is why a
+    second capture's provenance is never folded into the first one's mapping: a
+    checksum only means anything next to the path whose bytes it was computed from.
+    """
+    provenance: dict[str, Any] = dict(entry["data"])
+    provenance["sidecar_path"] = entry["sidecar_path"]
+    license_value = provenance.get("license")
+    if isinstance(license_value, str) and license_value != "unresolved" and license_value not in SPDX_LICENSE_IDS:
+        warning = (
+            f"{entry['sidecar_path']}: provenance license is not in the SPDX allowlist: {license_value}"
+        )
+        provenance.pop("license", None)
+        append_record_warning(record, warning)
+        ensure_metadata(record)["review_required"] = True
+        warnings.append(warning)
+    checksum = provenance.get("checksum")
+    if checksum:
+        target = project_root / target_rel
+        if target.is_file():
+            actual = hash_file_contents(target)
+            verified = actual is not None and f"sha256:{actual}" == checksum
+            provenance["checksum_verified"] = verified
+            if not verified:
+                warning = f"provenance checksum mismatch for {target_rel} (sidecar {entry['sidecar_path']})"
+                append_record_warning(record, warning)
+                ensure_metadata(record)["review_required"] = True
+                warnings.append(warning)
+        else:
+            provenance["checksum_verified"] = False
+            warning = f"{entry['sidecar_path']}: checksum cannot be verified for a directory target"
+            append_record_warning(record, warning)
+            warnings.append(warning)
+    standards = provenance.get("standards")
+    if isinstance(standards, dict) and standards.get("review_required") is True:
+        warning = f"{entry['sidecar_path']}: standards metadata requires review"
+        append_record_warning(record, warning)
+        ensure_metadata(record)["review_required"] = True
+        warnings.append(warning)
+    return provenance
+
+
+def additional_provenance_entry(target_rel: str, provenance: dict[str, Any]) -> dict[str, Any]:
+    """One secondary capture's provenance, named by the path it describes."""
+    entry: dict[str, Any] = {"path": target_rel}
+    for field, value in provenance.items():
+        if field in PROVENANCE_CORRELATION_FIELDS:
+            continue
+        entry[field] = value
+    return entry
+
+
 def apply_provenance_sidecars(
     project_root: Path,
     records: list[dict[str, Any]],
     sidecars: dict[str, dict[str, Any]],
 ) -> list[str]:
-    """Merge sidecar provenance into matching records and verify checksums."""
+    """Merge sidecar provenance into matching records and verify checksums.
+
+    A record can own more than one delivered path — inventory folds a paired PDF into
+    the LaTeX bundle record that describes the same paper, so one manifest row carries
+    two captures that were retrieved separately and hash differently. The first
+    matching sidecar becomes the record's `provenance`; every other matching sidecar
+    becomes an `additional_provenance` entry rather than being discarded, because the
+    capture it describes was delivered and its origin, retrieval time, and checksum are
+    the only record of where those bytes came from.
+    """
     warnings: list[str] = []
     matched: set[str] = set()
     for record in records:
@@ -1690,53 +1867,23 @@ def apply_provenance_sidecars(
         primary = next((candidate for candidate in candidates if candidate in sidecars), None)
         if primary is None:
             continue
-        entry = sidecars[primary]
         matched.add(primary)
-        provenance: dict[str, Any] = dict(entry["data"])
-        provenance["sidecar_path"] = entry["sidecar_path"]
-        license_value = provenance.get("license")
-        if isinstance(license_value, str) and license_value != "unresolved" and license_value not in SPDX_LICENSE_IDS:
-            warning = (
-                f"{entry['sidecar_path']}: provenance license is not in the SPDX allowlist: {license_value}"
-            )
-            provenance.pop("license", None)
-            append_record_warning(record, warning)
-            ensure_metadata(record)["review_required"] = True
-            warnings.append(warning)
-        checksum = provenance.get("checksum")
-        if checksum:
-            target = project_root / primary
-            if target.is_file():
-                actual = hash_file_contents(target)
-                verified = actual is not None and f"sha256:{actual}" == checksum
-                provenance["checksum_verified"] = verified
-                if not verified:
-                    warning = f"provenance checksum mismatch for {primary} (sidecar {entry['sidecar_path']})"
-                    append_record_warning(record, warning)
-                    ensure_metadata(record)["review_required"] = True
-                    warnings.append(warning)
-            else:
-                provenance["checksum_verified"] = False
-                warning = f"{entry['sidecar_path']}: checksum cannot be verified for a directory target"
-                append_record_warning(record, warning)
-                warnings.append(warning)
-        record["provenance"] = provenance
-        standards = provenance.get("standards")
-        if isinstance(standards, dict) and standards.get("review_required") is True:
-            warning = f"{entry['sidecar_path']}: standards metadata requires review"
-            append_record_warning(record, warning)
-            ensure_metadata(record)["review_required"] = True
-            warnings.append(warning)
+        record["provenance"] = merge_sidecar_provenance(
+            project_root, record, primary, sidecars[primary], warnings
+        )
+        additional: list[dict[str, Any]] = []
         for extra in candidates:
             if extra == primary or extra not in sidecars:
                 continue
             matched.add(extra)
-            warning = (
-                f"{sidecars[extra]['sidecar_path']}: additional provenance sidecar not merged "
-                f"(record {record_label(record)} already carries provenance from {entry['sidecar_path']})"
+            additional.append(
+                additional_provenance_entry(
+                    extra,
+                    merge_sidecar_provenance(project_root, record, extra, sidecars[extra], warnings),
+                )
             )
-            append_record_warning(record, warning)
-            warnings.append(warning)
+        if additional:
+            record["additional_provenance"] = additional
     for target_rel in sorted(set(sidecars) - matched):
         warnings.append(f"{sidecars[target_rel]['sidecar_path']}: provenance sidecar matches no source record")
     return warnings
@@ -2158,12 +2305,48 @@ def provenance_for_record(record: dict[str, Any]) -> dict[str, Any]:
     return provenance if isinstance(provenance, dict) else {}
 
 
+def unverified_additional_capture_paths(record: dict[str, Any]) -> list[str]:
+    """Paths of the record's secondary captures whose checksum is present but unverified.
+
+    A record can deliver more than one capture — a paired paper's LaTeX bundle and its
+    PDF, a link URL harvested from two link files — and each `additional_provenance`
+    entry carries the checksum of its own path. A checksum that is present and did not
+    verify is a mismatch wherever it sits, so a mismatch-rejecting run has to read these
+    entries too. An *absent* checksum is a different question and is deliberately not
+    reported here; `strict_checksum_refusals` says why it stays on the primary.
+    """
+    additional = record.get("additional_provenance")
+    if not isinstance(additional, list):
+        return []
+    paths: list[str] = []
+    for entry in additional:
+        if not isinstance(entry, dict):
+            continue
+        if not isinstance(entry.get("checksum"), str) or entry.get("checksum_verified") is True:
+            continue
+        # Every entry is built by additional_provenance_entry, which always names a path.
+        paths.append(str(entry.get("path")))
+    return paths
+
+
 def strict_checksum_refusals(
     records: list[dict[str, Any]],
     *,
     require_checksum: bool,
     reject_mismatch: bool,
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, str]]]:
+    """Split records into those the strict modes admit and the refusals they raise.
+
+    The two modes ask different questions, and only one of them reaches past the
+    record's primary capture. `reject_mismatch` asks whether any checksum the record
+    carries failed against the bytes beside it, which is positive evidence about a
+    specific capture and so is asked of every capture the record delivered.
+    `require_checksum` asks whether a verified checksum is present at all, which is
+    evidence about nothing in particular, and is asked of the primary capture alone:
+    a secondary capture may legitimately arrive without a checksum, and a primary that
+    is a bundle root can never be verified, so demanding one everywhere would refuse
+    correct deliveries for an absence.
+    """
     if not require_checksum and not reject_mismatch:
         return records, [], []
 
@@ -2176,19 +2359,45 @@ def strict_checksum_refusals(
         checksum_verified = provenance.get("checksum_verified") is True
         record_id = record_label(record)
 
-        reason: str | None = None
+        record_refusals: list[dict[str, str]] = []
         if reject_mismatch and checksum_present and not checksum_verified:
-            reason = "checksum_mismatch"
-            message = f"strict checksum refusal: {record_id} checksum is present but not verified"
+            record_refusals.append(
+                {
+                    "source_id": record_id,
+                    "reason": "checksum_mismatch",
+                    "message": f"strict checksum refusal: {record_id} checksum is present but not verified",
+                }
+            )
         elif require_checksum and not checksum_verified:
-            reason = "checksum_required"
-            message = f"strict checksum refusal: {record_id} missing verified checksum"
-        else:
+            record_refusals.append(
+                {
+                    "source_id": record_id,
+                    "reason": "checksum_required",
+                    "message": f"strict checksum refusal: {record_id} missing verified checksum",
+                }
+            )
+        if reject_mismatch:
+            # Whatever the primary did, a secondary capture may still have mismatched,
+            # and the operator needs the path of each one that did.
+            record_refusals.extend(
+                {
+                    "source_id": record_id,
+                    "reason": "checksum_mismatch",
+                    "path": path,
+                    "message": (
+                        f"strict checksum refusal: {record_id} capture {path} "
+                        "checksum is present but not verified"
+                    ),
+                }
+                for path in unverified_additional_capture_paths(record)
+            )
+
+        if not record_refusals:
             kept.append(record)
             continue
 
-        warnings.append(message)
-        refusals.append({"source_id": record_id, "reason": reason, "message": message})
+        warnings.extend(refusal["message"] for refusal in record_refusals)
+        refusals.extend(record_refusals)
     return kept, warnings, refusals
 
 
@@ -2199,7 +2408,8 @@ def strict_refusal_error_code(refusals: list[dict[str, str]]) -> str:
 
 
 def strict_refusal_message(refusals: list[dict[str, str]]) -> str:
-    count = len(refusals)
+    # One record can raise a refusal per offending capture; the count is of sources.
+    count = len(unique_values([refusal["source_id"] for refusal in refusals]))
     noun = "source" if count == 1 else "sources"
     reasons = {refusal.get("reason") for refusal in refusals}
     if "checksum_mismatch" in reasons:
@@ -2209,7 +2419,7 @@ def strict_refusal_message(refusals: list[dict[str, str]]) -> str:
 
 def strict_refusal_details(refusals: list[dict[str, str]]) -> dict[str, Any]:
     return {
-        "source_ids": [refusal["source_id"] for refusal in refusals],
+        "source_ids": unique_values([refusal["source_id"] for refusal in refusals]),
         "refusals": refusals,
     }
 

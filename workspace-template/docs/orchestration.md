@@ -316,9 +316,9 @@ All mutating phases also compare exact pre-action records. Research may change
 only scoped question files and append open requests linked only to those
 questions. Discovery may append only request-scoped candidates from enabled
 providers. Review may change only scoped candidate IDs. Acquisition may fulfill
-only scoped requests, transition only scoped candidates/questions, preserve all
-existing raw and normalized evidence, and create only outputs attributable to
-new fulfilled source IDs. Reuse of an unchanged pre-existing source rests on one
+only scoped requests, transition only scoped candidates/questions, and preserve
+all existing raw and normalized evidence. What it may create is a closed set,
+stated in full below. Reuse of an unchanged pre-existing source rests on one
 precondition: the source's own sidecar already named a scoped request when the
 order was issued, and named a scoped candidate as well wherever there is a
 candidate store. From there the controller fixed exactly two terms, also at
@@ -332,6 +332,53 @@ must also be a derived one. That check re-runs the normalizer the trusted
 bibliography cross-references, and fails closed: a source whose normalization is
 not reproducible from the same bytes, or whose inputs this order does not
 fingerprint (a `codebase:` artifact bundle), is refused rather than reused.
+
+**A completed acquisition creates a closed set, on both arms.** A completed
+acquisition may append to the evidence manifest exactly the new ids its
+fulfilled scoped requests cite; may create under `raw/` and
+`sources/normalized/` only those records' declared raw files, their
+`.provenance.yml` sidecars, their normalized records and the structured-view
+sidecars those records declare (plus the one normalized output per source the
+order recorded as correlated-but-not-yet-normalized); and may create nothing
+else durable except attempt-failure audit events for scoped requests carrying
+this action's id. The scoped candidate and question transitions named above are
+changes this order separately authorizes, not creations this rule admits, and
+the audit exception is reachable only on the arm that may complete with a scoped
+request unfulfilled — a provider acquisition completes only when every scoped
+request is fulfilled, so it has no failure left to record. The normalized half
+is closed in both directions — an order owes one record per newly fulfilled
+source exactly as much as it is permitted one — so a normalized output no
+fulfilled source owns and a fulfilled source that produced no output are both
+refused with `ORCHESTRATION_POSTCONDITION_FAILED`, naming the unexpected and the
+missing paths. The structured-view sidecar is the one asymmetry: allowed when
+the record declares a `structured_view`, never required, because a source that
+binds no view writes only the record, and demanding the sidecar would refuse
+every non-structured fulfilment.
+
+**A new record's `raw_paths` is inventory-derived, not acquirer-declared.**
+Verification re-runs inventory's own derivation over the delivered tree — a
+read-only walk that writes neither the manifest nor the activity log — and
+refuses a new record whose declared `raw_paths` is not what inventory derives,
+compared as an ordered list because that walk is sorted and deterministic and
+the only sanctioned route to a manifest record is running inventory. The refusal
+is `ORCHESTRATION_POSTCONDITION_FAILED` and it names both lists. This is why a
+path hand-appended to a fulfilled record no longer authorizes the file it names:
+the record used to be the authority on its own extent and is not, so the
+acquirer authors the bytes while attribution is derived from them. An id
+inventory derives nothing for is not inventory-derivable and may not be created
+by an acquisition at all, and a derivation that cannot run is a recoverable
+refusal rather than a crash — repair the raw tree until
+`scripts/source_inventory.py --report` succeeds, then resubmit. A `raw_paths`
+entry naming a directory — an arXiv or LaTeX bundle, a local code repository,
+the forms `docs/source-delivery.md` describes — denotes every regular file
+beneath it, so a bundle's subtree is that record's unit of admission and a
+bundle delivered under an order is admitted whole instead of refused file by
+file. The cost is stated rather than argued away: a file placed inside a
+directory the acquirer marked as a bundle is therefore admitted under that
+record. Narrowing that needs a member list inventory does not record, not a
+controller change. Every acquisition arm asks this one derivation — delegated,
+provider, and the partial delivery a blocked action leaves behind — so none of
+them is the looser one.
 
 A **delegated** acquisition action is bounded the same way, with three
 differences that follow from having no candidate store: it may not change
