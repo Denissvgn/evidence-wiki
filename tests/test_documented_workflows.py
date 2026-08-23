@@ -837,10 +837,18 @@ class DocumentedWorkflowTests(unittest.TestCase):
         # The declaration, and the property that keeps it from being a provider grant.
         self.assertIn("acquirer_agent_id: autoseller-orchestrator", orchestration)
         self.assertIn("Delegation is not a provider grant", orchestration)
-        # The three result rules an acquirer most easily gets wrong.
-        self.assertIn("fulfilment **or** a recorded attempt failure", orchestration)
+        # The three result rules an acquirer most easily gets wrong. Two of them moved with
+        # the bookkeeping: a fulfilment inside a pending order is a claim, so the "or" rule
+        # is pinned as a *claimed* fulfilment, and `blocked` can no longer be described as
+        # "changed nothing durable" -- the store and the pages do not move inside the order
+        # either way, so the rule is about what was claimed and delivered instead.
+        self.assertIn("a claimed fulfilment **or** a recorded attempt failure", orchestration)
         self.assertIn("batch is therefore `completed`", orchestration)
-        self.assertIn("`blocked` means the attempt changed nothing durable", orchestration)
+        self.assertIn("`blocked` means the action filed no claims and delivered nothing", orchestration)
+        # Where the uncommitted bookkeeping lives. This is the page the delivery contract
+        # sends a reader to for the session shape, so the path is stated here once rather
+        # than left for each surface to restate.
+        self.assertIn("`runs/order-claims/<orchestration_id>/<action_id>.json`", orchestration)
         # Retry semantics and the gate.
         self.assertIn("scoped to the current session", orchestration)
         self.assertIn("SOURCE_REQUEST_FULFILL_DELEGATED", orchestration)
