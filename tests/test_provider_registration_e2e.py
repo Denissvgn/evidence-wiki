@@ -48,7 +48,6 @@ from __future__ import annotations
 import contextlib
 import copy
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -77,18 +76,7 @@ from tests._provider_plugin_fixture import (  # noqa: E402
     installed_provider_plugins,
     refresh_provider_plugin_caches,
 )
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
+from tests._script_loader import load_script as load_script_module  # noqa: E402
 
 # Names are prefixed per file: these scripts are reachable through more than one loader,
 # and two copies under one name would share -- or clobber -- each other's module state.

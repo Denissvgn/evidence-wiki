@@ -29,6 +29,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests._script_loader import load_isolated_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 
@@ -50,13 +52,7 @@ REFUSAL_TYPES = frozenset(
 
 def load_script(stem: str):
     """Load one workspace script the way the package loads it: sibling-isolated."""
-    sys.path.insert(0, str(SCRIPTS))
-    try:
-        from _workspace_module_loader import load_workspace_module
-
-        return load_workspace_module(SCRIPTS, stem)
-    finally:
-        sys.path.remove(str(SCRIPTS))
+    return load_isolated_module(f"cross_module_refusal_{stem}", SCRIPTS / f"{stem}.py")
 
 
 def locally_defined_exceptions(tree: ast.Module) -> set[str]:

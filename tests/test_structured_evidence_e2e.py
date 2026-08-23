@@ -55,7 +55,6 @@ hosts hand-editing question frontmatter:
 import contextlib
 import datetime
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -67,6 +66,8 @@ import unittest
 from pathlib import Path
 
 import yaml
+
+from tests._script_loader import load_script as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -85,17 +86,6 @@ STRUCTURED_KIND = "structured_data"
 # really renders — the mis-pairing below is between two answers that both exist.
 REQUESTED_FACET = "supplier_quote"
 DELIVERED_OTHER_FACET = "price_history_median_90d"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 INIT = load_script_module("e2e_structured_init", "init_research_workspace.py")

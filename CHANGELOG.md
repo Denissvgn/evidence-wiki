@@ -1,5 +1,482 @@
 # Changelog
 
+## Unreleased
+
+- **Fix: the machine export dropped every capture a source record delivered beyond the
+  first.** A manifest record can own more than one delivered path — inventory folds a
+  paired paper's PDF into the LaTeX-bundle record for the same work — and each capture was
+  retrieved separately, carrying its own origin URL, retrieval time, license and checksum
+  as an `additional_provenance` entry. `export_answers.py` read `provenance` once and
+  nothing else, so an exported citation described the first capture and stayed silent about
+  the rest. A consumer reading the export document could not tell that a second capture
+  existed at all, let alone where its bytes came from.
+
+  The checksum is the part that mattered. Verification is per-capture by construction — a
+  hash means something only beside the bytes it was computed from — so a paired capture
+  that fails to verify records `checksum_verified: false` on its own entry and never on the
+  primary's. Read through the export, such a record was indistinguishable from one whose
+  single capture verified cleanly: the failure was not reported as false, it was absent.
+  The workspace had already marked the record `review_required` and warned about it, and
+  none of that reached the document downstream agents actually read.
+
+  Each citation now carries `additional_provenance[]`, one entry per further capture, with
+  that capture's `path`, `origin_url`, `retrieved_at`, `license`, `checksum` and
+  `checksum_verified`. The key is emitted only when a record delivered more than one
+  capture, matching how `checksum` and `academic` are already attached, so existing
+  citations keep their shape and no other exported field moves. `request_id` and
+  `candidate_id` stay out, as they are stripped from the entries themselves: which request
+  authorised a delivery has exactly one answer per record, and every consumer reads it from
+  `provenance` alone. `sidecar_path` stays out for the reason the primary's does — it
+  locates inventory's input inside the workspace, while a citation reports where the bytes
+  came from rather than which file said so. An entry that names no path is not carried at
+  all but reported in `warnings[]`, because a `checksum_verified: false` against a capture
+  the consumer cannot identify asserts a verdict about a file it cannot go and look at —
+  and dropping it quietly would be this same defect one level down. Found by inspection of
+  the export against the
+  manifest contract at 0.5.2, and reproduced there: the new assertions fail with the field
+  absent before the change and pass after it.
+- **Change: `--reject-mismatch` now refuses a record whose secondary capture's checksum did
+  not verify, where before it admitted one.** A record can deliver more than one capture:
+  inventory folds a paired PDF into the LaTeX-bundle record for the same paper, and it folds
+  every link file naming the same URL into one link record. Each further capture's sidecar
+  becomes an `additional_provenance` entry carrying the checksum of its own path.
+  `strict_checksum_refusals` read the record's primary `provenance` and nothing else, so a
+  record whose second capture had been proven mismatched — `checksum_verified: false`
+  against the bytes actually delivered — passed the mismatch-rejecting mode untouched. That
+  is now a refusal, and a secondary capture's refusal names it: the offending `path`
+  appears in the warning text and in the error envelope under `details.refusals[].path`, so
+  an operator reading a refused run can tell which of the record's captures failed rather
+  than only which record was dropped. A primary-capture mismatch is unchanged and still
+  names the record alone, carrying no `path` — nothing on the record says which delivered
+  path the primary `provenance` describes. A record with several failing captures raises one
+  refusal per capture; `details.source_ids` and the envelope's count stay counts of sources.
+
+  This is a narrowing of an opt-in flag, and it is disclosed as such. A workspace that runs
+  `source_inventory.py --reject-mismatch` over multi-capture records may see it exit
+  non-zero and drop a record on the next run where the previous release wrote that record to
+  the manifest. That is the flag doing what its name says — the mismatch was always real,
+  was always warned about, and always marked the record `review_required`; only the
+  exclusion was missing. Nothing changes for a run without the flag, and nothing changes for
+  a record that never grew an `additional_provenance` entry.
+
+  **`--require-checksum` stays primary-only, deliberately.** The two flags ask different
+  questions. A checksum that is present and did not verify is positive evidence about a
+  specific capture, so it is now asked of every capture. A checksum that is *absent* is
+  evidence of nothing, and demanding one from every capture would refuse correct
+  deliveries — a secondary capture may legitimately arrive without one, and a capture whose
+  target is a directory can never be verified at all, which is why the requirement would
+  refuse every paired paper, whose primary capture is the bundle root. A record whose sole
+  unverified checksum sits on a secondary capture is therefore still admitted under
+  `--require-checksum` alone, pinned end to end by its own test.
+
+  Rated low, not a security fix, and the severity is stated here rather than left to
+  inference. The mismatch was never silent: it always warned in the report and always marked
+  the record `review_required`, so no run was told the delivery was clean. Two claims that
+  would have narrowed it further were checked and do not hold, and are recorded here rather
+  than repeated: a multi-capture record's primary capture is *not* always a directory, and a
+  link record built from two link files can carry `provenance.checksum_verified: true`
+  alongside a mismatched `additional_provenance` entry, which an exported citation reports as
+  the record's verification status. Every consumer other than `--reject-mismatch` — lint, the
+  evidence gates, export — still reads the primary `provenance` alone; that boundary is now
+  stated where it is relied upon rather than assumed away. Verified by reverting only the
+  production change and confirming the refusal tests fail while both `--require-checksum`
+  controls still pass.
+- **Fix: a file delivered under a dot path inside a bundle was admitted by the record that
+  owns it and counted by nothing.** An arXiv or LaTeX bundle record declares one `raw_paths`
+  entry — the bundle directory — and no member list anywhere, so the whole subtree beneath
+  it is the record's unit of admission: the controller expands that directory-shaped entry
+  into every regular file beneath it with no skip predicate, and the raw tree snapshot
+  fingerprints one entry per regular file the same way. `bundle_file_count`, which fills the
+  record's `metadata.file_count`, filtered members through `should_skip` instead — and
+  applied that predicate to the path relative to the *workspace* rather than to the bundle,
+  so one dot component anywhere in the prefix suppressed the whole subtree under it. A file
+  written to `<bundle>/.build/main.aux` was therefore admitted under the record and
+  invisible in it: the count did not move, and `raw_fingerprint`, which filters the same
+  way, came back byte-identical, so the delivery triggered no re-normalization either.
+
+  `metadata.file_count` now counts every regular file beneath the bundle directory,
+  dot-prefixed members included, which is the same subtree the record admits and the
+  snapshot walks. It classifies entries the way the snapshot classifies them — `lstat`
+  rather than `is_file`, a real regular file rather than a symlink to one, a link count of
+  exactly one — because the snapshot refuses a symlink or a multiply-linked file rather than
+  enumerating it, and counting either would put the same subset mismatch back with the
+  excluded set merely moved to the other side. `should_skip` is unchanged and still decides
+  which paths become *records*: dotfiles are still not inventoried as separate sources,
+  because how a record is selected and how much evidence it admits are different questions.
+
+  Narrowing the other side was measured and rejected. Teaching raw-path attribution to skip
+  dot paths makes the counts agree just as well and refuses a lawfully delivered local code
+  repository on its own `.git/HEAD` — the defect the local-repository entry below closes,
+  arriving from the other direction. Widening the count is the direction that leaves both
+  record kinds consistent with the tree the snapshot walks.
+
+  **The fingerprint half is disclosed, not closed.** `raw_fingerprint_paths` still filters
+  through `should_skip`, deliberately: it names the bytes normalization re-reads, not the
+  bytes the record admits, and widening it would contradict what that field is for rather
+  than repair it. A dot-prefixed member beneath a bundle therefore still reproduces a
+  byte-identical `raw_fingerprint` and still triggers no re-normalization. Nor is the count
+  a member list: nothing in the record bounds what a delivered bundle may contain, and
+  closing that needs an inventory-level member list rather than a wider predicate here.
+
+  Two refusals to expect for anyone holding an open order. A bundle record with a
+  dot-prefixed member no longer fingerprints as it did, and the acquirer's mandatory
+  `source_inventory.py --report` re-derives every record in the manifest, not only the ones
+  its order fulfils. So an order issued before this change and submitted after it can be
+  refused two ways. Where the rewritten record is one the order fulfils, the refusal is
+  `manifest_record_changed_after_issuance`. Where it is any other pre-existing record — an
+  unrelated paper whose bundle happens to carry a `.latexmkrc` — the submit fails the
+  manifest scope guard first: `ORCHESTRATION_POSTCONDITION_FAILED`, "changed, removed, or
+  added evidence-manifest records outside fulfilled source scope", with
+  `manifest_scope_violations.changed_outside_scope` naming that untouched record. Its
+  printed remediation, "Restore existing and out-of-scope manifest records", cannot be
+  reached by re-running inventory, which derives the same new count again. Both are
+  recoverable the same way and by the same route: issue a fresh order against the
+  re-inventoried manifest and resubmit, rather than editing counts back by hand. The same
+  holds for every record whose count this release moved, local repositories included.
+  Reproduced on 0.5.2.
+- **Fix: a stray file delivered during a blocked acquisition could be reported as a broken
+  raw tree.** A `blocked` acquisition submission records a partial delivery: something was
+  fetched, nothing was fulfilled. Its raw-scope guard asks inventory to attribute the
+  delivered files to the manifest records the order correlates, and both consumers of that
+  attribution — the `raw_paths` cross-check and the set of admitted new files — are keyed
+  on the correlated records the action *appended*. A delivery that continues an earlier one
+  appends none: the correlated record was already in the manifest when the order was
+  issued. In that state the attribution pass has no consumer and its result was discarded
+  whatever it contained, the admitted set coming entirely from the literal declared paths
+  of the pre-existing correlated records.
+
+  It was derived anyway: the gate also fired whenever the delivery had added any file at
+  all beneath the configured raw source roots, which is exactly what a stray delivery does
+  and what a continued one usually does. Deriving attribution re-walks and re-hashes
+  the whole raw tree, and it can fail. When it failed, the raise travelled out ahead of a
+  refusal that had already been decided: the operator was told "delivered raw evidence
+  could not be re-derived by source inventory rules" and sent to repair a raw tree that was
+  not broken, while the one file that was actually wrong was never named. The refusal that
+  fits — "blocked acquisition changed raw evidence outside correlated partial deliveries",
+  carrying the stray path in `unexpected_new_raw_paths` — was reachable only when the
+  derivation happened to succeed.
+
+  The gate now fires on the correlated records the action appended and on nothing else,
+  which is the shape both completed arms already had — each gates on the id set its own
+  consumers read, though the sets themselves differ: the completed arms use the
+  controller-issued fulfilled ids, this arm the manifest additions it has just observed.
+  Nothing else in the block moved. A partial delivery that does append a correlated record
+  still derives attribution exactly once and is still cross-checked against it, and since
+  both consumers iterate that id set alone, not one delivery's admitted paths change on any
+  arm. What changes is the delivery that appends nothing: it is judged on the files it left
+  rather than on whether an unconsulted derivation happened to survive. The two refusals
+  that derivation could raise — a raw tree inventory cannot read, and a peer holding the
+  acquisition barrier — therefore stop reaching this case, and a continued delivery stops
+  paying for a tree walk whose answer was thrown away.
+
+  Introduced with the attribution predicate described in the next entry and fixed before
+  either shipped: 0.5.2 asks no derivation on this arm, so no released version can produce
+  the substitution. Reproduced on this branch.
+- **Fix: the memoised raw attribution could be reused for a tree it was never derived
+  from, and the refusal it feeds did not say which declared path was unaccounted for.** One
+  `submit` verifies the same workspace up to three times, so the inventory derivation is
+  memoised for the run, and the key was the raw-tree content fingerprint alone. That
+  fingerprint is a statement about regular files — the raw-tree snapshot records an entry per
+  file and none for a directory — so creating an empty directory left the key byte-identical
+  while changing what inventory derives from the same tree. An empty `.git/` is one of the
+  markers that turns a directory into a local-repository record: on either side of that one
+  `mkdir` the same tree derives a different record set, and the second and third verification
+  passes were answered with the first pass's attribution.
+
+  The memo now keys on that fingerprint composed with a digest of the directory set the
+  derivation walked — directory names only, no file bytes re-hashed — so an answer is reused
+  only while both are unchanged. The composition is internal to the derivation, so every call
+  site still passes the one fingerprint it already holds, and one accepted submission still
+  costs exactly one derivation pass. The raw-tree snapshot was deliberately not widened to
+  record directories: its entries are also the raw-scope guards' universe, so a directory
+  appearing among them would surface as an unexpected new raw path and refuse legitimate
+  deliveries — trading a stale memo for a broken bundle acquisition.
+
+  The refusal for a record whose `raw_paths` is not what inventory derives now carries a
+  third field beside the two lists, `declared_not_derived`: the declared paths inventory
+  accounts for none of, in declared order. Both lists side by side say only that they
+  disagree, which on a hand-appended path left the operator to diff them by eye, and the
+  standing advice — re-run `source_inventory.py --report` — does not repair a hand-edited
+  record, so following it reached a second, honest refusal rather than the fix. The new
+  field names the path to remove, and the advice is unchanged. It supplements the
+  pinned-order equality test and never replaces it, and it is one-sided on purpose: it
+  reports what a record declared that inventory accounts for nowhere, so it is empty
+  whenever every declared path is accounted for. A reorder, a duplicate, and a declared
+  list that omits a derived path are all still mismatches, each reporting an empty
+  `declared_not_derived` — read that as "nothing surplus was declared", not as "the lists
+  agree".
+
+  Mirrored alongside, as hygiene rather than a fix: the bundle-directory expansion inside the
+  derivation now applies the raw-tree snapshot's own file predicate — one `lstat`, link-like
+  entries refused, regular files whose link count is not one refused — where it had used
+  `Path.is_file()`, which resolves symlinks and accepts hardlinks. No behaviour changes
+  today, because the snapshot refuses such a file before the expansion is ever consulted;
+  that agreement was incidental, and is now stated.
+
+  Both defects arrived with the derived-attribution predicate described in the entries below
+  and were caught before any release carried them, so there is no released version to
+  reproduce them on. Both were reproduced on this branch by reverting the repair and watching
+  the test fail: the mismatch payload missing its field, and a derivation across one `mkdir`
+  answered from the stale memo.
+
+- **Fix: a directory-shaped `raw_paths` entry could not be delivered inside any acquisition
+  order.** A bundle record — an arXiv or LaTeX source archive, a local code repository —
+  declares exactly one `raw_paths` entry, the bundle directory itself. The raw-tree
+  snapshot records one entry per regular *file*, and each arm built its set of admitted
+  paths by adding the literal `raw_paths` string with no prefix expansion. The guard
+  therefore admitted none of what the fulfilled record declared: every file beneath the
+  directory came back as an unauthorised new raw path, and the refusal told the operator to
+  remove deliveries the fulfilled record itself referenced.
+
+  This broke in-order bundle acquisition on the delegated, provider and blocked-partial
+  arms alike, including the `arxiv download --format source --request-id ...` form of
+  `fetch_sources.py` that `docs/acquisition.md` and the acquisition skills instruct. No
+  workaround kept the evidence intact: the only way to stop the record naming a directory
+  is to stop the delivery being a bundle, which scatters one `raw:` record per file and
+  drops `metadata.arxiv_id`. It is admitted now, by the single change described in the next
+  entry. Reproduced on 0.5.2. Present by inspection at 0.5.1 — the mechanisms are
+  byte-identical there, but were never executed, so that is an inspection and not a
+  reproduction.
+
+- **Hardening: a `raw_paths` list appended by hand to a fulfilled manifest record
+  authorised the extra file.** The set of admitted raw paths was built from the acquirer's
+  own record bytes, so the party under check also decided what the check would allow. An
+  acquirer could deliver a file no inventory run had ever seen and attach it to a fulfilled
+  source by editing that source's manifest entry.
+
+  Deliberately not filed as a security fix, because the reachable effect was small and
+  saying otherwise would misrepresent it. The smuggled file was inert: normalization of a
+  record reads the path its kind selects, not an appended tail, so the extra bytes never
+  reached the record's normalized output or its checksums, and the next
+  `source_inventory.py --report` split the file back out into a record of its own. It also
+  granted nothing the acquirer did not already hold — for a source it fulfils, the acquirer
+  already authors both the manifest record and the normalized bytes, and neither is
+  re-derived. What it did cost was the meaning of the check: an allowlist computed from the
+  bytes under examination attests nothing, whatever its blast radius.
+
+  Both defects are closed by one change: the acquirer authors the bytes, and attribution is
+  derived rather than declared. A single inventory derivation over the delivered tree — one
+  that writes neither the manifest nor the activity log, though taking the acquisition
+  barrier does write a holder file under `raw/.locks/` — now answers both raw-scope
+  questions: which new raw files an acquisition may create, and whether a new record's
+  `raw_paths` is what inventory itself would derive. A directory-shaped entry admits the
+  regular files beneath it, because that is what inventory
+  attributes to that record; a declared list inventory does not derive is a refusal naming
+  both lists. The derivation is memoised per submission by the raw-tree fingerprint, so
+  verifying up to three times costs one pass.
+
+  **The identity anchor did not move on the arms where that guard was ever the anchor.** On
+  the two completed arms — delegated and provider — `allowed_new_ids` at the manifest guard
+  is still exactly the controller-issued fulfilled set — the same call, unchanged by this
+  release. The blocked-partial arm never read that way and still does not: it passes the
+  additions it has just observed, so that guard admits any new record by construction, which
+  this change neither introduced nor leans on. What bounds a partial delivery's additions is the
+  correlation requirement immediately after that guard, which refuses any new manifest
+  record whose `provenance` does not name this action's scoped request and candidate with
+  the candidate agreeing; the raw files such a delivery may create are then attributed over
+  those correlated new records alone. On all three arms every `mutable_ids` over evidence is
+  still `set()`, so a pre-existing record that was changed or removed is still caught at
+  that guard, and the manifest-scope guard still fires before any raw-path logic. What
+  changed is per-record attribution — which files a record accounts for — not which records
+  may exist.
+
+  **This is not fully bounded, and should not be read as such.** A bundle's subtree is its
+  record's unit of admission, so a file placed inside a directory the acquirer marked as a
+  bundle is admitted under that record: the derivation has no member list to hold it to,
+  because the record itself has none. The other half of that admission is easy to miss, so
+  it is stated here: the file does not show up in the record's own account of itself either.
+  Neither `metadata.file_count` nor `raw_fingerprint` is re-derived or compared by this
+  check, so whatever the record declared stands; and for a dot-prefixed file beneath an
+  arXiv or LaTeX bundle, re-running inventory reproduces both byte-identically anyway,
+  because both filter through `should_skip` while admission does not. A local repository
+  record carries no `raw_fingerprint` at all. So such a file triggers no re-normalization,
+  and `raw_fingerprint` must not be read as "the bytes this record stands for": it is the
+  bytes normalization re-reads, which for a bundle is a subset of what the record admits.
+  Closing that needs an inventory-level member list rather than a controller change, and it
+  stays open on purpose. Separately, the normalized bytes of a newly fulfilled record are
+  still trusted as delivered — only reused sources are re-derived and compared — and that
+  boundary is unchanged by this release.
+
+  Two behaviour changes follow for anyone driving the protocol. A manifest record inventory
+  cannot re-derive is now refused where it previously passed, so a record an acquisition
+  creates has to come from running `source_inventory.py` rather than from an editor. And a
+  derivation that cannot run at all is a new recoverable refusal rather than a crash,
+  repaired by making `source_inventory.py --report` succeed and resubmitting.
+
+- **Fix: a manifest record that owned two delivered captures kept only the first one's
+  provenance.** Inventory folds a paired PDF into the LaTeX-bundle record for the same
+  paper, so one manifest row can own two paths that were retrieved separately, at different
+  URLs, and hash differently. `fetch_sources.py` writes a sidecar beside each of them, and
+  only the first matching sidecar was merged: the second was reported as "additional
+  provenance sidecar not merged" and then discarded, taking the paired capture's
+  `origin_url`, `retrieved_at` and verified `checksum` with it. Nothing in the manifest
+  said where the PDF had come from. The bytes were never unaccounted for — both sidecars
+  already counted toward `raw_fingerprint`, so a correction to either still re-triggered
+  normalization — but the parsed fields were dropped, and no test exercised the path at
+  all. Every matching sidecar is merged now: the first still becomes `provenance`,
+  unchanged in shape, selection and checksum handling, and each further one becomes an
+  entry in a new record-level `additional_provenance` list that names the `path` it
+  describes and is checksum-verified against that path's own bytes rather than the
+  primary's. A sidecar matching no record at all is still reported as unmatched.
+
+  The correlation fields are deliberately stripped from those entries.
+  `provenance.request_id` is the only link between a delivered capture and the source
+  request that authorised it, and delegated fulfilment correlation reads it — with
+  `candidate_id` — as a scalar. A paired capture carrying a second copy would turn one
+  authorisation into an ambiguous pair, so correlation goes on reading the primary
+  `provenance` alone and this change moves nothing about which deliveries are authorised.
+  For the same reason the second sidecar's fields are not folded into the first one's
+  mapping: a `checksum` means something only beside the bytes it was computed from, and a
+  merged mapping would state a verified hash about the wrong file.
+
+  One consequence for anyone holding an open order. A record that gains
+  `additional_provenance` no longer fingerprints as it did before, so an order issued
+  before this change whose acquirer re-runs `source_inventory.py` and then submits can see
+  such a record refused as `manifest_record_changed_after_issuance` — the rewritten-since-
+  issuance cause, which is recoverable. Issue a fresh order and resubmit rather than
+  editing the manifest back.
+
+- **Fix: a local code repository could be stamped `bounded: true` and then refused as
+  unbounded.** `codebase_intake.bounded` was decided by a file count that filtered members
+  through `should_skip`, which withholds every dot-prefixed path, while the raw-tree
+  snapshot that consumes the promise fingerprints every regular file beneath the raw roots
+  and refuses the workspace with `ORCHESTRATION_WORKSPACE_UNSAFE` past its own 10,000-entry
+  limit. Two identical caps over two different sets: a 9,000-file checkout carrying a
+  3,000-object `.git` passed the intake bound and was then refused by the guard, the
+  refusal naming a tree the record had already declared admissible. `.git` is itself one of
+  the markers that makes a tree a repository, so the excluded subset was not an exotic case
+  — it is what every acquirer clones.
+
+  `metadata.file_count` and `metadata.codebase_intake.file_count` now count every regular
+  file beneath the repository directory, which is the same subtree the record admits and
+  the snapshot walks. Both still stop one past the intake limit rather than enumerate a
+  tree already refused, so a repository over the bound publishes `file_count: 10001` and not
+  its true total: past the limit that field is a verdict, not a census. `should_skip` is
+  unchanged and still decides which paths become *records*: dotfiles are still not
+  inventoried as separate sources, because how a record is selected and how much evidence it
+  admits are different questions.
+
+  **That subset mismatch is closed for local repositories, and for bundle counts by the
+  entry above.** The same shape survived one record kind over: `bundle_file_count`, which
+  fills an arXiv or LaTeX bundle's `metadata.file_count`, filtered through `should_skip` over
+  the same directory the raw-tree snapshot walks unfiltered, and it is widened in this same
+  release. Nothing contradicted itself there the way it did for repositories, because a
+  bundle record carries no `bounded` flag to be contradicted — the effect was quieter rather
+  than absent: the count stated less than the tree the record admits.
+  `raw_fingerprint_paths`, which decides what a `paper` record's `raw_fingerprint` covers,
+  still filters that way and is deliberately left as it is, so a dot-prefixed file beneath a
+  bundle still falls outside the fingerprint that decides re-normalization.
+
+  **This is not a workspace-wide bound, and should not be read as one.** The snapshot's
+  limit totals across every configured raw source root while the intake limit is per
+  repository, so several correctly bounded checkouts can still add up past it. Closing that
+  needs a workspace-wide accounting rather than a different predicate in inventory, and it
+  stays open on purpose.
+
+  Two consequences for anyone holding an open order. A local repository record containing
+  dot-prefixed files no longer fingerprints as it did, so an order issued before this change
+  whose acquirer re-runs `source_inventory.py --report` and then submits can see that record
+  refused as `manifest_record_changed_after_issuance` — recoverable; issue a fresh order and
+  resubmit rather than editing the manifest back. And a repository whose `.git` carries it
+  past the limit now reports `bounded: false` with `review_required` where it previously
+  reported bounded, which is the refusal arriving at intake instead of at submit.
+
+- **Fix: two more reuse-path remediations that were refused for being followed.** 0.5.2
+  closed that defect class for the `REUSE_SCOPE_*` causes only. Reconciliation held a reused
+  source to one of two arms and attached one shared remediation to both, and that
+  remediation named the record rewrite: the right recourse on the arm where the order
+  recorded no normalized output, and advice that cannot succeed on the arm where it recorded
+  one. Reuse there reconciles against the exact bytes the order fingerprinted, and every
+  normalization run restamps the second-resolution `normalized_at` those bytes include, so
+  following the printed advice returned the identical refusal, as many times as it was
+  followed.
+
+  What a host parsing the refusal envelope should expect. Each entry in
+  `details.reconciliation_failures[]` now carries its own `repair`, keyed to the arm and the
+  state that entry is in: the arm whose normalized bytes the order fingerprinted, the arm
+  that owes a record re-derived from unchanged raw evidence, and a third for that second
+  arm's failures where the re-derivation could not be performed at all, so the record's
+  bytes were never what failed. The terms common to both arms are stated once and point at
+  that field, the shape the reuse-scope refusal already had, on the delegated and provider
+  arms alike. The refusal message and the `was_scoped_match`, `was_authorized_unnormalized`,
+  `derivation_checked` and `derivation_failure` keys are unchanged.
+
+  Adapter identity was the second refusal. `frontmatter_for` derives `normalizer.name` from
+  the adapter `research.yml` configures, while `carry_version_stamps` deliberately carries
+  only versions, so a stamped name that disagreed was just different bytes: it came back as
+  "normalized evidence is not what normalizing the raw evidence produces", whose remediation
+  is about a hand-edited body — sending the operator to hunt for a prose edit while the two
+  lines that actually disagreed sat in the frontmatter and were never quoted back. The name
+  is now compared explicitly, before rendering, and refused under its own
+  `derivation_failure.reason`, "normalized evidence does not name the normalizer configured
+  for its kind", carrying the recorded `normalizer` and the `configured_normalizer` in keys
+  of their own. Separately, an adapter that raises `AdapterError` — most sharply, one
+  reporting a program identity `research.yml` does not authorize — no longer has its message
+  buried in the blanket clause's `error` string: it reports "the normalizer adapter this
+  workspace authorizes did not produce a record to compare against", which is one of the
+  verdicts a record rewrite cannot clear. Both reason strings are new, so a host matching on
+  `derivation_failure.reason` will see two values it has not seen before.
+
+- **Fix: refusing to relink a fulfilled request was reported to hosts as a broken
+  workspace.** `source_requests.py fulfill` refuses to point an already-fulfilled request at
+  a second source — an ordinary refusal of an ordinary mistake. Its message matched no
+  clause in `classify_error_code`: the clause written to catch it tested for "already
+  fulfilled by a different source id", a string this package has never raised anywhere. The
+  refusal therefore fell past every clause to the classifier's `WORKSPACE_UNREADABLE` tail,
+  which is declared non-recoverable and remediated as checking the workspace path and its
+  required starter files. A host was told the workspace was unreadable and must not be
+  retried, when nothing was wrong with the workspace and one relink simply was not allowed.
+
+  It classifies as `REQUEST_ALREADY_FULFILLED` now. A host branching on this envelope reads
+  `recoverable: true` where it previously read `false`, and that code where it previously
+  read `WORKSPACE_UNREADABLE` — the opposite direction to the five codes 0.5.0 declared
+  non-recoverable, and correct for the same reason those were: it is what the refusal always
+  meant. That code's registry remediation was written for `record-attempt-failure` alone and
+  now answers both commands that reach it, since a fulfilled request accepts neither a
+  recorded attempt failure nor a relink. Re-fulfilling a request with the *same* source id
+  is unchanged and still succeeds idempotently. The tests now assert `error_code` and
+  `recoverable` rather than a stderr substring, which is what let the mismatch ship.
+
+- **Fix: the reuse and reconciliation refusals stopped advising commands that refuse.**
+  Every escape those refusals printed was unfollowable in the only state that could print
+  it. Both the reuse-scope failure set and the reconciliation loop are computed over the
+  request store's own `fulfilled` records, so the request under discussion is already
+  fulfilled by the very source being refused — and `source_requests.py` closes both doors
+  out of that state: `record-attempt-failure` refuses a fulfilled request outright, and
+  `fulfill` refuses to relink one to a later delivery. The remediations advised one or both
+  anyway, as did two of the three per-cause repairs and the delegated correlation refusal.
+  An operator who followed the printed advice reached a second refusal for having followed
+  it.
+
+  Both doors were walked in tests rather than reasoned about, and neither is named now.
+  What the refusals state instead is the fact underneath all of them — a fulfilled request
+  has no second route — and, where the per-source repair cannot be performed, that this
+  order has none either. Two more escapes were found the same way and removed: the provider
+  arms' "acquire it through another selected candidate" bottoms out at that same relink
+  refusal, and `manifest_record_changed_after_issuance`'s "restore it exactly" is required
+  by the scope guards but never cleared this refusal, because membership in the order's
+  reuse baselines was fixed at issuance and no rewrite ever moved it — restoring the record
+  only changes which of the other two causes gets reported. The delegated acquirer skill,
+  which routed a refused reuse to both dead escapes, is corrected to the same effect.
+
+  One more `repair` changes, one level down and for the same reason. A re-derivation that
+  *crashes* reports the blanket reason "normalized evidence could not be re-derived from the
+  raw evidence", and that reason was missing from
+  `UNVERIFIABLE_DERIVATION_REASONS`, so it was answered with the record rewrite — which
+  re-enters the same normalizer that had just raised. It joins that set, so such a failure
+  now carries the repair pointing at `derivation_failure.error` instead.
+
+  **The `failed` outcome is disclosed here, not closed.** The `scoped_match` repair used to
+  offer ending the action with a failed outcome and starting a fresh session, as though that
+  were a clean exit. It is not one, and nothing refuses it: `prepare_submission` answers a
+  `failed` outcome without calling `verify_action_postconditions` at all, so no evidence or
+  scope check runs. The fulfilment the acquirer already wrote stays in the request store with
+  its `source_id`; `open_requests` selects on `status == "open"`, so no later order sees that
+  request again; and evidence the controller had just declined to verify is accepted
+  permanently. The repair names that cost now instead of naming the command, and a test
+  performs the outcome and observes each part of it. The hole itself is unchanged and stays
+  open on purpose.
+
 ## 0.5.2 - 2026-08-19
 
 - **Fix: two concurrent status reads could make each other fail.** Writing the status

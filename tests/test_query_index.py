@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import subprocess
@@ -11,18 +10,14 @@ from unittest import mock
 
 import yaml
 
+from tests._script_loader import load_module as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "workspace-template" / "scripts" / "query_index.py"
 
 
 def load_module():
-    spec = importlib.util.spec_from_file_location("research_query_index", SCRIPT_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {SCRIPT_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script_module("research_query_index", SCRIPT_PATH)
 
 
 QIDX = load_module()

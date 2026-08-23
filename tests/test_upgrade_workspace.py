@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import shutil
@@ -12,6 +11,8 @@ from unittest import mock
 
 import yaml
 
+from tests._script_loader import load_module as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -23,16 +24,6 @@ INIT_PATH = REPO_ROOT / "workspace-template" / "scripts" / "init_research_worksp
 TEMPLATE_QUERY_INDEX = REPO_ROOT / "workspace-template" / "scripts" / "query_index.py"
 TEMPLATE_INTAKE = REPO_ROOT / "workspace-template" / "scripts" / "intake_questions.py"
 TEMPLATE_INIT = REPO_ROOT / "workspace-template" / "scripts" / "init_research_workspace.py"
-
-
-def load_script_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 INIT = load_script_module("research_init_for_upgrade", INIT_PATH)

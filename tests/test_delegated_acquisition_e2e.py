@@ -26,17 +26,20 @@ never showed the gate shut would not be demonstrating anything.
 
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 
 import yaml
+
+from tests._script_loader import load_script as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
@@ -90,17 +93,6 @@ def synthetic_pdf(lines: list[str]) -> bytes:
         startxref,
     )
     return bytes(document)
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 INIT = load_script_module("e2e_delegated_init", "init_research_workspace.py")
@@ -172,23 +164,37 @@ class DelegatedWorkspace:
             }
         config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
-    def block_question_on_a_request(self, workspace: Path) -> str:
-        """Reach `blocked_on_sources` the way research does: claim, request, block."""
-        self.run_script(CLAIM, ["claim", "--slug", QUESTION_SLUG, "--agent-id", "research-agent"], workspace)
+    def block_question_on_a_request(
+        self,
+        workspace: Path,
+        *,
+        slug: str = QUESTION_SLUG,
+        query: str = "Live supplier quote for B0ABC12345",
+    ) -> str:
+        """Reach `blocked_on_sources` the way research does: claim, request, block.
+
+        Parameterised by slug so a backlog spanning two questions is built by walking this
+        same route twice rather than by writing a second helper. Routing reads the state
+        this route produces -- a claimed question, an open request linked to it, and the
+        question blocked on that request. A question blocked some other way can look the
+        same in the fixture and route differently, and two helpers reaching one state
+        drift apart as soon as either is edited.
+        """
+        self.run_script(CLAIM, ["claim", "--slug", slug, "--agent-id", "research-agent"], workspace)
         request = self.run_script(
             REQUESTS,
             [
                 "add", "--kind", "other",
-                "--query-or-identifier", "Live supplier quote for B0ABC12345",
+                "--query-or-identifier", query,
                 "--rationale", "The question cannot be answered from delivered evidence.",
-                "--priority", "high", "--question-slug", QUESTION_SLUG,
+                "--priority", "high", "--question-slug", slug,
             ],
             workspace,
         )["request"]["request_id"]
         self.run_script(
             RESOLVE,
             [
-                "block", "--slug", QUESTION_SLUG, "--agent-id", "research-agent",
+                "block", "--slug", slug, "--agent-id", "research-agent",
                 "--blocked-reason", "No supplier quote has been delivered.",
                 "--request-id", request,
             ],
@@ -297,11 +303,17 @@ class DelegatedWorkspace:
 
     # -- reading durable state ---------------------------------------------------
 
+    def manifest_records(self, workspace: Path) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in (workspace / "sources" / "manifest.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+
     def source_id_for(self, workspace: Path, raw_path: str) -> str:
-        for line in (workspace / "sources" / "manifest.jsonl").read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
+        for record in self.manifest_records(workspace):
             if raw_path in record.get("raw_paths", []):
                 return str(record["id"])
         raise AssertionError(f"no manifest record for {raw_path}")
@@ -342,6 +354,21 @@ class DelegatedWorkspace:
 
     SECOND_SLUG = "needs-competitor-evidence"
 
+    def add_second_question(self, workspace: Path) -> None:
+        """A second question in the profile's own shape, so a backlog can span two of them.
+
+        Written by copying the one the profile created rather than by re-running init:
+        every field but the slug and the prose is exactly what an initialized workspace
+        carries, which is what keeps `workspace_status` reading it as an ordinary question.
+        """
+        questions = workspace / "wiki" / "questions"
+        (questions / f"{self.SECOND_SLUG}.md").write_text(
+            (questions / f"{QUESTION_SLUG}.md").read_text(encoding="utf-8")
+            .replace(f"slug: {QUESTION_SLUG}", f"slug: {self.SECOND_SLUG}")
+            .replace("What does the supplier quote for B0ABC12345?", "What do competitors charge?"),
+            encoding="utf-8",
+        )
+
     def build_backlog(self, root: Path) -> tuple[Path, dict[str, str]]:
         """Two blocked questions over three requests, none of them satisfiable yet.
 
@@ -356,15 +383,7 @@ class DelegatedWorkspace:
         """
         workspace = self.init_workspace(root, spare_question=False)
         self.configure(workspace, delegated=True)
-
-        profile_questions = workspace / "wiki" / "questions"
-        second = profile_questions / f"{self.SECOND_SLUG}.md"
-        second.write_text(
-            (profile_questions / f"{QUESTION_SLUG}.md").read_text(encoding="utf-8")
-            .replace(f"slug: {QUESTION_SLUG}", f"slug: {self.SECOND_SLUG}")
-            .replace("What does the supplier quote for B0ABC12345?", "What do competitors charge?"),
-            encoding="utf-8",
-        )
+        self.add_second_question(workspace)
 
         requests: dict[str, str] = {}
         for name, slug, query in (
@@ -405,6 +424,13 @@ class DelegatedWorkspace:
         )
 
     def deliver_for(self, workspace: Path, request_id: str) -> str:
+        """One genuinely new delivery, inventoried and normalized inside the pending order.
+
+        Normalized by source id rather than with `--all`, which is what an acquirer holding
+        an order for one request may do: `--all` also rewrites records the order does not
+        scope, and a fixture that happens to hold nothing else to normalize hides the
+        difference — see `NormalizeAllInsideAnOrderTests` for the state where it does not.
+        """
         destination = workspace / "raw" / "data"
         destination.mkdir(parents=True, exist_ok=True)
         payload = destination / PAYLOAD.name
@@ -419,8 +445,9 @@ class DelegatedWorkspace:
             yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
         )
         self.run_script(INVENTORY, ["--report"], workspace)
-        self.run_script(NORMALIZE, ["--all"], workspace)
-        return self.source_id_for(workspace, f"raw/data/{PAYLOAD.name}")
+        source_id = self.source_id_for(workspace, f"raw/data/{PAYLOAD.name}")
+        self.run_script(NORMALIZE, ["--source-id", source_id], workspace)
+        return source_id
 
     def question_frontmatter(self, workspace: Path, slug: str) -> str:
         return (workspace / "wiki" / "questions" / f"{slug}.md").read_text(encoding="utf-8")
@@ -540,14 +567,16 @@ class DelegatedWorkspace:
         self.assertEqual("acquisition", order["phase"])
         return order
 
-    def fulfil_and_reopen(self, workspace: Path, request_id: str, source_id: str) -> None:
+    def fulfil_and_reopen(
+        self, workspace: Path, request_id: str, source_id: str, *, slug: str = QUESTION_SLUG
+    ) -> None:
         self.run_script(
             REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
         )
         self.run_script(
             RESOLVE,
             [
-                "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
+                "reopen", "--slug", slug, "--agent-id", ACQUIRER,
                 "--source-id", source_id, "--request-id", request_id,
             ],
             workspace,
@@ -1282,6 +1311,113 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
             )
             self.assertFalse(failure["record_unchanged"])
 
+    def assert_rebuilt_reuse_is_refused(self, workspace: Path, action_id: str, source_id: str) -> dict:
+        code, envelope = self.submit(workspace, action_id)
+        self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+        self.assertEqual(
+            "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+            envelope["message"],
+            envelope,
+        )
+        failure = next(
+            item
+            for item in envelope["details"]["reconciliation_failures"]
+            if item["source_id"] == source_id
+        )
+        self.assertTrue(failure["was_scoped_match"], failure)
+        self.assertFalse(failure["normalized_unchanged"], failure)
+        return envelope
+
+    def rebuild_the_normalized_record(self, workspace: Path, source_id: str, stamp: str) -> None:
+        """Exactly what the shared remediation used to print, with the clock pinned.
+
+        `normalized_at` is second-resolution, so two rebuilds inside one second render
+        identical bytes and the refusal being reproduced would not reproduce. That is a
+        property of how fast a test runs, not of the guard, so the stamp is fixed here
+        rather than left to the wall clock.
+        """
+        with mock.patch.object(NORMALIZE, "timestamp_utc", lambda: stamp):
+            self.run_script(NORMALIZE, ["--source-id", source_id, "--force"], workspace)
+
+    def test_rebuilding_a_fingerprinted_record_is_refused_and_only_restoring_it_helps(self):
+        """The arm-(a) half of the bug above: printed advice the operator cannot follow.
+
+        A source the order fingerprinted normalized reconciles on exactly those bytes. The
+        shared remediation told its operator to rewrite the record with
+        `normalize_sources.py --source-id <id> --force`, which is the right answer for the
+        *other* arm — the one where the order recorded no normalized output and the acquirer
+        owes a freshly derived record. Here it cannot work at all: the rebuild restamps
+        `normalized_at` and changes nothing else, and that stamp is inside the fingerprint,
+        so no number of rebuilds lands back on the bytes the order recorded.
+
+        So the advice is walked rather than read. Rebuild, submit, rebuild again, submit
+        again — the identical refusal both times, which is what an operator following the
+        printed text actually experienced. Then the repair the failure now names is performed,
+        and it is the one that ends it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, _, source_id, order = self.arrive_at_reuse(Path(tmpdir))
+            record = self.normalized_record_for(workspace, source_id)
+            fingerprinted = record.read_bytes()
+
+            self.rebuild_the_normalized_record(workspace, source_id, "2026-08-20T09:00:00Z")
+            rebuilt = record.read_bytes()
+            self.assertNotEqual(fingerprinted, rebuilt, "the rebuild rewrote nothing")
+            self.assertEqual(
+                [
+                    line
+                    for line in fingerprinted.decode("utf-8").splitlines()
+                    if not line.startswith("normalized_at:")
+                ],
+                [
+                    line
+                    for line in rebuilt.decode("utf-8").splitlines()
+                    if not line.startswith("normalized_at:")
+                ],
+                "the rebuild differs by more than the stamp, so this is not the arm-(a) trap",
+            )
+
+            envelope = self.assert_rebuilt_reuse_is_refused(workspace, order["action_id"], source_id)
+            failure = next(
+                item
+                for item in envelope["details"]["reconciliation_failures"]
+                if item["source_id"] == source_id
+            )
+            self.assertNotIn(
+                "--force",
+                failure["repair"],
+                "arm (a) is still being sent to the rewrite that restamps what it must restore",
+            )
+            self.assertNotIn("--force", envelope["remediation"], envelope)
+
+            # Following the old advice a second time. Different bytes, identical refusal.
+            self.rebuild_the_normalized_record(workspace, source_id, "2026-08-20T09:00:01Z")
+            self.assertNotEqual(rebuilt, record.read_bytes(), "the second rebuild rewrote nothing")
+            again = self.assert_rebuilt_reuse_is_refused(workspace, order["action_id"], source_id)
+            self.assertEqual(
+                failure["repair"],
+                next(
+                    item
+                    for item in again["details"]["reconciliation_failures"]
+                    if item["source_id"] == source_id
+                )["repair"],
+                "the second rebuild reached a different refusal, so the loop is not reproduced",
+            )
+
+            # The repair the failure names, performed literally: the record restored to the
+            # bytes the order fingerprinted.
+            record.write_bytes(fingerprinted)
+
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(
+                0,
+                code,
+                f"restoring the fingerprinted bytes is the advised repair and must resolve it: {session}",
+            )
+            self.assertEqual("research", session["phase"])
+            self.assertEqual(order["action_id"], session["last_completed_action_id"])
+
     # -- the reuse path that is allowed, and what it may still not touch ------------
 
     def test_the_documented_reuse_path_closes_the_loop(self):
@@ -1717,6 +1853,128 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
                 failure["derivation_failure"]["reason"],
                 failure,
             )
+
+    def reconciliation_derivation_failure(self, workspace: Path, action_id: str, source_id: str) -> dict:
+        """Submit, insist the reuse was refused by re-derivation, and return that failure."""
+        code, envelope = self.submit(workspace, action_id)
+        self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+        self.assertEqual(
+            "pre-existing fulfilled evidence is not an unchanged exact scoped reconciliation match",
+            envelope["message"],
+            envelope,
+        )
+        failure = next(
+            item
+            for item in envelope["details"]["reconciliation_failures"]
+            if item["source_id"] == source_id
+        )
+        self.assertTrue(failure["was_authorized_unnormalized"], failure)
+        self.assertTrue(failure["record_unchanged"], failure)
+        self.assertTrue(failure["derivation_checked"], failure)
+        return failure
+
+    def test_a_reused_record_naming_another_normalizer_is_refused_by_that_name(self):
+        """A producer identity the workspace does not configure is its own refusal.
+
+        `carry_version_stamps` carries `normalizer.version` out of the file so a host upgrade
+        between issuance and submission is not read as a forgery, and deliberately leaves
+        `normalizer.name` derived so a record cannot claim a producer that did not produce it.
+        Nothing said so, though: a stamped name that disagreed simply rendered different bytes
+        and was reported as "normalized evidence is not what normalizing the raw evidence
+        produces", whose remediation is about a hand-edited body. The operator was sent to
+        re-read prose while the two lines that disagreed sat in the frontmatter, unquoted.
+
+        Both sides are named now, which is the difference between a verdict and a diff an
+        operator has to reconstruct.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            self.normalize_and_close(workspace, request_id, source_id)
+            record = self.normalized_record_for(workspace, source_id)
+            stamped = record.read_text(encoding="utf-8")
+            configured = f"normalizer:\n  name: {ADAPTER_NAME}\n"
+            self.assertIn(configured, stamped, "the fixture no longer stamps the configured adapter")
+            record.write_text(
+                stamped.replace(configured, "normalizer:\n  name: retired-normalize\n", 1),
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            failure = self.reconciliation_derivation_failure(
+                workspace, order["action_id"], source_id
+            )
+            derivation = failure["derivation_failure"]
+
+            self.assertEqual(
+                "normalized evidence does not name the normalizer configured for its kind",
+                derivation["reason"],
+                derivation,
+            )
+            self.assertEqual("retired-normalize", derivation["normalizer"], derivation)
+            self.assertEqual(
+                ADAPTER_NAME,
+                derivation["configured_normalizer"],
+                "the refusal must name both identities, or the operator cannot see which moved",
+            )
+            # Record-side, so the rewrite is the repair: re-deriving restamps the configured
+            # identity, which is precisely what this record no longer carries.
+            self.assertEqual(
+                CONTROLLER.RECONCILIATION_ARM_REPAIRS["authorized_unnormalized"],
+                failure["repair"],
+                failure,
+            )
+
+    def test_an_adapter_reporting_an_unauthorised_identity_is_reported_as_the_adapter(self):
+        """The verifier's own tooling failing is not the acquirer having authored a body.
+
+        `research.yml` names the adapter and is pinned by the trusted-input guard, but the
+        program that name resolves to is not: an adapter redeployed on PATH between the
+        acquirer's `normalize_sources.py` run and the verifier's re-derivation is outside
+        everything this order fingerprints. The protocol catches it precisely — the run
+        reports an identity `research.yml` does not authorize and `AdapterError` says exactly
+        that — and the controller's blanket `except` then reported "normalized evidence could
+        not be re-derived from the raw evidence" and buried the sentence in `error`. The
+        acquirer's record is fine; the host is not, and only one of those is actionable.
+
+        The reuse is still refused, and must be: an identity the workspace never authorized is
+        not something to accept evidence on. What changes is that the refusal says whose
+        problem it is.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, source_id, order = self.arrive_at_unnormalized_reuse(Path(tmpdir))
+            self.normalize_and_close(workspace, request_id, source_id)
+
+            # The redeploy: same argv, same research.yml, a program now reporting itself as
+            # something the workspace never authorized.
+            with mock.patch.dict(os.environ, {"EW_STUB_NAME": "stub-normalize-ng"}):
+                failure = self.reconciliation_derivation_failure(
+                    workspace, order["action_id"], source_id
+                )
+            derivation = failure["derivation_failure"]
+
+            self.assertEqual(
+                "the normalizer adapter this workspace authorizes did not produce a record to compare against",
+                derivation["reason"],
+                derivation,
+            )
+            self.assertIn("stub-normalize-ng", derivation["error"], derivation)
+            self.assertIn("research.yml authorized", derivation["error"], derivation)
+            # And the repair follows the verdict rather than the arm alone. Rewriting the
+            # record runs the same adapter and fails in the same place, so this state is not
+            # sent to the rewrite: the loop being closed here is the one the arm repairs close.
+            self.assertEqual(
+                CONTROLLER.RECONCILIATION_ARM_REPAIRS["authorized_unnormalized_unverifiable"],
+                failure["repair"],
+                failure,
+            )
+            self.assertNotIn("--force", failure["repair"], failure)
+
+            # The control: with the authorized program back on PATH the same reuse is
+            # accepted, so the refusal above is about the adapter and not about the record.
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(0, code, session)
+            self.assertEqual("research", session["phase"])
 
     def test_an_authorised_reuse_may_not_author_its_structured_view_sidecar(self):
         """The sidecar is bound by the same re-derivation, not by the record's own digest.
@@ -2494,6 +2752,177 @@ class ReusedSourceKindTests(DelegatedWorkspace, unittest.TestCase):
                 "them cannot testify that the tampered record spawned nothing",
             )
 
+    # -- the subtree a reused bundle does not open ------------------------------------
+
+    PLANTED_MEMBER = "sections/planted-appendix.tex"
+
+    def arrive_at_a_mixed_batch(self, root: Path) -> tuple[Path, dict[str, str], str, dict]:
+        """One order over two requests: one to be delivered new, one a pre-existing bundle.
+
+        Two questions with one blocking request each, because both requests are fulfilled
+        here: a question left blocked on a fulfilled request is a missing open link, which
+        `workspace_status` reports as `attention_required` and which freezes the session
+        before submission is ever reached.
+
+        The mixture is the whole point and neither half can be dropped. Attribution is only
+        derived when the action created at least one manifest record, so a pure-reuse order
+        computes no attribution at all and admits nothing from any subtree, expanded or not.
+        The reused bundle is what makes an expanded subtree exist to be over-admitted.
+        """
+        workspace = self.init_workspace(root)
+        self.configure(workspace, delegated=True)
+        self.add_second_question(workspace)
+        requests = {
+            "reused": self.block_question_on_a_request(workspace),
+            "delivered": self.block_question_on_a_request(
+                workspace, slug=self.SECOND_SLUG, query="Competitor offer snapshot"
+            ),
+        }
+        bundle_source_id = self.deliver_latex_before_the_order(workspace, requests["reused"])
+        self.start(workspace)
+        order = self.pending_order(workspace)
+        self.assertEqual(
+            sorted(requests.values()),
+            sorted(order["scope"]["request_ids"]),
+            f"the guard under test only runs on a batch carrying both kinds of fulfilment: {order}",
+        )
+        return workspace, requests, bundle_source_id, order
+
+    def assert_the_planted_file_is_inert_to_the_normalizer(
+        self, workspace: Path, source_id: str
+    ) -> None:
+        """The reused bundle still re-derives, with the planted file sitting inside it.
+
+        Reconciliation runs several checks before raw scope does, and it re-normalizes the
+        reused source from its raw evidence inside a sandbox that copies the whole
+        `latex_root` subtree -- planted file included. A plant the LaTeX reader picked up
+        would therefore be refused as a reuse that does not re-derive, and the raw-scope
+        guard this test is about would never be consulted: the test would go green on a
+        refusal that says nothing about admission scope at all.
+
+        `main.tex` neither `\\input`s nor `\\include`s the plant and the entrypoint is chosen
+        from the bundle's top level, so the reader never reaches it. Asserted rather than
+        assumed, through the controller's own re-derivation predicate, so that a normalizer
+        that later starts reading the whole tree fails here -- with the reason -- instead of
+        quietly turning the test below into a different one.
+        """
+        records = self.manifest_records(workspace)
+        record = next(item for item in records if item["id"] == source_id)
+        self.assertIsNone(
+            CONTROLLER.normalized_output_derivation_failure(
+                workspace,
+                CONTROLLER.load_config(workspace),
+                record,
+                self.normalized_record_for(workspace, source_id),
+                records,
+                NORMALIZE,
+            ),
+            "the planted file changed what normalizing the reused bundle produces, so this "
+            "fixture is refused by reconciliation and proves nothing about raw scope",
+        )
+
+    def test_a_completed_batch_may_not_write_into_a_reused_pre_existing_bundle(self):
+        """A bundle the action reused is not a subtree it may write into either.
+
+        `test_a_blocked_partial_delivery_may_not_write_into_a_pre_existing_bundle` pins this
+        for the blocked arm, and the blocked arm's own comment says the completed arms pass
+        their newly created ids alone "for the same reason". Nothing said it here: widening
+        the completed arm's allowed set from the new ids to every fulfilled id left the whole
+        suite green, because no fixture in it ever fulfilled one request from a new delivery
+        and another from a directory-shaped record the workspace already held.
+
+        That is the shape the hole needs. Attribution expands a directory-valued `raw_paths`
+        to every regular file beneath it, which is what makes a bundle deliverable at all and
+        is safe for a record the action itself created -- the acquirer wrote the whole
+        subtree. Applied to a record that already existed at issuance, the same expansion
+        admits anything dropped anywhere inside somebody else's payload, because inventory
+        attributes files to the record whose directory contains them and asks nothing about
+        who put them there.
+
+        The batch is mixed deliberately: the new delivery is what makes attribution get
+        derived at all, and the reused bundle is what gives the expansion a subtree to reach
+        into. So the refusal is asserted together with the allowed set, because "refused" on
+        its own is also what a fixture that never reached this guard would produce. The
+        allowed set being exactly the newly delivered record's own two paths -- with no
+        member of the reused bundle in it -- is the guard's own evidence that it evaluated
+        the ids the action created rather than everything it fulfilled.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, requests, bundle_source_id, order = self.arrive_at_a_mixed_batch(
+                Path(tmpdir)
+            )
+            bundle = f"raw/papers/{LATEX_BUNDLE_FIXTURE.name}"
+
+            # The honest half of the order: one request fetched, one served by normalizing
+            # the correlated bundle the workspace already held.
+            delivered_source_id = self.deliver_for(workspace, requests["delivered"])
+            self.fulfil_and_reopen(
+                workspace, requests["delivered"], delivered_source_id, slug=self.SECOND_SLUG
+            )
+            self.normalize_scoped_source(workspace, requests["reused"], bundle_source_id)
+            before = self.evidence_bytes(workspace)
+
+            planted = f"{bundle}/{self.PLANTED_MEMBER}"
+            planted_path = workspace / planted
+            planted_path.parent.mkdir(parents=True, exist_ok=True)
+            planted_path.write_text(
+                "\\section{Appendix}\nPlanted inside a bundle this action did not deliver.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            self.assert_the_planted_file_is_inert_to_the_normalizer(workspace, bundle_source_id)
+
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"], envelope)
+            self.assertTrue(envelope["recoverable"], envelope)
+            self.assertEqual(
+                "delegated acquisition changed raw evidence outside newly fulfilled manifest source scope",
+                envelope["message"],
+                envelope,
+            )
+            details = envelope["details"]
+            self.assertEqual(
+                [planted],
+                details["unexpected_new_raw_paths"],
+                "the refusal must name the planted file, and name only it: the bundle's own "
+                "members were in the issuance baseline, and the delivered payload is allowed",
+            )
+            self.assertEqual(
+                [f"raw/data/{PAYLOAD.name}", f"raw/data/{PAYLOAD.name}.provenance.yml"],
+                sorted(details["allowed_new_raw_paths"]),
+                "only the record this action created may contribute an expanded subtree; a "
+                "reused pre-existing bundle's members appearing here means the expansion "
+                "reached a record the acquirer did not write",
+            )
+            self.assertFalse(
+                any(details["raw_scope_violations"].values()),
+                f"nothing that existed at issuance was changed; the plant is a new file: {details}",
+            )
+            after = self.evidence_bytes(workspace)
+            self.assertEqual(
+                [planted],
+                sorted(set(after) - set(before)),
+                "a refused submission writes nothing of its own",
+            )
+            self.assertEqual(
+                dict(before.items()),
+                {path: after[path] for path in before},
+                "a refused submission leaves the evidence it read exactly as it found it",
+            )
+
+            # The control: the same batch with the plant removed is accepted. Without it a
+            # fixture that never reached the raw-scope guard -- refused for some earlier
+            # reason with an empty allowed set -- would satisfy every assertion above.
+            planted_path.unlink()
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(0, code, session)
+            self.assertEqual("research", session["phase"])
+            self.assertEqual("open", self.question_status(workspace))
+            self.assertIn("status: open", self.question_frontmatter(workspace, self.SECOND_SLUG))
+
 
 class NormalizeAllInsideAnOrderTests(DelegatedWorkspace, unittest.TestCase):
     """`normalize_sources.py --all` inside a work order, in a workspace that has a second record.
@@ -2573,6 +3002,514 @@ class NormalizeAllInsideAnOrderTests(DelegatedWorkspace, unittest.TestCase):
                 envelope["details"]["normalized_scope_violations"],
                 "the refusal must name the unscoped output, and only it: the scoped source's "
                 "own record is exactly what this order authorised",
+            )
+            self.assertTrue(envelope["recoverable"])
+
+
+class BetweenActionsDeliveryTests(DelegatedWorkspace, unittest.TestCase):
+    """The mid-session delivery route the contract recommends, walked end to end.
+
+    A capture that fulfils nothing — discovery residue, the snapshot a lookup step took on
+    the way to the artifact a request actually asks for — has nowhere to go inside an
+    acquisition order: a delegated acquisition may deliver nothing it does not fulfil, and
+    three guards say so. `docs/source-delivery.md` ("Lookup steps and intermediate
+    captures") and `skills/research-acquire-delegated.md` therefore send it *between*
+    actions — after one submission is accepted, before the next order is issued — delivered
+    **and inventoried together**, and **unstamped**. Every other fixture in this file
+    delivers either before the session starts or inside a pending order, so the one route
+    the shipped contract actively recommends was the one route nothing walked.
+
+    Both qualifiers in that sentence are walked, because each one is the difference between
+    an accepted order and a refused one. "Inventoried together": inventory is what turns
+    delivered bytes into a manifest record, and issuance fingerprints the manifest it finds,
+    so a capture inventoried between actions is *pre-existing evidence* to the next order,
+    while the same capture left un-inventoried is first recorded by the next acquirer's own
+    inventory run and lands inside that order as a new manifest record no scoped request
+    fulfils. "Unstamped": a stamped capture correlates to the request it names, which is what
+    puts it in that order's un-normalized reuse baseline and changes what the order permits.
+
+    Nothing here normalizes the capture, and that choice is what forces the in-order leg to
+    normalize with `--source-id`. `normalize_sources.py --all` — which `acquire()` and every
+    fixture built on it run — would normalize the mid-session capture too, and its output
+    belongs to no fulfilled source; the last test below measures that refusal rather than
+    leaving it as a claim in prose. Normalizing the capture between actions is equally
+    lawful and would make `--all` harmless again, but the un-normalized shape is the one the
+    advice describes, and it is the shape that costs an acquirer a flag it will not think to
+    pass. `NormalizeAllInsideAnOrderTests` pins the same hazard for a source the workspace
+    already held; this is the same hazard reached by following the advice.
+
+    The route's cost is asserted rather than argued away: a between-actions delivery is
+    bracketed by no work order. It passes through no postcondition, nothing compares the
+    workspace against the previous order's end state, and the next issuance simply adopts
+    whatever it finds. `assert_every_mutation_is_bracketed_by_an_order` still passes over
+    such a session — it accounts for fulfilments and question moves, and a capture that
+    fulfils nothing makes neither — which is exactly why the manifest gaining a record while
+    no order was live is asserted directly instead of being left to that audit.
+    """
+
+    SPARE_SLUG = "answerable-from-delivered-evidence"
+    CAPTURE_NAME = "keepa-b0mid00001.json"
+    CAPTURE_BODY = (
+        '{\n  "asin": "B0MID00001",\n  "supplier_quote": "7.10 EUR",\n  "offer_count": 2\n}\n'
+    )
+
+    # -- reading durable state ---------------------------------------------------------
+
+    def session_state(self, workspace: Path) -> dict:
+        return json.loads(
+            (workspace / "runs" / "orchestrations" / ORCHESTRATION_ID / "session.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def issuance_baseline(self, workspace: Path, action_id: str) -> dict:
+        """What the order recorded about the manifest it found, from the protected sidecar.
+
+        The fields are the order's own answer to "what was already here": which records
+        existed at issuance, and which of them this order authorises reuse of. Read here
+        rather than inferred, because the difference the stamp makes is a difference in this
+        list before it is a difference in any submission's verdict.
+        """
+        baseline = json.loads(
+            CONTROLLER.scope_integrity_baseline_path(
+                workspace, ORCHESTRATION_ID, action_id
+            ).read_text(encoding="utf-8")
+        )
+        return next(
+            item["fields"]
+            for item in baseline["postconditions"]
+            if item["check"] == "manifest_records_increased"
+        )
+
+    def requests_fulfilled_by(self, workspace: Path, source_id: str) -> list[str]:
+        return sorted(
+            str(record["request_id"])
+            for line in (
+                workspace / "sources" / "source-requests.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+            for record in [json.loads(line)]
+            if record.get("status") == "fulfilled" and record.get("source_id") == source_id
+        )
+
+    def normalized_records_naming(self, workspace: Path, source_id: str) -> list[str]:
+        return [
+            path.name
+            for path in sorted((workspace / "sources" / "normalized").glob("*.md"))
+            if source_id in path.read_text(encoding="utf-8")
+        ]
+
+    # -- the session shape this route needs --------------------------------------------
+
+    def complete_a_research_order(self, workspace: Path) -> str:
+        """Issue and close the research order the spare question earns.
+
+        The route is defined by where the delivery happens — after a submission is accepted
+        and before the next order is issued — so the session has to have completed an action
+        before the interesting one. Research is the cheap way there: a spare actionable
+        question outranks the blocked one, and answering it is the acquirer's own honest
+        work rather than a fixture edit.
+
+        The answer is deliberately uncited (`--allow-uncited`). Grounding it would need
+        evidence delivered before the session, which is the pre-session arm this class
+        exists to be different from; the acquisition leg that follows is where cited
+        evidence enters.
+        """
+        code, research = self.next_action(workspace)
+        self.assertEqual(0, code, research)
+        self.assertEqual("research", research["phase"], research)
+        self.assertEqual([self.SPARE_SLUG], research["scope"]["question_slugs"], research)
+        page = workspace / "wiki" / "synthesis" / "already-answerable.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            "---\ntype: synthesis\ncreated: 2026-08-19\nupdated: 2026-08-19\n"
+            "summary: This question needed no evidence the workspace lacked.\n---\n\n"
+            "# Already answerable\n\nThe question is answered from what the workspace states.\n",
+            encoding="utf-8",
+        )
+        self.run_script(
+            RESOLVE,
+            [
+                "answer", "--slug", self.SPARE_SLUG, "--agent-id", "research-agent",
+                "--answer-page", "wiki/synthesis/already-answerable.md",
+                "--allow-uncited", "--allow-unclaimed",
+            ],
+            workspace,
+        )
+        code, session = self.submit(workspace, research["action_id"])
+        self.assertEqual(0, code, session)
+        return str(research["action_id"])
+
+    def write_the_capture(self, workspace: Path, request_id: str | None) -> None:
+        """The bytes and the sidecar, with no command run over them yet.
+
+        Separate from the inventory step because "delivered **and inventoried together**" is
+        an instruction with two halves, and one test here omits the second one on purpose.
+        """
+        destination = workspace / "raw" / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        payload = destination / self.CAPTURE_NAME
+        payload.write_text(self.CAPTURE_BODY, encoding="utf-8", newline="\n")
+        sidecar: dict[str, object] = {
+            "origin_url": "https://api.keepa.test/product/B0MID00001",
+            "license": "CC-BY-4.0",
+            "retrieved_at": "2026-08-18T12:00:00Z",
+            "retrieved_by": ACQUIRER,
+            "checksum": f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}",
+        }
+        if request_id is not None:
+            sidecar["request_id"] = request_id
+        (destination / (self.CAPTURE_NAME + ".provenance.yml")).write_text(
+            yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
+        )
+
+    def deliver_between_actions(self, workspace: Path, request_id: str | None) -> str:
+        """The mid-session capture: delivered and inventoried together, normalized never.
+
+        `deliver_before_the_order` is this helper's pre-session sibling and takes the same
+        `request_id | None` affordance for the same reason — an unstamped sidecar is what
+        evidence acquired for no request looks like. What differs is only when it runs: here
+        a session is live, no order is pending, and the two commands this uses are the two
+        the delegation gate deliberately does not cover.
+        """
+        self.write_the_capture(workspace, request_id)
+        self.run_script(INVENTORY, ["--report"], workspace)
+        return self.source_id_for(workspace, f"raw/data/{self.CAPTURE_NAME}")
+
+    def arrive_after_a_between_actions_delivery(
+        self, root: Path, *, stamped: bool
+    ) -> tuple[Path, str, str, dict]:
+        """Research order completed, capture delivered in the gap, acquisition order issued.
+
+        The window is checked rather than assumed: the session is live and holds no pending
+        action while the delivery happens, and the manifest changes inside it. That pair is
+        the route's whole tradeoff stated as measurements — the workspace gained durable
+        evidence at a moment when no work order was accountable for it.
+        """
+        workspace, request_id = self.make_workspace(root, spare_question=True)
+        self.start(workspace)
+        self.complete_a_research_order(workspace)
+
+        session = self.session_state(workspace)
+        self.assertEqual("active", session["status"], session)
+        self.assertIsNone(
+            session["pending_action_id"],
+            "the delivery below is only 'between actions' if no order is pending",
+        )
+        manifest_before = self.evidence_state(workspace)["sources/manifest.jsonl"]
+
+        capture_id = self.deliver_between_actions(workspace, request_id if stamped else None)
+
+        self.assertNotEqual(
+            manifest_before,
+            self.evidence_state(workspace)["sources/manifest.jsonl"],
+            "the capture reached the manifest while no work order accounted for it",
+        )
+        order = self.pending_order(workspace)
+        self.assertEqual([request_id], order["scope"]["request_ids"], order)
+        return workspace, request_id, capture_id, order
+
+    def acquire_with_a_scoped_normalize(self, workspace: Path, request_id: str) -> str:
+        """`acquire()` with one flag changed: normalize this order's source, not every record.
+
+        `--all` would also normalize the capture delivered between actions, whose output no
+        fulfilled source owns. That is not a hypothetical difference — the last test in this
+        class runs `acquire()` unchanged and collects the refusal — and `--source-id` is what
+        the controller's own remediation tells a refused acquirer to use.
+        """
+        destination = workspace / "raw" / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        payload = destination / PAYLOAD.name
+        shutil.copy2(PAYLOAD, payload)
+        sidecar = yaml.safe_load(
+            PAYLOAD.with_name(PAYLOAD.name + ".provenance.yml").read_text(encoding="utf-8")
+        )
+        sidecar["retrieved_by"] = ACQUIRER
+        sidecar["request_id"] = request_id
+        sidecar["checksum"] = f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}"
+        (destination / (PAYLOAD.name + ".provenance.yml")).write_text(
+            yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"
+        )
+        self.run_script(INVENTORY, ["--report"], workspace)
+        source_id = self.source_id_for(workspace, f"raw/data/{PAYLOAD.name}")
+        self.run_script(
+            REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
+        )
+        self.run_script(NORMALIZE, ["--source-id", source_id], workspace)
+        self.run_script(
+            RESOLVE,
+            [
+                "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
+                "--source-id", source_id, "--request-id", request_id,
+            ],
+            workspace,
+        )
+        return source_id
+
+    def fulfil_the_order_with(self, workspace: Path, request_id: str, source_id: str) -> None:
+        """Close the order on a source the workspace already holds, normalizing it here.
+
+        Normalization sits between the two mutations because `reopen` refuses a source
+        nothing has normalized; that ordering is the reuse leg's shape, not a preference.
+        """
+        self.run_script(
+            REQUESTS, ["fulfill", "--request-id", request_id, "--source-id", source_id], workspace
+        )
+        self.run_script(NORMALIZE, ["--source-id", source_id], workspace)
+        self.run_script(
+            RESOLVE,
+            [
+                "reopen", "--slug", QUESTION_SLUG, "--agent-id", ACQUIRER,
+                "--source-id", source_id, "--request-id", request_id,
+            ],
+            workspace,
+        )
+
+    # -- the route the contract recommends ---------------------------------------------
+
+    def test_an_unstamped_capture_delivered_between_actions_survives_the_next_order(self):
+        """The recommended route, from the residue landing to the next order closing.
+
+        What has to hold for the advice to be worth giving: the capture survives the next
+        order's issuance as ordinary pre-existing evidence, the acquisition that follows is
+        accepted with it sitting there, and nothing in the order ever asks the acquirer to
+        account for it. The last part is the one worth pinning: an unstamped capture
+        correlates to no request, so the order records no reuse authorization for it, which
+        means it neither may nor must acquire a normalized record inside the action. It
+        fulfils nothing, and nothing requires it to.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, capture_id, order = self.arrive_after_a_between_actions_delivery(
+                Path(tmpdir), stamped=False
+            )
+
+            fields = self.issuance_baseline(workspace, order["action_id"])
+            self.assertIn(
+                capture_id,
+                fields["manifest_record_fingerprints_before"],
+                "the next order adopted the capture as evidence that was already there",
+            )
+            self.assertEqual(
+                [],
+                fields["reusable_source_ids_before"],
+                "an unstamped capture correlates to nothing, so this order authorises no "
+                "reuse of it and demands no normalized record for it",
+            )
+
+            source_id = self.acquire_with_a_scoped_normalize(workspace, request_id)
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(
+                0,
+                code,
+                f"a capture delivered between actions must not fail the next submission: {session}",
+            )
+            self.assertEqual("research", session["phase"], session)
+            self.assertEqual(order["action_id"], session["last_completed_action_id"])
+            self.assertEqual("open", self.question_status(workspace))
+
+            # The capture is still exactly what it was: correlated to nothing, spent on
+            # nothing, and un-normalized because nothing ever required otherwise.
+            self.assertEqual([request_id], self.requests_fulfilled_by(workspace, source_id))
+            self.assertEqual([], self.requests_fulfilled_by(workspace, capture_id))
+            self.assertEqual([], self.normalized_records_naming(workspace, capture_id))
+            self.assertEqual(
+                self.CAPTURE_BODY,
+                (workspace / "raw" / "data" / self.CAPTURE_NAME).read_text(encoding="utf-8"),
+            )
+
+            # The audit passes, and the reason it passes is the point: it accounts for
+            # fulfilments and question moves, and this delivery made neither. The manifest
+            # record it did make was checked by no postcondition at all — asserted in
+            # `arrive_after_a_between_actions_delivery`, where the window is still open.
+            checker = DelegatedAcquisitionChainTests(
+                "test_the_delegated_loop_closes_and_leaves_no_unaccounted_mutation"
+            )
+            checker.assert_every_mutation_is_bracketed_by_an_order(workspace)
+            report = LINT.run_checks(workspace, LINT.load_config(workspace))
+            self.assertEqual(0, report["stats"]["delegated_unattributed_fulfilments"])
+
+    # -- why the advice says "and inventoried together" ----------------------------------
+
+    def test_a_capture_left_un_inventoried_across_issuance_is_refused_inside_the_next_order(self):
+        """The same delivery with the second command omitted, and the bill arrives late.
+
+        Nothing about the bytes changes: same file, same unstamped sidecar, same window.
+        Only the inventory run is missing, and issuance fingerprints the raw tree as it
+        stands — so the stale capture is baselined into the raw tree and the raw-scope guard
+        will never mention it. What it is not is a manifest record. The next acquirer must
+        run inventory before it can fulfil anything, that run derives a record for the stale
+        file too, and the record is new, fulfilled by nothing, and refused.
+
+        The refusal is worth walking because of who receives it: an acquirer that did
+        nothing wrong, told that it added a manifest record outside fulfilled source scope,
+        for a delivery made in a window its own order knows nothing about. That is the whole
+        reason the instruction is "delivered **and inventoried together**" rather than
+        "delivered".
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir), spare_question=True)
+            self.start(workspace)
+            self.complete_a_research_order(workspace)
+            self.write_the_capture(workspace, None)
+
+            order = self.pending_order(workspace)
+            fields = self.issuance_baseline(workspace, order["action_id"])
+            self.assertIn(
+                f"raw/data/{self.CAPTURE_NAME}",
+                fields["raw_tree_before"]["entries"],
+                "issuance baselined the delivered bytes, so the raw tree has nothing new in "
+                "it and the raw-scope guard is not the one that speaks",
+            )
+            self.assertEqual(
+                {},
+                fields["manifest_record_fingerprints_before"],
+                "and the capture is a manifest record for nobody yet, which is the whole "
+                "difference between this test and the one above",
+            )
+
+            source_id = self.acquire_with_a_scoped_normalize(workspace, request_id)
+            capture_id = self.source_id_for(workspace, f"raw/data/{self.CAPTURE_NAME}")
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"], envelope)
+            self.assertEqual(
+                "delegated acquisition changed, removed, or added evidence-manifest records "
+                "outside fulfilled source scope",
+                envelope["message"],
+                envelope,
+            )
+            self.assertEqual(
+                {"removed": [], "added_outside_scope": [capture_id], "changed_outside_scope": []},
+                envelope["details"]["manifest_scope_violations"],
+                envelope,
+            )
+            self.assertEqual([source_id], envelope["details"]["fulfilled_source_ids"], envelope)
+            self.assertTrue(envelope["recoverable"])
+
+    # -- why the advice says "unstamped" ------------------------------------------------
+
+    def test_stamping_the_same_capture_makes_the_next_order_expect_something_of_it(self):
+        """The difference one sidecar field makes, measured on both sides of it.
+
+        Same session, same bytes, same delivery point; the sidecar either names the request
+        the next order will scope or names nothing. Stamped, the capture is un-normalized
+        evidence correlated to a scoped request, which is precisely the shape
+        `acquisition_reuse_baselines` admits: the order lists it as reusable, and an
+        acquirer may close the order on it by normalizing it inside the action — fetching
+        nothing, and citing a lookup-step snapshot as the evidence for the question.
+        Unstamped, the identical work is refused as reuse of evidence the order never
+        authorised.
+
+        So the advice is not stylistic. A stamp on a capture that was never meant to answer
+        anything changes what the next order permits, and the acquirer that follows the
+        stamp is not doing anything the contract can distinguish from honest reuse.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, capture_id, order = self.arrive_after_a_between_actions_delivery(
+                Path(tmpdir), stamped=True
+            )
+
+            self.assertEqual(
+                [capture_id],
+                self.issuance_baseline(workspace, order["action_id"])["reusable_source_ids_before"],
+                "a stamped, un-normalized capture of a reusable kind joins the reuse baseline",
+            )
+
+            self.fulfil_the_order_with(workspace, request_id, capture_id)
+            code, session = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(0, code, f"the stamp turned residue into an accepted fulfilment: {session}")
+            self.assertEqual("research", session["phase"], session)
+            self.assertEqual("open", self.question_status(workspace))
+            self.assertEqual([request_id], self.requests_fulfilled_by(workspace, capture_id))
+            self.assertEqual(
+                1,
+                len(self.normalized_records_naming(workspace, capture_id)),
+                "the reuse arm both permits and requires the one normalized record it owes",
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, capture_id, order = self.arrive_after_a_between_actions_delivery(
+                Path(tmpdir), stamped=False
+            )
+
+            self.assertEqual(
+                [],
+                self.issuance_baseline(workspace, order["action_id"])["reusable_source_ids_before"],
+            )
+
+            self.fulfil_the_order_with(workspace, request_id, capture_id)
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"], envelope)
+            self.assertIn(
+                "reuses pre-existing evidence that was not a scoped reconciliation match",
+                envelope["message"],
+                envelope,
+            )
+            failure = next(
+                item
+                for item in envelope["details"]["reuse_scope_failures"]
+                if item["source_id"] == capture_id
+            )
+            self.assertEqual("provenance_names_no_scoped_request", failure["cause"], failure)
+            self.assertIsNone(failure["provenance_request_id"], failure)
+            # Recoverable and still pending: the refusal is a repair request. The question
+            # is `open` here rather than `blocked`, because the acquirer's reopen was
+            # sanctioned by the pending order and applied before submission adjudicated
+            # anything — which is what the refusal now asks the acquirer to undo.
+            self.assertTrue(envelope["recoverable"])
+            self.assertEqual(
+                order["action_id"], self.session_state(workspace)["pending_action_id"], envelope
+            )
+
+    # -- the flag the route costs the acquirer -------------------------------------------
+
+    def test_normalizing_every_record_inside_the_order_is_refused_for_the_capture(self):
+        """The hazard the recommended route hands the next acquirer, walked once.
+
+        `acquire()` is this file's own depiction of the delegated loop and it normalizes
+        with `--all`, which is also what an acquirer reading a passing example would run.
+        Against a workspace that took the between-actions advice, `--all` reaches the
+        mid-session capture as well, and the order authorises normalized output only for the
+        source it fulfils. So the acquirer is refused for evidence a *previous* window
+        delivered, with a message that names only the file it just wrote.
+
+        This is the same refusal `NormalizeAllInsideAnOrderTests` pins for a source the
+        workspace already held. It is asserted again here because the state is reached by
+        following the shipped advice rather than by an accident of workspace history, and
+        because the first test's `--source-id` normalize is only justified if this is what
+        the alternative actually does.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, capture_id, order = self.arrive_after_a_between_actions_delivery(
+                Path(tmpdir), stamped=False
+            )
+
+            self.acquire(workspace, request_id)
+            capture_output = (
+                self.normalized_record_for(workspace, capture_id).relative_to(workspace).as_posix()
+            )
+            code, envelope = self.submit(workspace, order["action_id"])
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", envelope["error_code"], envelope)
+            self.assertEqual(
+                "delegated acquisition changed normalized evidence outside newly fulfilled source scope",
+                envelope["message"],
+                envelope,
+            )
+            self.assertEqual(
+                {
+                    "removed": [],
+                    "added_outside_scope": [capture_output],
+                    "changed_outside_scope": [],
+                },
+                envelope["details"]["normalized_scope_violations"],
+                "the refusal names the capture's output and only it",
             )
             self.assertTrue(envelope["recoverable"])
 

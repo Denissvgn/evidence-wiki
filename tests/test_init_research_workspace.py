@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import os
 import shutil
@@ -23,16 +22,11 @@ from tests._provider_plugin_fixture import (  # noqa: E402
     installed_provider_plugins,
     refresh_provider_plugin_caches,
 )
+from tests._script_loader import load_module  # noqa: E402
 
 
 def load_init_module():
-    spec = importlib.util.spec_from_file_location("research_workspace_init", INIT_SCRIPT_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load init script from {INIT_SCRIPT_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module("research_workspace_init", INIT_SCRIPT_PATH)
 
 
 INIT = load_init_module()

@@ -1,13 +1,13 @@
 import contextlib
-import importlib.util
 import io
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import yaml
+
+from tests._script_loader import load_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCORER_PATH = REPO_ROOT / "tools" / "score_eval_workspace.py"
@@ -19,13 +19,7 @@ CONTRIBUTING = REPO_ROOT / "CONTRIBUTING.md"
 def load_scorer():
     if not SCORER_PATH.is_file():
         raise AssertionError(f"missing scorer tool: {SCORER_PATH.relative_to(REPO_ROOT)}")
-    spec = importlib.util.spec_from_file_location("score_eval_workspace", SCORER_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load scorer from {SCORER_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module("score_eval_workspace", SCORER_PATH)
 
 
 def write_json(path: Path, payload: dict) -> None:

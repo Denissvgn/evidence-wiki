@@ -3131,6 +3131,48 @@ def carry_version_stamps(expected: dict[str, Any], stamped: dict[str, Any]) -> N
             derived["version"] = recorded.get("version")
 
 
+def normalizer_identity_failure(
+    expected: dict[str, Any],
+    stamped: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Refuse a record naming a producer other than the one configured for it, by name.
+
+    The other half of ``carry_version_stamps``. Versions travel from the file, so a host
+    upgrade is not a forgery; names stay derived, so a record cannot claim a producer that
+    did not produce it. What was missing was any *statement* about the name: a stamped
+    ``normalizer.name`` that disagrees with the configured one is a difference in the
+    rendered bytes like any other, so it fell through to "normalized evidence is not what
+    normalizing the raw evidence produces" -- whose remediation is about a hand-edited body.
+    An operator reading that goes looking for an edit to the prose, while the two lines that
+    actually disagree sit in the frontmatter and are never quoted back.
+
+    So the comparison is made explicitly and reported with both sides in their own keys, the
+    way ``stamped_pdf_extractor`` already reports the extractor it refused. Names only: the
+    versions have been carried by the time this runs, and comparing them here would undo the
+    one thing that helper exists to allow.
+
+    Absent on both sides is not a disagreement -- a record for a kind that stamps no producer
+    block has nothing to be wrong about, and the byte comparison still has the last word.
+
+    The reason says "does not name" rather than "names another", because a record whose
+    ``normalizer`` block was deleted or corrupted into something that is not a producer
+    object reaches here too, and reporting that one as naming a different normalizer would
+    assert something the file did not do. Either way ``normalizer`` carries what the record
+    names -- ``None`` when it names nothing usable -- beside the identity that was expected.
+    """
+    derived = expected.get("normalizer")
+    recorded = stamped.get("normalizer")
+    derived_name = derived.get("name") if isinstance(derived, dict) else None
+    recorded_name = recorded.get("name") if isinstance(recorded, dict) else None
+    if derived_name == recorded_name:
+        return None
+    return {
+        "reason": "normalized evidence does not name the normalizer configured for its kind",
+        "normalizer": recorded_name if isinstance(recorded_name, str) else None,
+        "configured_normalizer": derived_name if isinstance(derived_name, str) else None,
+    }
+
+
 def normalized_output_derivation_failure(
     project_root: Path,
     config: dict[str, Any],
@@ -3291,11 +3333,30 @@ def normalized_output_derivation_failure(
                 return {"reason": "normalized evidence cites source ids the evidence manifest does not hold"}
         expected_frontmatter["references_source_ids"] = stamped_references
         carry_version_stamps(expected_frontmatter, frontmatter)
+        # Beside the version carry, and deliberately: that helper's whole subject is these
+        # two producer blocks, and the name is the half it does *not* carry. Answered here,
+        # before rendering, because after `render_markdown` the difference is only bytes and
+        # the byte verdict blames hand-editing the body. `return` rather than `raise`: the
+        # blanket clause below would fold a raise back into the generic re-derivation reason.
+        identity_failure = normalizer_identity_failure(expected_frontmatter, frontmatter)
+        if identity_failure is not None:
+            return identity_failure
         expected_text = normalize_sources.render_markdown(source, expected_frontmatter)
     except OrchestrationControllerError:
         raise
     except RederivationSandboxError as exc:
         return {"reason": "the bounded workspace this re-derivation runs in could not be prepared", "error": str(exc)}
+    # Split out of the blanket clause for the reason `RederivationSandboxError` above it is:
+    # the adapter protocol raises this to say something precise -- most sharply, that the
+    # program it ran reported an identity `research.yml` does not authorize -- and folding
+    # that into "could not be re-derived" buries the one sentence the operator can act on
+    # inside `error`. Read off the module that raises it, so the class is the same object
+    # rather than a second copy of it loaded through another path.
+    except getattr(normalize_sources, "AdapterError", ()) as exc:
+        return {
+            "reason": "the normalizer adapter this workspace authorizes did not produce a record to compare against",
+            "error": str(exc),
+        }
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - any re-derivation failure is the same verdict
         return {"reason": "normalized evidence could not be re-derived from the raw evidence", "error": str(exc)}
     if expected_text.encode("utf-8") != payload:
@@ -3307,6 +3368,13 @@ def normalized_output_derivation_failure(
 #: by the exact bytes each verdict is a statement about. ``None`` -- the state outside a
 #: submit, and the state every other caller sees -- disables memoisation entirely.
 _DERIVATION_VERDICTS: dict[tuple[str, str, str], dict[str, Any] | None] | None = None
+
+#: Inventory-derived raw attribution already computed during one ``submit``, keyed by the
+#: raw-tree content fingerprint *and* the directory set under those same roots -- together,
+#: the tree the attribution is a statement about. Same lifecycle and rationale as
+#: ``_DERIVATION_VERDICTS``: ``submit_result`` verifies up to three times, and one
+#: derivation pass re-hashes every raw file.
+_RAW_ATTRIBUTION_MEMO: dict[str, dict[str, dict[str, Any]]] | None = None
 
 
 @contextmanager
@@ -3325,13 +3393,264 @@ def derivation_verdict_memo() -> Iterator[None]:
     one submit and discarded with it, because between submits the workspace is free to
     change.
     """
-    global _DERIVATION_VERDICTS
+    global _DERIVATION_VERDICTS, _RAW_ATTRIBUTION_MEMO
     previous = _DERIVATION_VERDICTS
+    previous_attribution = _RAW_ATTRIBUTION_MEMO
     _DERIVATION_VERDICTS = {}
+    _RAW_ATTRIBUTION_MEMO = {}
     try:
         yield
     finally:
         _DERIVATION_VERDICTS = previous
+        _RAW_ATTRIBUTION_MEMO = previous_attribution
+
+
+def raw_tree_directory_digest(project_root: Path, config: dict[str, Any]) -> str:
+    """Digest the directory set under the immutable raw roots, hashing no file bytes.
+
+    Completes the raw-attribution memo key, which a raw-tree content fingerprint cannot
+    complete on its own: ``raw_tree_snapshot`` records an entry per regular file and none
+    for a directory, so that fingerprint cannot tell an unchanged tree from one that gained
+    an empty directory -- and an empty directory is something ``source_inventory`` reads.
+    An empty ``.git/`` is one of the markers that makes a directory a local repository.
+
+    Directory names only: no ``stat`` of the files beneath them and no digest of their
+    bytes, so this costs one walk of a tree the caller's own fingerprint has already
+    walked. Tolerant by design -- anything unreadable or link-like under ``raw/`` is the
+    raw-tree guards' business and they refuse it on their own terms. This returns a digest,
+    never a verdict.
+
+    Scoped to ``configured_raw_source_roots``, deliberately the same roots the fingerprint
+    it completes is taken over, and read beside that fingerprint rather than under the
+    acquisition barrier the derivation takes. Neither is the derivation's own reach:
+    ``integrations.codebase_analysis.source_roots`` may name a root outside
+    ``raw.source_roots``, and such a root is outside the raw-tree fingerprint just as it is
+    outside this digest -- a gap in what the raw baselines cover at all, which composing
+    this key neither widens nor closes. Between the two the key can only go stale in the
+    direction of an extra derivation pass, never a reused answer.
+    """
+    directories: set[str] = set()
+    for relative_root in configured_raw_source_roots(config):
+        root = project_root / relative_root.as_posix()
+        for current, _dirnames, _filenames in os.walk(root):
+            try:
+                walked = PurePosixPath(Path(current).relative_to(root).as_posix())
+            except ValueError:  # pragma: no cover - os.walk yields only paths under root
+                continue
+            directories.add((relative_root / walked).as_posix())
+    # NUL separates because it is the one byte a POSIX path component cannot contain, so
+    # no directory set can be spelled as another set's joined form. A newline separator
+    # would rest that on paths never containing one, which is a convention rather than a
+    # rule -- and this digest exists precisely so the key determines the value.
+    # ``surrogateescape`` because ``os.walk`` hands back undecodable bytes as surrogates
+    # and a plain ``encode`` raises on them. An empty directory whose name is not valid
+    # UTF-8 reaches here without the snapshot having seen it -- the snapshot joins file
+    # paths only -- and a digest that raised there would be a verdict, which this is not.
+    return hashlib.sha256("\0".join(sorted(directories)).encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def derived_raw_attribution(
+    project_root: Path,
+    config: dict[str, Any],
+    *,
+    memo_key: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Re-run inventory derivation over the delivered raw tree, writing nothing.
+
+    Returns ``source_id -> {"raw_paths": [...], "files": {...}}`` where ``raw_paths`` is
+    the list inventory derives for that record over the tree as delivered, and ``files``
+    is the set of snapshot-level entries those paths denote: a regular-file entry denotes
+    itself, a directory-shaped entry (arXiv/LaTeX bundle, local code repo) denotes every
+    regular file beneath it, and every entry additionally denotes its
+    ``<entry>.provenance.yml`` sidecar.
+
+    This is the single predicate both raw-scope questions are answered from: which new
+    raw files a completed acquisition may create (the union of ``files`` over the
+    admitted record ids), and whether a new manifest record's declared ``raw_paths`` is
+    what inventory itself would derive (list equality against ``raw_paths``).
+
+    ``source_inventory.build_records`` writes neither the manifest nor the activity log,
+    which is what makes it usable as a verification predicate -- but it is not literally
+    read-only. Taking the acquisition barrier creates ``raw/.locks/`` and writes a holder
+    file into it, so this call does touch the workspace. Every shipped ``raw.source_roots``
+    lists the evidence subtrees (``raw/papers``, ``raw/web``, ...) and never bare ``raw``,
+    so the barrier sits outside every snapshot root and no fingerprint sees it. Nothing
+    enforces that: ``configured_raw_source_roots`` accepts bare ``raw``, and under such a
+    config the holder file is inside a snapshot root, its ``pid`` and ``created_at`` move
+    the raw-tree fingerprint, and the verification passes report the acquirer as having
+    changed raw evidence it never touched. Closing that means rejecting the root or
+    excluding ``raw/.locks`` from the snapshot, not moving this call off the barrier.
+    ``memo_key``
+    should be the current raw-tree content fingerprint, and is not the whole memo key.
+    That fingerprint is a claim about regular files and nothing more, so on its own it does
+    not say what it reads as -- "the tree the derivation saw is unchanged".
+    ``raw_tree_snapshot`` records an entry per regular file and none for a directory, so
+    creating an empty directory -- a ``.git/`` marker, an empty bundle folder -- leaves it
+    byte-identical while changing what ``build_records`` derives from the same tree. What
+    is memoised on is therefore that fingerprint composed with
+    ``raw_tree_directory_digest``, so the directory set has to be unchanged too before an
+    answer is reused. Composed here rather than at the call sites, which keep passing the
+    one fingerprint they already hold.
+
+    Widening ``raw_tree_snapshot`` to record directories would answer the same question and
+    must not be done: those entries are also the raw-scope guards' universe, so a directory
+    appearing among them would surface as an unexpected new raw path and refuse legitimate
+    deliveries.
+    """
+    cache = _RAW_ATTRIBUTION_MEMO
+    entry_key = (
+        f"{memo_key}\0{raw_tree_directory_digest(project_root, config)}"
+        if cache is not None and memo_key is not None
+        else None
+    )
+    if cache is not None and entry_key is not None and entry_key in cache:
+        return cache[entry_key]
+    source_inventory = load_sibling_module("source_inventory")
+    try:
+        records, _warnings, _summary = source_inventory.build_records(project_root, config, {})
+    except OrchestrationControllerError:
+        raise
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - any derivation failure is the same verdict
+        # Losing the acquisition barrier lock to a live writer is not a broken raw tree,
+        # and telling the operator to repair one would be advice they cannot follow --
+        # nothing is wrong with the evidence and the next attempt may simply win. Read
+        # ``contended`` by attribute rather than catching the class: workspace scripts
+        # load siblings by path, so several copies of ``_workspace_locks`` coexist and an
+        # ``isinstance`` check does not survive across them (``_workspace_locks.py:97``).
+        if getattr(exc, "contended", False):
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                "delivered raw evidence could not be re-derived while another writer held the workspace",
+                recoverable=True,
+                remediation="Wait for the concurrent workspace writer to finish, then resubmit the same action id.",
+                details={"error": str(exc)},
+            ) from exc
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_POSTCONDITION_FAILED",
+            "delivered raw evidence could not be re-derived by source inventory rules",
+            recoverable=True,
+            remediation="Repair the raw tree so source_inventory.py --report succeeds, then resubmit.",
+            details={"error": str(exc)},
+        ) from exc
+    attribution: dict[str, dict[str, Any]] = {}
+    for record in records:
+        source_id = record.get("id") if isinstance(record, dict) else None
+        raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
+        if not isinstance(source_id, str) or not isinstance(raw_paths, list):
+            continue
+        files: set[str] = set()
+        for raw_path in raw_paths:
+            if not (
+                isinstance(raw_path, str)
+                and raw_path.startswith("raw/")
+                and safe_snapshot_relative_path(raw_path)
+            ):
+                continue
+            target = project_root / raw_path
+            try:
+                is_directory = target.is_dir() and not target.is_symlink()
+            except OSError:
+                is_directory = False
+            if is_directory:
+                # Inventory attributes the whole subtree to this one record (no member
+                # enumeration exists in the record), so the subtree is the record's unit
+                # of admission -- exactly what the snapshot's per-file entries will show.
+                for member in sorted(target.rglob("*")):
+                    try:
+                        metadata = member.lstat()
+                        # The raw-tree snapshot's own rule for what counts as a file, so
+                        # this expansion admits exactly the entries that snapshot shows:
+                        # it refuses a link-like entry outright and refuses any regular
+                        # file whose link count is not one, while ``Path.is_file()``
+                        # resolves symlinks and accepts hardlinks.
+                        if path_is_link_like(member, metadata):
+                            continue
+                        if not stat.S_ISREG(metadata.st_mode):
+                            continue
+                        if int(getattr(metadata, "st_nlink", 1) or 1) != 1:
+                            continue
+                        files.add(relative_workspace_path(project_root, member))
+                    except OSError:
+                        continue
+            else:
+                files.add(raw_path)
+            files.add(f"{raw_path}.provenance.yml")
+        attribution[source_id] = {
+            "raw_paths": [path for path in raw_paths if isinstance(path, str)],
+            "files": files,
+        }
+    if cache is not None and entry_key is not None:
+        cache[entry_key] = attribution
+    return attribution
+
+
+def raw_attribution_mismatches(
+    attribution: dict[str, dict[str, Any]],
+    new_records_by_id: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Each new record whose declared ``raw_paths`` is not what inventory derives.
+
+    List (pinned-order) equality, deliberately: inventory's output is deterministic --
+    the raw walk is sorted and the two multi-path merges append in that order -- and the
+    only sanctioned route to a manifest record is running inventory, so a legitimate
+    delivery reproduces the derived list byte for byte. Set equality would additionally
+    admit only reorderings and duplicates, and no shipped tool produces either. An id
+    inventory derives nothing for reports ``derived_raw_paths: null``: such a record is
+    not inventory-derivable and may not be created by an acquisition.
+
+    Each mismatch names three things, because "these two lists are not equal" does not say
+    which path is the unaccounted one: both lists, and ``declared_not_derived`` -- the
+    declared paths inventory accounts for none of, in declared order. An id inventory
+    derives nothing for reports every declared path there.
+
+    That third field supplements the equality test and never replaces it, and it is
+    one-sided on purpose: it answers "what did this record claim that inventory does not
+    account for", so it is empty whenever every declared path is accounted for, however the
+    two lists disagree -- a reorder, a duplicate, or a declared list that simply omits a
+    path inventory derives. Read an empty difference as "nothing surplus was declared", not
+    as "the lists agree"; what the lists do is the equality test's answer, printed beside
+    it. A ``raw_paths`` that is not a list reports ``null`` for both the declared list and
+    the difference, there being no list to subtract from.
+    """
+    mismatches: dict[str, dict[str, Any]] = {}
+    for source_id in sorted(new_records_by_id):
+        record = new_records_by_id[source_id]
+        declared = record.get("raw_paths") if isinstance(record, dict) else None
+        entry = attribution.get(source_id)
+        derived = entry["raw_paths"] if entry is not None else None
+        if not isinstance(declared, list) or declared != derived:
+            derived_present = (
+                {path for path in derived if isinstance(path, str)} if isinstance(derived, list) else set()
+            )
+            mismatches[source_id] = {
+                "declared_raw_paths": declared if isinstance(declared, list) else None,
+                "derived_raw_paths": derived,
+                "declared_not_derived": (
+                    [path for path in declared if not (isinstance(path, str) and path in derived_present)]
+                    if isinstance(declared, list)
+                    else None
+                ),
+            }
+    return mismatches
+
+
+def attributed_raw_paths(
+    attribution: dict[str, dict[str, Any]],
+    record_ids: set[str],
+) -> set[str]:
+    """The snapshot entries inventory attributes to the given record ids."""
+    allowed: set[str] = set()
+    for source_id in record_ids:
+        entry = attribution.get(source_id)
+        if entry is not None:
+            allowed |= entry["files"]
+    return allowed
+
+
+RAW_ATTRIBUTION_REMEDIATION = (
+    "Run source_inventory.py --report so every new record's raw_paths is exactly what "
+    "inventory derives from the delivered files; never hand-edit raw_paths."
+)
 
 
 def memoised_derivation_failure(
@@ -3358,24 +3677,136 @@ def memoised_derivation_failure(
     return verdict
 
 
-# The terms are one sentence for both arms; the recourse when the reuse cannot be
-# repaired is not, for the same reason `REUSE_SCOPE_*` splits below. The rewrite command
-# is named exactly: plain `--force` selects nothing, because selection defaults to the
-# pending set, and `--all --force` rewrites every record in the workspace straight into a
-# `changed_outside_scope` refusal. `--source-id <id> --force` is the one form that repairs
-# the record this refusal is about and leaves the rest of the manifest alone.
+# The terms are one sentence for both arms; the recourse is not, for the same reason
+# `REUSE_SCOPE_*` splits below and with the same shape -- terms once, then a pointer at the
+# per-failure `repair`. The rewrite command this used to name for both arms is correct for
+# exactly one of them, and `RECONCILIATION_ARM_REPAIRS` is where it now lives.
 RECONCILIATION_TERMS = (
     "Reuse a pre-existing source only on the terms this order recorded for it: its manifest record "
     "byte-identical to what the order fingerprinted, and its normalized output either byte-identical to "
     "what the order fingerprinted or, where the order recorded none, the record normalize_sources.py "
-    "produces from the unchanged raw evidence. A hand-edited record is not stale, so plain "
-    "normalize_sources.py skips it: rewrite that one record with normalize_sources.py --source-id <id> "
-    "--force, which leaves every record outside this order's scope untouched"
+    "produces from the unchanged raw evidence. How that is repaired depends on which of the two arms this "
+    "source was held to and on what the check found, and reconciliation_failures[].repair names the one "
+    "this source needs"
+)
+
+# One repair per state that has its own, because they do not share one. The rewrite clause
+# was written for the arm where the order recorded no normalized output -- there it is
+# exactly right, and named exactly: plain `--force` selects nothing, because selection
+# defaults to the pending set, and `--all --force` rewrites every record in the workspace
+# straight into a `changed_outside_scope` refusal, so `--source-id <id> --force` is the one
+# form that repairs the record this refusal is about and leaves the rest of the manifest
+# alone.
+#
+# Emitted for the other arm it was advice that can never succeed. A source the order
+# fingerprinted normalized reconciles on those exact bytes, and `normalized_at` is
+# second-resolution and restamped by every run: re-normalizing rewrites the one field that
+# has to come back unchanged, so the operator who follows it is refused again, identically,
+# for having followed it. What is actually recoverable there is the bytes themselves, and
+# nothing else is -- which that arm's repair now says, instead of pointing at a fresh
+# session as though one could be reached from here. It cannot be reached cleanly: the only
+# outcome that ends this action without re-running these checks is `failed`, and
+# `prepare_submission` takes that branch without calling `verify_action_postconditions` at
+# all, so it accepts the fulfilment this guard is refusing rather than withdrawing it. The
+# request stays `fulfilled` with its `source_id` in the store, no later order sees it
+# again (`open_requests` selects on status), and evidence the controller refused to verify
+# is in the workspace permanently. That is a worse end than the refusal, so the repair
+# names its cost rather than its command.
+#
+# The third key is the same failure one level down, inside the arm the rewrite *does* serve:
+# a re-derivation that could not be performed is refused before the record's bytes are ever
+# compared, so rewriting them is the same dead end. `UNVERIFIABLE_DERIVATION_REASONS` below
+# is which verdicts those are.
+RECONCILIATION_ARM_REPAIRS = {
+    "scoped_match": (
+        "This order fingerprinted both this source's manifest record and its normalized output at "
+        "issuance, so only those exact bytes reconcile, and re-normalizing cannot reproduce them: every "
+        "run restamps normalized_at, which is part of what was fingerprinted. Restore the record and the "
+        "normalized output as the order fingerprinted them; that is the only repair this refusal has. If "
+        "the rewrite is what this workspace should keep, this order cannot be satisfied from this source "
+        "at all, and it has no clean way to end either: ending the action with a failed outcome is "
+        "accepted without any evidence or scope check running at all, leaves the fulfilment and its "
+        "source id recorded as if verified, and leaves behind a request no later order can see, because "
+        "routing scopes open requests only. Take that as abandoning the session, never as a way past "
+        "this refusal."
+    ),
+    "authorized_unnormalized": (
+        "This order recorded no normalized output for this source and authorizes the single record it "
+        "owes, re-derived from the unchanged raw evidence. A hand-edited record is not stale, so plain "
+        "normalize_sources.py skips it: rewrite that one record with normalize_sources.py --source-id "
+        "<id> --force, which leaves every record outside this order's scope untouched. Its manifest "
+        "record still has to be byte-identical to what the order fingerprinted."
+    ),
+    "authorized_unnormalized_unverifiable": (
+        "The re-derivation this reuse rests on could not be performed at all, so rewriting the record "
+        "cannot change the verdict; derivation_failure.reason says what stopped it. Where that names this "
+        "host -- a normalizer adapter that would not run, or a bounded workspace that could not be "
+        "prepared -- repair the host and resubmit the same action id, leaving the record as it is. Where "
+        "it names what this order pinned -- a source normalized from artifacts or paths no baseline "
+        "fingerprints, or a kind this package does not normalize -- no reuse of this source can be "
+        "verified under this order at all. Where it says only that the re-derivation could not be "
+        "performed, derivation_failure.error carries what was raised: normalizing this source is broken "
+        "here for a reason neither the record nor this order can name, and rewriting the record runs the "
+        "same normalizer into the same failure."
+    ),
+}
+
+# The arm-(b) verdicts the rewrite above cannot clear, split out for the reason the arms
+# themselves are: advice that reads as a repair and returns the identical refusal is the
+# defect. Each of these is reached before the record's own bytes are ever compared -- the
+# check could not run, or the reuse is structurally out of this order's reach -- so
+# `normalize_sources.py --source-id <id> --force` either fails in the same place the
+# verification did or rewrites a record whose content was never the problem.
+#
+# The blanket verdict is here too, and was the one omission that reproduced the very defect
+# this set exists to stop. `normalized_output_derivation_failure` ends in
+# `except (Exception, SystemExit)`, so any re-derivation that *crashes* is reported as
+# "normalized evidence could not be re-derived from the raw evidence" -- a check that could
+# not run, not a record that did not match. Left out of this set it fell through to the
+# rewrite, whose `normalize_sources.py --source-id <id> --force` re-enters the same
+# normalizer that just raised. The named crash reasons above were split out of this same
+# clause precisely so their operators would not be sent there; the residue deserves the same
+# answer, and the repair's last sentence is written for it.
+#
+# Deliberately not here: "normalized evidence names a PDF extractor this package does not
+# implement" and "...is unavailable on this host". Those *are* record-side. The rewrite
+# re-derives under the extractor `research.yml` configures and restamps the record with it,
+# which is exactly the repair, and adding them would send a fixable state to the "repair the
+# host" text instead.
+UNVERIFIABLE_DERIVATION_REASONS = frozenset(
+    {
+        "the reused source normalizes from artifacts this order does not fingerprint",
+        "the reused source normalizes from workspace paths no raw-evidence baseline pins",
+        "the workspace source paths this re-derivation needs are unusable",
+        "this package's normalizer does not handle the reused source's kind",
+        "the bounded workspace this re-derivation runs in could not be prepared",
+        "the normalizer adapter this workspace authorizes did not produce a record to compare against",
+        "normalized evidence could not be re-derived from the raw evidence",
+    }
+)
+
+# Every refusal that carries this tail is computed over the acquirer's *fulfilled* list, so
+# the request it speaks about is already fulfilled by the very source being refused. That is
+# what made the escapes these remediations used to name unfollowable rather than merely
+# clumsy, and both were walked before being removed: `source_requests.py
+# record-attempt-failure` refuses a fulfilled request outright, and a second delivery "under
+# its own raw path" inventories cleanly and is then refused by `fulfill`, which will not
+# relink a fulfilled request to a different source. Acquiring through another candidate ends
+# at the same relink refusal.
+#
+# So none of them is named. What is named is the fact underneath all three -- a fulfilled
+# request has no second route -- and, where the per-source repair cannot be performed, that
+# this order has none either. "There is no route from here" is worse news than a command and
+# better advice than one that is refused for having been followed.
+NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST = (
+    "There is no second route out of this refusal: this action already fulfilled the request from the "
+    "source being refused, and a fulfilled request accepts neither a recorded attempt failure nor a "
+    "relink to a later delivery. Only the per-source repair changes this verdict, and where the source "
+    "has none, this order has no route from here"
 )
 
 RECONCILIATION_REMEDIATION = (
-    f"{RECONCILIATION_TERMS}. Otherwise deliver that evidence again as a new source under its own raw path, "
-    "or record the attempt failure with source_requests.py record-attempt-failure using this action id."
+    f"{RECONCILIATION_TERMS}. {NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST}."
 )
 
 # Selection is the whole of this advice, which is why it is one constant rather than the
@@ -3391,15 +3822,16 @@ MISSING_NORMALIZED_REMEDIATION = (
 )
 
 PROVIDER_RECONCILIATION_REMEDIATION = (
-    f"{RECONCILIATION_TERMS}. Otherwise acquire it through another selected candidate for this request."
+    f"{RECONCILIATION_TERMS}. {NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST}. Acquiring the evidence again "
+    "through another selected candidate produces a source this request cannot be relinked to either."
 )
 
-# Both arms name the same terms; they differ only in what to do with a request the reuse
-# cannot serve. The delegated acquirer records an attempt failure against this action --
-# per-request outcomes are how a delegated batch reports a request it could not satisfy.
-# The provider arm has no such outcome: every scoped request must be fulfilled, so the
-# route there is another candidate, and telling it otherwise would be advice its own
-# fulfilment guard refuses.
+# Both arms name the same terms, and differ only in which dead escape their own acquirer
+# would otherwise reach for: an attempt failure recorded against this action for the
+# delegated arm, another selected candidate for the provider arm. Neither is a route,
+# because this refusal is computed over `fulfilled` -- see
+# `NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST` above -- so each arm names the one its reader
+# would try and says why it is refused, rather than advising it.
 REUSE_SCOPE_TERMS = (
     "Reuse only a source this order named at issuance: one whose .provenance.yml already named this request, "
     "unchanged since, either carrying a normalized record then or normalized inside this order. The repair "
@@ -3407,33 +3839,51 @@ REUSE_SCOPE_TERMS = (
 )
 
 REUSE_SCOPE_REMEDIATION = (
-    f"{REUSE_SCOPE_TERMS}, or record the attempt failure with source_requests.py record-attempt-failure "
-    "using this action id."
+    f"{REUSE_SCOPE_TERMS}. {NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST}."
 )
 
 PROVIDER_REUSE_SCOPE_REMEDIATION = (
-    f"{REUSE_SCOPE_TERMS}, or acquire it through another selected candidate for this request."
+    f"{REUSE_SCOPE_TERMS}. {NO_SECOND_ROUTE_FOR_A_FULFILLED_REQUEST}. Acquiring the evidence again "
+    "through another selected candidate produces a source this request cannot be relinked to either."
 )
 
 # One repair per cause, because the causes do not share one. The sentence that used to
 # serve all three told the acquirer its source satisfied every clause of the reuse
 # terms — true for two of them, and precisely wrong for the third, where the source does
 # satisfy them and the order simply predates the authorization it would have needed.
+#
+# None of the three ends with a command, and that is the honest shape rather than an
+# oversight. The failure set is built from sources that are in `manifest_records_before`
+# and in neither reuse baseline, and those baselines were fixed at issuance, so nothing
+# done during the order can move a source into one. The request is fulfilled by the source
+# besides, so the second delivery two of these used to advise cannot be linked to it. What
+# each repair owes its reader is therefore the truth about its own cause plus a plain
+# statement that this order has no route -- the rewritten-record cause included, whose
+# restore the manifest-scope guard downstream requires and which still leaves this refusal
+# standing, under whichever of the other two causes was true all along.
 REUSE_SCOPE_CAUSE_REPAIRS = {
     "provenance_names_no_scoped_request": (
         "This source's .provenance.yml names another request or none. Correlation is acquirer-written, so "
-        "restamping it authorizes nothing and never makes it reusable; deliver that evidence again as a new "
-        "source under its own raw path with its own sidecar."
+        "restamping it authorizes nothing and never makes it reusable, and this order has no repair that "
+        "does: the request it was used for is already fulfilled by it, so a fresh delivery under its own "
+        "raw path with its own sidecar cannot be linked to that request either. Such a delivery is what a "
+        "later order needs; it is not a way out of this one."
     ),
     "manifest_record_changed_after_issuance": (
         "This source's manifest record was rewritten after the order was issued, so what it says now is no "
-        "evidence of what it said then. Restore it exactly as the order recorded it."
+        "evidence of what it said then, and the rewrite has to be undone whatever else follows: restore the "
+        "record exactly as the order recorded it. Restoring it does not make this source reusable, though. "
+        "Every source this refusal reports was outside both of the order's reuse baselines before the "
+        "rewrite as well, and those baselines were fixed at issuance, so what restoring the record changes "
+        "is only which of the other two causes this refusal reports — and neither of those has a repair "
+        "inside this order either."
     ),
     "no_reuse_authorization_at_issuance": (
         "This source is correlated and unchanged; the order simply recorded no reuse authorization for it, "
         "and nothing done inside the order can add one. Leave it alone and let a later order — issued while "
-        "it is correlated and un-normalized — reuse it, or deliver that evidence again as a new source under "
-        "its own raw path."
+        "it is correlated and un-normalized — reuse it. This order has no repair for it: the request it was "
+        "used for is already fulfilled by it, so a fresh delivery under its own raw path cannot be linked "
+        "to that request either."
     ),
 }
 
@@ -3595,10 +4045,24 @@ def reused_source_reconciliation_failure(
     # reaches the derivation, and saying `derivation_failure: None` there would read as
     # "the body was examined and matched" -- sending the operator to repair the record and
     # fail again on a body nothing looked at.
+    #
+    # The arm is also the repair, and is named once so the booleans and the advice cannot
+    # come apart. Both arms used to be told to re-normalize the record, which is the recourse
+    # for exactly one of them, and not for every failure even of that one:
+    # `RECONCILIATION_ARM_REPAIRS` carries who can follow the rewrite and what the rest do
+    # instead.
+    scoped_match = isinstance(expected, dict)
+    if scoped_match:
+        arm = "scoped_match"
+    elif isinstance(derivation, dict) and derivation.get("reason") in UNVERIFIABLE_DERIVATION_REASONS:
+        arm = "authorized_unnormalized_unverifiable"
+    else:
+        arm = "authorized_unnormalized"
     failure: dict[str, Any] = {
         "source_id": source_id,
-        "was_scoped_match": isinstance(expected, dict),
-        "was_authorized_unnormalized": not isinstance(expected, dict),
+        "was_scoped_match": scoped_match,
+        "was_authorized_unnormalized": not scoped_match,
+        "repair": RECONCILIATION_ARM_REPAIRS[arm],
         "record_unchanged": record_unchanged,
         "normalized_unchanged": normalized_as_authorized,
         "derivation_checked": derivation_checked,
@@ -6425,10 +6889,19 @@ def verify_delegated_acquisition_postconditions(
         "fulfilled evidence is not linked to its source request by a provenance sidecar",
         {"correlation_failures": correlation_failures},
         (
+            # The first sentence is the live repair, and it is live only for a source this
+            # action delivered: its raw path and its manifest record are both new, so the
+            # scope guards admit the restamp and the re-inventory. For a source the manifest
+            # already held it is not, which the rest used to answer with a second delivery --
+            # dead for the same reason every other escape on this path is, since this guard
+            # also reads the acquirer's `fulfilled` list. Say so rather than sending the
+            # acquirer to `fulfill` to find out.
             "Stamp request_id into each source's .provenance.yml as you deliver it, naming the request it "
             "fulfils, then re-run source_inventory.py before fulfilling. Raw evidence is immutable, so a "
-            "source the manifest already holds cannot be given one afterwards; deliver that evidence as a "
-            "new source under its own raw path instead."
+            "source the manifest already holds cannot be given one afterwards, and a second delivery does "
+            "not rescue it either: this request is already fulfilled by the source being refused and will "
+            "not relink to one. A fresh delivery under its own raw path, with its own sidecar, is what a "
+            "later order needs."
         ),
     )
 
@@ -6645,16 +7118,27 @@ def verify_delegated_acquisition_postconditions(
         mutable_ids=set(),
         allowed_new_ids=set(current_raw_entries) - set(before_raw_entries),
     )
-    allowed_new_raw_paths: set[str] = set()
-    for source_id in expected_new_source_ids:
-        record = by_source_id.get(source_id)
-        raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
-        if not isinstance(raw_paths, list):
-            continue
-        for raw_path in raw_paths:
-            if isinstance(raw_path, str) and raw_path.startswith("raw/") and safe_snapshot_relative_path(raw_path):
-                allowed_new_raw_paths.add(raw_path)
-                allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
+    # One inventory-derivation pass over the delivered tree answers both raw-scope
+    # questions: whether each new record's raw_paths is what inventory itself derives
+    # (refusing the hand-edited raw_paths route), and which snapshot entries those
+    # records attribute (admitting a directory-shaped bundle's member files).
+    if expected_new_source_ids:
+        raw_attribution = derived_raw_attribution(
+            project_root, config, memo_key=current_raw_tree.get("fingerprint")
+        )
+    else:
+        raw_attribution = {}
+    attribution_mismatches = raw_attribution_mismatches(
+        raw_attribution,
+        {source_id: by_source_id.get(source_id) for source_id in expected_new_source_ids},
+    )
+    require(
+        not attribution_mismatches,
+        "delegated acquisition manifest raw_paths do not match inventory-derived attribution",
+        {"raw_attribution_mismatches": attribution_mismatches},
+        RAW_ATTRIBUTION_REMEDIATION,
+    )
+    allowed_new_raw_paths = attributed_raw_paths(raw_attribution, expected_new_source_ids)
     actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
     unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
     require(
@@ -7544,16 +8028,25 @@ def verify_action_postconditions(
             mutable_ids=set(),
             allowed_new_ids=set(current_raw_entries) - set(before_raw_entries),
         )
-        allowed_new_raw_paths: set[str] = set()
-        for source_id in expected_new_source_ids:
-            record = by_source_id.get(source_id)
-            raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
-            if not isinstance(raw_paths, list):
-                continue
-            for raw_path in raw_paths:
-                if isinstance(raw_path, str) and raw_path.startswith("raw/") and safe_snapshot_relative_path(raw_path):
-                    allowed_new_raw_paths.add(raw_path)
-                    allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
+        # Same predicate as the delegated arm, from the same single derivation pass:
+        # raw_paths must be inventory-derived, and attribution decides admission.
+        if expected_new_source_ids:
+            raw_attribution = derived_raw_attribution(
+                project_root, config, memo_key=current_raw_tree.get("fingerprint")
+            )
+        else:
+            raw_attribution = {}
+        attribution_mismatches = raw_attribution_mismatches(
+            raw_attribution,
+            {source_id: by_source_id.get(source_id) for source_id in expected_new_source_ids},
+        )
+        require(
+            not attribution_mismatches,
+            "acquisition manifest raw_paths do not match inventory-derived attribution",
+            {"raw_attribution_mismatches": attribution_mismatches},
+            RAW_ATTRIBUTION_REMEDIATION,
+        )
+        allowed_new_raw_paths = attributed_raw_paths(raw_attribution, expected_new_source_ids)
         actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
         unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
         require(
@@ -8222,17 +8715,6 @@ def verify_blocked_action_postconditions(
         "Restore existing normalized evidence and remove outputs not correlated to the scoped acquisition.",
     )
 
-    allowed_new_raw_paths: set[str] = set()
-    for record in correlated_records:
-        raw_paths = record.get("raw_paths") if isinstance(record.get("raw_paths"), list) else []
-        for raw_path in raw_paths:
-            if (
-                isinstance(raw_path, str)
-                and raw_path.startswith("raw/")
-                and safe_snapshot_relative_path(raw_path)
-            ):
-                allowed_new_raw_paths.add(raw_path)
-                allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
     current_raw_tree = raw_tree_snapshot(project_root, config, include_entries=True)
     before_raw_entries = raw_tree_before["entries"]
     current_raw_entries = current_raw_tree["entries"]
@@ -8243,6 +8725,53 @@ def verify_blocked_action_postconditions(
         mutable_ids=set(),
         allowed_new_ids=actual_new_raw_paths,
     )
+    # Same predicate as the completed arms, over the correlated record set: a newly
+    # appended correlated record's raw_paths must be what inventory derives, and the
+    # files inventory attributes to correlated records are the partial-delivery scope.
+    correlated_ids = {
+        str(record.get("id"))
+        for record in correlated_records
+        if isinstance(record.get("id"), str)
+    }
+    correlated_new_records = {
+        str(record.get("id")): record
+        for record in correlated_records
+        if isinstance(record.get("id"), str) and record.get("id") in actual_new_source_ids
+    }
+    by_correlated_id = {
+        str(record.get("id")): record
+        for record in correlated_records
+        if isinstance(record.get("id"), str)
+    }
+    if correlated_new_records:
+        raw_attribution = derived_raw_attribution(
+            project_root, config, memo_key=current_raw_tree.get("fingerprint")
+        )
+    else:
+        raw_attribution = {}
+    attribution_mismatches = raw_attribution_mismatches(raw_attribution, correlated_new_records)
+    require(
+        not attribution_mismatches,
+        "blocked acquisition manifest raw_paths do not match inventory-derived attribution",
+        {"raw_attribution_mismatches": attribution_mismatches},
+        RAW_ATTRIBUTION_REMEDIATION,
+    )
+    # Attribution expands a directory entry to its whole subtree, so it may only widen
+    # admission for records this action created. Handing it every correlated record --
+    # which the pre-expansion allowlist could safely do, because a bare directory string
+    # is never a snapshot entry and so admitted nothing -- would let a partial delivery
+    # write new files into a *pre-existing* correlated bundle's subtree. The completed
+    # arms pass their new ids alone for the same reason.
+    allowed_new_raw_paths = attributed_raw_paths(raw_attribution, set(correlated_new_records))
+    for source_id in correlated_ids - set(correlated_new_records):
+        record = by_correlated_id.get(source_id)
+        raw_paths = record.get("raw_paths") if isinstance(record, dict) else None
+        if not isinstance(raw_paths, list):
+            continue
+        for raw_path in raw_paths:
+            if isinstance(raw_path, str) and raw_path.startswith("raw/") and safe_snapshot_relative_path(raw_path):
+                allowed_new_raw_paths.add(raw_path)
+                allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
     unexpected_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
     require(
         not any(raw_scope_violations.values()) and not unexpected_raw_paths,
@@ -8250,6 +8779,7 @@ def verify_blocked_action_postconditions(
         {
             "raw_scope_violations": raw_scope_violations,
             "unexpected_new_raw_paths": unexpected_raw_paths[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
+            "allowed_new_raw_paths": sorted(allowed_new_raw_paths)[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES],
         },
         "Restore existing raw evidence and remove deliveries not referenced by a correlated manifest record.",
     )

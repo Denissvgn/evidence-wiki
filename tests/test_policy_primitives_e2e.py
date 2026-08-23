@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
 import shutil
@@ -60,6 +59,7 @@ from tests._pack_policy_rule_fixture import (  # noqa: E402
     structured_view_bytes,
     write_structured_view,
 )
+from tests._script_loader import load_script as load_script_module  # noqa: E402
 
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "policy-primitives-workspace"
@@ -69,17 +69,6 @@ PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profil
 AGE_KEY = "retrieved_at_hours_ago"
 #: The `domain_pack` fragment merged into the initializer's research.yml, then deleted.
 OVERLAY_NAME = "research-overlay.yml"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 INIT = load_script_module("e2e_primitives_init", "init_research_workspace.py")

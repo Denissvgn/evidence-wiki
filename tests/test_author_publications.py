@@ -14,29 +14,19 @@ exclusion, idempotent appends, the disabled-discovery gate, HTTP error envelopes
 """
 
 import contextlib
-import importlib.util
 import io
 import json
 import os
-import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
 
+from tests._script_loader import load_script as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 DISCOVER = load_script_module("author_publications_under_test", "discover_sources.py")
@@ -108,8 +98,25 @@ class AuthorPublicationsDiscoveryTests(unittest.TestCase):
     def _reset_transport(self):
         DISCOVER.OPENALEX_TRANSPORT = None
         DISCOVER.OPENALEX_LAST_REQUEST_AT = None
+        # Restored to the module's real callables rather than to this suite's stubs.
+        # Every test module that loads discover_sources.py shares one module object,
+        # so installing a frozen clock in a cleanup would hand it to all of them.
+        DISCOVER.OPENALEX_CLOCK = time.monotonic
+        DISCOVER.OPENALEX_SLEEP = time.sleep
+
+    def test_the_cleanup_restores_the_real_pacing_hooks(self):
+        """This cleanup used to install stubs, which the shared module then kept.
+
+        Every test module that loads ``discover_sources`` shares one object, so a
+        cleanup handing back a frozen clock and a no-op sleep gave them to all of them.
+        """
         DISCOVER.OPENALEX_CLOCK = lambda: 0.0
         DISCOVER.OPENALEX_SLEEP = lambda _seconds: None
+
+        self._reset_transport()
+
+        self.assertIs(time.monotonic, DISCOVER.OPENALEX_CLOCK)
+        self.assertIs(time.sleep, DISCOVER.OPENALEX_SLEEP)
 
     def install_transport(self, transport) -> None:
         DISCOVER.OPENALEX_TRANSPORT = transport

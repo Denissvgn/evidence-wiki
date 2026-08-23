@@ -7,7 +7,6 @@ order at all, and one that reads `delegated` without a declared acquirer would a
 work orders to nobody — so every rejection is covered here rather than left to a default.
 """
 
-import importlib.util
 import re
 import sys
 import unittest
@@ -15,21 +14,12 @@ from pathlib import Path
 
 import yaml
 
+from tests._script_loader import load_script as load_script_module
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 TEMPLATE_RESEARCH_YML = REPO_ROOT / "workspace-template" / "research.yml"
 RESEARCH_YML_DOC = REPO_ROOT / "workspace-template" / "docs" / "research-yml.md"
-
-
-def load_script_module(name: str, filename: str):
-    path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load script from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 CONFIG = load_script_module("research_orchestration_config", "_orchestration_config.py")

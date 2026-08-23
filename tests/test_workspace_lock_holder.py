@@ -7,16 +7,16 @@ nothing about two hosts racing for one workspace.
 """
 
 import errno
-import importlib.util
 import json
 import multiprocessing
 import os
-import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from tests._script_loader import load_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCKS_PATH = REPO_ROOT / "workspace-template" / "scripts" / "_workspace_locks.py"
@@ -25,13 +25,7 @@ CHILD_TIMEOUT_SECONDS = 30.0
 
 
 def load_locks_module(name: str = "workspace_lock_holder_under_test"):
-    spec = importlib.util.spec_from_file_location(name, LOCKS_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load {LOCKS_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module(name, LOCKS_PATH)
 
 
 def spawn_context():
@@ -495,7 +489,15 @@ class ContentionSignalTests(unittest.TestCase):
                     self.assertTrue(handle.locked)
                     # Acquired by breaking the abandoned lock, so the dead
                     # owner's token is gone rather than merely waited out.
-                    self.assertNotIn("dead", exclusive_path.read_text(encoding="utf-8"))
+                    # Compared as the parsed token, not as a substring of the
+                    # file: the successor writes a random hex token, "dead" is
+                    # itself valid hex, and a token that happens to contain it
+                    # would fail an otherwise passing run.
+                    self.assertNotEqual(
+                        "dead",
+                        locks._read_exclusive_ownership_token(exclusive_path),
+                        exclusive_path.read_text(encoding="utf-8"),
+                    )
         finally:
             locks.LOCK_BACKENDS = old_backends
 

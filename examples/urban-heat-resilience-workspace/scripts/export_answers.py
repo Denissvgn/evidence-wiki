@@ -22,7 +22,10 @@ Per-question record fields:
 - ``citations[]``: one entry per source id with ``source_id``, ``in_manifest``,
   manifest ``raw_paths``, ``normalized_record`` path when one exists, ``title``
   from the normalized record, and provenance ``origin_url``/``license``/
-  ``checksum``/``checksum_verified`` when present on the manifest record
+  ``checksum``/``checksum_verified`` when present on the manifest record, plus
+  ``additional_provenance[]`` when the record delivered more than one capture:
+  one entry per further capture carrying its ``path``, ``origin_url``,
+  ``retrieved_at``, ``license``, ``checksum``, and ``checksum_verified``
 - ``blocked_reason`` for blocked questions
 - ``confidence`` and ``evidence_strength`` only when the question page carries
   them (set by the verification pass, ``skills/research-verify.md``)
@@ -309,6 +312,52 @@ def standards_citation_metadata(provenance: dict[str, Any]) -> dict[str, Any] | 
     return dict(standards)
 
 
+def additional_provenance_citations(record: dict[str, Any]) -> tuple[list[dict[str, Any]], list[int]]:
+    """Every further capture the record delivered, each named by the path it describes.
+
+    One record can own more than one delivered path -- inventory folds a paired PDF
+    into the LaTeX-bundle record for the same paper -- and each capture was retrieved
+    separately, so each carries its own origin, retrieval time, and checksum verdict.
+    Only the first reaches the citation's flat provenance fields. Without these
+    entries a consumer of the export cannot see that a second capture exists, let
+    alone that its checksum failed to verify, because the failure is recorded on the
+    entry and never on the primary.
+
+    ``request_id`` and ``candidate_id`` are absent from these entries by construction
+    and stay absent here: which request authorised a delivery has one answer per
+    record, and every consumer reads it from ``provenance`` alone. ``sidecar_path``
+    is dropped for the same reason the primary's is -- it locates inventory's input
+    inside the workspace, and the citation reports where the bytes came from rather
+    than which file said so.
+
+    An entry that names no path is discarded rather than carried, because the whole
+    point of a per-capture checksum is that it belongs to particular bytes: reporting
+    ``checksum_verified: false`` against a capture the consumer cannot identify asserts
+    a verdict about a file it cannot go and look at. Returns the carried entries and
+    the 1-based positions of the discarded ones, which the caller reports as warnings
+    so a dropped capture is never silently absent.
+    """
+    entries = record.get("additional_provenance")
+    if not isinstance(entries, list):
+        return [], []
+    carried: list[dict[str, Any]] = []
+    unnamed: list[int] = []
+    for position, entry in enumerate(entries, start=1):
+        capture: dict[str, Any] = {}
+        if isinstance(entry, dict):
+            for field in ("path", "origin_url", "retrieved_at", "license", "checksum"):
+                value = entry.get(field)
+                if isinstance(value, str) and value.strip():
+                    capture[field] = value.strip()
+            if isinstance(entry.get("checksum_verified"), bool):
+                capture["checksum_verified"] = entry["checksum_verified"]
+        if "path" in capture:
+            carried.append(capture)
+        else:
+            unnamed.append(position)
+    return carried, unnamed
+
+
 def build_citation(
     source_id: str,
     manifest: dict[str, dict[str, Any]],
@@ -345,6 +394,14 @@ def build_citation(
         citation["checksum"] = checksum_value.strip()
     if isinstance(provenance.get("checksum_verified"), bool):
         citation["checksum_verified"] = provenance["checksum_verified"]
+    additional_provenance, unnamed_captures = additional_provenance_citations(record)
+    if additional_provenance:
+        citation["additional_provenance"] = additional_provenance
+    for position in unnamed_captures:
+        warnings.append(
+            f"Question '{slug}' cites source whose additional provenance entry "
+            f"{position} names no path: {source_id}"
+        )
     academic = academic_citation_metadata(provenance)
     if academic is not None:
         citation["academic"] = academic
