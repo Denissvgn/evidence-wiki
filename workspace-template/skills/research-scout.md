@@ -49,7 +49,7 @@ python3 scripts/source_requests.py add --kind paper --query-or-identifier "arXiv
 python3 scripts/source_requests.py list --status open --format json
 ```
 
-   One request per candidate; tie each to the question slugs it unblocks. Re-adding an identical open request is a reported no-op. A fetch agent later delivers the files and runs `source_requests.py fulfill --request-id ... --source-id ...`.
+   One request per candidate; tie each to the question slugs it unblocks. Re-adding an identical open request is a reported no-op. A fetch agent later delivers the files and runs `source_requests.py fulfill --request-id ... --source-id ...`; inside a pending delegated acquisition order that command claims the fulfilment instead of writing it, so the request keeps listing as `open` until the controller accepts the acquirer's submission (`docs/orchestration.md`).
 9. Route follow-up work to the right next step: inventory, normalization, ingest, query, synthesis, or a user-approved external search.
 
 ## Candidate Output Format

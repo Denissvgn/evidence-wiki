@@ -216,6 +216,35 @@ are not recursively content-hashed into that tripwire. The durable repair guard
 lives at `runs/orchestration-guards/<orchestration_id>.json`, outside the parent
 tree whose expected fingerprint it retains.
 
+A delegated acquirer owns one more `runs/` subtree. Inside a pending delegated
+acquisition order — issued to an external acquiring host, never to a managed
+worker — `source_requests.py fulfill` and `question_resolve.py reopen` do not
+write the request store or the question page; they file a claim at
+`runs/order-claims/<orchestration_id>/<action_id>.json`. That document is
+schema version 1 and carries the action's identifiers, a `fulfilments` map
+keyed by request ID, and a `reopens` map keyed by question slug, each entry
+naming what was claimed and when. Both commands merge into it under one lock
+at `runs/order-claims/<orchestration_id>/.locks/<action_id>.lock`, because
+`fulfill` serializes on the request store and `reopen` on the question page,
+so neither excludes the other from the ledger. The controller reads the ledger
+while it verifies a submission: a claim the order does not scope is refused,
+and a ledger the controller cannot read is refused rather than read as no
+claims. It writes the claimed bookkeeping for real only once it accepts the
+submission. A refused or `failed` submission commits nothing, and a `blocked`
+one is refused outright if it claimed anything, since a blocked attempt is the
+report that nothing changed. The ledger is left in place either way, as the
+audit of what the attempt asserted.
+
+That directory sits outside `runs/orchestrations/<orchestration_id>/` for the
+same reason the repair guard does. The parent session tree is part of the
+tripwire-protected controls above: it is fingerprinted before an action is
+dispatched and verified unchanged when the action comes back. A claim is filed
+during exactly that window, so a ledger kept under the session directory would
+read as drift in the controls rather than as the acquirer's own bookkeeping.
+Storing claims inside the work order was ruled out for a different reason: the
+order is a fingerprinted, controller-authored artifact the acquirer must not
+write at all. See [orchestration.md](orchestration.md).
+
 Scoped workers must not start daemons, hooks, background jobs, or detached
 subprocesses; every process must finish within its work order. Initial process
 group cleanup is not hostile-process containment. An operator-controlled
