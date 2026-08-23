@@ -423,7 +423,7 @@ class DelegatedWorkspace:
             workspace,
         )
 
-    def deliver_for(self, workspace: Path, request_id: str) -> str:
+    def deliver_for(self, workspace: Path, request_id: str, *, scope: dict | None = None) -> str:
         """One genuinely new delivery, inventoried and normalized inside the pending order.
 
         Normalized by source id rather than with `--all`, which is what an acquirer holding
@@ -440,6 +440,10 @@ class DelegatedWorkspace:
         )
         sidecar["retrieved_by"] = ACQUIRER
         sidecar["request_id"] = request_id
+        if scope is not None:
+            # Lets a caller deliver evidence whose declared scope disagrees with the
+            # request's, which is the only way to exercise the pairing check.
+            sidecar["scope"] = dict(scope)
         sidecar["checksum"] = f"sha256:{hashlib.sha256(payload.read_bytes()).hexdigest()}"
         (destination / (PAYLOAD.name + ".provenance.yml")).write_text(
             yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8"

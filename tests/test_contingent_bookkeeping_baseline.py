@@ -664,5 +664,123 @@ class CommitReplayTests(DelegatedWorkspace, unittest.TestCase):
                 msg=f"the replayed commit must be idempotent, not restamped: {replayed}",
             )
 
+    def test_a_replay_does_not_license_editing_the_rest_of_the_record(self):
+        """The replay allowance is for the commit's own delta, not for the record.
+
+        Exempting the request id outright would let anything on that record differ from the
+        frozen baseline once `status` and `source_id` happened to match -- so an edit made
+        in the window between the crash and the replay would be admitted, and the commit
+        would then skip the record as already done. The allowance reverts the delta and
+        requires the result to fingerprint back to issuance.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            action_id = self.pending_order(workspace)["action_id"]
+            source_id = self.deliver_for(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            before = session_document(workspace)
+            code, envelope = self.submit(workspace, action_id)
+            self.assertEqual(0, code, envelope)
+
+            # Crash: the commit landed, the session write did not. Then a field the commit
+            # never touches is edited before the replay.
+            path = workspace / "sources" / "source-requests.jsonl"
+            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+            for record in records:
+                if record["request_id"] == request_id:
+                    record["rationale"] = "rewritten after the commit"
+            path.write_text(
+                "".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in records),
+                encoding="utf-8",
+            )
+            session_path = workspace / "runs" / "orchestrations" / ORCHESTRATION_ID / "session.json"
+            session_path.write_text(json.dumps(before, indent=2) + "\n", encoding="utf-8")
+
+            replay_code, replay = self.submit(workspace, action_id)
+
+            self.assertNotEqual(0, replay_code, replay)
+            self.assertIn("outside the fulfilled request scope", replay["message"], replay)
+
+
+class LedgerIsNotTrustedTests(DelegatedWorkspace, unittest.TestCase):
+    """The ledger is acquirer-writable, so verification treats it as a claim, not a fact."""
+
+    def pending_acquisition(self, root: Path) -> tuple[Path, str, str]:
+        workspace, request_id = self.make_workspace(root)
+        self.start(workspace)
+        return workspace, request_id, self.pending_order(workspace)["action_id"]
+
+    def test_a_claim_naming_a_source_whose_scope_contradicts_the_request_is_refused(self):
+        """Writing the ledger by hand must not get past the check `fulfill` applies.
+
+        `check_fulfill_scope` lives in the CLI, so it is reached only by a caller that uses
+        the CLI. The ledger is a file the acquirer writes, so a claim put there directly
+        would pair a request with a source whose declared scope contradicts it and never
+        meet that check at all. Verification re-runs the same predicate.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            # Declared before issuance, so the frozen baseline carries it and the store is
+            # never edited inside the order -- the contradiction is in the claim alone.
+            path = workspace / "sources" / "source-requests.jsonl"
+            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+            for record in records:
+                if record["request_id"] == request_id:
+                    record["scope"] = {"facet_id": "a-facet-the-delivery-does-not-carry"}
+            path.write_text(
+                "".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in records),
+                encoding="utf-8",
+            )
+            self.start(workspace)
+            action_id = self.pending_order(workspace)["action_id"]
+            source_id = self.deliver_for(workspace, request_id, scope={"facet_id": "a-different-facet"})
+            CLAIMS.record_fulfilment_claim(
+                workspace, ORCHESTRATION_ID, action_id,
+                request_id=request_id, source_id=source_id, claimed_at="2026-01-01T00:00:00Z",
+            )
+            # Claimed too, so the question-transition guard is satisfied and the scope
+            # contradiction is the only thing left for verification to answer.
+            CLAIMS.record_reopen_claim(
+                workspace, ORCHESTRATION_ID, action_id,
+                question_slug=QUESTION_SLUG, source_ids=[source_id], request_ids=[request_id],
+                claimed_at="2026-01-01T00:00:00Z",
+            )
+
+            code, envelope = self.submit(workspace, action_id, artifacts=[f"raw/data/{PAYLOAD.name}"])
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("scope contradicts the request", envelope["message"], envelope)
+            self.assertEqual(
+                request_id,
+                envelope["details"]["scope_pairing_failures"][0]["request_id"],
+                envelope,
+            )
+
+    def test_a_claim_filed_after_verification_began_refuses_rather_than_being_dropped(self):
+        """A late claim must not be silently left uncommitted by an accepted submission."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, action_id = self.pending_acquisition(Path(tmpdir))
+            source_id = self.deliver_for(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            original = CONTROLLER.commit_delegated_bookkeeping
+
+            def file_a_late_claim(*args, **kwargs):
+                CLAIMS.record_fulfilment_claim(
+                    workspace, ORCHESTRATION_ID, action_id,
+                    request_id="req-filed-late", source_id=source_id,
+                    claimed_at="2026-01-01T00:00:00Z",
+                )
+                return original(*args, **kwargs)
+
+            with mock.patch.object(CONTROLLER, "commit_delegated_bookkeeping", file_a_late_claim):
+                code, envelope = self.submit(workspace, action_id, artifacts=[f"raw/data/{PAYLOAD.name}"])
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("changed while the submission was being verified", envelope["message"], envelope)
+
+
 if __name__ == "__main__":
     unittest.main()

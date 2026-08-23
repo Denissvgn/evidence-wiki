@@ -6663,6 +6663,9 @@ def commit_delegated_bookkeeping(
     fulfilment_claims: dict[str, Any],
     reopen_claims: dict[str, Any],
     committed_slugs: set[str],
+    *,
+    orchestration_id: str,
+    action_id: str,
 ) -> None:
     """Write the bookkeeping the acquirer claimed, now that the controller has accepted it.
 
@@ -6676,6 +6679,37 @@ def commit_delegated_bookkeeping(
     """
     source_requests = load_sibling_module("source_requests")
     question_resolve = load_sibling_module("question_resolve")
+    order_claims = load_sibling_module("_order_claims")
+    # Verification read the ledger once, at the top of a pass that then ran every other
+    # guard. The acquirer can still file a claim in that window -- the action is pending
+    # until this returns -- and committing the stale maps would accept a submission while
+    # silently leaving the late claim uncommitted. Re-read under the ledger's own lock and
+    # refuse if anything moved, so a lost claim is a refusal the acquirer can retry rather
+    # than an acceptance that dropped its work.
+    lock_path = order_claims.claims_lock_path(project_root, orchestration_id, action_id)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with order_claims.workspace_lock(
+        lock_path,
+        timeout_seconds=order_claims.CLAIM_LOCK_TIMEOUT_SECONDS,
+        purpose="order claim commit",
+    ):
+        current = order_claims.load_claims(
+            order_claims.claims_path(project_root, orchestration_id, action_id)
+        )
+        if current.get("fulfilments") != fulfilment_claims or current.get("reopens") != reopen_claims:
+            # Reported as a postcondition failure, not as invalid state: the workspace is
+            # not broken, the submission simply no longer matches what was checked, and the
+            # acquirer resubmits. ORCHESTRATION_STATE_INVALID is non-recoverable everywhere
+            # else it is raised, and one code may not report two recoverabilities.
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                "order claims changed while the submission was being verified",
+                recoverable=True,
+                remediation=(
+                    "Resubmit the action; a claim filed after verification began was not part of "
+                    "what the controller checked."
+                ),
+            )
     now = timestamp_utc()
     # Reopens first, and the order matters. Finalization is replayable, so a crash can land
     # between the two halves. Reopening first leaves questions open with no blocking link --
@@ -6701,9 +6735,12 @@ def commit_delegated_bookkeeping(
                     continue
                 if record.get("status") == "fulfilled" and record.get("source_id") == claim["source_id"]:
                     continue
+                # `updated_at` deliberately untouched: the delta a replay has to be able to
+                # revert is exactly {status, source_id}, both of which have known pre-commit
+                # values. When the request was answered is already recorded -- in the claim's
+                # `claimed_at`, and in the log entry the fulfil wrote.
                 record["status"] = "fulfilled"
                 record["source_id"] = str(claim["source_id"])
-                record["updated_at"] = now
                 changed = True
             if changed:
                 source_requests._write_requests_unlocked(path, records)
@@ -6858,14 +6895,26 @@ def verify_delegated_acquisition_postconditions(
         projected["source_id"] = str(claim["source_id"])
         projected_requests_by_id[claimed_id] = projected
     # A claim whose durable record already carries it is one the controller committed on a
-    # previous, interrupted finalization. Those ids -- and only those -- may differ from the
-    # frozen baseline; everything else in the store must be byte-identical.
-    committed_request_ids = {
-        claimed_id
-        for claimed_id, claim in fulfilment_claims.items()
-        if requests_by_id[claimed_id].get("status") == "fulfilled"
-        and requests_by_id[claimed_id].get("source_id") == claim["source_id"]
-    }
+    # previous, interrupted finalization. Exempting the id outright would be too generous:
+    # it would let *any* field of that record differ from the frozen baseline, so an edit to
+    # `scope` or `rationale` made after the crash would be admitted and then skipped by the
+    # commit. Instead the record is reverted through the only delta the commit applies and
+    # the result must fingerprint back to the baseline exactly. That is why the commit does
+    # not touch `updated_at`: a field whose pre-commit value nothing records could not be
+    # reverted, and the check would have to fall back to trusting the id again.
+    committed_request_ids = set()
+    for claimed_id, claim in fulfilment_claims.items():
+        durable = requests_by_id[claimed_id]
+        if durable.get("status") != "fulfilled" or durable.get("source_id") != claim["source_id"]:
+            continue
+        reverted = dict(durable)
+        reverted["status"] = "open"
+        reverted["source_id"] = None
+        reverted_fingerprint = record_fingerprint_snapshot(
+            [reverted], id_field="request_id", label="source-request store"
+        ).get(claimed_id)
+        if reverted_fingerprint == source_requests_before.get(claimed_id):
+            committed_request_ids.add(claimed_id)
 
     # --- per-request outcomes ---------------------------------------------------------
     current_attempt_events = request_attempt_audit_events(project_root, config)
@@ -7013,6 +7062,47 @@ def verify_delegated_acquisition_postconditions(
             "PDFs without extracted text cannot satisfy a source request."
         ),
     )
+    # The scope pairing `fulfill` checks, checked again here against the same predicate.
+    # That command is where the rule has always lived, and it is reached only by callers who
+    # use the CLI: the ledger is acquirer-writable, so a claim written straight to the JSON
+    # would pair a request with a source whose declared scope contradicts it and never meet
+    # the check at all. Re-run rather than reimplemented, so the two cannot drift. Only the
+    # contradiction layers apply -- whether the caller asked for `--require-scope` is not
+    # recorded anywhere the controller can read, and an absent scope is not a contradiction.
+    source_requests_module = load_sibling_module("source_requests")
+    scope_pairing_failures: list[dict[str, Any]] = []
+    for claimed_id, claim in sorted(fulfilment_claims.items()):
+        claimed_source = str(claim["source_id"])
+        if claimed_source not in by_source_id:
+            # Not in the manifest; the membership guard reports that, and this check has
+            # nothing to compare against.
+            continue
+        try:
+            source_requests_module.check_fulfill_scope(
+                requests_by_id[claimed_id],
+                claimed_source,
+                source_requests_module.source_provenance_scope(project_root, config, claimed_source),
+                {},
+                require_scope=False,
+            )
+        except (SystemExit, source_requests_module.RequestScopeError) as exc:
+            # Both, because the predicate reports through whichever door its layer uses: a
+            # scope conflict raises the scope module's error and the other layers exit. An
+            # escaping exception here would leave verification with a traceback where every
+            # other unreadable or contradictory input produces a refusal.
+            reason = getattr(exc, "message", None) or str(exc)
+            scope_pairing_failures.append(
+                {"request_id": claimed_id, "source_id": claimed_source, "reason": reason}
+            )
+    require(
+        not scope_pairing_failures,
+        "delegated acquisition claimed a fulfilment whose scope contradicts the request",
+        {"scope_pairing_failures": scope_pairing_failures},
+        (
+            "Fulfil each request with a source whose delivered scope agrees with the request's own; "
+            "a claim cannot pair evidence the request did not ask for."
+        ),
+    )
     correlation_failures = delegated_fulfilment_correlation_failures(fulfilled, by_source_id)
     require(
         not correlation_failures,
@@ -7059,9 +7149,17 @@ def verify_delegated_acquisition_postconditions(
             continue
         claimed_sources = [value for value in claim.get("source_ids", []) if isinstance(value, str)]
         projected_sources = sorted(set(durable.get("source_ids", [])) | set(claimed_sources))
-        if durable.get("status") == "open" and not durable.get("blocking_request_ids"):
-            # Already committed by an interrupted finalization; the page may differ from the
-            # frozen baseline for this slug alone.
+        if (
+            durable.get("status") == "open"
+            and not durable.get("blocking_request_ids")
+            and sorted(durable.get("source_ids", [])) == projected_sources
+        ):
+            # Already committed by an interrupted finalization. The evidence fields must
+            # match the projection exactly, not merely look reopened: two lifecycle fields
+            # alone would exempt the whole page fingerprint for this slug on the strength of
+            # a state an edit could also produce. A page whose *body* was edited after the
+            # crash is still admitted for this one slug -- the frontmatter is what the
+            # controller reads, and the body is covered for every slug it does not exempt.
             committed_question_slugs.add(slug)
             continue
         current_question_evidence[slug] = {
@@ -7348,6 +7446,8 @@ def verify_delegated_acquisition_postconditions(
             fulfilment_claims,
             reopen_claims,
             committed_question_slugs,
+            orchestration_id=require_safe_id(session["orchestration_id"], "orchestration_id"),
+            action_id=action_id,
         )
     if not fulfilled:
         # Every scoped request failed, and each failure is recorded. The action itself is
