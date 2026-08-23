@@ -21,7 +21,7 @@ Each JSONL line is one request record (schema version 1.0)::
       "status": "open",                   # open|fulfilled
       "created_at": "2026-06-10T12:00:00Z",
       "updated_at": "2026-06-10T12:00:00Z",
-      "source_id": null,                   # manifest id set on fulfill
+      "source_id": null,                   # manifest id set once fulfilment commits
       "scope": {"facet_id": "benchmarks"}  # optional; omitted when unscoped
     }
 
@@ -40,22 +40,49 @@ Subcommands:
   an open request exists is an idempotent no-op reported as a duplicate.
 - ``list``: read-only listing with optional repeatable ``--status``, ``--kind``,
   and ``--scope`` filters.
-- ``fulfill``: link a delivered manifest ``--source-id`` to a request and set
-  ``status: fulfilled``. Fulfilling an already-fulfilled request with the same
-  source id is a no-op; with a different source id it is an error. A request
-  and a delivery that both declare scope must agree about every key they share;
-  ``--match-scope`` adds caller-asserted keys and ``--require-scope`` upgrades a
-  key the delivery never states from tolerated to refused.
+- ``fulfill``: link a delivered manifest ``--source-id`` to a request. Outside a
+  delegated acquisition order that link is written here — ``status: fulfilled``
+  and the request's ``source_id`` — while inside one it is claimed instead, as
+  described below. Fulfilling an already-fulfilled request with the same source
+  id is a no-op; with a different source id it is an error, and inside an order a
+  claim already filed for the request settles both cases exactly as a stored
+  fulfilment would, because until acceptance the claim is the only record of this
+  action's bookkeeping. A request and a delivery that both declare scope must
+  agree about every key they share; ``--match-scope`` adds caller-asserted keys
+  and ``--require-scope`` upgrades a key the delivery never states from tolerated
+  to refused.
 
-The file is single-writer by design: ``add`` and ``fulfill`` serialize through
-the shared workspace lock helper while preserving atomic append/replace writes.
-Concurrent readers always see complete lines.
+Inside a pending **delegated acquisition** work order — one declaring
+``phase: acquisition`` and ``acquisition_mode: delegated``, the kind an external
+acquirer executes — ``fulfill`` writes nothing to this file. It files a claim at
+``runs/order-claims/<orchestration_id>/<action_id>.json``, and the orchestration
+controller commits that claim during the verification pass in which it accepts the
+acquisition submission; a refused or failed submission commits nothing. Bookkeeping
+the controller has not checked yet is not durable state: a fulfilment written while
+the order was still pending would stand even after the submission carrying it was
+thrown away. Until acceptance the record therefore still reads ``status: "open"``
+with ``source_id: null``, so a mid-order ``list --status open`` keeps returning a
+claimed request as open. Every ``fulfill`` report carries a ``contingent`` boolean
+saying which of the two paths ran; text output appends
+``(claimed, pending acceptance)`` when it is true, and the ``log.md`` entry says
+the fulfilment was claimed and is committed when the order is accepted.
+``record-attempt-failure`` is not contingent: it still records the attempt audit
+durably, and only its "already fulfilled" refusal consults the claim ledger.
+
+``add`` and ``fulfill`` serialize through the shared workspace lock helper while
+preserving atomic append/replace writes, so concurrent readers always see complete
+lines. ``fulfill`` is not the only writer of a fulfilment, though: the
+orchestration controller writes one too, under the same lock, when it commits a
+claim — and inside a delegated acquisition order it is the only one that does,
+because ``fulfill`` has written none.
 
 Exit codes:
 
 - ``0``: success (including duplicate-add and same-source refulfill no-ops).
-- ``2``: validation error, unknown request/source id, malformed artifact, or
-  unreadable workspace.
+- ``2``: validation error, unknown request/source id, malformed artifact,
+  unreadable workspace, or an unreadable claim ledger — which is refused rather
+  than read as "nothing was claimed", since that would admit a second claim over
+  one already filed.
 """
 
 from __future__ import annotations
