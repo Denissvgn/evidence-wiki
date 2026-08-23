@@ -439,6 +439,37 @@ class CodebaseIntakeBoundTests(CodebaseWorkspace, unittest.TestCase):
                 "this record admits and must not move its bound",
             )
 
+    def test_a_symlinked_directory_is_neither_descended_nor_counted(self):
+        """A link to a tree must not enlarge the bound with files the snapshot never walks.
+
+        ``rglob`` yields a linked directory without descending it, and the entry is then
+        refused as not a regular file. The bound is a statement about the set the snapshot
+        walks, and a linked tree is not in that set at either end: not enumerated, and not
+        traversed to find out.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.enable_codebase_analysis(workspace)
+            self.deliver_local_repository(workspace, request_id)
+            repo = workspace / REPO_RELATIVE
+            outside = Path(tmpdir) / "linked-tree"
+            (outside / "nested").mkdir(parents=True)
+            (outside / "one.py").write_text("one\n", encoding="utf-8")
+            (outside / "nested" / "two.py").write_text("two\n", encoding="utf-8")
+
+            baseline = INVENTORY.local_repo_file_count(repo)
+            try:
+                (repo / "linkdir").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):  # pragma: no cover - unprivileged Windows
+                self.skipTest("this filesystem does not allow creating a directory symlink")
+
+            self.assertEqual(
+                baseline,
+                INVENTORY.local_repo_file_count(repo),
+                "a linked tree is not walked and not counted: the bound describes the set "
+                "the snapshot enumerates",
+            )
+
     def test_a_multiply_linked_member_is_excluded_because_the_snapshot_refuses_it(self):
         """A hardlink drops *both* copies from the bound, and the snapshot refuses the tree.
 
