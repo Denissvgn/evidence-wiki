@@ -788,8 +788,11 @@ class DocumentedWorkflowTests(unittest.TestCase):
                 )
 
         collapsed = re.sub(r"\s+", " ", skill)
-        # The three things an acquirer most easily gets wrong, stated outright.
-        self.assertIn("exactly one of two durable outcomes", collapsed)
+        # The three things an acquirer most easily gets wrong, stated outright. The two
+        # outcomes are no longer both durable when the acquirer records them — a fulfilment
+        # is a claim the controller commits on acceptance — so the rule is pinned on what
+        # the acquirer must record, which is what it can still act on.
+        self.assertIn("exactly one of two recorded outcomes", collapsed)
         self.assertIn("partial** batch is still `completed`", collapsed)
 
         # Asserted inside the Outcome Semantics section, not anywhere in the file: the
@@ -798,7 +801,9 @@ class DocumentedWorkflowTests(unittest.TestCase):
         semantics = re.sub(
             r"\s+", " ", skill.split("## Outcome Semantics", 1)[1].split("## Completion Checklist", 1)[0]
         )
-        self.assertIn("nothing durable changed", semantics)
+        # Not "nothing durable changed": a filed claim leaves the store and the pages
+        # byte-identical, so that test is one the acquirer can no longer apply to itself.
+        self.assertIn("recorded nothing at all", semantics)
         self.assertIn("Reserve `failed` for", semantics)
         self.assertIn("Never claim terminal `blocked_on_sources`", semantics)
 

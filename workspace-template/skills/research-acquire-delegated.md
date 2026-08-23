@@ -35,11 +35,26 @@ Inputs:
 
 - Treat `scope.request_ids` as a hard authorization limit. Fulfil only those requests. Do
   not touch another open request because it looked easier, higher priority, or related.
-- **Every scoped request must end the action with exactly one of two durable outcomes**: a
-  fulfilment (`status: fulfilled` with a manifest `source_id`) or a recorded attempt
-  failure in the attempt audit for this `action_id`. A scoped request left with neither
-  fails the postconditions — "we did not get to it" is not an outcome the controller can
-  verify, and silence is what the audit exists to remove.
+- **Every scoped request must end the action with exactly one of two recorded outcomes**:
+  a fulfilment filed through `fulfill`, or a recorded attempt failure in the attempt audit
+  for this `action_id`. A scoped request left with neither fails the postconditions — "we
+  did not get to it" is not an outcome the controller can verify, and silence is what the
+  audit exists to remove.
+- Only one of those two is durable at the moment you record it, which changes what you may
+  verify your own work against. Inside a pending delegated acquisition order `fulfill`
+  files a **claim** at `runs/order-claims/<orchestration_id>/<action_id>.json` and
+  deliberately leaves `sources/source-requests.jsonl` alone: the record keeps
+  `status: open` and `source_id: null` until the controller commits the claim, which it
+  does when — and only when — it accepts your submission. `reopen` (step 7) works the same
+  way, leaving the question `blocked` with its `blocked_reason` and `blocking_request_ids`
+  intact. Both commands answer with `"contingent": true` in their JSON and append
+  `(claimed, pending acceptance)` to their text output, and that acknowledgement is the
+  record of what you did; the store is not. Do not read the store back to check yourself
+  and conclude the command failed. It did not, and the repairs that suggestion invites are
+  both refused: a second `fulfill` naming another source is refused as a relink, and
+  `record-attempt-failure` is refused because the request the claim answers has no failed
+  attempt to record. `record-attempt-failure` is the one verb here that still writes
+  durably and at once — the attempt audit is unchanged.
 - Stamp `request_id` in the provenance sidecar of everything you deliver, at the moment
   you deliver it. The controller correlates a fulfilment to its request through that
   field; a delivered file without it cannot satisfy the request it was fetched for. The
@@ -129,6 +144,19 @@ python3 scripts/source_requests.py list --status open --format json
    `plan-fetch` and has no provider layer at all, so every delivery here is
    already the manual-delivery path `research-acquire.md` falls back to for a
    kind without a provider route.
+
+   Run this once, at the start. The store is frozen for the life of the order,
+   so the listing is not a progress ledger: it keeps returning every scoped
+   request as `open` however many you have already fulfilled, right up to the
+   moment the controller accepts the submission and commits the claims. The
+   in-order record of progress is each `fulfill` call's own JSON, where
+   `"contingent": true` says the claim was filed.
+
+   One state contradicts that, and only one: a replay after an acceptance was
+   interrupted part-way through committing. A request the controller already
+   committed reads `fulfilled` in this listing and answers a repeated `fulfill`
+   with `"updated": false` and `"contingent": false`. That request is finished,
+   not lost; leave it and account for the rest of the scope.
 
 2. Acquire the evidence with your own connectors, outside the workspace. Nothing in this
    workspace performs or authorizes that fetch.
@@ -291,9 +319,13 @@ python3 scripts/source_requests.py record-attempt-failure \
 python3 scripts/question_resolve.py reopen --slug example --agent-id ACQUIRER_ID --source-id data:keepa-b0abc123 --request-id req-1a2b3c4d5e
 ```
 
-   A question with any still-unfulfilled blocking request stays blocked and untouched.
-   Do not hand-edit question frontmatter; `reopen` is the deterministic verb, and it
-   refuses with `SOURCE_NOT_NORMALIZED` when the fulfilled source has no normalized record.
+   Count only the blockers this order scopes. A question stays blocked and untouched
+   while any request in `scope.request_ids` that blocks it is unfulfilled; a
+   `blocking_request_ids` entry the order does not scope — one an earlier session retired,
+   or one held over by the scope cap — is not yours to wait on and does not keep the
+   question out of the set. Do not hand-edit question frontmatter; `reopen` is the
+   deterministic verb, and it refuses with `SOURCE_NOT_NORMALIZED` when the fulfilled
+   source has no normalized record.
 
 8. Submit the result for the action:
 
@@ -304,18 +336,25 @@ evidence-wiki orchestrate submit --target . --orchestration-id ORCH_ID \
 
    The result is exactly `{schema_version, action_id, outcome, summary, artifacts}`. Put
    the delivered workspace-relative paths in `artifacts`. Per-request outcomes are not
-   reported here — the controller reads them from the request store and the attempt audit,
-   because a claim in a summary is not evidence.
+   reported here — the controller reads the fulfilments from this action's claim ledger and
+   the attempt failures from the attempt audit, because an assertion in a summary is not
+   evidence. This step is also where the bookkeeping becomes durable: accepting the
+   submission is what writes the request store and the question pages, so a refused or
+   `failed` submission commits nothing and leaves no fulfilment standing.
 
 ## Outcome Semantics
 
 - **`completed`** — the action carried out its work order. A **partial** batch is still
   `completed`: some requests fulfilled, the rest recorded as attempt failures. That is the
   normal shape of a delegated action, not a degraded one.
-- **`blocked`** — the attempt was aborted and **nothing durable changed**: no fulfilment,
-  no reopened question, no attempt-failure event, no delivered file. The parent pauses with
-  this action pending and `resume` replays it. If you already changed something, you are
-  `completed`, not `blocked`.
+- **`blocked`** — the attempt was aborted having **recorded nothing at all**: no `fulfill`,
+  no `reopen`, no `record-attempt-failure`, no delivered file, no inventory or
+  normalization run. The parent pauses with this action pending and `resume` replays it.
+  Decide this from what you ran, never from what the workspace reads back afterwards: a
+  filed claim leaves the request store and the question pages byte-identical, so a
+  fulfilled request and an untouched one look the same from outside. The controller settles
+  it from the claim ledger and refuses a `blocked` submission that filed anything into it.
+  If you ran any of those commands, you are `completed`, not `blocked`.
 - **`failed`** — execution is unrecoverable and the session terminates. A throttled
   connector, an expired credential, or an unreachable host is **not** `failed`: it is a
   per-request attempt failure inside a `completed` action, or `blocked` if nothing ran at
@@ -326,8 +365,10 @@ evidence-wiki orchestrate submit --target . --orchestration-id ORCH_ID \
 ## Completion Checklist
 
 - Only the work order's scoped request ids were touched.
-- Every scoped request ends with a fulfilment **or** an attempt-failure event carrying this
-  action's `action_id` — never neither, never both.
+- Every scoped request ends with a filed fulfilment claim **or** an attempt-failure event
+  carrying this action's `action_id` — never neither, never both. The store still reads
+  `open` for the claimed ones, so tick them off against each `fulfill` call's
+  `"contingent": true` rather than against a re-listing.
 - Every delivered artifact has a `.provenance.yml` sidecar carrying `request_id`, and a
   checksum for file deliveries; a request that declares a `scope` mapping has the same
   keys and values stamped into the sidecar's `scope:` field.
@@ -345,10 +386,14 @@ evidence-wiki orchestrate submit --target . --orchestration-id ORCH_ID \
   delivered source ids plus any reused source that still owed a normalized record — never
   `--all`, never a bare run. Every fulfilled `source_id` has a normalized record, and a
   reused source that was already normalized was not normalized again.
-- Questions were reopened only where **all** blocking requests are fulfilled; questions
-  with a remaining unfulfilled request are byte-identical to before the action.
+- `reopen` was called for **exactly** the questions this action unblocked — no fewer, and
+  no others. The controller compares the reopen claims against that set and refuses in
+  either direction. Work each question out by intersecting its `blocking_request_ids`,
+  which the freeze leaves intact in the frontmatter, with `scope.request_ids`, and asking
+  whether you fulfilled all of what remains. The page's bytes settle nothing, because a
+  claimed reopen leaves it `blocked` exactly like a question you never touched.
 - No candidate record was created or changed; delegated acquisition has no candidate store.
 - Nothing below `runs/orchestrations/` was written.
 - No credential appears in any sidecar, request, attempt detail, log entry, or summary.
-- The result is `completed` for a partial batch, `blocked` only when nothing durable
-  changed, and `failed` only for an unrecoverable condition.
+- The result is `completed` for a partial batch, `blocked` only when the action recorded
+  nothing at all, and `failed` only for an unrecoverable condition.
