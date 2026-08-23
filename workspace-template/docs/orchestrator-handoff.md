@@ -185,12 +185,24 @@ which is what every artifact issued before delegated acquisition existed is.
 
 A delegated acquisition order carries an empty `candidate_ids` scope and the
 `research-acquire-delegated` skill. Its result reports per-request outcomes
-nowhere: the controller reads them from the source-request store and the
-append-only attempt audit, because a claim in a summary is not evidence. Every
-scoped request must end the action with a fulfilment **or** a recorded attempt
-failure naming that action, so a **partial** batch submits `completed`. Submit
-`blocked` only when nothing durable changed at all — unlike the provider path, a
+nowhere: the controller reads them from the workspace itself, because an
+assertion in a summary is not evidence. Every scoped request must end the action
+with a fulfilment **or** a recorded attempt failure naming that action, so a
+**partial** batch submits `completed`. Submit `blocked` only when the action
+claimed nothing and changed nothing at all — unlike the provider path, a
 delegated `blocked` tolerates no partial delivery.
+
+Inside the pending order the source-request store and the question pages are
+frozen, so a fulfilment is not something the acquirer writes.
+`source_requests.py fulfill` and `question_resolve.py reopen` file a claim at
+`runs/order-claims/<orchestration_id>/<action_id>.json` instead: the request
+stays `open` with a null `source_id`, the question stays `blocked`, and both
+commands report `contingent: true`. The controller commits the claims during the
+verification pass that accepts the submission, so the ledger — not the store — is
+what says which request this action fulfilled with which source, and a refused or
+`failed` submission commits nothing. `record-attempt-failure` is not contingent:
+it writes the append-only attempt audit durably, and that audit is where the
+controller reads per-request failures.
 
 When a delegated session retires every open request it terminates
 `blocked_on_sources` with a reason beginning with the stable prefix
@@ -408,17 +420,17 @@ errors that prevent the report from being built.
 | `intake_questions.py` | `python3 scripts/intake_questions.py --format json`, or any `--dry-run` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `HANDOFF_SIGNATURE_INVALID`, `INTAKE_FIELD_TOO_LONG`, `INTAKE_TOTAL_CAP_EXCEEDED`, `INTAKE_RATE_LIMITED`, `WORKSPACE_UNREADABLE` |
 | `lint.py` | `python3 scripts/lint.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `WORKSPACE_UNREADABLE` |
 | `normalize_sources.py` | `python3 scripts/normalize_sources.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `SOURCE_UNKNOWN`, `SOURCE_NOT_NORMALIZABLE`, `WORKSPACE_UNREADABLE` |
-| `orchestration_controller.py` | `python3 scripts/orchestration_controller.py start\|next\|submit\|status --format json` | `CONFIG_MISSING`, `CONFIG_INVALID`, `ORCHESTRATION_ID_INVALID`, `ACTION_ID_INVALID`, `AGENT_ID_INVALID`, `ORCHESTRATION_EXISTS`, `ORCHESTRATION_UNKNOWN`, `ORCHESTRATION_STATE_INVALID`, `ORCHESTRATION_EVENTS_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`, `ORCHESTRATION_DRIVER_BUSY`, `ORCHESTRATION_WRITE_FAILED`, `ORCHESTRATION_WORKSPACE_UNSAFE`, `ORCHESTRATION_WORKSPACE_HEALTH_CHANGED`, `ORCHESTRATION_PROVIDER_POLICY_CHANGED`, `ORCHESTRATION_DELEGATION_CHANGED`, `ORCHESTRATION_CONTROL_REPAIR_REQUIRED`, `ORCHESTRATION_TRUSTED_INPUT_UNSAFE`, `ORCHESTRATION_TRUSTED_INPUT_CHANGED`, `ORCHESTRATION_LEGACY_ACTION_UNBOUND`, `ACTION_NOT_PENDING`, `RESULT_UNREADABLE`, `RESULT_INVALID`, `RESULT_CONFLICT`, `ORCHESTRATION_POSTCONDITION_FAILED`, `WORK_ORDER_INVALID`, `CANDIDATE_STORE_INVALID`, `SOURCE_REQUESTS_INVALID`, `WORKSPACE_UNREADABLE` |
+| `orchestration_controller.py` | `python3 scripts/orchestration_controller.py start\|next\|submit\|status --format json` | `CONFIG_MISSING`, `CONFIG_INVALID`, `ORCHESTRATION_ID_INVALID`, `ACTION_ID_INVALID`, `AGENT_ID_INVALID`, `ORCHESTRATION_EXISTS`, `ORCHESTRATION_UNKNOWN`, `ORCHESTRATION_STATE_INVALID`, `ORCHESTRATION_EVENTS_INVALID`, `ORCHESTRATION_OWNER_MISMATCH`, `ORCHESTRATION_DRIVER_BUSY`, `ORCHESTRATION_WRITE_FAILED`, `ORCHESTRATION_WORKSPACE_UNSAFE`, `ORCHESTRATION_WORKSPACE_HEALTH_CHANGED`, `ORCHESTRATION_PROVIDER_POLICY_CHANGED`, `ORCHESTRATION_DELEGATION_CHANGED`, `ORCHESTRATION_CONTROL_REPAIR_REQUIRED`, `ORCHESTRATION_TRUSTED_INPUT_UNSAFE`, `ORCHESTRATION_TRUSTED_INPUT_CHANGED`, `ORCHESTRATION_LEGACY_ACTION_UNBOUND`, `ACTION_NOT_PENDING`, `RESULT_UNREADABLE`, `RESULT_INVALID`, `RESULT_CONFLICT`, `ORCHESTRATION_POSTCONDITION_FAILED`, `ORCHESTRATION_STATE_UNREADABLE`, `ORCHESTRATION_SCOPE_EXCEEDED`, `WORK_ORDER_INVALID`, `CANDIDATE_STORE_INVALID`, `SOURCE_REQUESTS_INVALID`, `WORKSPACE_UNREADABLE` |
 | `query_index.py` | `python3 scripts/query_index.py QUERY --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID`, `QUERY_MISSING`, `WORKSPACE_UNREADABLE` |
 | `question_claim.py` | `python3 scripts/question_claim.py claim --slug SLUG --agent-id AGENT --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `CLAIM_NOT_STALE`, `STEAL_THRESHOLD_REQUIRED`, `STEAL_FLAG_REQUIRED`, `STEAL_NOT_APPLICABLE`, `STATUS_NOT_CLAIMABLE`, `STATUS_NOT_RELEASABLE`, `SLUG_INVALID`, `SLUG_UNKNOWN`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
-| `question_resolve.py` | `python3 scripts/question_resolve.py answer\|block\|defer\|reject\|reopen --slug SLUG --agent-id AGENT ... --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `STATUS_NOT_RESOLVABLE`, `STATUS_NOT_REOPENABLE`, `SOURCE_NOT_NORMALIZED`, `QUESTION_NOT_CLAIMED`, `ANSWER_SOURCE_REQUIRED`, `COVERAGE_REQUIRED`, `COVERAGE_BLOCKED`, `COVERAGE_MANIFEST_INVALID`, `ANSWER_PAGE_INVALID`, `ANSWER_PAGE_MISSING`, `SOURCE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_LINKED`, `REQUEST_SCOPE_MISMATCH`, `RESOLUTION_REASON_INVALID`, `VALUE_INVALID`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
+| `question_resolve.py` | `python3 scripts/question_resolve.py answer\|block\|defer\|reject\|reopen --slug SLUG --agent-id AGENT ... --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `CLAIM_HELD`, `STATUS_NOT_RESOLVABLE`, `STATUS_NOT_REOPENABLE`, `SOURCE_NOT_NORMALIZED`, `QUESTION_NOT_CLAIMED`, `ANSWER_SOURCE_REQUIRED`, `COVERAGE_REQUIRED`, `COVERAGE_BLOCKED`, `COVERAGE_MANIFEST_INVALID`, `ANSWER_PAGE_INVALID`, `ANSWER_PAGE_MISSING`, `SOURCE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_LINKED`, `REQUEST_SCOPE_MISMATCH`, `QUESTION_REOPEN_DELEGATED`, `ORCHESTRATION_STATE_UNREADABLE`, `RESOLUTION_REASON_INVALID`, `VALUE_INVALID`, `PAGE_INVALID`, `AGENT_ID_INVALID` |
 | `question_status.py` | `python3 scripts/question_status.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `WORKSPACE_UNREADABLE` |
 | `publication_readiness.py` | `python3 scripts/publication_readiness.py --format json` or `python3 scripts/publication_readiness.py --format json bundle --run-id RUN_ID` | `CONFIG_MISSING`, `CONFIG_INVALID`, `RUN_ID_INVALID`, `WORKSPACE_UNREADABLE` |
 | `run_controller.py` | `python3 scripts/run_controller.py start\|transition\|status\|event\|heartbeat\|adopt\|abandon\|recover\|override-manual-url-budget\|finish --format json` | `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `RUN_ID_REQUIRED`, `RUN_ID_INVALID`, `RUN_EXISTS`, `RUN_UNKNOWN`, `RUN_STATE_INVALID`, `RUN_TRANSITION_INVALID`, `RUN_TERMINAL`, `RUN_ACADEMIC_PROVIDER_ACCOUNTING_EXISTS`, `RUN_MUTATION_RECOVERY_REQUIRED`, `RUN_MUTATION_WRITE_FAILED`, `RUN_PENDING_EVENT_INVALID`, `RUN_EVENTS_INVALID`, `RUN_EVENT_ID_CONFLICT`, `RUN_ADOPT_THRESHOLD_REQUIRED`, `RUN_ABANDON_THRESHOLD_REQUIRED`, `RUN_NOT_STALE`, `BUDGET_EXCEEDED`, `BUDGET_OVERRIDE_INVALID`, `RUN_COMPLETION_NOT_READY`, `RUN_COMPLETION_READINESS_INVALID`, `RUN_COMPLETION_READINESS_UNREADABLE`, `FINAL_VERDICT_REQUIRED`, `EVENT_TYPE_INVALID`, `EVENT_DATA_INVALID`, `VALUE_INVALID`, `AGENT_ID_INVALID`, `WORKSPACE_UNREADABLE` |
 | `run_report.py` | `python3 scripts/run_report.py baseline --output PATH --format json`, `python3 scripts/run_report.py --baseline PATH --format json`, or `python3 scripts/run_report.py --run-id RUN_ID --format json` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `BASELINE_MISSING`, `BASELINE_INVALID`, `RUN_ID_REQUIRED`, `RUN_ID_INVALID`, `RUN_UNKNOWN`, `RUN_STATE_INVALID`, `WORKSPACE_UNREADABLE` |
 | `smoke_validate_workspace.py` | `python3 scripts/smoke_validate_workspace.py --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `WORKSPACE_UNREADABLE` for fatal setup exceptions. A provider id no registration supplies is a HIGH report finding carrying `PROVIDER_NOT_REGISTERED`, not a fatal envelope — it fails the smoke verdict, which is what reaches `ORCHESTRATION_WORKSPACE_UNSAFE`. |
 | `source_inventory.py` | `python3 scripts/source_inventory.py --report --format json`, or `--dry-run --format json` JSONL records | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_INVALID`, `INVENTORY_CHECKSUM_REQUIRED`, `INVENTORY_CHECKSUM_MISMATCH`, `WORKSPACE_UNREADABLE` |
-| `source_requests.py` | `python3 scripts/source_requests.py list --format json` or `python3 scripts/source_requests.py plan-fetch --request-id ID --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_INVALID`, `QUESTION_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_KIND_INVALID`, `REQUEST_KIND_UNDECLARED`, `REQUEST_SCOPE_INVALID`, `REQUEST_SCOPE_MISMATCH`, `REQUEST_SCOPE_MISSING`, `WORKSPACE_UNREADABLE` |
+| `source_requests.py` | `python3 scripts/source_requests.py list --format json`, `python3 scripts/source_requests.py fulfill --request-id ID --source-id ID --format json`, or `python3 scripts/source_requests.py plan-fetch --request-id ID --format json` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_INVALID`, `QUESTION_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_KIND_INVALID`, `REQUEST_KIND_UNDECLARED`, `REQUEST_SCOPE_INVALID`, `REQUEST_SCOPE_MISMATCH`, `REQUEST_SCOPE_MISSING`, `REQUEST_ALREADY_FULFILLED`, `SOURCE_UNKNOWN`, `SOURCE_REQUEST_FULFILL_DELEGATED`, `ORCHESTRATION_STATE_UNREADABLE`, `WORKSPACE_UNREADABLE` |
 | `verify_citations.py` | `python3 scripts/verify_citations.py --format json`, optionally `--live --provider arxiv\|openalex` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `VALUE_INVALID`, `ACQUISITION_DISABLED`, `ACQUISITION_PROVIDER_DISABLED`, `ACQUISITION_NETWORK_ERROR`, `ACQUISITION_RESPONSE_INVALID`, `WORKSPACE_UNREADABLE` |
 | `workspace_status.py` | `python3 scripts/workspace_status.py --format json`, `--check-complete --format json`, or `--run-id RUN_ID --format json` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `RUN_ID_INVALID`, `RUN_UNKNOWN`, `RUN_STATE_INVALID`, `WORKSPACE_UNREADABLE` |
 
@@ -488,7 +500,7 @@ Stable error codes:
 | `ORCHESTRATION_DELEGATION_CHANGED` | The retained session's declared acquisition mode or acquirer no longer matches `research.yml` `orchestration:`. | Restore the declaration the session started under, or start a new parent session under the new one. |
 | `SOURCE_REQUEST_FULFILL_DELEGATED` | Under `orchestration.acquisition: delegated`, `source_requests.py fulfill` or `record-attempt-failure` named a request that no live session's pending work order scopes. | Fulfil or record the attempt while executing the delegated acquisition work order that scopes the request, or finish the active session first. An identical re-fulfil (same request and source id) is a no-op and stays allowed. |
 | `QUESTION_REOPEN_DELEGATED` | Under `orchestration.acquisition: delegated`, `question_resolve.py reopen` named a question that no live session's pending work order scopes. | Reopen the question while executing the work order that scopes it — any phase — or finish the active session first. |
-| `ORCHESTRATION_STATE_UNREADABLE` | A workspace command could not read a session or work order while deciding whether a mutation is scoped by a pending action. | Restore `runs/orchestrations/`; unreadable control state fails closed rather than permitting the mutation. |
+| `ORCHESTRATION_STATE_UNREADABLE` | A workspace command could not read a session, a work order, or an action's order-claim ledger while deciding whether a mutation is scoped by a pending action or filing the claim that stands in for it, and the controller reports it for a ledger it cannot read while verifying a delegated acquisition submission. | Restore the orchestration control tree under `runs/`: sessions and work orders live in `runs/orchestrations/`, order claims in `runs/order-claims/<orchestration_id>/<action_id>.json`. Unreadable session state or order claims cannot authorize a mutation, so the command fails closed rather than permitting it. |
 | `ORCHESTRATION_CONTROL_REPAIR_REQUIRED` | The workspace controller found a required `runs/orchestration-guards/<orchestration_id>.json` marker before `next` or `submit`. | Restore the issued state and use managed `orchestrate resume --acknowledge-control-repair`; direct protocol submission stays fail-closed until the marker is acknowledged. |
 | `ACTION_NOT_PENDING` | `submit` named an action other than the persisted pending action. | Call `next` and submit the returned action id. |
 | `RESULT_INVALID` | A work result violates the version 1.0 schema or safe-path rules. | Return exactly `schema_version`, `action_id`, `outcome`, a bounded `summary`, and an `artifacts` list of workspace-relative paths. |
@@ -527,6 +539,7 @@ Stable error codes:
 | `QUESTION_UNKNOWN` | Referenced question slug does not exist. | Use an existing `wiki/questions/` slug. |
 | `REQUEST_UNKNOWN` | Referenced source-request id is unknown. | List requests and choose an existing id. |
 | `REQUEST_NOT_OPEN` | Discovery was requested for a source request that is no longer open. | Pass an open source request id, or record a new request with `source_requests.py add` for the remaining evidence gap; a fulfilled request is never reopened. |
+| `REQUEST_ALREADY_FULFILLED` | `source_requests.py fulfill` named a second source for a request one source already satisfies, or `record-attempt-failure` named a request that is already fulfilled. Inside a delegated acquisition order the answer comes from this action's order claim, which is where its bookkeeping lives until the controller commits it. | A fulfilled request has evidence: it takes no failed attempt and cannot be relinked to another source. Open a new request if the delivered source turned out to be unusable. Re-fulfilling with the same source id stays a no-op. |
 | `REQUEST_KIND_INVALID` | A source-request kind id is malformed, or a pack kind was written without its reserved `pack:` prefix. | Use a built-in kind, or a pack kind namespaced like `pack:<pack-name>/<kind-id>`. |
 | `REQUEST_KIND_UNDECLARED` | A well-formed namespaced kind is not declared by the workspace's active domain pack. | Declare the kind under `domain_pack.request_kinds`, or use a built-in kind. |
 | `REQUEST_SCOPE_INVALID` | A `--scope` or `--match-scope` value is not `key=value`, has a malformed key, or repeats a key. | Pass scope pairs as `key=value` with a lowercase key. |
@@ -1038,6 +1051,20 @@ reopens those questions with `scripts/question_resolve.py reopen --slug SLUG
 until the fulfilled manifest source also has a normalized record. `fulfill` only
 links the source to the request; `reopen` is the deterministic verb that moves
 the question `blocked` → `open` and attaches the delivered `source_id`.
+
+That is the providers-mode sequence, where both verbs write as they run. Under
+`orchestration.acquisition: delegated` the same two calls are made in the same
+order and run the same checks, but inside the pending delegated acquisition
+order neither writes: each files a claim under `runs/order-claims/` (see
+"Delegated Acquisition Fields" above), so the request stays `open` with a null
+`source_id` and the question stays `blocked` with its `blocked_reason` and
+`blocking_request_ids` intact until the controller accepts the submission. Read
+the workspace accordingly for the rest of the order. `list --status open` keeps
+returning a claimed request as open and `question_status.py` keeps counting the
+question as blocked, so neither is evidence the acquirer skipped the work. A
+second `reopen` of the same slug is accepted and merged into the claim rather
+than refused `STATUS_NOT_REOPENABLE`, because the page whose status would have
+refused it never moved.
 
 ## Step 4: Inject Questions Mid-Run
 
