@@ -1531,6 +1531,37 @@ class BundleFileCountTests(unittest.TestCase):
                 f"this record admits and must not move its count; record was {after}",
             )
 
+    def test_a_symlinked_directory_is_neither_descended_nor_counted(self):
+        """A link to a tree must not smuggle that tree into the count.
+
+        The walk is ``rglob``, which yields a linked directory as an entry but does not
+        descend it, and the entry is then refused as not a regular file. Both halves are
+        asserted, because only the pair is the property: a walk that descended would count
+        files the snapshot never enumerates, and a walk that descended *and* filtered would
+        still pay to traverse an arbitrarily large tree a bundle merely points at.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.copy_workspace(Path(tmpdir))
+            bundle = workspace / self.BUNDLE_RELATIVE
+            outside = workspace / "linked-tree"
+            (outside / "nested").mkdir(parents=True)
+            (outside / "one.tex").write_text("one\n", encoding="utf-8")
+            (outside / "nested" / "two.tex").write_text("two\n", encoding="utf-8")
+
+            before = self.bundle_record(workspace)
+            try:
+                (bundle / "linkdir").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):  # pragma: no cover - unprivileged Windows
+                self.skipTest("this filesystem does not allow creating a directory symlink")
+            after = self.bundle_record(workspace)
+
+            self.assertEqual(
+                before["metadata"]["file_count"],
+                after["metadata"]["file_count"],
+                "neither the link nor anything beneath it is evidence this record admits; "
+                f"record was {after}",
+            )
+
     def test_a_multiply_linked_member_leaves_the_count_with_both_of_its_names(self):
         """A hardlink drops *both* copies from the count, because the snapshot refuses the tree.
 
