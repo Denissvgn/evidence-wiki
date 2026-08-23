@@ -2094,7 +2094,10 @@ def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) ->
     question_claim = load_sibling_module("question_claim")
     date_text = question_claim.timestamp_utc().split("T", 1)[0]
     if action == "reopen":
-        headline = "reopened"
+        # A claimed reopen has not moved the page, so the headline must not say it did:
+        # a refused or failed order would leave this entry asserting a reopen that never
+        # happened, which is the one thing an audit log must not do.
+        headline = "reopen claimed" if result.get("contingent") else "reopened"
     elif action == GROUNDING_SET_ACTION:
         # The status did not change; naming it in the headline would read as if it had.
         headline = "grounding recorded"
@@ -2114,7 +2117,8 @@ def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) ->
             lines.append(f"- Cited sources: {', '.join(result['source_ids'])}.")
         lines.append(f"- Verification: {result.get('verification')}. {result.get('verification_remediation')}")
     if action == "reopen" and result.get("source_ids"):
-        lines.append(f"- Reopened with sources: {', '.join(result['source_ids'])}.")
+        claimed = " (claimed; committed when the order is accepted)" if result.get("contingent") else ""
+        lines.append(f"- Reopened with sources: {', '.join(result['source_ids'])}{claimed}.")
     if action == "reopen" and result.get("pairs"):
         # The audit entry must not credit scope for a pairing scope did not make: a tie
         # settled on the order --source-id was passed is the positional guess this
@@ -2210,6 +2214,10 @@ def render_text_report(report: dict[str, Any]) -> str:
             f"grounding set: {report['slug']} ({report.get('grounding_count', 0)} entries; {rendered_forms}; "
             f"verification {report.get('verification')})\n"
         )
+    if report.get("contingent"):
+        # The page still reads `blocked`. Saying `open` here would hand a text-mode caller
+        # a state the workspace does not hold until the controller accepts the order.
+        return f"{report['status']} (claimed, pending acceptance): {report['slug']}\n"
     return f"{report['status']}: {report['slug']}\n"
 
 

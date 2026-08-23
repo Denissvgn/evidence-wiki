@@ -2333,6 +2333,10 @@ def render_text_report(report: dict[str, Any]) -> str:
         return "\n".join(lines) + "\n"
     if report.get("action") == "fulfill":
         verb = "Fulfilled" if report["updated"] else "Already fulfilled (no-op)"
+        if report.get("contingent"):
+            # The durable record still reads `open`; the summary below is the projection
+            # the controller will commit, not what the store says right now.
+            verb = f"{verb} (claimed, pending acceptance)"
         return f"{verb}:\n  {request_summary(report['request'])}\n"
     if report.get("action") == "record-attempt-failure":
         event = report["event"]

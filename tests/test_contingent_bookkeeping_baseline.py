@@ -471,9 +471,6 @@ class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase)
             self.assertEqual(1, len(stored_requests(workspace)), stored_requests(workspace))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ClaimIdempotencyTests(DelegatedWorkspace, unittest.TestCase):
     """The re-filing contract a downstream consumer told us its replay path depends on.
@@ -666,3 +663,6 @@ class CommitReplayTests(DelegatedWorkspace, unittest.TestCase):
                 replayed,
                 msg=f"the replayed commit must be idempotent, not restamped: {replayed}",
             )
+
+if __name__ == "__main__":
+    unittest.main()

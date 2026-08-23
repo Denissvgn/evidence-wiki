@@ -205,6 +205,28 @@ def require_sanctioned_mutation(
         if (request_id is not None and _sanctions_request(entry["work_order"], request_id))
         or (question_slug is not None and _sanctions_question(entry["work_order"], question_slug))
     ]
+    committing = [
+        entry for entry in sanctioning if is_delegated_acquisition_order(entry["work_order"])
+    ]
+    if len(committing) > 1:
+        # Two live delegated acquisition orders scope the same subject, so there is no way
+        # to tell which one this mutation belongs to -- and guessing files the claim into
+        # one order's ledger while the other submits with nothing to show. Refused rather
+        # than resolved by sort order.
+        raise DelegationGateError(
+            error_code,
+            (
+                f"{subject} is scoped by more than one pending delegated acquisition order, so the "
+                "order this change belongs to is ambiguous"
+            ),
+            remediation=(
+                "Finish or cancel one of the overlapping orders; a request or question may be "
+                "scoped by only one pending acquisition order at a time."
+            ),
+            details={
+                "orchestration_ids": sorted(str(entry["orchestration_id"]) for entry in committing),
+            },
+        )
     if sanctioning:
         # Which entry is returned now decides whether the caller writes through or files a
         # claim, so it may not fall out of the order the sessions happened to sort in. Two
@@ -213,10 +235,7 @@ def require_sanctioned_mutation(
         # present. Writing through while one is pending would mutate exactly the state that
         # order freezes, which is the hole this mechanism closes; claiming under a research
         # order that never commits is visible and recoverable, and a silent bypass is not.
-        for entry in sanctioning:
-            if is_delegated_acquisition_order(entry["work_order"]):
-                return entry
-        return sanctioning[0]
+        return committing[0] if committing else sanctioning[0]
     raise DelegationGateError(
         error_code,
         (
