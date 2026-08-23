@@ -546,6 +546,24 @@ python3 scripts/question_resolve.py reopen --slug heat-exposure --agent-id fetch
 `blocked_reason` and `blocking_request_ids`, and merges the delivered source IDs
 into the question's `source_ids`.
 
+Inside a pending delegated acquisition work order it does none of that yet. The
+reopen is *claimed* against the order instead: the question stays `blocked` with
+its `blocked_reason` and `blocking_request_ids` intact, and the controller
+applies the three edits above when it accepts the acquisition submission — a
+refused or `failed` submission applies nothing, so a reopen becomes durable only
+when the order it belongs to is accepted. See
+[orchestration.md](orchestration.md) for when a workspace is in that mode and
+what acceptance commits. A research order's reopen writes straight through, as
+does every workspace that does not delegate acquisition at all.
+
+The report says which of the two happened: `contingent` is `true` when the
+reopen was claimed, text mode prints `open (claimed, pending acceptance)`, and
+`log.md` records `reopen claimed` rather than `reopened`. `contingent` is the
+only envelope field that separates them — `status` reads `open` and `applied`
+reads `true` either way, because both describe the question as it will stand
+once the order is accepted. A host that needs to know what the page says *now*
+branches on `contingent`, and on nothing else.
+
 Both flags are repeatable, and the resolver does **not** zip them by position.
 When a supplied request carries a structured `scope` (see
 [source-delivery.md](source-delivery.md)), each scoped request is paired with the
@@ -561,6 +579,7 @@ reported as `pairs`:
 ```json
 {
   "action": "reopen",
+  "contingent": false,
   "status": "open",
   "source_ids": ["raw:shade-cover-survey", "raw:heat-index-readings"],
   "request_ids": ["req-heat-index", "req-shade-cover"],
@@ -643,6 +662,8 @@ pairs as such rather than claiming declared scope decided them.
 | Error code | Cause |
 |------------|-------|
 | `STATUS_NOT_REOPENABLE` | The question is not `blocked`. |
+| `QUESTION_REOPEN_DELEGATED` | Under `orchestration.acquisition: delegated`, a session is live and no pending work order scopes this question — or more than one pending acquisition order does, so the order the reopen belongs to is ambiguous. |
+| `ORCHESTRATION_STATE_UNREADABLE` | A session document, work order, or order-claim ledger this reopen had to read could not be parsed. Unreadable control state fails closed rather than authorizing the write. |
 | `SOURCE_UNKNOWN` | A supplied `--source-id` is not in the manifest. |
 | `SOURCE_NOT_NORMALIZED` | A supplied source has no normalized record yet. |
 | `REQUEST_SCOPE_MISMATCH` | A scoped request matches no supplied source, or two scoped requests can only be satisfied by the same source. |
@@ -658,8 +679,14 @@ contested `request_ids`, `source_ids`, and each request's
 
 `reopen` never writes to `sources/source-requests.jsonl`. Pairs are computed,
 verified, and reported; recording fulfilment stays with
-`scripts/source_requests.py fulfill`, which remains the single writer of request
-records.
+`scripts/source_requests.py fulfill`. That command is no longer the sole writer
+of the fields that record it, though: inside a delegated acquisition order it
+files a claim rather than a record, and the `status` and `source_id` those
+records end up carrying are written by the controller when it accepts the
+submission — for the duration of such an order nothing but the controller
+marks a request fulfilled (see [orchestration.md](orchestration.md)). The
+division of labour this paragraph is about holds either way: no path through
+`reopen` touches the request store.
 
 ## Answer Export
 
