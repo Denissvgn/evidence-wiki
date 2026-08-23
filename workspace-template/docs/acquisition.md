@@ -662,6 +662,14 @@ When a download fulfills a source request, link the resulting manifest source:
 python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-id paper:2601.00001v1
 ```
 
+That is the provider flow this page describes, where the command writes the
+request store as soon as it returns. A workspace that delegates acquisition to
+an external host instead of enabling providers behaves differently inside a
+pending work order: the same command claims the fulfilment, and the controller
+commits it when it accepts the submission. See
+[orchestration.md](orchestration.md) before reading a mid-order request listing
+as the finished state.
+
 Fetch agents should follow `skills/research-acquire.md` for the complete
 request-backed loop: smoke validation, open-request listing, explicit provider
 fetching, sidecar checks, inventory, normalization, request fulfillment,
@@ -715,3 +723,7 @@ the distribution.
   evidence-policy context into acquisition planning.
 - [orchestrator-handoff.md](orchestrator-handoff.md) places acquisition and
   delivery in the external chain lifecycle.
+- [orchestration.md](orchestration.md) defines delegated acquisition, the mode
+  in which an external host acquires under a work order instead of the
+  providers registered here, and the bookkeeping rules that apply inside such
+  an order.

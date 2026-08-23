@@ -272,6 +272,17 @@ and stale claims from one status poll without parsing individual Markdown pages.
 Malformed `in_progress` records without `claimed_by` are not counted as active
 claims; lint still reports those as claim hygiene issues.
 
+The blocked-question link counters read the durable request store and the
+question pages, so inside a pending delegated acquisition order they lag the
+acquirer's work by design. When the acquirer has already delivered evidence and
+run `source_requests.py fulfill` and `question_resolve.py reopen`, those two
+results are recorded against the open work order rather than written into the
+workspace: the request still reads `open`, the question still reads `blocked`
+with its `blocking_request_ids` intact, and `blocked_questions_with_requests`
+still counts it. The controller writes them when it accepts the submission, so
+the first poll that reflects the delivery is the one after acceptance. See
+[orchestration.md](orchestration.md).
+
 ### `coverage`
 
 Coverage counts summarize every manifest file under `sources.coverage_dir`, so a
@@ -494,7 +505,7 @@ The rule set is fixed for schema version 1.0 and evaluated in this order:
 
 1. `attention_required`: smoke validation failed or could not run, lint reported HIGH issues, lint could not run, a blocked question lacks a valid linked open source request, or — under the default `review.escalation_scope: workspace` — a question awaits human review.
 2. `complete`: no actionable questions, no blocked questions, no questions awaiting human review, smoke passed, no HIGH lint issues. An empty backlog is reported as complete with an explanatory reason so orchestrators can distinguish "done" from "not yet started".
-3. `blocked_on_sources`: no actionable questions, but blocked questions remain and every blocked question has `blocking_request_ids` linked to open source requests. Deliver the requested evidence and reopen the blocked questions to proceed.
+3. `blocked_on_sources`: no actionable questions, but blocked questions remain and every blocked question has `blocking_request_ids` linked to open source requests. Deliver the requested evidence and reopen the blocked questions to proceed. Inside a pending delegated acquisition order that delivery does not move the verdict by itself: `source_requests.py fulfill` and `question_resolve.py reopen` claim the bookkeeping instead of writing it, and the controller commits the claim only when it accepts the submission. See [orchestration.md](orchestration.md).
 4. `in_progress`: actionable questions remain, or under `review.escalation_scope: question` the only remaining work is pending human reviews (structured code `questions_awaiting_review_only`).
 
 ## Exit Codes
