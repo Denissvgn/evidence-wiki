@@ -488,20 +488,76 @@ request.
 `docs/source-delivery.md` with `request_id` stamped in the sidecar, inventory,
 normalize, `source_requests.py fulfill`, `question_resolve.py reopen` — and
 records anything it could not obtain with
-`source_requests.py record-attempt-failure`. See
+`source_requests.py record-attempt-failure`. Two of those commands no longer
+write the workspace while the order is pending: `fulfill` and `reopen` file
+claims the controller commits when it accepts the submission, described next.
+`record-attempt-failure` still appends its audit event durably and immediately.
+See
 [../skills/research-acquire-delegated.md](../skills/research-acquire-delegated.md)
 for the full sequence. Managed `orchestrate run` and `resume` refuse a delegated
 workspace with `RUNNER_DELEGATED_ACQUISITION_UNSUPPORTED`: the order is addressed
 to the host's own connectors, which no managed worker can be.
 
-**Result semantics.** Every scoped request must end the action with a fulfilment
-**or** a recorded attempt failure naming that action; a request with neither
-fails the postconditions. A **partial** batch is therefore `completed`, not
-degraded — that is the ordinary shape of a delegated action. `blocked` means the
-attempt changed nothing durable at all and `resume` replays the same order;
-unlike the provider path, no partial delivery is tolerated, because a delegate
-holding delivered evidence can simply fulfil it. `failed` remains reserved for an
-unrecoverable condition, never a throttled or unauthorized connector.
+**Contingent bookkeeping.** A claim is the acquirer's statement of bookkeeping it
+has performed and the controller has not yet verified — "request `R` is fulfilled
+by source `S`", "question `Q` reopens with these sources" — and never a statement
+about the evidence itself, which is still checked against the manifest, the
+normalized tree, and the raw tree exactly as before. Inside a pending delegated
+acquisition order `source_requests.py fulfill` writes a claim to
+`runs/order-claims/<orchestration_id>/<action_id>.json` rather than to
+`sources/source-requests.jsonl`, and `question_resolve.py reopen` writes one
+there rather than to the question page. The controller commits an accepted
+action's claims as the last thing it does, after every postcondition has passed;
+a submission it refuses, and one the acquirer reports `failed`, commit nothing at
+all and leave the store and the pages as the order found them. The ledger sits
+outside `runs/orchestrations/<orchestration_id>/` for the reason the repair
+guard does: that tree is controller-authored control state, so a file the
+acquirer writes into it mid-action is drift rather than content. The work order
+is no better a home — it is a fingerprinted artifact the acquirer must not write
+at all.
+
+Until the submission is accepted, the durable state still says what it said at
+issuance. The request keeps `status: "open"` and `source_id: null`; the question
+page keeps `blocked`, with its `blocked_reason` and `blocking_request_ids`
+intact. Both commands say so rather than leaving it to be discovered: their JSON
+carries a `contingent` boolean, their text output appends
+`(claimed, pending acceptance)`, and `log.md` records `reopen claimed` and
+`(claimed; committed when the order is accepted)`. Read that boolean, because
+the rest of the JSON describes the claim: `fulfill` reports the request as
+`fulfilled` with its `source_id`, and `reopen` reports `status: "open"`, both of
+which are what the workspace will hold once the order is accepted rather than
+what it holds now. The one user-observable difference is in reads — a mid-order
+`source_requests.py list --status open` keeps returning a claimed request as
+open, which is the truthful answer, because nothing has been committed yet.
+
+`record-attempt-failure` files no claim: a failed attempt is evidence that the
+action ran, and it is appended to the audit exactly as durably as before. Only
+its already-fulfilled refusal changed, and it now consults the ledger as well as
+the store, so a fulfilment this action has merely claimed contradicts an attempt
+failure the same way a committed one does. Contingency is scoped to acquisition:
+a research order's `reopen` writes its page straight through, since no
+acquisition submission would ever come along to commit a claim for it, and a
+workspace that acquires through its own providers never reaches any of this.
+
+**Result semantics.** Every scoped request must end the action with a claimed
+fulfilment **or** a recorded attempt failure naming that action; a request with
+neither fails the postconditions. The two outcomes are no longer symmetric in
+what they leave behind: an attempt failure is durable the moment
+`record-attempt-failure` returns, while a fulfilment is a claim that becomes
+durable only if this submission is accepted. A **partial** batch is therefore
+`completed`, not degraded — that is the ordinary shape of a delegated action.
+`blocked` means the action filed no claims and delivered nothing: no fulfilment
+or reopen claim in the ledger, nothing added to the raw, normalized, or manifest
+trees, and no recorded attempt failure either, since a recorded attempt failure
+is durable evidence that the action ran and belongs to a `completed` result.
+Because the store and the pages are frozen for the duration of the order,
+finding them unchanged no longer shows that the attempt did nothing, so the
+controller reads the claim ledger too and refuses a `blocked` submission that
+claimed a fulfilment or a reopen. A blocked action leaves the order pending and
+`resume` replays it; unlike the provider path, no partial delivery is tolerated,
+because a delegate holding delivered evidence can simply fulfil it. `failed`
+remains reserved for an unrecoverable condition, never a throttled or
+unauthorized connector.
 
 **Retry and exhaustion.** Attempts are counted from the durable audit and scoped
 to the current session, so a new session gets a fresh look at every request —
@@ -522,8 +578,20 @@ scopes — `SOURCE_REQUEST_FULFILL_DELEGATED` and `QUESTION_REOPEN_DELEGATED`. A
 request is sanctioned by a pending delegated acquisition order that scopes it; a
 question by any pending order that scopes its slug, since research orders
 legitimately mutate their own questions. An identical re-fulfil is a no-op and
-stays allowed. Without the `orchestration:` section, or with every session
-terminal, nothing is gated and these commands behave exactly as before.
+stays allowed; inside an acquisition order it is answered against the claim,
+which is the only record of what this action has already fulfilled. Without the
+`orchestration:` section, or with every session terminal, nothing is gated and
+these commands behave exactly as before.
+
+Permission is only half of what being inside the protocol changes. A sanctioned
+`fulfill` or `reopen` in a delegated acquisition order is deferred as well as
+allowed: the acquirer can claim its bookkeeping but cannot make it durable, and
+the controller decides that when it rules on the submission. Sanction and
+durability still coincide everywhere else — a research order's `reopen` is scoped
+by that order and writes its page on the spot, and an ungated workspace writes as
+it always did — so "the command was permitted" and "the workspace changed" are
+the same statement outside delegated acquisition and two different ones inside
+it.
 
 ## Provider And Runner Boundaries
 
