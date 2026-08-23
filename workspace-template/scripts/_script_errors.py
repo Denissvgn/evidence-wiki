@@ -694,6 +694,11 @@ def classify_error_code(message: str) -> str:
     # different source id", a string this package has never raised.
     if text.startswith("Request already fulfilled:") or "is already fulfilled by source" in lower:
         return "REQUEST_ALREADY_FULFILLED"
+    # The same trap the paragraph above describes: a claim ledger the command cannot read is
+    # unreadable *orchestration* state, and falling through to the tail would report it as a
+    # broken workspace and tell the caller to check its starter files.
+    if text.startswith("Unreadable order claims:"):
+        return "ORCHESTRATION_STATE_UNREADABLE"
     if text.startswith("Unknown attempt failure code:"):
         return "ATTEMPT_FAILURE_CODE_INVALID"
     if text.startswith("Unknown source id:"):

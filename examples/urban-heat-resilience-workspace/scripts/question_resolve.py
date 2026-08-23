@@ -113,8 +113,13 @@ _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from _delegation_gate import DelegationGateError, require_sanctioned_mutation
+from _delegation_gate import (
+    DelegationGateError,
+    is_delegated_acquisition_order,
+    require_sanctioned_mutation,
+)
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
+from _order_claims import OrderClaimError, record_reopen_claim
 from _request_scope import conflict_details, format_scope, normalize_scope, scope_match
 from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
 from _workspace_locks import LockUnavailableError
@@ -1641,6 +1646,19 @@ def require_in_order_question_mutation(
     )
 
 
+def apply_reopen_to_page(page_path: Path, text: str, merged: list[str], now: str) -> None:
+    """The one edit a reopen makes to a question page.
+
+    Extracted so the controller's commit of a claimed reopen applies exactly this, rather
+    than a second implementation that could drift from it.
+    """
+    question_claim = load_sibling_module("question_claim")
+    fields: dict[str, Any] = {"status": "open", "source_ids": merged, "updated": now.split("T", 1)[0]}
+    remove_fields = ("claimed_by", "claimed_at", "blocked_reason", "blocking_request_ids")
+    updated = apply_resolution_edits(text, fields, remove_fields, quoted_fields={"updated"})
+    question_claim.write_page_atomic(page_path, updated)
+
+
 def transition_reopen(
     page_path: Path,
     project_root: Path,
@@ -1673,7 +1691,15 @@ def transition_reopen(
         # Under delegated acquisition this transition must belong to a pending work order.
         # Reopen has no no-op path to exempt: a question that is not blocked was already
         # refused above, so everything reaching here mutates the page.
-        require_in_order_question_mutation(project_root, config, slug)
+        sanctioning = require_in_order_question_mutation(project_root, config, slug)
+        # Contingent bookkeeping applies only inside a delegated *acquisition* order. A
+        # research order scopes questions too, and its reopen is not part of any acquisition
+        # submission, so nothing would ever come along to commit a claim for it.
+        contingent = (
+            sanctioning
+            if is_delegated_acquisition_order(sanctioning.get("work_order") if sanctioning else None)
+            else None
+        )
         source_ids = validate_source_ids(project_root, config, unique_nonempty(args.source_id, "--source-id"))
         if not source_ids:
             raise ResolveError(EXIT_INVALID, "VALUE_INVALID", "reopen requires at least one --source-id")
@@ -1710,12 +1736,28 @@ def transition_reopen(
             if source_id not in merged:
                 merged.append(source_id)
         now = question_claim.timestamp_utc()
-        fields: dict[str, Any] = {"status": "open", "source_ids": merged, "updated": now.split("T", 1)[0]}
-        remove_fields = ("claimed_by", "claimed_at", "blocked_reason", "blocking_request_ids")
-        updated = apply_resolution_edits(text, fields, remove_fields, quoted_fields={"updated"})
-        question_claim.write_page_atomic(page_path, updated)
+        if contingent is not None:
+            try:
+                record_reopen_claim(
+                    project_root,
+                    contingent["orchestration_id"],
+                    contingent["action_id"],
+                    question_slug=slug,
+                    source_ids=list(merged),
+                    request_ids=list(request_ids),
+                    claimed_at=now,
+                )
+            except OrderClaimError as exc:
+                raise ResolveError(
+                    EXIT_INVALID,
+                    "ORCHESTRATION_STATE_UNREADABLE",
+                    f"unreadable order claims: {exc.message}",
+                ) from exc
+        else:
+            apply_reopen_to_page(page_path, text, merged, now)
         return {
             "applied": True,
+            "contingent": contingent is not None,
             "status": "open",
             "previous_holder": {},
             "answer_page": None,
