@@ -4836,6 +4836,17 @@ class OrchestrationControllerTests(unittest.TestCase):
                 ],
             )
 
+    def reopen_question(self, target: Path, request_id: str, source_id: str, slug: str) -> None:
+        """Reopen without fulfilling, so a case can exercise the reopen half on its own."""
+        self.assert_json_script_ok(
+            RESOLVE,
+            [
+                "--project-root", str(target), "reopen", "--slug", slug,
+                "--agent-id", "acquirer-1", "--source-id", source_id,
+                "--request-id", request_id, "--format", "json",
+            ],
+        )
+
     def submit_delegated(self, target: Path, action_id: str = "action-0001", **overrides) -> tuple:
         result = {
             "schema_version": "1.0",
@@ -5164,10 +5175,10 @@ class OrchestrationControllerTests(unittest.TestCase):
 
     def test_a_fully_unblocked_question_left_blocked_is_refused(self):
         # Fulfilment alone is not the outcome: the question the evidence was for must
-        # actually reopen, or research never picks it up again. Through `submit` the
-        # earlier runtime guard answers first — a blocked question whose only request is
-        # fulfilled is a HIGH lint finding, which flips the readiness verdict — so this
-        # asserts the refusal happens and the next case pins the postcondition itself.
+        # actually reopen, or research never picks it up again. Under contingent
+        # bookkeeping the fulfilment is a claim, so the durable store has not moved and
+        # workspace health has nothing to report -- the postcondition is what answers, and
+        # it names the question rather than the workspace.
         with tempfile.TemporaryDirectory() as tmpdir:
             target, request_id = self.delegated_action(Path(tmpdir))
             source_id = self.deliver_for_request(target, request_id)
@@ -5176,7 +5187,8 @@ class OrchestrationControllerTests(unittest.TestCase):
             code, error, _ = self.submit_delegated(target)
 
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
-            self.assertEqual("ORCHESTRATION_WORKSPACE_HEALTH_CHANGED", error["error_code"])
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"], error)
+            self.assertIn("reopen every fully unblocked question", error["message"], error)
 
     def test_the_question_transition_postcondition_names_the_unreopened_question(self):
         # The guard behind the runtime refusal above, exercised directly. It is the check
@@ -5992,7 +6004,11 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(CONTROLLER.EXIT_INVALID, relink_code, relink_error)
             self.assertEqual("REQUEST_ALREADY_FULFILLED", relink_error["error_code"], relink_error)
             self.assertTrue(relink_error["recoverable"], relink_error)
-            self.assertEqual(source_id, self.stored_request(target, request_id)["source_id"])
+            # The claim, not the store, is what holds the fulfilment mid-order: the store
+            # is frozen until the controller commits. That the relink was refused against
+            # the claim is the same guarantee, read where the fulfilment now lives.
+            self.assertIsNone(self.stored_request(target, request_id)["source_id"])
+            self.assertEqual(source_id, self.claimed_source_id(target, request_id))
 
             # And the advice the operator actually reads names neither of them.
             for text in (error["remediation"], failure["repair"]):
@@ -6086,6 +6102,14 @@ class OrchestrationControllerTests(unittest.TestCase):
         self.assertEqual(CONTROLLER.RECONCILIATION_ARM_REPAIRS["scoped_match"], failure["repair"])
         return error
 
+    def claimed_source_id(self, target: Path, request_id: str) -> str | None:
+        """The source a pending action claims for a request, read from its claim ledger."""
+        path = target / "runs" / "order-claims" / "orch-test" / "action-0001.json"
+        if not path.is_file():
+            return None
+        claim = json.loads(path.read_text(encoding="utf-8"))["fulfilments"].get(request_id)
+        return claim["source_id"] if isinstance(claim, dict) else None
+
     def test_the_failed_outcome_costs_exactly_what_the_repair_says(self):
         """The one escape nothing refuses, and the reason it is no longer offered as one.
 
@@ -6128,20 +6152,19 @@ class OrchestrationControllerTests(unittest.TestCase):
                 ["action-0001"], [record["action_id"] for record in session["failure_records"]], session
             )
 
-            # Cost one: the fulfilment the controller refused to verify is still recorded.
+            # Costs one and two are what contingent bookkeeping removes. The fulfilment was
+            # a claim the controller never committed, so the request is untouched and still
+            # open -- a later session routes it again rather than finding it invisible.
             stored = self.stored_request(target, request_id)
-            self.assertEqual("fulfilled", stored["status"], stored)
-            self.assertEqual(source_id, stored["source_id"], stored)
-
-            # Cost two: the request never reopens, so the promised new session has nothing
-            # to route and this evidence is never verified by anything.
+            self.assertEqual("open", stored["status"], stored)
+            self.assertIsNone(stored["source_id"], stored)
             self.assertEqual(
-                [],
+                [request_id],
                 [
                     record["request_id"]
                     for record in CONTROLLER.open_requests(target, CONTROLLER.load_config(target))
                 ],
-                "a fulfilled request is invisible to routing, so no later order revisits it",
+                "an uncommitted claim leaves the request routable, which is the point",
             )
 
             # Cost three: the unverified bytes are simply still there.
@@ -6336,6 +6359,29 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"])
             self.assertIn("changed the source-request store", error["message"])
             self.assertIn("cannot fulfill a request", error["remediation"])
+
+    def test_a_blocked_delegated_action_that_reopened_a_question_is_refused(self):
+        """The reopen half of the same rule, which needs its own case now.
+
+        Both halves used to be caught by one assertion: the question page moved, so the
+        no-change check on question files saw it. The page no longer moves inside an order,
+        so that check passes while a reopen claim sits on file. The refusal has to read the
+        ledger, and disabling only the fulfilment half of it would leave this uncaught.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target, request_id = self.delegated_action(Path(tmpdir))
+            source_id = self.deliver_for_request(target, request_id)
+            self.reopen_question(target, request_id, source_id, "test-question")
+
+            code, error, _ = self.submit_delegated(target, outcome="blocked", summary="Aborted.")
+
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
+            self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", error["error_code"], error)
+            self.assertIn("changed question files", error["message"], error)
+            self.assertIn("cannot reopen a question", error["remediation"], error)
+            self.assertEqual(
+                ["test-question"], error["details"]["claimed_question_slugs"], error
+            )
 
     def test_a_blocked_delegated_action_that_recorded_an_attempt_is_refused(self):
         # Recording a failure is the delegated way of saying "this request produced

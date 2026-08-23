@@ -6623,6 +6623,92 @@ def delegated_fulfilment_correlation_failures(
     return failures
 
 
+def load_order_claims(
+    project_root: Path,
+    orchestration_id: str,
+    action_id: str,
+    order_claims: ModuleType,
+) -> dict[str, Any]:
+    """Read one action's claim ledger, failing closed and bounded like every other input.
+
+    A ledger the controller cannot read is never reported as "no claims". Both arms rely on
+    the opposite reading -- the completed arm to know what to commit, the blocked arm to
+    refuse an attempt that claimed anything -- so degrading to empty would turn an
+    unreadable ledger into a silently accepted submission.
+    """
+    try:
+        claims = order_claims.load_claims(
+            order_claims.claims_path(project_root, orchestration_id, action_id)
+        )
+    except order_claims.OrderClaimError as exc:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_STATE_UNREADABLE",
+            f"delegated acquisition claims could not be read: {exc.message}",
+            recoverable=True,
+            remediation="Restore the orchestration control tree; unreadable claims cannot authorize bookkeeping.",
+        ) from exc
+    entries = len(claims.get("fulfilments", {})) + len(claims.get("reopens", {}))
+    if entries > MAX_SCOPE_GUARD_ENTRIES:
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_SCOPE_EXCEEDED",
+            f"delegated acquisition claimed {entries} bookkeeping entries, over the {MAX_SCOPE_GUARD_ENTRIES} limit",
+            recoverable=False,
+        )
+    return claims
+
+
+def commit_delegated_bookkeeping(
+    project_root: Path,
+    config: dict[str, Any],
+    fulfilment_claims: dict[str, Any],
+    reopen_claims: dict[str, Any],
+    committed_slugs: set[str],
+) -> None:
+    """Write the bookkeeping the acquirer claimed, now that the controller has accepted it.
+
+    Called from the wet pass only, and only after every ``require`` above it has passed, so
+    a refused submission leaves the request store and the question pages exactly as it
+    found them. It is deliberately the *last* thing the delegated arm does: the twin-pass
+    check compares the phase each pass returns, and a pass that wrote before deciding could
+    only be compared against a workspace it had already changed.
+
+    Idempotent in both halves, because finalization can be interrupted and replayed.
+    """
+    source_requests = load_sibling_module("source_requests")
+    question_resolve = load_sibling_module("question_resolve")
+    now = timestamp_utc()
+    # Reopens first, and the order matters. Finalization is replayable, so a crash can land
+    # between the two halves. Reopening first leaves questions open with no blocking link --
+    # a state the health guard does not inspect. Fulfilling first would leave a *blocked*
+    # question whose blocking request reads fulfilled, which lint reports and readiness
+    # turns into ORCHESTRATION_WORKSPACE_HEALTH_CHANGED, refused as unrecoverable before the
+    # replay ever reaches finalization. The cheaper half-state is the one to leave behind.
+    for slug, claim in sorted(reopen_claims.items()):
+        if slug in committed_slugs:
+            continue
+        source_ids = [value for value in claim.get("source_ids", []) if isinstance(value, str)]
+        question_resolve.commit_reopen_claim(project_root, config, slug, source_ids, now)
+    if fulfilment_claims:
+        path = source_requests.requests_path(project_root, config)
+        with source_requests.workspace_lock(
+            source_requests.source_requests_lock_path(path), purpose="source request mutation"
+        ):
+            records = source_requests.load_requests(path)
+            changed = False
+            for record in records:
+                claim = fulfilment_claims.get(str(record.get("request_id")))
+                if not isinstance(claim, dict):
+                    continue
+                if record.get("status") == "fulfilled" and record.get("source_id") == claim["source_id"]:
+                    continue
+                record["status"] = "fulfilled"
+                record["source_id"] = str(claim["source_id"])
+                record["updated_at"] = now
+                changed = True
+            if changed:
+                source_requests._write_requests_unlocked(path, records)
+
+
 def verify_delegated_acquisition_postconditions(
     project_root: Path,
     session: dict[str, Any],
@@ -6737,6 +6823,50 @@ def verify_delegated_acquisition_postconditions(
         "Restore the source-request store; an attempted request is never deleted.",
     )
 
+    # --- contingent bookkeeping -------------------------------------------------------
+    # What the acquirer *claims* it did. The request store and the question pages are
+    # frozen for the duration of the order, so this ledger -- not the store -- is what says
+    # which request was fulfilled by which source. Everything downstream reads the
+    # projection; nothing downstream reads a status the acquirer wrote.
+    order_claims = load_sibling_module("_order_claims")
+    claims = load_order_claims(
+        project_root,
+        require_safe_id(session["orchestration_id"], "orchestration_id"),
+        action_id,
+        order_claims,
+    )
+    fulfilment_claims = {
+        str(key): value
+        for key, value in claims.get("fulfilments", {}).items()
+        if isinstance(value, dict) and isinstance(value.get("source_id"), str)
+    }
+    reopen_claims = {
+        str(key): value
+        for key, value in claims.get("reopens", {}).items()
+        if isinstance(value, dict)
+    }
+    require(
+        set(fulfilment_claims) <= scoped_requests,
+        "delegated acquisition claimed a fulfilment for a request this order does not scope",
+        {"request_ids": sorted(set(fulfilment_claims) - scoped_requests)},
+        "Fulfil only request ids named by this work order.",
+    )
+    projected_requests_by_id = dict(requests_by_id)
+    for claimed_id, claim in fulfilment_claims.items():
+        projected = dict(requests_by_id[claimed_id])
+        projected["status"] = "fulfilled"
+        projected["source_id"] = str(claim["source_id"])
+        projected_requests_by_id[claimed_id] = projected
+    # A claim whose durable record already carries it is one the controller committed on a
+    # previous, interrupted finalization. Those ids -- and only those -- may differ from the
+    # frozen baseline; everything else in the store must be byte-identical.
+    committed_request_ids = {
+        claimed_id
+        for claimed_id, claim in fulfilment_claims.items()
+        if requests_by_id[claimed_id].get("status") == "fulfilled"
+        and requests_by_id[claimed_id].get("source_id") == claim["source_id"]
+    }
+
     # --- per-request outcomes ---------------------------------------------------------
     current_attempt_events = request_attempt_audit_events(project_root, config)
     current_attempt_fingerprints = record_fingerprint_snapshot(
@@ -6791,9 +6921,9 @@ def verify_delegated_acquisition_postconditions(
     )
 
     fulfilled = [
-        requests_by_id[request_id]
+        projected_requests_by_id[request_id]
         for request_id in request_ids
-        if requests_by_id[request_id].get("status") == "fulfilled"
+        if projected_requests_by_id[request_id].get("status") == "fulfilled"
     ]
     fulfilled_request_ids = {str(item.get("request_id")) for item in fulfilled}
     failed_request_ids = set(failed_requests)
@@ -6914,11 +7044,31 @@ def verify_delegated_acquisition_postconditions(
         remediation="Start a fresh orchestration session; never infer question transitions after execution.",
     )
     fulfilled_by_request_id = {str(item.get("request_id")): item for item in fulfilled}
-    current_question_evidence = scoped_question_evidence_snapshot(
+    durable_question_evidence = scoped_question_evidence_snapshot(
         project_root,
         config,
         list(blocked_questions_before),
     )
+    # The page is frozen too, so what a reopen *did* is read from its claim projected onto
+    # the frozen page -- exactly the edit the controller will commit.
+    current_question_evidence = dict(durable_question_evidence)
+    committed_question_slugs: set[str] = set()
+    for slug, claim in reopen_claims.items():
+        durable = durable_question_evidence.get(slug)
+        if not isinstance(durable, dict):
+            continue
+        claimed_sources = [value for value in claim.get("source_ids", []) if isinstance(value, str)]
+        projected_sources = sorted(set(durable.get("source_ids", [])) | set(claimed_sources))
+        if durable.get("status") == "open" and not durable.get("blocking_request_ids"):
+            # Already committed by an interrupted finalization; the page may differ from the
+            # frozen baseline for this slug alone.
+            committed_question_slugs.add(slug)
+            continue
+        current_question_evidence[slug] = {
+            "status": "open",
+            "blocking_request_ids": [],
+            "source_ids": projected_sources,
+        }
     # A question is unblocked only when every request blocking it was fulfilled. One
     # unfulfilled blocker — scoped and failed, or outside this order entirely — leaves the
     # question exactly as it was.
@@ -6928,6 +7078,16 @@ def verify_delegated_acquisition_postconditions(
         if set(before.get("blocking_request_ids", [])) <= fulfilled_request_ids
         and before.get("blocking_request_ids")
     }
+    unauthorized_reopen_claims = sorted(set(reopen_claims) - fully_unblocked)
+    require(
+        not unauthorized_reopen_claims,
+        "delegated acquisition changed a question that was not fully unblocked by this action",
+        {
+            "question_slugs": unauthorized_reopen_claims,
+            "fully_unblocked": sorted(fully_unblocked),
+        },
+        "Restore every question with a remaining unfulfilled blocking request; reopen only fully unblocked ones.",
+    )
     question_transition_failures: list[dict[str, Any]] = []
     for slug in sorted(fully_unblocked):
         before = blocked_questions_before[slug]
@@ -6969,27 +7129,38 @@ def verify_delegated_acquisition_postconditions(
     request_scope_violations = fingerprint_scope_violations(
         source_requests_before,
         current_source_request_fingerprints,
-        # Only a fulfilled request's record changes. A failed attempt lives in the audit,
-        # so the request itself must be byte-stable.
-        mutable_ids=fulfilled_request_ids,
+        # The store is frozen for the duration of the order: fulfilment is a claim the
+        # controller commits, so nothing should have written here at all. The only
+        # tolerated difference is a claim this controller already committed on an
+        # interrupted finalization, which is a replay of its own write, not the acquirer's.
+        mutable_ids=committed_request_ids,
     )
     require(
         not any(request_scope_violations.values()),
         "delegated acquisition changed source requests outside the fulfilled request scope",
         {"source_request_scope_violations": request_scope_violations},
-        "Restore every unfulfilled request; record its failed attempt in the audit instead of editing it.",
+        (
+            "The request store is frozen while an order is pending. Fulfil through "
+            "source_requests.py fulfill, which files a claim the controller commits; restore any "
+            "request edited by hand."
+        ),
     )
     current_question_files = question_file_fingerprint_snapshot(project_root, config)
     question_scope_violations = fingerprint_scope_violations(
         question_files_before,
         current_question_files,
-        mutable_ids={f"{slug}.md" for slug in fully_unblocked},
+        # Frozen on the same terms as the request store, and tolerant of the same replay.
+        mutable_ids={f"{slug}.md" for slug in committed_question_slugs},
     )
     require(
         not any(question_scope_violations.values()),
         "delegated acquisition changed a question that was not fully unblocked by this action",
         {"question_scope_violations": question_scope_violations},
-        "Restore every question with a remaining unfulfilled blocking request; reopen only fully unblocked ones.",
+        (
+            "Question pages are frozen while an order is pending. Reopen through "
+            "question_resolve.py reopen, which files a claim the controller commits; restore any page "
+            "edited by hand."
+        ),
     )
 
     fulfilled_source_ids = {
@@ -7170,6 +7341,14 @@ def verify_delegated_acquisition_postconditions(
     )
 
     require(current in {"fetching", "evidence_ready"}, "delegated acquisition child run is in an invalid state")
+    if apply_effects:
+        commit_delegated_bookkeeping(
+            project_root,
+            config,
+            fulfilment_claims,
+            reopen_claims,
+            committed_question_slugs,
+        )
     if not fulfilled:
         # Every scoped request failed, and each failure is recorded. The action itself is
         # complete: the acquirer did what the order asked and proved it. Return to planning
@@ -8295,6 +8474,29 @@ def verify_blocked_delegated_acquisition_postconditions(
             remediation,
         )
 
+    # Read before the six workspace snapshots below, and never degraded to "no claims":
+    # the store and the pages are frozen inside this order, so their no-change assertions
+    # are satisfied by a claim rather than disproved by one. The ledger is the only place a
+    # blocked attempt's bookkeeping can now show up.
+    order_claims = load_sibling_module("_order_claims")
+    claims = load_order_claims(
+        project_root,
+        require_safe_id(work_order.get("orchestration_id"), "orchestration_id"),
+        require_safe_id(work_order.get("action_id"), "action_id"),
+        order_claims,
+    )
+    require(
+        not claims.get("fulfilments"),
+        "blocked delegated acquisition changed the source-request store",
+        {"claimed_request_ids": sorted(claims.get("fulfilments", {}))},
+        "Restore every request; a blocked attempt cannot fulfill a request. Report a fulfilment as completed.",
+    )
+    require(
+        not claims.get("reopens"),
+        "blocked delegated acquisition changed question files",
+        {"claimed_question_slugs": sorted(claims.get("reopens", {}))},
+        "Restore every question; a blocked attempt cannot reopen a question.",
+    )
     require_unchanged(
         source_requests_before,
         source_request_record_fingerprint_snapshot(project_root, config),

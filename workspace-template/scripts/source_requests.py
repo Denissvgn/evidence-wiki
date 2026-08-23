@@ -2066,10 +2066,13 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
             raise SystemExit(f"Unknown request id: {request_id} (no record in {relative_label(project_root, path)})")
         if target.get("status") == "fulfilled":
             if target.get("source_id") == source_id:
+                # Reachable on a replay after the controller committed a claim, so it
+                # carries the same flag the contingent paths do rather than omitting it.
                 return {
                     "schema_version": SCHEMA_VERSION,
                     "action": "fulfill",
                     "updated": False,
+                    "contingent": False,
                     "request": target,
                     "requests_path": relative_label(project_root, path),
                 }
@@ -2144,11 +2147,12 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
             target["source_id"] = source_id
             target["updated_at"] = now
             _write_requests_unlocked(path, records)
+    claimed_note = " (claimed; committed when the order is accepted)" if contingent is not None else ""
     append_log_entry(
         project_root / "log.md",
         (
             f"## [{now.split('T', 1)[0]}] source-request | Fulfilled source request\n\n"
-            f"- Request: `{request_id}` fulfilled by `{source_id}`.\n"
+            f"- Request: `{request_id}` fulfilled by `{source_id}`{claimed_note}.\n"
             f"- Questions: {', '.join(target.get('question_slugs') or []) or 'none'}.\n"
         ),
     )

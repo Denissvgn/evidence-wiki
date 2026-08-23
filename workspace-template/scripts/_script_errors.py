@@ -170,7 +170,8 @@ _REMEDIATIONS = {
         "Reopen this question while executing the work order that scopes it, or finish the active session first."
     ),
     "ORCHESTRATION_STATE_UNREADABLE": (
-        "Restore the orchestration control tree; unreadable session state cannot authorize a mutation."
+        "Restore the orchestration control tree under runs/; unreadable session state or order "
+        "claims cannot authorize a mutation."
     ),
     # orchestration_controller.py
     #

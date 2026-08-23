@@ -119,7 +119,13 @@ from _delegation_gate import (
     require_sanctioned_mutation,
 )
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
-from _order_claims import OrderClaimError, record_reopen_claim
+from _order_claims import (
+    OrderClaimError,
+    claims_path,
+    load_claims,
+    record_reopen_claim,
+    reopen_claim,
+)
 from _request_scope import conflict_details, format_scope, normalize_scope, scope_match
 from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
 from _workspace_locks import LockUnavailableError
@@ -1659,6 +1665,37 @@ def apply_reopen_to_page(page_path: Path, text: str, merged: list[str], now: str
     question_claim.write_page_atomic(page_path, updated)
 
 
+def commit_reopen_claim(
+    project_root: Path,
+    config: dict[str, Any],
+    slug: str,
+    source_ids: list[str],
+    now: str,
+) -> bool:
+    """Apply a claimed reopen to the durable page. Idempotent: a page already open is left.
+
+    Deliberately re-reads the page rather than trusting the text the claim was computed
+    against: the freeze means the bytes are the same, and if they are not, the scope guard
+    refused before this was ever called.
+    """
+    question_claim = load_sibling_module("question_claim")
+    page_path = question_claim.question_page_path(project_root, slug)
+    with question_claim.question_lock(page_path):
+        text = page_path.read_text(encoding="utf-8")
+        parts = question_claim.split_frontmatter_lines(text)
+        if parts is None:
+            return False
+        frontmatter = question_claim.frontmatter_mapping(parts[0])
+        if frontmatter.get("status") != "blocked":
+            return False
+        merged = existing_source_ids(frontmatter)
+        for source_id in source_ids:
+            if source_id not in merged:
+                merged.append(source_id)
+        apply_reopen_to_page(page_path, text, merged, now)
+        return True
+
+
 def transition_reopen(
     page_path: Path,
     project_root: Path,
@@ -1737,7 +1774,27 @@ def transition_reopen(
                 merged.append(source_id)
         now = question_claim.timestamp_utc()
         if contingent is not None:
+            # Merged with whatever this action already claimed for the question, not
+            # written over it. The page is frozen, so a second reopen recomputes `merged`
+            # from the same unchanged frontmatter and would otherwise drop the sources the
+            # first one contributed -- a loss that used to be impossible, because the page
+            # moved and the second call was refused as not reopenable.
             try:
+                claimed = reopen_claim(
+                    load_claims(
+                        claims_path(
+                            project_root, contingent["orchestration_id"], contingent["action_id"]
+                        )
+                    ),
+                    slug,
+                )
+                if isinstance(claimed, dict):
+                    for value in claimed.get("source_ids", []):
+                        if isinstance(value, str) and value not in merged:
+                            merged.append(value)
+                    for value in claimed.get("request_ids", []):
+                        if isinstance(value, str) and value not in request_ids:
+                            request_ids.append(value)
                 record_reopen_claim(
                     project_root,
                     contingent["orchestration_id"],
@@ -2104,6 +2161,10 @@ def build_report(action: str, slug: str, agent_id: str, page_path: Path, project
         "slug": slug,
         "agent_id": agent_id,
         "applied": result["applied"],
+        # `status` is what the question will read once the controller accepts the order.
+        # While `contingent` is true the page still says `blocked`, so a consumer that
+        # needs the durable answer has to read this flag rather than the status alone.
+        "contingent": bool(result.get("contingent")),
         "status": result["status"],
         "question_page": workspace_label(project_root, page_path),
         "answer_page": result.get("answer_page"),
