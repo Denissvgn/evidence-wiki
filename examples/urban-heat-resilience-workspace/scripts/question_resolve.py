@@ -49,11 +49,28 @@ research runs:
   fulfilled source id(s) so ``research-answer`` can pick the question up. It is
   the deterministic counterpart to ``block`` and the only verb that operates on a
   terminal status; it requires no claim because a blocked question is unclaimed.
+  Whether that transition is written or only claimed turns on the order it runs
+  inside. Outside a pending delegated **acquisition** order it is written to the
+  page immediately: in a workspace that does not delegate acquisition, when no
+  live order is pending, and under a sanctioning order of any other kind — a
+  **research** order legitimately scopes a question, and no acquisition
+  submission will ever come along to commit what it reopens. Inside a pending
+  delegated acquisition order the transition is filed as a claim under
+  ``runs/order-claims/`` instead, and ``orchestration_controller.py`` applies it
+  to the page when it accepts the submission; a refused or failed submission
+  applies nothing, and until acceptance the page still reads ``blocked``, keeping
+  its ``blocked_reason`` and ``blocking_request_ids``. The report's
+  ``contingent`` boolean is what separates the two: while it is true, ``applied``
+  and ``status`` describe the reopen the claim will produce rather than the page
+  as it stands. Text output appends ``(claimed, pending acceptance)``, and the
+  ``log.md`` headline reads *reopen claimed* rather than *reopened*.
   When a supplied ``--request-id`` carries a structured ``scope``, reopen pairs it
   with the supplied source whose provenance scope agrees, and reports the result
   as ``pairs`` — so a host stops zipping the two repeatable flags by position.
   Reopen never writes to the request records: pairing is computed and verified,
-  and fulfilment stays with ``source_requests.py fulfill``.
+  and fulfilment stays with ``source_requests.py fulfill`` — which, inside that
+  same kind of order, likewise claims it rather than writing it, so the controller
+  is what makes either durable.
 
 By default, the other verbs require the question to be claimed by the same agent
 id. ``--allow-unclaimed`` lets an orchestrator or single-agent workflow resolve
@@ -65,7 +82,8 @@ Exit codes:
 
 - ``0``: resolution applied.
 - ``2``: invalid usage, unknown slug, invalid page/request/source, unclaimed
-  question without ``--allow-unclaimed``, or a status that cannot be resolved.
+  question without ``--allow-unclaimed``, an unreadable claim ledger, or a status
+  that cannot be resolved.
 - ``3``: claim conflict (held by another agent).
 """
 
