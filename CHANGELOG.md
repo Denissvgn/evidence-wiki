@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+- **Change: inside a pending delegated acquisition order, `fulfill` and `reopen` now file a
+  claim the controller commits on acceptance, instead of writing durable state as they
+  run.** An order is one of those when it carries `phase: acquisition` and
+  `acquisition_mode: delegated`, and nothing outside one is touched.
+  `source_requests.py fulfill` writes a claim at
+  `runs/order-claims/<orchestration_id>/<action_id>.json` and does not write
+  `sources/source-requests.jsonl` at all, so the record it is about stays `status: "open"`
+  with `source_id: null` for the duration of the order. `question_resolve.py reopen` files
+  a claim the same way and leaves the question page `blocked`, with its `blocked_reason`
+  and `blocking_request_ids` where they were. The controller commits the accepted claims
+  during the wet verification pass, after every other check in it has passed, so a refused
+  submission commits nothing. A claim asserts bookkeeping and never evidence — which source
+  answered which request, which sources reopen a question — and every evidence check still
+  runs against the manifest, the normalized tree and the raw tree exactly as it did. One
+  new refusal comes with it: a request or question scoped by two live delegated acquisition
+  orders at once is refused as ambiguous rather than attributed to whichever session sorted
+  first, because guessing files the claim into one order's ledger and leaves the other
+  submitting with nothing to show.
+
+  Four things close with it, and they were four symptoms of one cause: the acquirer wrote
+  durable state before the controller had looked at the evidence, and what is written
+  outlives the order that wrote it. A refused submission no longer leaves a fulfilment
+  standing, because there is nothing written to leave. An `outcome: failed`, which verifies
+  nothing — `prepare_submission` takes that branch without calling
+  `verify_action_postconditions` at all — no longer strands the request in `fulfilled`,
+  where `open_requests` selects on `status == "open"` and so no later order would see it
+  again; the request stays open and routable. The reuse refusals, whose escapes were
+  unfollowable precisely because the record had already been written, no longer speak about
+  a record that would have to be walked back: a refusal now ends an order that changed
+  nothing, and a later order finds the request exactly as issuance found it. And a scoped
+  request's record cannot be rewritten mid-order, because the store may not move at all
+  while the order is pending: the request-scope guard's mutable set is empty now, where it
+  used to hold every request the action fulfilled, so an edit to a scoped request's
+  `rationale` or `scope` is a refusal where it was accepted before.
+
+  **That fourth one is delegated-only, and the provider arm does not narrow with it.** A
+  provider acquisition order's request-scope guard still admits every field of every
+  request the order names, so the same mid-order rewrite is still accepted there and the
+  rewritten text is still what the store holds once the action is over. It is pinned as the
+  measurement of a defect rather than as intended behaviour, and closing it is not what
+  this change is.
+
+  Three neighbouring behaviours are deliberately unchanged. A **research** order's `reopen`
+  still writes the page straight through: scope is what sanctions a question mutation, so a
+  research order legitimately reopens the questions it scopes, and no acquisition
+  submission would ever come along to commit a claim on its behalf. A **provider**
+  workspace — anything other than `orchestration: acquisition: delegated`, and
+  `acquisition: providers` remains the default — never reaches any of this, because the
+  delegation gate short-circuits on the mode before it looks for an order at all. And
+  `record-attempt-failure` still writes the attempt audit durably, which is the right
+  answer for it: an audit of what an acquirer tried is not an assertion about evidence, and
+  it has to survive the refusal it documents. Only its "already fulfilled" refusal moved,
+  and only to consult the claim ledger as well as the store, so a request answered by an
+  uncommitted claim is refused in the same words and classifies as the same recoverable
+  code.
+
+  One consequence for anything that reads a workspace mid-order. While a delegated
+  acquisition order is pending, `source_requests.py list --status open` keeps returning a
+  claimed request as *open*, and goes on doing so until the submission is accepted — `list`
+  reads the store, and the store is the thing that is not moving. That is the mechanism
+  working rather than a lag to route around, and both commands that file claims say so
+  themselves. Their JSON carries a `contingent` boolean — on every `question_resolve.py`
+  envelope, false everywhere but a claimed reopen — text output appends
+  `(claimed, pending acceptance)`, and `log.md` says `reopen claimed` where it used to say
+  `reopened` and appends `(claimed; committed when the order is accepted)` to what either
+  command records, rather than auditing a transition that has not happened. A reader that
+  needs to know what the workspace holds reads that flag, not the status. Pinned by four
+  propositions asserted against the durable bytes rather than against a command's return
+  value: three of them — the frozen store and page, the refused submission that commits
+  nothing, and the failed outcome that leaves its request routable — fail before this
+  change and pass after it, and the fourth, the provider arm, did not move either way.
 - **Fix: the machine export dropped every capture a source record delivered beyond the
   first.** A manifest record can own more than one delivered path — inventory folds a
   paired paper's PDF into the LaTeX-bundle record for the same work — and each capture was
