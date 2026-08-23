@@ -168,7 +168,42 @@ def load_claims(path: Path) -> dict[str, Any]:
             continue
         if not isinstance(value, dict):
             raise OrderClaimError(f"claims document has a non-object {section} section: {path.name}")
+        for key, claim in value.items():
+            _require_claim_shape(section, key, claim, path)
     return document
+
+
+#: What each section's entries must carry, as (string fields, list-of-string fields).
+_CLAIM_SHAPE = {
+    "fulfilments": (("request_id", "source_id", "claimed_at"), ()),
+    "reopens": (("question_slug", "claimed_at"), ("source_ids", "request_ids")),
+}
+
+
+def _require_claim_shape(section: str, key: Any, claim: Any, path: Path) -> None:
+    """Refuse a claim the projection could not read, rather than failing later on its shape.
+
+    The container being a mapping is not enough. A ``source_ids`` of ``null`` satisfies the
+    section check and then makes the controller's projection iterate ``None``, which raises
+    a bare ``TypeError`` out of verification instead of the fail-closed refusal every other
+    unreadable-ledger path produces.
+    """
+    if not isinstance(key, str) or not key:
+        raise OrderClaimError(f"claims document has a non-string {section} key: {path.name}")
+    if not isinstance(claim, dict):
+        raise OrderClaimError(f"claims document has a non-object {section} entry {key!r}: {path.name}")
+    text_fields, list_fields = _CLAIM_SHAPE[section]
+    for field in text_fields:
+        if not isinstance(claim.get(field), str) or not claim[field]:
+            raise OrderClaimError(
+                f"claims document {section} entry {key!r} has no {field} string: {path.name}"
+            )
+    for field in list_fields:
+        values = claim.get(field)
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise OrderClaimError(
+                f"claims document {section} entry {key!r} has a non-string-list {field}: {path.name}"
+            )
 
 
 def _write_atomic(path: Path, document: dict[str, Any]) -> None:

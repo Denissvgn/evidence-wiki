@@ -107,8 +107,19 @@ SAFE_OUTPUT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from _delegation_gate import DelegationGateError, require_sanctioned_mutation
+from _delegation_gate import (
+    DelegationGateError,
+    is_delegated_acquisition_order,
+    require_sanctioned_mutation,
+)
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
+from _order_claims import (
+    OrderClaimError,
+    claims_path,
+    fulfilment_claim,
+    load_claims,
+    record_fulfilment_claim,
+)
 from _request_kinds import BUILTIN_REQUEST_KINDS, RequestKindError, validate_kind
 from _request_scope import (
     RequestScopeError,
@@ -536,6 +547,32 @@ def workspace_delegates_acquisition(config: dict[str, Any]) -> bool:
         return is_delegated(orchestration_config(config))
     except OrchestrationConfigError as exc:
         raise SystemExit(f"Invalid research.yml: {exc.message}") from exc
+
+
+def contingent_order(sanctioning: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The sanctioning order, when it is one whose bookkeeping the controller commits.
+
+    ``None`` means write through: an ungated workspace, no live session, or an order of a
+    kind that has no acquisition submission coming to commit anything on its behalf.
+    """
+    if sanctioning is None:
+        return None
+    return sanctioning if is_delegated_acquisition_order(sanctioning.get("work_order")) else None
+
+
+def claimed_fulfilment(
+    project_root: Path, order: dict[str, Any], request_id: str
+) -> dict[str, Any] | None:
+    """This action's claim for one request, or ``None``.
+
+    A ledger that cannot be read is never reported as "nothing was claimed": that would
+    admit a second, contradicting claim over the top of one already filed.
+    """
+    try:
+        claims = load_claims(claims_path(project_root, order["orchestration_id"], order["action_id"]))
+    except OrderClaimError as exc:
+        raise SystemExit(f"Unreadable order claims: {exc.message}") from exc
+    return fulfilment_claim(claims, request_id)
 
 
 def require_in_order_request_mutation(
@@ -2029,10 +2066,13 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
             raise SystemExit(f"Unknown request id: {request_id} (no record in {relative_label(project_root, path)})")
         if target.get("status") == "fulfilled":
             if target.get("source_id") == source_id:
+                # Reachable on a replay after the controller committed a claim, so it
+                # carries the same flag the contingent paths do rather than omitting it.
                 return {
                     "schema_version": SCHEMA_VERSION,
                     "action": "fulfill",
                     "updated": False,
+                    "contingent": False,
                     "request": target,
                     "requests_path": relative_label(project_root, path),
                 }
@@ -2043,7 +2083,34 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
         # Gated here rather than at the top of the command: the idempotent re-fulfil above
         # returns without touching anything, and refusing a no-op would break a delegate
         # replaying its own action.
-        require_in_order_request_mutation(project_root, config, request_id)
+        contingent = contingent_order(require_in_order_request_mutation(project_root, config, request_id))
+        if contingent is not None:
+            # Inside a delegated acquisition order this is a claim the controller commits
+            # when it accepts the submission, so the already-claimed cases answer exactly
+            # as the already-fulfilled cases above do -- against the claim rather than the
+            # store, which is the only record of this action's bookkeeping until then.
+            claim = claimed_fulfilment(project_root, contingent, request_id)
+            if claim is not None and claim.get("source_id") != source_id:
+                raise SystemExit(
+                    f"Request {request_id} is already fulfilled by source {claim.get('source_id')}; "
+                    "record a new request instead of relinking it."
+                )
+            if claim is not None:
+                # The same no-op an identical re-fulfil against the store is. A delegate
+                # replaying its own action must not be refused, must not be told it changed
+                # something it did not, and must not leave a second entry behind.
+                projected = dict(target)
+                projected["status"] = "fulfilled"
+                projected["source_id"] = source_id
+                projected["updated_at"] = str(claim.get("claimed_at") or target.get("updated_at"))
+                return {
+                    "schema_version": SCHEMA_VERSION,
+                    "action": "fulfill",
+                    "updated": False,
+                    "contingent": True,
+                    "request": projected,
+                    "requests_path": relative_label(project_root, path),
+                }
         if source_id not in manifest_source_ids(project_root, config):
             raise SystemExit(
                 f"Unknown source id: {source_id} (not in the manifest). "
@@ -2060,15 +2127,32 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
         )
 
         now = timestamp_utc()
-        target["status"] = "fulfilled"
-        target["source_id"] = source_id
-        target["updated_at"] = now
-        _write_requests_unlocked(path, records)
+        if contingent is not None:
+            record_fulfilment_claim(
+                project_root,
+                contingent["orchestration_id"],
+                contingent["action_id"],
+                request_id=request_id,
+                source_id=source_id,
+                claimed_at=now,
+            )
+            # What the caller is shown, not what the store holds: the durable record stays
+            # open until the controller commits, which is the whole point of the claim.
+            target = dict(target)
+            target["status"] = "fulfilled"
+            target["source_id"] = source_id
+            target["updated_at"] = now
+        else:
+            target["status"] = "fulfilled"
+            target["source_id"] = source_id
+            target["updated_at"] = now
+            _write_requests_unlocked(path, records)
+    claimed_note = " (claimed; committed when the order is accepted)" if contingent is not None else ""
     append_log_entry(
         project_root / "log.md",
         (
             f"## [{now.split('T', 1)[0]}] source-request | Fulfilled source request\n\n"
-            f"- Request: `{request_id}` fulfilled by `{source_id}`.\n"
+            f"- Request: `{request_id}` fulfilled by `{source_id}`{claimed_note}.\n"
             f"- Questions: {', '.join(target.get('question_slugs') or []) or 'none'}.\n"
         ),
     )
@@ -2076,6 +2160,7 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "action": "fulfill",
         "updated": True,
+        "contingent": contingent is not None,
         "request": target,
         "requests_path": relative_label(project_root, path),
     }
@@ -2111,7 +2196,20 @@ def run_record_attempt_failure(args: argparse.Namespace) -> dict[str, Any]:
                 f"Request already fulfilled: {request_id} was fulfilled by source "
                 f"{target.get('source_id')}; a fulfilled request has no failed attempt to record."
             )
-        require_in_order_request_mutation(project_root, config, request_id)
+        attempt_order = contingent_order(
+            require_in_order_request_mutation(project_root, config, request_id)
+        )
+        # A claim is a fulfilment the controller has not committed yet. It contradicts an
+        # attempt failure exactly as a committed one does -- the request was answered, so
+        # there is no failed attempt to record against it -- and it is refused in the same
+        # words, so the two states classify as one recoverable code.
+        if attempt_order is not None:
+            claim = claimed_fulfilment(project_root, attempt_order, request_id)
+            if claim is not None:
+                raise SystemExit(
+                    f"Request already fulfilled: {request_id} was fulfilled by source "
+                    f"{claim.get('source_id')}; a fulfilled request has no failed attempt to record."
+                )
         now = timestamp_utc()
         event: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -2235,6 +2333,10 @@ def render_text_report(report: dict[str, Any]) -> str:
         return "\n".join(lines) + "\n"
     if report.get("action") == "fulfill":
         verb = "Fulfilled" if report["updated"] else "Already fulfilled (no-op)"
+        if report.get("contingent"):
+            # The durable record still reads `open`; the summary below is the projection
+            # the controller will commit, not what the store says right now.
+            verb = f"{verb} (claimed, pending acceptance)"
         return f"{verb}:\n  {request_summary(report['request'])}\n"
     if report.get("action") == "record-attempt-failure":
         event = report["event"]

@@ -113,8 +113,19 @@ _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from _delegation_gate import DelegationGateError, require_sanctioned_mutation
+from _delegation_gate import (
+    DelegationGateError,
+    is_delegated_acquisition_order,
+    require_sanctioned_mutation,
+)
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
+from _order_claims import (
+    OrderClaimError,
+    claims_path,
+    load_claims,
+    record_reopen_claim,
+    reopen_claim,
+)
 from _request_scope import conflict_details, format_scope, normalize_scope, scope_match
 from _script_errors import ScriptRefusal, emit_refusal, json_mode_requested
 from _workspace_locks import LockUnavailableError
@@ -1641,6 +1652,50 @@ def require_in_order_question_mutation(
     )
 
 
+def apply_reopen_to_page(page_path: Path, text: str, merged: list[str], now: str) -> None:
+    """The one edit a reopen makes to a question page.
+
+    Extracted so the controller's commit of a claimed reopen applies exactly this, rather
+    than a second implementation that could drift from it.
+    """
+    question_claim = load_sibling_module("question_claim")
+    fields: dict[str, Any] = {"status": "open", "source_ids": merged, "updated": now.split("T", 1)[0]}
+    remove_fields = ("claimed_by", "claimed_at", "blocked_reason", "blocking_request_ids")
+    updated = apply_resolution_edits(text, fields, remove_fields, quoted_fields={"updated"})
+    question_claim.write_page_atomic(page_path, updated)
+
+
+def commit_reopen_claim(
+    project_root: Path,
+    config: dict[str, Any],
+    slug: str,
+    source_ids: list[str],
+    now: str,
+) -> bool:
+    """Apply a claimed reopen to the durable page. Idempotent: a page already open is left.
+
+    Deliberately re-reads the page rather than trusting the text the claim was computed
+    against: the freeze means the bytes are the same, and if they are not, the scope guard
+    refused before this was ever called.
+    """
+    question_claim = load_sibling_module("question_claim")
+    page_path = question_claim.question_page_path(project_root, slug)
+    with question_claim.question_lock(page_path):
+        text = page_path.read_text(encoding="utf-8")
+        parts = question_claim.split_frontmatter_lines(text)
+        if parts is None:
+            return False
+        frontmatter = question_claim.frontmatter_mapping(parts[0])
+        if frontmatter.get("status") != "blocked":
+            return False
+        merged = existing_source_ids(frontmatter)
+        for source_id in source_ids:
+            if source_id not in merged:
+                merged.append(source_id)
+        apply_reopen_to_page(page_path, text, merged, now)
+        return True
+
+
 def transition_reopen(
     page_path: Path,
     project_root: Path,
@@ -1673,7 +1728,15 @@ def transition_reopen(
         # Under delegated acquisition this transition must belong to a pending work order.
         # Reopen has no no-op path to exempt: a question that is not blocked was already
         # refused above, so everything reaching here mutates the page.
-        require_in_order_question_mutation(project_root, config, slug)
+        sanctioning = require_in_order_question_mutation(project_root, config, slug)
+        # Contingent bookkeeping applies only inside a delegated *acquisition* order. A
+        # research order scopes questions too, and its reopen is not part of any acquisition
+        # submission, so nothing would ever come along to commit a claim for it.
+        contingent = (
+            sanctioning
+            if is_delegated_acquisition_order(sanctioning.get("work_order") if sanctioning else None)
+            else None
+        )
         source_ids = validate_source_ids(project_root, config, unique_nonempty(args.source_id, "--source-id"))
         if not source_ids:
             raise ResolveError(EXIT_INVALID, "VALUE_INVALID", "reopen requires at least one --source-id")
@@ -1710,12 +1773,48 @@ def transition_reopen(
             if source_id not in merged:
                 merged.append(source_id)
         now = question_claim.timestamp_utc()
-        fields: dict[str, Any] = {"status": "open", "source_ids": merged, "updated": now.split("T", 1)[0]}
-        remove_fields = ("claimed_by", "claimed_at", "blocked_reason", "blocking_request_ids")
-        updated = apply_resolution_edits(text, fields, remove_fields, quoted_fields={"updated"})
-        question_claim.write_page_atomic(page_path, updated)
+        if contingent is not None:
+            # Merged with whatever this action already claimed for the question, not
+            # written over it. The page is frozen, so a second reopen recomputes `merged`
+            # from the same unchanged frontmatter and would otherwise drop the sources the
+            # first one contributed -- a loss that used to be impossible, because the page
+            # moved and the second call was refused as not reopenable.
+            try:
+                claimed = reopen_claim(
+                    load_claims(
+                        claims_path(
+                            project_root, contingent["orchestration_id"], contingent["action_id"]
+                        )
+                    ),
+                    slug,
+                )
+                if isinstance(claimed, dict):
+                    for value in claimed.get("source_ids", []):
+                        if isinstance(value, str) and value not in merged:
+                            merged.append(value)
+                    for value in claimed.get("request_ids", []):
+                        if isinstance(value, str) and value not in request_ids:
+                            request_ids.append(value)
+                record_reopen_claim(
+                    project_root,
+                    contingent["orchestration_id"],
+                    contingent["action_id"],
+                    question_slug=slug,
+                    source_ids=list(merged),
+                    request_ids=list(request_ids),
+                    claimed_at=now,
+                )
+            except OrderClaimError as exc:
+                raise ResolveError(
+                    EXIT_INVALID,
+                    "ORCHESTRATION_STATE_UNREADABLE",
+                    f"unreadable order claims: {exc.message}",
+                ) from exc
+        else:
+            apply_reopen_to_page(page_path, text, merged, now)
         return {
             "applied": True,
+            "contingent": contingent is not None,
             "status": "open",
             "previous_holder": {},
             "answer_page": None,
@@ -1995,7 +2094,10 @@ def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) ->
     question_claim = load_sibling_module("question_claim")
     date_text = question_claim.timestamp_utc().split("T", 1)[0]
     if action == "reopen":
-        headline = "reopened"
+        # A claimed reopen has not moved the page, so the headline must not say it did:
+        # a refused or failed order would leave this entry asserting a reopen that never
+        # happened, which is the one thing an audit log must not do.
+        headline = "reopen claimed" if result.get("contingent") else "reopened"
     elif action == GROUNDING_SET_ACTION:
         # The status did not change; naming it in the headline would read as if it had.
         headline = "grounding recorded"
@@ -2015,7 +2117,8 @@ def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) ->
             lines.append(f"- Cited sources: {', '.join(result['source_ids'])}.")
         lines.append(f"- Verification: {result.get('verification')}. {result.get('verification_remediation')}")
     if action == "reopen" and result.get("source_ids"):
-        lines.append(f"- Reopened with sources: {', '.join(result['source_ids'])}.")
+        claimed = " (claimed; committed when the order is accepted)" if result.get("contingent") else ""
+        lines.append(f"- Reopened with sources: {', '.join(result['source_ids'])}{claimed}.")
     if action == "reopen" and result.get("pairs"):
         # The audit entry must not credit scope for a pairing scope did not make: a tie
         # settled on the order --source-id was passed is the positional guess this
@@ -2062,6 +2165,10 @@ def build_report(action: str, slug: str, agent_id: str, page_path: Path, project
         "slug": slug,
         "agent_id": agent_id,
         "applied": result["applied"],
+        # `status` is what the question will read once the controller accepts the order.
+        # While `contingent` is true the page still says `blocked`, so a consumer that
+        # needs the durable answer has to read this flag rather than the status alone.
+        "contingent": bool(result.get("contingent")),
         "status": result["status"],
         "question_page": workspace_label(project_root, page_path),
         "answer_page": result.get("answer_page"),
@@ -2107,6 +2214,10 @@ def render_text_report(report: dict[str, Any]) -> str:
             f"grounding set: {report['slug']} ({report.get('grounding_count', 0)} entries; {rendered_forms}; "
             f"verification {report.get('verification')})\n"
         )
+    if report.get("contingent"):
+        # The page still reads `blocked`. Saying `open` here would hand a text-mode caller
+        # a state the workspace does not hold until the controller accepts the order.
+        return f"{report['status']} (claimed, pending acceptance): {report['slug']}\n"
     return f"{report['status']}: {report['slug']}\n"
 
 
