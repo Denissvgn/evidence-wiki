@@ -534,10 +534,12 @@ open, which is the truthful answer, because nothing has been committed yet.
 action ran, and it is appended to the audit exactly as durably as before. Only
 its already-fulfilled refusal changed, and it now consults the ledger as well as
 the store, so a fulfilment this action has merely claimed contradicts an attempt
-failure the same way a committed one does. Contingency is scoped to acquisition:
-a research order's `reopen` writes its page straight through, since no
-acquisition submission would ever come along to commit a claim for it, and a
-workspace that acquires through its own providers never reaches any of this.
+failure the same way a committed one does. Contingency is scoped to acquisition
+by phase rather than by who acquires: a research order's `reopen` writes its
+page straight through, since no acquisition submission would ever come along to
+commit a claim for it, while a workspace acquiring through its own providers is
+covered on the same terms as a delegated one — both are verified by a submission
+that can accept or refuse what was done, which is the whole requirement.
 
 **Result semantics.** Every scoped request must end the action with a claimed
 fulfilment **or** a recorded attempt failure naming that action; a request with

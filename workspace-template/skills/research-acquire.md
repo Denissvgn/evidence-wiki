@@ -222,6 +222,18 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    refuses the source ID, rerun inventory and inspect the manifest instead of
    hand-editing the candidate or request artifacts.
 
+   **Inside an acquisition work order both commands file claims rather than
+   writing.** The request record stays `open` with `source_id: null` and the
+   question page stays `blocked`; the controller writes both when it accepts the
+   submission, and a refused or failed submission writes neither. The JSON both
+   commands return carries `"contingent": true` and their text output says
+   `(claimed, pending acceptance)` — that is the acknowledgement, and it is the
+   only in-order record that the work was done. Two consequences for this loop:
+   re-running `list --status open` will keep returning a claimed request as open
+   for the life of the order, so do not use it to decide what is left to do; and
+   a submission this action reports as `blocked` is refused if any claim was
+   filed, because `blocked` means the action recorded nothing at all.
+
    If the request carries a `scope` mapping, `fulfill` compares it against the
    sidecar's stamped `scope:` and refuses with `REQUEST_SCOPE_MISMATCH` when a
    key disagrees — deliver the evidence the request actually describes or open
@@ -241,9 +253,13 @@ python3 scripts/question_resolve.py reopen --slug example --agent-id fetch-agent
 
    `reopen` refuses with `STATUS_NOT_REOPENABLE` unless the question is currently
    `blocked`, and with `SOURCE_NOT_NORMALIZED` unless the fulfilled `source_id` is
-   in the manifest and has a normalized record. On success it transitions the
-   question `blocked` → `open`, removes the stale `blocked_reason`, and adds the
-   fulfilled `source_id` so `research-answer` can pick it up.
+   in the manifest and has a normalized record. Outside a work order it transitions
+   the question `blocked` → `open` immediately, removing the stale `blocked_reason`
+   and adding the fulfilled `source_id`. Inside one it claims that transition and
+   the controller applies it on acceptance, so the page still reads `blocked` until
+   then — which is why the status a second `reopen` sees is unchanged, and why
+   re-running it inside the same order is accepted and merged into the claim rather
+   than refused as not reopenable.
 
 10. Append an acquisition log note:
 
