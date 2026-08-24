@@ -303,6 +303,29 @@ class SanctioningOrderTests(unittest.TestCase):
                     self.assertEqual(acquisition_id, entry["orchestration_id"], entry)
                     self.assertTrue(GATE.is_contingent_acquisition_order(entry["work_order"]), entry)
 
+    def test_an_ungated_workspace_is_not_refused_even_when_the_orders_are_ambiguous(self):
+        """The one refusal that could still reach a workspace this gate does not gate.
+
+        Reachable when a workspace is switched to providers with delegated orders still
+        live. The ambiguity is real, but refusing an operator over it is the single thing
+        this gate promises not to do, and no claim is filed either way, so there is no
+        ledger to file into wrongly.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.seed(root, self.DELEGATED, orchestration_id="orch-aaa")
+            self.seed(root, {**self.DELEGATED, "action_id": "action-0002"}, orchestration_id="orch-zzz")
+
+            self.assertIsNone(
+                GATE.require_sanctioned_mutation(
+                    root, False, request_id="req-1",
+                    error_code="X", subject="subject", remediation="fix it",
+                )
+            )
+            # The same ambiguity in a delegating workspace is still refused.
+            with self.assertRaises(GATE.DelegationGateError):
+                self.gate(root, request_id="req-1")
+
     def test_an_unsanctioned_mutation_still_refuses(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

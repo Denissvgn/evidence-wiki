@@ -219,6 +219,13 @@ def require_sanctioned_mutation(
         # to tell which one this mutation belongs to -- and guessing files the claim into
         # one order's ledger while the other submits with nothing to show. Refused rather
         # than resolved by sort order.
+        if not delegated:
+            # ...but never in a workspace this gate does not gate. Reachable when a
+            # workspace was switched to providers with delegated orders still live: the
+            # ambiguity is real, and refusing an operator over it would be the one thing
+            # this gate promises not to do. Write through, as an ungated workspace always
+            # has; no claim is filed either way, so there is no ledger to file into wrongly.
+            return None
         raise DelegationGateError(
             error_code,
             (
