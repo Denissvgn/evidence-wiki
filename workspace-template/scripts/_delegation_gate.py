@@ -154,14 +154,17 @@ def _sanctions_question(work_order: dict[str, Any] | None, question_slug: str) -
     return question_slug in _scope_ids(work_order, "question_slugs")
 
 
-def is_delegated_acquisition_order(work_order: dict[str, Any] | None) -> bool:
-    """Is this order the one kind whose bookkeeping the controller commits itself?
+def is_contingent_acquisition_order(work_order: dict[str, Any] | None) -> bool:
+    """Is this an order whose bookkeeping the controller commits on acceptance?
 
-    Sanctioning and this question are deliberately separate. ``_sanctions_question`` is
-    phase-agnostic because scope is the authorization, so a *research* order legitimately
-    sanctions a reopen -- and that reopen must keep writing straight through, because no
-    acquisition submission will ever come along to commit it. Only a delegated acquisition
-    order has a verification pass that can.
+    Today only a delegated acquisition order is. A provider acquisition order is verified by
+    a submission that could equally commit its bookkeeping, and extending this to cover one
+    is a change to the provider arm's verification, not to this predicate alone.
+
+    Sanctioning and this question stay separate. ``_sanctions_question`` is phase-agnostic
+    because scope is the authorization, so a *research* order legitimately sanctions a
+    reopen -- and that reopen must keep writing straight through, because no acquisition
+    submission will ever come along to commit it.
     """
     if not isinstance(work_order, dict):
         return False
@@ -192,10 +195,13 @@ def require_sanctioned_mutation(
     not merely permission: this is the only code that already knows which order you are
     inside, and whether that order is one whose bookkeeping the controller will commit.
     ``None`` therefore means "write through", and so does an entry for an order that
-    :func:`is_delegated_acquisition_order` rejects.
+    :func:`is_contingent_acquisition_order` rejects.
     """
-    if not delegated:
-        return None
+    # Identification is not gated on the workspace's acquisition mode; only the refusal is.
+    # A provider workspace is still never refused a mutation between actions -- that is the
+    # backward compatibility this gate promises -- but an acquisition order pending in one
+    # freezes the request store exactly as a delegated order does, and the caller has to be
+    # able to find out which order it is inside to file its claim there.
     live = live_pending_orders(project_root)
     if not live:
         return None
@@ -206,13 +212,20 @@ def require_sanctioned_mutation(
         or (question_slug is not None and _sanctions_question(entry["work_order"], question_slug))
     ]
     committing = [
-        entry for entry in sanctioning if is_delegated_acquisition_order(entry["work_order"])
+        entry for entry in sanctioning if is_contingent_acquisition_order(entry["work_order"])
     ]
     if len(committing) > 1:
         # Two live delegated acquisition orders scope the same subject, so there is no way
         # to tell which one this mutation belongs to -- and guessing files the claim into
         # one order's ledger while the other submits with nothing to show. Refused rather
         # than resolved by sort order.
+        if not delegated:
+            # ...but never in a workspace this gate does not gate. Reachable when a
+            # workspace was switched to providers with delegated orders still live: the
+            # ambiguity is real, and refusing an operator over it would be the one thing
+            # this gate promises not to do. Write through, as an ungated workspace always
+            # has; no claim is filed either way, so there is no ledger to file into wrongly.
+            return None
         raise DelegationGateError(
             error_code,
             (
@@ -236,6 +249,10 @@ def require_sanctioned_mutation(
         # order freezes, which is the hole this mechanism closes; claiming under a research
         # order that never commits is visible and recoverable, and a silent bypass is not.
         return committing[0] if committing else sanctioning[0]
+    if not delegated:
+        # Nothing sanctioned this, and the workspace does not delegate acquisition: an
+        # operator working a provider workspace by hand is not driving a protocol.
+        return None
     raise DelegationGateError(
         error_code,
         (

@@ -136,7 +136,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _delegation_gate import (
     DelegationGateError,
-    is_delegated_acquisition_order,
+    is_contingent_acquisition_order,
     require_sanctioned_mutation,
 )
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
@@ -584,7 +584,7 @@ def contingent_order(sanctioning: dict[str, Any] | None) -> dict[str, Any] | Non
     """
     if sanctioning is None:
         return None
-    return sanctioning if is_delegated_acquisition_order(sanctioning.get("work_order")) else None
+    return sanctioning if is_contingent_acquisition_order(sanctioning.get("work_order")) else None
 
 
 def claimed_fulfilment(

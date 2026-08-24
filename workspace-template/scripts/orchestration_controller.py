@@ -24,7 +24,7 @@ import stat
 import sys
 import tempfile
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -6657,6 +6657,79 @@ def load_order_claims(
     return claims
 
 
+def project_order_claims(
+    project_root: Path,
+    orchestration_id: str,
+    action_id: str,
+    *,
+    scoped_requests: set[str],
+    requests_by_id: dict[str, Any],
+    source_requests_before: dict[str, str],
+    arm: str,
+    require: Callable[..., None],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], set[str]]:
+    """Read one action's claims and project them onto the frozen request store.
+
+    What the acquirer *claims* it did. The request store and the question pages are frozen
+    for the duration of an acquisition order, so this ledger -- not the store -- is what
+    says which request was fulfilled by which source. Everything downstream reads the
+    projection; nothing downstream reads a status the acquirer wrote.
+
+    Shared by both acquisition arms. They differ in who executes the order and in what else
+    they verify, not in what a claim is or in how a replay is tolerated, and a second copy
+    of this would be a second thing to keep in step with the commit.
+
+    Returns the fulfilment claims, the reopen claims, the store projected through the
+    fulfilments, and the ids whose durable record already carries their own claim.
+    """
+    order_claims = load_sibling_module("_order_claims")
+    claims = load_order_claims(project_root, orchestration_id, action_id, order_claims)
+    fulfilment_claims = {
+        str(key): value
+        for key, value in claims.get("fulfilments", {}).items()
+        if isinstance(value, dict) and isinstance(value.get("source_id"), str)
+    }
+    reopen_claims = {
+        str(key): value
+        for key, value in claims.get("reopens", {}).items()
+        if isinstance(value, dict)
+    }
+    require(
+        set(fulfilment_claims) <= scoped_requests,
+        f"{arm} claimed a fulfilment for a request this order does not scope",
+        {"request_ids": sorted(set(fulfilment_claims) - scoped_requests)},
+        "Fulfil only request ids named by this work order.",
+    )
+    projected_requests_by_id = dict(requests_by_id)
+    for claimed_id, claim in fulfilment_claims.items():
+        projected = dict(requests_by_id[claimed_id])
+        projected["status"] = "fulfilled"
+        projected["source_id"] = str(claim["source_id"])
+        projected_requests_by_id[claimed_id] = projected
+    # A claim whose durable record already carries it is one the controller committed on a
+    # previous, interrupted finalization. Exempting the id outright would be too generous:
+    # it would let *any* field of that record differ from the frozen baseline, so an edit to
+    # `scope` or `rationale` made after the crash would be admitted and then skipped by the
+    # commit. Instead the record is reverted through the only delta the commit applies and
+    # the result must fingerprint back to the baseline exactly. That is why the commit does
+    # not touch `updated_at`: a field whose pre-commit value nothing records could not be
+    # reverted, and the check would have to fall back to trusting the id again.
+    committed_request_ids: set[str] = set()
+    for claimed_id, claim in fulfilment_claims.items():
+        durable = requests_by_id[claimed_id]
+        if durable.get("status") != "fulfilled" or durable.get("source_id") != claim["source_id"]:
+            continue
+        reverted = dict(durable)
+        reverted["status"] = "open"
+        reverted["source_id"] = None
+        reverted_fingerprint = record_fingerprint_snapshot(
+            [reverted], id_field="request_id", label="source-request store"
+        ).get(claimed_id)
+        if reverted_fingerprint == source_requests_before.get(claimed_id):
+            committed_request_ids.add(claimed_id)
+    return fulfilment_claims, reopen_claims, projected_requests_by_id, committed_request_ids
+
+
 def commit_delegated_bookkeeping(
     project_root: Path,
     config: dict[str, Any],
@@ -6861,60 +6934,18 @@ def verify_delegated_acquisition_postconditions(
     )
 
     # --- contingent bookkeeping -------------------------------------------------------
-    # What the acquirer *claims* it did. The request store and the question pages are
-    # frozen for the duration of the order, so this ledger -- not the store -- is what says
-    # which request was fulfilled by which source. Everything downstream reads the
-    # projection; nothing downstream reads a status the acquirer wrote.
-    order_claims = load_sibling_module("_order_claims")
-    claims = load_order_claims(
-        project_root,
-        require_safe_id(session["orchestration_id"], "orchestration_id"),
-        action_id,
-        order_claims,
+    fulfilment_claims, reopen_claims, projected_requests_by_id, committed_request_ids = (
+        project_order_claims(
+            project_root,
+            require_safe_id(session["orchestration_id"], "orchestration_id"),
+            action_id,
+            scoped_requests=scoped_requests,
+            requests_by_id=requests_by_id,
+            source_requests_before=source_requests_before,
+            arm="delegated acquisition",
+            require=require,
+        )
     )
-    fulfilment_claims = {
-        str(key): value
-        for key, value in claims.get("fulfilments", {}).items()
-        if isinstance(value, dict) and isinstance(value.get("source_id"), str)
-    }
-    reopen_claims = {
-        str(key): value
-        for key, value in claims.get("reopens", {}).items()
-        if isinstance(value, dict)
-    }
-    require(
-        set(fulfilment_claims) <= scoped_requests,
-        "delegated acquisition claimed a fulfilment for a request this order does not scope",
-        {"request_ids": sorted(set(fulfilment_claims) - scoped_requests)},
-        "Fulfil only request ids named by this work order.",
-    )
-    projected_requests_by_id = dict(requests_by_id)
-    for claimed_id, claim in fulfilment_claims.items():
-        projected = dict(requests_by_id[claimed_id])
-        projected["status"] = "fulfilled"
-        projected["source_id"] = str(claim["source_id"])
-        projected_requests_by_id[claimed_id] = projected
-    # A claim whose durable record already carries it is one the controller committed on a
-    # previous, interrupted finalization. Exempting the id outright would be too generous:
-    # it would let *any* field of that record differ from the frozen baseline, so an edit to
-    # `scope` or `rationale` made after the crash would be admitted and then skipped by the
-    # commit. Instead the record is reverted through the only delta the commit applies and
-    # the result must fingerprint back to the baseline exactly. That is why the commit does
-    # not touch `updated_at`: a field whose pre-commit value nothing records could not be
-    # reverted, and the check would have to fall back to trusting the id again.
-    committed_request_ids = set()
-    for claimed_id, claim in fulfilment_claims.items():
-        durable = requests_by_id[claimed_id]
-        if durable.get("status") != "fulfilled" or durable.get("source_id") != claim["source_id"]:
-            continue
-        reverted = dict(durable)
-        reverted["status"] = "open"
-        reverted["source_id"] = None
-        reverted_fingerprint = record_fingerprint_snapshot(
-            [reverted], id_field="request_id", label="source-request store"
-        ).get(claimed_id)
-        if reverted_fingerprint == source_requests_before.get(claimed_id):
-            committed_request_ids.add(claimed_id)
 
     # --- per-request outcomes ---------------------------------------------------------
     current_attempt_events = request_attempt_audit_events(project_root, config)

@@ -133,7 +133,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _delegation_gate import (
     DelegationGateError,
-    is_delegated_acquisition_order,
+    is_contingent_acquisition_order,
     require_sanctioned_mutation,
 )
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
@@ -1752,7 +1752,7 @@ def transition_reopen(
         # submission, so nothing would ever come along to commit a claim for it.
         contingent = (
             sanctioning
-            if is_delegated_acquisition_order(sanctioning.get("work_order") if sanctioning else None)
+            if is_contingent_acquisition_order(sanctioning.get("work_order") if sanctioning else None)
             else None
         )
         source_ids = validate_source_ids(project_root, config, unique_nonempty(args.source_id, "--source-id"))
