@@ -139,11 +139,12 @@ def _scope_ids(work_order: dict[str, Any] | None, field: str) -> set[str]:
 
 
 def _sanctions_request(work_order: dict[str, Any] | None, request_id: str) -> bool:
+    # Any acquisition order, whoever executes it. Both arms freeze the request store for the
+    # duration of the order, so a caller has to be able to identify either one; the mode
+    # decides who does the work, not whether the bookkeeping is contingent on acceptance.
     if not isinstance(work_order, dict):
         return False
     if work_order.get("phase") != ACQUISITION_PHASE:
-        return False
-    if work_order.get("acquisition_mode") != DELEGATED_ACQUISITION_MODE:
         return False
     return request_id in _scope_ids(work_order, "request_ids")
 
@@ -157,9 +158,8 @@ def _sanctions_question(work_order: dict[str, Any] | None, question_slug: str) -
 def is_contingent_acquisition_order(work_order: dict[str, Any] | None) -> bool:
     """Is this an order whose bookkeeping the controller commits on acceptance?
 
-    Today only a delegated acquisition order is. A provider acquisition order is verified by
-    a submission that could equally commit its bookkeeping, and extending this to cover one
-    is a change to the provider arm's verification, not to this predicate alone.
+    Every acquisition order is, whoever executes it: both arms are verified by a submission
+    that can accept or refuse what the acquirer did, which is the whole requirement.
 
     Sanctioning and this question stay separate. ``_sanctions_question`` is phase-agnostic
     because scope is the authorization, so a *research* order legitimately sanctions a
@@ -168,10 +168,7 @@ def is_contingent_acquisition_order(work_order: dict[str, Any] | None) -> bool:
     """
     if not isinstance(work_order, dict):
         return False
-    return (
-        work_order.get("phase") == ACQUISITION_PHASE
-        and work_order.get("acquisition_mode") == DELEGATED_ACQUISITION_MODE
-    )
+    return work_order.get("phase") == ACQUISITION_PHASE
 
 
 def require_sanctioned_mutation(
@@ -215,17 +212,17 @@ def require_sanctioned_mutation(
         entry for entry in sanctioning if is_contingent_acquisition_order(entry["work_order"])
     ]
     if len(committing) > 1:
-        # Two live delegated acquisition orders scope the same subject, so there is no way
-        # to tell which one this mutation belongs to -- and guessing files the claim into
-        # one order's ledger while the other submits with nothing to show. Refused rather
-        # than resolved by sort order.
-        if not delegated:
-            # ...but never in a workspace this gate does not gate. Reachable when a
-            # workspace was switched to providers with delegated orders still live: the
-            # ambiguity is real, and refusing an operator over it would be the one thing
-            # this gate promises not to do. Write through, as an ungated workspace always
-            # has; no claim is filed either way, so there is no ledger to file into wrongly.
-            return None
+        # Two live acquisition orders scope the same subject, so there is no way to tell
+        # which one this mutation belongs to -- and guessing files the claim into one
+        # order's ledger while the other submits with nothing to show.
+        #
+        # Refused whatever the workspace's own acquisition mode is, which is the one place
+        # this gate refuses a workspace it does not otherwise gate. The promise it keeps is
+        # that a mutation is never refused for *lacking* a sanction: an operator working a
+        # workspace by hand is not driving a protocol. Two live orders scoping this subject
+        # is the opposite of that, and writing through is not the safe answer it looks like
+        # -- an acquisition order freezes the request store, so the write lands in state
+        # both orders will then refuse as changed outside their scope.
         raise DelegationGateError(
             error_code,
             (

@@ -303,28 +303,35 @@ class SanctioningOrderTests(unittest.TestCase):
                     self.assertEqual(acquisition_id, entry["orchestration_id"], entry)
                     self.assertTrue(GATE.is_contingent_acquisition_order(entry["work_order"]), entry)
 
-    def test_an_ungated_workspace_is_not_refused_even_when_the_orders_are_ambiguous(self):
-        """The one refusal that could still reach a workspace this gate does not gate.
+    def test_ambiguous_orders_are_refused_whatever_the_workspace_mode_says(self):
+        """The one refusal that reaches a workspace this gate does not otherwise gate.
 
-        Reachable when a workspace is switched to providers with delegated orders still
-        live. The ambiguity is real, but refusing an operator over it is the single thing
-        this gate promises not to do, and no claim is filed either way, so there is no
-        ledger to file into wrongly.
+        The promise is that a mutation is never refused for *lacking* a sanction, because
+        an operator working a workspace by hand is not driving a protocol. Two live
+        acquisition orders scoping one subject is the opposite of that.
+
+        Writing through is not the safe answer it looks like: an acquisition order freezes
+        the request store, so the write lands in state both orders then refuse as changed
+        outside their scope. Refusing here costs one command; writing through costs both
+        orders.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             self.seed(root, self.DELEGATED, orchestration_id="orch-aaa")
             self.seed(root, {**self.DELEGATED, "action_id": "action-0002"}, orchestration_id="orch-zzz")
 
-            self.assertIsNone(
-                GATE.require_sanctioned_mutation(
-                    root, False, request_id="req-1",
-                    error_code="X", subject="subject", remediation="fix it",
-                )
-            )
-            # The same ambiguity in a delegating workspace is still refused.
-            with self.assertRaises(GATE.DelegationGateError):
-                self.gate(root, request_id="req-1")
+            for delegated in (False, True):
+                with self.subTest(delegated=delegated):
+                    with self.assertRaises(GATE.DelegationGateError) as caught:
+                        GATE.require_sanctioned_mutation(
+                            root, delegated, request_id="req-1",
+                            error_code="X", subject="subject", remediation="fix it",
+                        )
+                    self.assertEqual(
+                        ["orch-aaa", "orch-zzz"],
+                        caught.exception.details["orchestration_ids"],
+                        caught.exception.details,
+                    )
 
     def test_an_unsanctioned_mutation_still_refuses(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -336,7 +343,7 @@ class SanctioningOrderTests(unittest.TestCase):
             self.assertEqual("X", caught.exception.error_code)
 
     def test_a_malformed_order_is_not_mistaken_for_a_committable_one(self):
-        for value in (None, {}, {"phase": "acquisition"}, {"phase": "research", "acquisition_mode": "delegated"}):
+        for value in (None, {}, {"phase": "research"}, {"phase": "research", "acquisition_mode": "delegated"}):
             with self.subTest(value=value):
                 self.assertFalse(GATE.is_contingent_acquisition_order(value))
 

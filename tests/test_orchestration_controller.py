@@ -3316,6 +3316,10 @@ class OrchestrationControllerTests(unittest.TestCase):
         source_id = "html:existing-evidence"
         work_order = {
             "phase": "acquisition",
+            # Both written by the real issuer, and both needed now that the arm reads the
+            # order's claim ledger; a hand-built order has to carry them too.
+            "orchestration_id": "orch-test",
+            "action_id": "action-0001",
             "run_id": "run-existing-evidence",
             "scope": {
                 "question_slugs": ["test-question"],
@@ -3366,7 +3370,10 @@ class OrchestrationControllerTests(unittest.TestCase):
         run_controller.load_run_state.return_value = {"state": {"current": "fetching"}}
         source_requests = mock.Mock()
         source_requests.requests_path.return_value = Path("/unused/source-requests.jsonl")
-        source_requests.load_requests.return_value = [fulfilled_request]
+        # The store is frozen inside an acquisition order, so it holds the record as issued
+        # and the fulfilment is stated by the claim written below.
+        issued_request = {**fulfilled_request, "status": "open", "source_id": None}
+        source_requests.load_requests.return_value = [issued_request]
         normalize_sources = mock.Mock()
         normalize_sources.source_paths.return_value = (
             "sources/manifest.jsonl",
@@ -3376,6 +3383,37 @@ class OrchestrationControllerTests(unittest.TestCase):
         normalize_sources.records_by_source_id.return_value = {source_id: manifest_record}
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            # The fulfilment this arm verifies is a claim now, so the ledger is where it
+            # has to be stated; the store this fixture fabricates is the frozen baseline.
+            claims_file = (
+                Path(tmpdir) / "runs" / "order-claims" / "orch-test" / "action-0001.json"
+            )
+            claims_file.parent.mkdir(parents=True, exist_ok=True)
+            claims_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "orchestration_id": "orch-test",
+                        "action_id": "action-0001",
+                        "fulfilments": {
+                            request_id: {
+                                "request_id": request_id,
+                                "source_id": source_id,
+                                "claimed_at": "2026-01-01T00:00:00Z",
+                            }
+                        },
+                        "reopens": {
+                            "test-question": {
+                                "question_slug": "test-question",
+                                "source_ids": [source_id],
+                                "request_ids": [request_id],
+                                "claimed_at": "2026-01-01T00:00:00Z",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             normalized_path = Path(tmpdir) / "sources" / "normalized" / "existing.md"
             normalized_path.parent.mkdir(parents=True)
             normalized_path.write_text(
@@ -3429,7 +3467,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                     ),
                     "candidate_audit_record_fingerprints_before": {},
                     "source_request_record_fingerprints_before": CONTROLLER.record_fingerprint_snapshot(
-                        [open_request],
+                        [issued_request],
                         id_field="request_id",
                         label="test requests",
                     ),
@@ -3443,13 +3481,17 @@ class OrchestrationControllerTests(unittest.TestCase):
             )
 
             def sibling(stem: str):
+                # The real module, not a stub: the arm reads the order's claim ledger, and
+                # a workspace with no ledger is exactly the empty-claims case it handles.
+                if stem == "_order_claims":
+                    return load_script_module("reconciliation_order_claims", SCRIPTS / "_order_claims.py")
                 return {
                     "run_controller": run_controller,
                     "source_requests": source_requests,
                     "normalize_sources": normalize_sources,
                 }[stem]
 
-            def verify(question: dict) -> tuple[str | None, str | None]:
+            def verify(question: dict, *, frozen: bool = True) -> tuple[str | None, str | None]:
                 with (
                     mock.patch.object(CONTROLLER, "load_config", return_value={}),
                     mock.patch.object(CONTROLLER, "fresh_workspace_status", return_value=status),
@@ -3464,7 +3506,14 @@ class OrchestrationControllerTests(unittest.TestCase):
                     mock.patch.object(
                         CONTROLLER,
                         "question_file_fingerprint_snapshot",
-                        return_value={"test-question.md": "sha256:" + "5" * 64},
+                        # Identical to the baseline: the page is frozen inside the order, so
+                        # a reopen shows up in the claim rather than in these bytes.
+                        # The page is frozen inside the order, so a claimed reopen leaves
+                        # these bytes at the baseline. A page that reached any other status
+                        # did so by being written, which is what the fingerprint shows.
+                        return_value={
+                            "test-question.md": "sha256:" + ("4" if frozen else "5") * 64
+                        },
                     ),
                     mock.patch.object(
                         CONTROLLER,
@@ -3486,11 +3535,14 @@ class OrchestrationControllerTests(unittest.TestCase):
             }
             self.assertEqual(("research", None), verify(reopened))
             for bypass_status in ("answered", "deferred", "rejected"):
+                # A question moved out of `blocked` by anything other than this order's
+                # claimed reopen is an out-of-scope page write, and that is what answers
+                # now: the bytes moved, and only a committed reopen may move them.
                 with self.subTest(bypass_status=bypass_status), self.assertRaisesRegex(
                     CONTROLLER.OrchestrationControllerError,
-                    "did not reopen every scoped blocked question",
+                    "changed question files outside the persisted question scope",
                 ):
-                    verify({**reopened, "status": bypass_status})
+                    verify({**reopened, "status": bypass_status}, frozen=False)
 
             # Wiring site three. The provider arm validates the reuse baseline it consumes
             # on the same terms as the delegated arm: an id the manifest baseline does not

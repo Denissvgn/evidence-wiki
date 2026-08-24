@@ -37,12 +37,18 @@
   used to hold every request the action fulfilled, so an edit to a scoped request's
   `rationale` or `scope` is a refusal where it was accepted before.
 
-  **That fourth one is delegated-only, and the provider arm does not narrow with it.** A
-  provider acquisition order's request-scope guard still admits every field of every
-  request the order names, so the same mid-order rewrite is still accepted there and the
-  rewritten text is still what the store holds once the action is over. It is pinned as the
-  measurement of a defect rather than as intended behaviour, and closing it is not what
-  this change is.
+  **All four hold on both acquisition arms.** Contingent bookkeeping was delegated-only when
+  it first landed, and a provider acquisition order's request-scope guard still admitted
+  every field of every request the order named, so the same mid-order rewrite was accepted
+  there. It is not any more: an acquisition order freezes the request store whoever executes
+  it, and the exemption is now a record already carrying its own committed claim.
+
+  Narrowing that exemption could never have closed it, which is worth recording because it
+  was the obvious repair. The exemption is by record id rather than by field, and fulfilment
+  itself rewrote the record — so no width separated an honest fulfilment from a rewrite.
+  What changed is the other side of the comparison: a fulfilment is a claim now, so an
+  honest one leaves the record byte-identical and exempting nothing became correct rather
+  than unusable.
 
   Three neighbouring behaviours are deliberately unchanged. A **research** order's `reopen`
   still writes the page straight through: scope is what sanctions a question mutation, so a
@@ -72,7 +78,8 @@
   propositions asserted against the durable bytes rather than against a command's return
   value: three of them — the frozen store and page, the refused submission that commits
   nothing, and the failed outcome that leaves its request routable — fail before this
-  change and pass after it, and the fourth, the provider arm, did not move either way.
+  change and pass after it. The fourth was the provider arm, which did not move when the
+  others did and is what the follow-up above closes.
 - **Fix: the machine export dropped every capture a source record delivered beyond the
   first.** A manifest record can own more than one delivered path — inventory folds a
   paired paper's PDF into the LaTeX-bundle record for the same work — and each capture was

@@ -6742,11 +6742,13 @@ def commit_delegated_bookkeeping(
 ) -> None:
     """Write the bookkeeping the acquirer claimed, now that the controller has accepted it.
 
-    Called from the wet pass only, and only after every ``require`` above it has passed, so
-    a refused submission leaves the request store and the question pages exactly as it
-    found them. It is deliberately the *last* thing the delegated arm does: the twin-pass
-    check compares the phase each pass returns, and a pass that wrote before deciding could
-    only be compared against a workspace it had already changed.
+    Called from the wet pass only, and only after every ``require`` has passed, so a refused
+    submission leaves the request store and the question pages exactly as it found them.
+    That ordering is the point: the twin-pass check compares the phase each pass returns,
+    and a pass that wrote before deciding could only be compared against a workspace it had
+    already changed. It is not the last thing either arm does -- the child-run transition
+    follows it, and the all-failed arm returns before that -- only the last thing that can
+    refuse before it.
 
     Idempotent in both halves, because finalization can be interrupted and replayed.
     """
@@ -7948,15 +7950,61 @@ def verify_action_postconditions(
                 controller=controller,
                 apply_effects=apply_effects,
             )
-        requests = open_requests(project_root, config)
-        still_open = {str(item.get("request_id")) for item in requests}
-        require(not set(request_ids) & still_open, "acquisition did not fulfill the scoped source request")
+        # The request store is frozen for the duration of an acquisition order, so what the
+        # acquirer did is read from its claim ledger and projected onto the frozen records.
+        # The baseline is hoisted above the outcome check for that reason: the check used to
+        # ask whether the store still showed the request open, and under a freeze it always
+        # does. What it asks now is whether a claim was filed.
+        manifest_guard = recorded_postcondition("manifest_records_increased")
+        source_requests_before = manifest_guard.get("source_request_record_fingerprints_before")
+        require(
+            valid_record_fingerprint_snapshot(source_requests_before),
+            "acquisition work order lacks a valid bounded evidence integrity baseline",
+            remediation="Start a fresh orchestration session; never infer matching evidence after execution.",
+        )
         source_requests = load_sibling_module("source_requests")
         all_requests = source_requests.load_requests(source_requests.requests_path(project_root, config))
-        fulfilled = [
-            item
+        requests_by_id = {
+            str(item.get("request_id")): item
             for item in all_requests
-            if item.get("request_id") in set(request_ids) and item.get("status") == "fulfilled"
+            if isinstance(item.get("request_id"), str)
+        }
+        scoped_requests = {value for value in request_ids if isinstance(value, str)}
+        require(
+            scoped_requests <= set(requests_by_id),
+            "acquisition removed scoped source requests",
+            {"missing_request_ids": sorted(scoped_requests - set(requests_by_id))},
+            "Restore the source-request store; an attempted request is never deleted.",
+        )
+        fulfilment_claims, reopen_claims, projected_requests_by_id, committed_request_ids = (
+            project_order_claims(
+                project_root,
+                # From the order, not the session: the order always carries it, and this
+                # arm is reached with sessions that do not.
+                require_safe_id(
+                    work_order.get("orchestration_id") or session.get("orchestration_id"),
+                    "orchestration_id",
+                ),
+                require_safe_id(work_order.get("action_id"), "action_id"),
+                scoped_requests=scoped_requests,
+                requests_by_id=requests_by_id,
+                source_requests_before=source_requests_before,
+                arm="acquisition",
+                require=require,
+            )
+        )
+        # This arm has no per-request failure outcome: every scoped request is fulfilled or
+        # the action did not do what the order asked. The refusal keeps its wording, because
+        # what it means to the acquirer is unchanged.
+        require(
+            scoped_requests <= set(fulfilment_claims),
+            "acquisition did not fulfill the scoped source request",
+        )
+        fulfilled = [
+            projected_requests_by_id[request_id]
+            for request_id in request_ids
+            if isinstance(request_id, str)
+            and projected_requests_by_id.get(request_id, {}).get("status") == "fulfilled"
         ]
         require(
             bool(fulfilled) and all(item.get("source_id") for item in fulfilled),
@@ -8005,7 +8053,6 @@ def verify_action_postconditions(
         scoped_candidate_ids = {
             value for value in scope.get("candidate_ids", []) if isinstance(value, str) and value
         }
-        manifest_guard = recorded_postcondition("manifest_records_increased")
         before_manifest = int(manifest_guard.get("before", 0) or 0)
         matching_source_ids_before = manifest_guard.get("matching_source_ids_before")
         matching_source_records_before = manifest_guard.get("matching_source_records_before")
@@ -8015,7 +8062,6 @@ def verify_action_postconditions(
         manifest_records_before = manifest_guard.get("manifest_record_fingerprints_before")
         raw_tree_before = manifest_guard.get("raw_tree_before")
         candidate_records_before = manifest_guard.get("candidate_record_fingerprints_before")
-        source_requests_before = manifest_guard.get("source_request_record_fingerprints_before")
         normalized_files_before = manifest_guard.get("normalized_file_fingerprints_before")
         question_files_before = manifest_guard.get("question_file_fingerprints_before")
         require(
@@ -8070,6 +8116,37 @@ def verify_action_postconditions(
             for candidate in all_candidates
             if isinstance(candidate.get("candidate_id"), str)
         }
+        # The scope pairing `fulfill` checks, checked again here against the same predicate,
+        # for the reason it is re-run on the delegated arm: the ledger is a file the acquirer
+        # writes, so a claim put there directly never meets the command that owns the rule.
+        # The freeze makes the issued record trustworthy; this is what verifies the pairing.
+        scope_pairing_failures: list[dict[str, Any]] = []
+        for claimed_id, claim in sorted(fulfilment_claims.items()):
+            claimed_source = str(claim["source_id"])
+            if claimed_source not in by_source_id:
+                continue
+            try:
+                source_requests.check_fulfill_scope(
+                    requests_by_id[claimed_id],
+                    claimed_source,
+                    source_requests.source_provenance_scope(project_root, config, claimed_source),
+                    {},
+                    require_scope=False,
+                )
+            except (SystemExit, source_requests.RequestScopeError) as exc:
+                reason = getattr(exc, "message", None) or str(exc)
+                scope_pairing_failures.append(
+                    {"request_id": claimed_id, "source_id": claimed_source, "reason": reason}
+                )
+        require(
+            not scope_pairing_failures,
+            "acquisition claimed a fulfilment whose scope contradicts the request",
+            {"scope_pairing_failures": scope_pairing_failures},
+            (
+                "Fulfil each request with a source whose delivered scope agrees with the request's own; "
+                "a claim cannot pair evidence the request did not ask for."
+            ),
+        )
         correlation_failures: list[dict[str, Any]] = []
         for request in fulfilled:
             request_id = str(request.get("request_id") or "")
@@ -8127,10 +8204,52 @@ def verify_action_postconditions(
             "acquisition work order lacks a valid blocked-question baseline",
             remediation="Start a fresh orchestration session; never infer question transitions after execution.",
         )
-        current_question_evidence = scoped_question_evidence_snapshot(
+        # Snapshotted over the questions this order held blocked *and* every question a
+        # fulfilled request names. The wider set is what the still-blocked check below needs:
+        # it used to read workspace status, which covered the whole workspace, and a frozen
+        # page means status can no longer answer. Narrowing it to the baseline would have
+        # left that check unable to fail.
+        linked_question_slugs = {
+            str(slug)
+            for request in fulfilled
+            for slug in request.get("question_slugs", [])
+            if isinstance(slug, str) and slug
+        }
+        durable_question_evidence = scoped_question_evidence_snapshot(
             project_root,
             config,
-            list(blocked_questions_before),
+            sorted(set(blocked_questions_before) | linked_question_slugs),
+        )
+        # The page is frozen too, so what a reopen *did* is its claim projected onto the
+        # frozen page -- exactly the edit the controller will commit.
+        current_question_evidence = dict(durable_question_evidence)
+        committed_question_slugs: set[str] = set()
+        for slug, claim in reopen_claims.items():
+            durable = durable_question_evidence.get(slug)
+            if not isinstance(durable, dict):
+                continue
+            claimed_sources = [value for value in claim.get("source_ids", []) if isinstance(value, str)]
+            projected_sources = sorted(set(durable.get("source_ids", [])) | set(claimed_sources))
+            if (
+                durable.get("status") == "open"
+                and not durable.get("blocking_request_ids")
+                and sorted(durable.get("source_ids", [])) == projected_sources
+            ):
+                committed_question_slugs.add(slug)
+                continue
+            current_question_evidence[slug] = {
+                "status": "open",
+                "blocking_request_ids": [],
+                "source_ids": projected_sources,
+            }
+        # A reopen this order never scoped is caught here or nowhere: the page no longer
+        # moves, so the question-file scope guard has nothing left to see.
+        unauthorized_reopen_claims = sorted(set(reopen_claims) - set(blocked_questions_before))
+        require(
+            not unauthorized_reopen_claims,
+            "acquisition changed a question this order did not scope as blocked",
+            {"question_slugs": unauthorized_reopen_claims},
+            "Reopen only the blocked questions this work order named.",
         )
         question_transition_failures: list[dict[str, Any]] = []
         for slug, before in blocked_questions_before.items():
@@ -8175,17 +8294,18 @@ def verify_action_postconditions(
                 "question is exactly open, has the fulfilled source id, and has no remaining blocking links."
             ),
         )
-        linked_question_slugs = {
-            str(slug)
-            for request in fulfilled
-            for slug in request.get("question_slugs", [])
-            if isinstance(slug, str) and slug
+        # Read from the projection, not from workspace status: the pages are frozen, so
+        # status reports every scoped question still blocked whatever the acquirer claimed,
+        # and this check would refuse the work it is meant to confirm.
+        still_blocked = {
+            slug
+            for slug in linked_question_slugs
+            if current_question_evidence.get(slug, {}).get("status") == "blocked"
         }
-        blocked_slugs = set(status.get("questions", {}).get("blocked_slugs", []))
         require(
-            not linked_question_slugs & blocked_slugs,
+            not still_blocked,
             "questions linked to fulfilled evidence remain blocked",
-            {"question_slugs": sorted(linked_question_slugs & blocked_slugs)},
+            {"question_slugs": sorted(still_blocked)},
         )
         current_source_request_fingerprints = record_fingerprint_snapshot(
             all_requests,
@@ -8195,7 +8315,11 @@ def verify_action_postconditions(
         request_scope_violations = fingerprint_scope_violations(
             source_requests_before,
             current_source_request_fingerprints,
-            mutable_ids=set(request_ids),
+            # Frozen for the duration of the order: a fulfilment is a claim the controller
+            # commits, so nothing should have written here at all. The only tolerated
+            # difference is a claim this controller already committed on an interrupted
+            # finalization, which is a replay of its own write rather than the acquirer's.
+            mutable_ids=committed_request_ids,
         )
         require(
             not any(request_scope_violations.values()),
@@ -8207,7 +8331,9 @@ def verify_action_postconditions(
         acquisition_question_scope_violations = fingerprint_scope_violations(
             question_files_before,
             current_question_files,
-            mutable_ids={f"{slug}.md" for slug in scope.get("question_slugs", []) if isinstance(slug, str)},
+            # Frozen for the same reason, and tolerated on the same terms: only a slug whose
+            # durable page already carries its own claim, from a commit that was interrupted.
+            mutable_ids={f"{slug}.md" for slug in committed_question_slugs},
         )
         require(
             not any(acquisition_question_scope_violations.values()),
@@ -8383,6 +8509,21 @@ def verify_action_postconditions(
             "Restore every out-of-scope candidate and transition only the scoped candidate to fetched.",
         )
         require(current in {"fetching", "evidence_ready"}, "acquisition child run is in an invalid state")
+        if apply_effects:
+            # After every require above it, so a refused submission leaves the request store
+            # and the question pages exactly as it found them.
+            commit_delegated_bookkeeping(
+                project_root,
+                config,
+                fulfilment_claims,
+                reopen_claims,
+                committed_question_slugs,
+                orchestration_id=require_safe_id(
+                    work_order.get("orchestration_id") or session.get("orchestration_id"),
+                    "orchestration_id",
+                ),
+                action_id=require_safe_id(work_order.get("action_id"), "action_id"),
+            )
         if apply_effects and current == "fetching":
             controller.run_transition(project_root, child_args(run_id, session["agent_id"], to_state="evidence_ready"))
         return "research", None
@@ -8786,6 +8927,33 @@ def verify_blocked_action_postconditions(
         remediation="Preserve this action for audit and start a fresh orchestration; do not infer a baseline.",
     )
 
+    # Read before the workspace snapshots below, and never degraded to "no claims". The
+    # store and the pages are frozen inside an acquisition order, so their no-change
+    # assertions are now satisfied by a claim rather than disproved by one: the ledger is
+    # the only place a blocked attempt's bookkeeping can show up at all.
+    order_claims = load_sibling_module("_order_claims")
+    blocked_claims = load_order_claims(
+        project_root,
+        require_safe_id(
+            work_order.get("orchestration_id") or session.get("orchestration_id"),
+            "orchestration_id",
+        ),
+        require_safe_id(work_order.get("action_id"), "action_id"),
+        order_claims,
+    )
+    require(
+        not blocked_claims.get("fulfilments"),
+        "blocked acquisition changed the source-request store",
+        {"claimed_request_ids": sorted(blocked_claims.get("fulfilments", {}))},
+        "Restore every request to its pre-action state; a blocked attempt cannot fulfill a request.",
+    )
+    require(
+        not blocked_claims.get("reopens"),
+        "blocked acquisition changed question files",
+        {"claimed_question_slugs": sorted(blocked_claims.get("reopens", {}))},
+        "Restore every question to its pre-action state; a blocked attempt cannot reopen a question.",
+    )
+    # Kept as well as, not instead of: these still catch an edit that bypassed the CLI.
     current_source_requests = source_request_record_fingerprint_snapshot(project_root, config)
     require(
         current_source_requests == source_requests_before,

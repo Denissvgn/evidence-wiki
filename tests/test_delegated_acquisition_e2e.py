@@ -3824,16 +3824,19 @@ class OutOfBandGateTests(DelegatedWorkspace, unittest.TestCase):
         # fulfil one.
         self.assertFalse(gate._sanctions_request(research_order, "req-scoped"))
 
-    def test_only_a_delegated_acquisition_order_sanctions_a_fulfilment(self):
-        """A stale providers-mode order must not vouch for a delegated fulfilment.
+    def test_only_an_acquisition_order_sanctions_a_fulfilment(self):
+        """An order of any other phase must not vouch for a fulfilment.
 
-        Asserted at the predicate because the state is awkward to reach and stays that
-        way: a session issues provider acquisition orders only while the workspace does
-        *not* delegate, and declaring delegation afterwards is refused at the next
-        `next`/`submit` with `ORCHESTRATION_DELEGATION_CHANGED`. The gate reads config and
-        session files independently of that guard, so the retained order is exactly what a
-        mode check has to disqualify — and no end-to-end state can demonstrate it without
-        first defeating another guard.
+        The acquisition mode no longer disqualifies an order here. Both arms freeze the
+        request store for the duration of an acquisition order, so both have to be
+        identifiable from the gate; who executes the order decides nothing about whether
+        its bookkeeping is contingent on acceptance. What still disqualifies an order is
+        its phase, which is what this asserts.
+
+        Asserted at the predicate because the interesting states are awkward to reach and
+        stay that way: a retained order from before a mode change is exactly the shape a
+        phase check has to judge, and no end-to-end state can produce one without first
+        defeating another guard.
         """
         gate = load_script_module("e2e_delegated_gate", "_delegation_gate.py")
         scope = {"question_slugs": [QUESTION_SLUG], "request_ids": ["req-scoped"]}
@@ -3842,9 +3845,15 @@ class OutOfBandGateTests(DelegatedWorkspace, unittest.TestCase):
         self.assertTrue(gate._sanctions_request(delegated_order, "req-scoped"))
         self.assertFalse(gate._sanctions_request(delegated_order, "req-elsewhere"))
 
-        for stale in (
-            {"phase": "acquisition", "scope": scope},  # pre-delegation order: no mode field
+        # An acquisition order sanctions whatever its mode says, including none at all:
+        # a pre-delegation order and a provider order both freeze the store the same way.
+        for acquisition in (
+            {"phase": "acquisition", "scope": scope},
             {"phase": "acquisition", "acquisition_mode": "providers", "scope": scope},
+        ):
+            self.assertTrue(gate._sanctions_request(acquisition, "req-scoped"), acquisition)
+
+        for stale in (
             {"phase": "discovery", "acquisition_mode": "delegated", "scope": scope},
             {"phase": "candidate_review", "acquisition_mode": "delegated", "scope": scope},
         ):
