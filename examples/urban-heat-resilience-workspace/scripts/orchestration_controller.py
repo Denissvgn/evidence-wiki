@@ -7457,6 +7457,19 @@ def verify_delegated_acquisition_postconditions(
         mutable_ids=set(),
         allowed_new_ids=set(current_raw_entries) - set(before_raw_entries),
     )
+    # Refused before the derivation below, which is the whole point of separating them.
+    # This verdict is already decided -- it says a raw file that existed at issuance was
+    # changed or removed, and needs nothing from inventory to say it. Deriving first let a
+    # derivation that *raises* travel out ahead of it, so an operator who had deleted a raw
+    # file was told to repair a raw tree instead of being told what they had deleted. The
+    # deletion is often why the derivation cannot run, which is what makes the wrong answer
+    # the likely one rather than a rare coincidence.
+    require(
+        not any(raw_existing_changes.values()),
+        "delegated acquisition changed or removed raw evidence that existed when the order was issued",
+        {"raw_scope_violations": raw_existing_changes},
+        "Restore every raw file the order was issued against; delivered raw evidence is immutable.",
+    )
     # One inventory-derivation pass over the delivered tree answers both raw-scope
     # questions: whether each new record's raw_paths is what inventory itself derives
     # (refusing the hand-edited raw_paths route), and which snapshot entries those
@@ -7481,7 +7494,7 @@ def verify_delegated_acquisition_postconditions(
     actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
     unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
     require(
-        not any(raw_existing_changes.values()) and not unexpected_new_raw_paths,
+        not unexpected_new_raw_paths,
         "delegated acquisition changed raw evidence outside newly fulfilled manifest source scope",
         {
             "raw_scope_violations": raw_existing_changes,
@@ -8511,6 +8524,15 @@ def verify_action_postconditions(
             mutable_ids=set(),
             allowed_new_ids=set(current_raw_entries) - set(before_raw_entries),
         )
+        # Split from the derivation for the reason the delegated arm is: this verdict is
+        # already decided and needs nothing from inventory, so letting a derivation that
+        # raises travel out ahead of it answers a deletion with "repair the raw tree".
+        require(
+            not any(raw_existing_changes.values()),
+            "acquisition changed or removed raw evidence that existed when the order was issued",
+            {"raw_scope_violations": raw_existing_changes},
+            "Restore every raw file the order was issued against; delivered raw evidence is immutable.",
+        )
         # Same predicate as the delegated arm, from the same single derivation pass:
         # raw_paths must be inventory-derived, and attribution decides admission.
         if expected_new_source_ids:
@@ -8533,7 +8555,7 @@ def verify_action_postconditions(
         actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
         unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
         require(
-            not any(raw_existing_changes.values()) and not unexpected_new_raw_paths,
+            not unexpected_new_raw_paths,
             "acquisition changed raw evidence outside newly fulfilled manifest source scope",
             {
                 "raw_scope_violations": raw_existing_changes,

@@ -21,6 +21,26 @@
   additions in this release. And a `--require-checksum` or `--reject-mismatch` refusal over a
   bundle record now reports a `path` where it reported none, which is additive to the
   envelope rather than a change to which records refuse.
+- **Fix: deleting raw evidence an order was issued against was reported as a broken raw
+  tree.** Both completed acquisition arms decide, from two snapshots, whether a raw file
+  that existed when the order was issued has been changed or removed. That verdict needs
+  nothing from inventory — and it was being held until after a re-derivation of the whole
+  delivered tree, which can fail. When it failed, the raise travelled out ahead of the
+  verdict already in hand: the operator was told "delivered raw evidence could not be
+  re-derived by source inventory rules" and sent to repair a raw tree, and the file they
+  had deleted was never named.
+
+  The two are not independent, which is what makes the wrong answer the likely one rather
+  than a coincidence. Deleting a raw file a manifest record references is a plausible reason
+  the derivation cannot run at all, so the case that produces the misdirection is the
+  ordinary one.
+
+  The check now runs before the derivation, and the refusal names the file. One consequence
+  for anyone reading refusals: an edit to raw evidence that existed at issuance now answers
+  `changed or removed raw evidence that existed when the order was issued` rather than
+  sharing a refusal with deliveries outside the fulfilled source scope. The shared wording
+  described only the other half, so a sidecar edit was reported as a scope problem. The
+  unexpected-new-paths refusal keeps its message and its details unchanged.
 
 - **Change: inside a pending acquisition order, `fulfill` and `reopen` now file a claim the
   controller commits on acceptance, instead of writing durable state as they run.** An
