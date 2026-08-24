@@ -399,13 +399,13 @@ Behavior in `source_inventory.py`:
   failed verification is refused even though its primary provenance — the LaTeX
   bundle root — carries no checksum at all, and a link record whose primary capture
   verified is refused when a second link file naming the same URL did not. The
-  refusal of a *secondary* capture names it: its `path` appears in the warning text
-  and in the error envelope under `details.refusals[].path`, so the operator can tell
-  which of the record's captures failed rather than only which record was dropped. A
-  primary-capture mismatch is unchanged and still names the record alone, without a
-  `path`: nothing on the record records which delivered path the primary `provenance`
-  describes, and naming one here would be a guess rather than a reading. A record with
-  several failing captures raises one refusal per capture, all naming that record.
+  refusal names the capture it is about, primary or secondary: its `path` appears in
+  the warning text and in the error envelope under `details.refusals[].path`, so the
+  operator can tell which of the record's captures failed rather than only which record
+  was dropped. The primary names its path because the record now carries it —
+  `provenance.path` is the delivered path the sidecar was read for, which for a bundle
+  is the bundle root and so appears in no `raw_paths`. A record with several failing
+  captures raises one refusal per capture, all naming that record.
 - `--require-checksum` stays primary-only, and that is a constraint rather than an
   omission. The two flags ask different questions. A checksum that is present and
   did not verify is positive evidence about a specific capture, so it is asked of
@@ -423,9 +423,9 @@ Behavior in `source_inventory.py`:
   statement that every capture of the record verified.
 - An exported citation is the exception: it carries each `additional_provenance`
   entry through as its own object, so a consumer reading the export sees every
-  capture's `path` and `checksum_verified` rather than the primary's alone. What it
-  still cannot see is which delivered path the *primary* `provenance` describes —
-  that path is not recorded on the record.
+  capture's `path` and `checksum_verified` rather than the primary's alone. The
+  primary's own path comes through as `provenance_path`, so the flat `checksum` and
+  `checksum_verified` fields say which capture they are a verdict about.
 - Provenance and evidence-usability fields flow into normalized-record
   frontmatter on the next normalization, so exported citations carry
   `origin_url`, `license`, academic venue/status metadata, and unusable-evidence

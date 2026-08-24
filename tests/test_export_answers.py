@@ -947,6 +947,35 @@ optional_facets:
             self.assertEqual("HANDOFF_SIGNATURE_INVALID", envelope["error_code"])
             self.assertEqual("invalid", envelope["details"]["handoff_signature_status"])
 
+    def test_a_citation_names_the_path_its_primary_checksum_describes(self):
+        """`checksum_verified` is a verdict about one capture, so it has to name which.
+
+        A record can own several delivered paths, and for a bundle the primary is the
+        bundle root rather than anything in `raw_paths` -- so a consumer reading the flat
+        checksum fields could not say what had been verified, while every *secondary*
+        capture already named its own path.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = self.seed_answered_workspace(Path(tmpdir))
+            record = dict(MANIFEST_RECORD)
+            record["provenance"] = {
+                **MANIFEST_RECORD["provenance"],
+                "checksum": "sha256:" + "a" * 64,
+                "checksum_verified": True,
+                "path": "raw/other/arXiv-2601.00001v1",
+            }
+            (target / "sources" / "manifest.jsonl").write_text(json.dumps(record) + "\n")
+
+            code, document = self.export_json(target)
+
+            self.assertEqual(0, code)
+            citation = self.question_by_slug(document, "benchmarks")["citations"][0]
+            self.assertEqual(
+                "raw/other/arXiv-2601.00001v1",
+                citation["provenance_path"],
+                msg=f"the flat checksum fields describe one capture and must name it: {citation}",
+            )
+
     def test_citation_surfaces_checksum_provenance(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.seed_answered_workspace(Path(tmpdir))

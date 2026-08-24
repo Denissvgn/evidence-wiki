@@ -1868,9 +1868,16 @@ def apply_provenance_sidecars(
         if primary is None:
             continue
         matched.add(primary)
-        record["provenance"] = merge_sidecar_provenance(
+        merged = merge_sidecar_provenance(
             project_root, record, primary, sidecars[primary], warnings
         )
+        # Named by the path it describes, exactly as every secondary capture is. A record
+        # can own several delivered paths and the primary is whichever of them a sidecar
+        # matched first, which is not derivable from the record afterwards: `latex_root`
+        # is not in `raw_paths`, so a consumer reading `checksum_verified` off a bundle
+        # record could not say which capture had been verified.
+        merged["path"] = primary
+        record["provenance"] = merged
         additional: list[dict[str, Any]] = []
         for extra in candidates:
             if extra == primary or extra not in sidecars:
@@ -2360,22 +2367,33 @@ def strict_checksum_refusals(
         record_id = record_label(record)
 
         record_refusals: list[dict[str, str]] = []
+        # The primary capture names its path too now. It could not before: a record may own
+        # several delivered paths and nothing recorded which one the primary provenance
+        # described, so these refusals named only the record -- ambiguous for exactly the
+        # multi-capture records the mismatch arm exists to catch.
+        primary_path = provenance.get("path") if isinstance(provenance.get("path"), str) else None
+        primary_named = f" capture {primary_path}" if primary_path else ""
         if reject_mismatch and checksum_present and not checksum_verified:
-            record_refusals.append(
-                {
-                    "source_id": record_id,
-                    "reason": "checksum_mismatch",
-                    "message": f"strict checksum refusal: {record_id} checksum is present but not verified",
-                }
-            )
+            refusal = {
+                "source_id": record_id,
+                "reason": "checksum_mismatch",
+                "message": (
+                    f"strict checksum refusal: {record_id}{primary_named} "
+                    "checksum is present but not verified"
+                ),
+            }
+            if primary_path:
+                refusal["path"] = primary_path
+            record_refusals.append(refusal)
         elif require_checksum and not checksum_verified:
-            record_refusals.append(
-                {
-                    "source_id": record_id,
-                    "reason": "checksum_required",
-                    "message": f"strict checksum refusal: {record_id} missing verified checksum",
-                }
-            )
+            refusal = {
+                "source_id": record_id,
+                "reason": "checksum_required",
+                "message": f"strict checksum refusal: {record_id}{primary_named} missing verified checksum",
+            }
+            if primary_path:
+                refusal["path"] = primary_path
+            record_refusals.append(refusal)
         if reject_mismatch:
             # Whatever the primary did, a secondary capture may still have mismatched,
             # and the operator needs the path of each one that did.

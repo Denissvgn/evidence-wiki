@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Fix: a record's primary checksum was a verdict about a capture it never named.** A
+  manifest record can own several delivered paths, and the primary `provenance` is whichever
+  of them a sidecar matched first. For a bundle that is the bundle root, which appears in no
+  `raw_paths` at all — so nothing on the record said which capture the flat `checksum` and
+  `checksum_verified` fields described, while every *secondary* capture had named its own
+  path since `additional_provenance` shipped.
+
+  The record now carries `provenance.path`, and the two consumers that had to work around
+  its absence stop doing so. A strict-mode refusal names the capture it is about whether that
+  capture is the primary or a secondary one, where a primary mismatch previously named only
+  the record — ambiguous for exactly the multi-capture records the mismatch arm exists to
+  catch. And an exported citation carries `provenance_path`, so a consumer reading
+  `checksum_verified` can say what was verified.
+
+  Two consequences worth expecting. Manifest records grow a field, so a record rewritten by
+  the next inventory run has a new fingerprint, on the same terms as the other field
+  additions in this release. And a `--require-checksum` or `--reject-mismatch` refusal over a
+  bundle record now reports a `path` where it reported none, which is additive to the
+  envelope rather than a change to which records refuse.
+
 - **Change: inside a pending acquisition order, `fulfill` and `reopen` now file a claim the
   controller commits on acceptance, instead of writing durable state as they run.** An
   order is one of those when it carries `phase: acquisition`, whether the acquirer is a

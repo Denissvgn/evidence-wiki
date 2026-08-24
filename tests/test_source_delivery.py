@@ -681,10 +681,13 @@ class SourceDeliveryTests(unittest.TestCase):
             [refusal for refusal in refusals if refusal["reason"] != "checksum_required"],
             envelope,
         )
-        self.assertEqual([], [refusal for refusal in refusals if "path" in refusal], envelope)
+        # Still primary-only, and now it says which capture that is. The bundle root can
+        # never verify, so it is the one refused; naming it is what stops a reader of a
+        # multi-capture record having to guess which path the verdict was about.
         self.assertEqual([], [refusal for refusal in refusals if pdf_rel in refusal["message"]], envelope)
         paper_refusals = [refusal for refusal in refusals if refusal["source_id"] == "paper:2601.00001v1"]
         self.assertEqual(1, len(paper_refusals), envelope)
+        self.assertEqual("raw/other/arXiv-2601.00001v1", paper_refusals[0]["path"], envelope)
 
     def write_two_link_captures(self, workspace: Path) -> tuple[str, str]:
         """Two link files naming one URL: the first verifies, the second does not.
@@ -773,7 +776,14 @@ class SourceDeliveryTests(unittest.TestCase):
             [refusal["reason"] for refusal in paper_refusals],
             envelope,
         )
-        self.assertEqual([pdf_rel], [refusal["path"] for refusal in paper_refusals if "path" in refusal], envelope)
+        # Both halves name their capture now: the primary refusal the bundle root it was
+        # about, the secondary refusal the PDF. Only the second used to carry a path, so a
+        # reader could not tell which capture the primary verdict described.
+        self.assertEqual(
+            ["raw/other/arXiv-2601.00001v1", pdf_rel],
+            [refusal["path"] for refusal in paper_refusals if "path" in refusal],
+            envelope,
+        )
         self.assertEqual(3, len(envelope["details"]["source_ids"]), envelope)
         self.assertIn("refused 3 sources", envelope["message"], envelope)
 
