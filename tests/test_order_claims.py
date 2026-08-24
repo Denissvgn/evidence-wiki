@@ -219,16 +219,35 @@ class SanctioningOrderTests(unittest.TestCase):
 
             self.assertEqual("orch-1", entry["orchestration_id"], entry)
             self.assertEqual("action-0001", entry["action_id"], entry)
-            self.assertTrue(GATE.is_delegated_acquisition_order(entry["work_order"]), entry)
+            self.assertTrue(GATE.is_contingent_acquisition_order(entry["work_order"]), entry)
 
-    def test_an_ungated_workspace_reports_no_order(self):
+    def test_an_ungated_workspace_still_learns_which_order_scopes_the_change(self):
+        """Identification is not gated on the workspace's acquisition mode; refusal is.
+
+        A workspace that does not delegate is never *refused* a mutation -- that is the
+        backward compatibility this gate promises. But a caller still has to be able to
+        find out which pending order it is inside, because an order freezing the request
+        store is a property of the order, not of the workspace that issued it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.seed(root, self.DELEGATED)
+
+            entry = GATE.require_sanctioned_mutation(
+                root, False, request_id="req-1",
+                error_code="X", subject="subject", remediation="fix it",
+            )
+
+            self.assertEqual("action-0001", entry["action_id"], entry)
+
+    def test_an_ungated_workspace_is_not_refused_an_unsanctioned_change(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             self.seed(root, self.DELEGATED)
 
             self.assertIsNone(
                 GATE.require_sanctioned_mutation(
-                    root, False, request_id="req-1",
+                    root, False, request_id="req-nothing-scopes",
                     error_code="X", subject="subject", remediation="fix it",
                 )
             )
@@ -250,7 +269,7 @@ class SanctioningOrderTests(unittest.TestCase):
             entry = self.gate(root, question_slug="needs-price")
 
             self.assertEqual("action-0007", entry["action_id"], entry)
-            self.assertFalse(GATE.is_delegated_acquisition_order(entry["work_order"]), entry)
+            self.assertFalse(GATE.is_contingent_acquisition_order(entry["work_order"]), entry)
 
     def test_a_delegated_acquisition_order_sanctions_a_reopen_and_is_committable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -259,7 +278,7 @@ class SanctioningOrderTests(unittest.TestCase):
 
             entry = self.gate(root, question_slug="needs-price")
 
-            self.assertTrue(GATE.is_delegated_acquisition_order(entry["work_order"]), entry)
+            self.assertTrue(GATE.is_contingent_acquisition_order(entry["work_order"]), entry)
 
     def test_an_acquisition_order_wins_over_a_research_order_scoping_one_question(self):
         """Two live sessions can scope one slug, and sort order must not decide this.
@@ -282,7 +301,7 @@ class SanctioningOrderTests(unittest.TestCase):
                     entry = self.gate(root, question_slug="needs-price")
 
                     self.assertEqual(acquisition_id, entry["orchestration_id"], entry)
-                    self.assertTrue(GATE.is_delegated_acquisition_order(entry["work_order"]), entry)
+                    self.assertTrue(GATE.is_contingent_acquisition_order(entry["work_order"]), entry)
 
     def test_an_unsanctioned_mutation_still_refuses(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -296,7 +315,7 @@ class SanctioningOrderTests(unittest.TestCase):
     def test_a_malformed_order_is_not_mistaken_for_a_committable_one(self):
         for value in (None, {}, {"phase": "acquisition"}, {"phase": "research", "acquisition_mode": "delegated"}):
             with self.subTest(value=value):
-                self.assertFalse(GATE.is_delegated_acquisition_order(value))
+                self.assertFalse(GATE.is_contingent_acquisition_order(value))
 
 
 if __name__ == "__main__":
