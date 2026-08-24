@@ -394,6 +394,13 @@ def build_citation(
         citation["checksum"] = checksum_value.strip()
     if isinstance(provenance.get("checksum_verified"), bool):
         citation["checksum_verified"] = provenance["checksum_verified"]
+    # Which delivered path the flags above describe. A record can own several, and for a
+    # bundle the primary is the bundle root rather than anything in `raw_paths`, so a
+    # consumer reading `checksum_verified` had no way to say what had been verified --
+    # while every *secondary* capture named its own path.
+    primary_path = provenance.get("path")
+    if isinstance(primary_path, str) and primary_path.strip():
+        citation["provenance_path"] = primary_path.strip()
     additional_provenance, unnamed_captures = additional_provenance_citations(record)
     if additional_provenance:
         citation["additional_provenance"] = additional_provenance
