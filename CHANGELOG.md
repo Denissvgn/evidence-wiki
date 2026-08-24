@@ -2,10 +2,10 @@
 
 ## Unreleased
 
-- **Change: inside a pending delegated acquisition order, `fulfill` and `reopen` now file a
-  claim the controller commits on acceptance, instead of writing durable state as they
-  run.** An order is one of those when it carries `phase: acquisition` and
-  `acquisition_mode: delegated`, and nothing outside one is touched.
+- **Change: inside a pending acquisition order, `fulfill` and `reopen` now file a claim the
+  controller commits on acceptance, instead of writing durable state as they run.** An
+  order is one of those when it carries `phase: acquisition`, whether the acquirer is a
+  delegated host or the workspace's own providers, and nothing outside one is touched.
   `source_requests.py fulfill` writes a claim at
   `runs/order-claims/<orchestration_id>/<action_id>.json` and does not write
   `sources/source-requests.jsonl` at all, so the record it is about stays `status: "open"`
@@ -37,20 +37,27 @@
   used to hold every request the action fulfilled, so an edit to a scoped request's
   `rationale` or `scope` is a refusal where it was accepted before.
 
-  **That fourth one is delegated-only, and the provider arm does not narrow with it.** A
-  provider acquisition order's request-scope guard still admits every field of every
-  request the order names, so the same mid-order rewrite is still accepted there and the
-  rewritten text is still what the store holds once the action is over. It is pinned as the
-  measurement of a defect rather than as intended behaviour, and closing it is not what
-  this change is.
+  **All four hold on both acquisition arms.** Contingent bookkeeping was delegated-only when
+  it first landed, and a provider acquisition order's request-scope guard still admitted
+  every field of every request the order named, so the same mid-order rewrite was accepted
+  there. It is not any more: an acquisition order freezes the request store whoever executes
+  it, and the exemption is now a record already carrying its own committed claim.
+
+  Narrowing that exemption could never have closed it, which is worth recording because it
+  was the obvious repair. The exemption is by record id rather than by field, and fulfilment
+  itself rewrote the record — so no width separated an honest fulfilment from a rewrite.
+  What changed is the other side of the comparison: a fulfilment is a claim now, so an
+  honest one leaves the record byte-identical and exempting nothing became correct rather
+  than unusable.
 
   Three neighbouring behaviours are deliberately unchanged. A **research** order's `reopen`
   still writes the page straight through: scope is what sanctions a question mutation, so a
   research order legitimately reopens the questions it scopes, and no acquisition
   submission would ever come along to commit a claim on its behalf. A **provider**
-  workspace — anything other than `orchestration: acquisition: delegated`, and
-  `acquisition: providers` remains the default — never reaches any of this, because the
-  delegation gate short-circuits on the mode before it looks for an order at all. And
+  workspace is still never refused for lacking a sanction, which is what the delegation
+  gate has always promised an operator working by hand: it is told which order scopes its
+  change so the command can file a claim there, and the only refusal that reaches it is two
+  live acquisition orders scoping one subject, which no answer resolves. And
   `record-attempt-failure` still writes the attempt audit durably, which is the right
   answer for it: an audit of what an acquirer tried is not an assertion about evidence, and
   it has to survive the refusal it documents. Only its "already fulfilled" refusal moved,
@@ -58,8 +65,8 @@
   uncommitted claim is refused in the same words and classifies as the same recoverable
   code.
 
-  One consequence for anything that reads a workspace mid-order. While a delegated
-  acquisition order is pending, `source_requests.py list --status open` keeps returning a
+  One consequence for anything that reads a workspace mid-order. While an acquisition order
+  is pending, delegated or provider, `source_requests.py list --status open` keeps returning a
   claimed request as *open*, and goes on doing so until the submission is accepted — `list`
   reads the store, and the store is the thing that is not moving. That is the mechanism
   working rather than a lag to route around, and both commands that file claims say so
@@ -72,7 +79,9 @@
   propositions asserted against the durable bytes rather than against a command's return
   value: three of them — the frozen store and page, the refused submission that commits
   nothing, and the failed outcome that leaves its request routable — fail before this
-  change and pass after it, and the fourth, the provider arm, did not move either way.
+  change and pass after it. The fourth was the provider arm, which did not move when the
+  others did until the freeze reached it, and now asserts the refusal it used to measure as
+  an admission.
 - **Fix: the machine export dropped every capture a source record delivered beyond the
   first.** A manifest record can own more than one delivered path — inventory folds a
   paired paper's PDF into the LaTeX-bundle record for the same work — and each capture was

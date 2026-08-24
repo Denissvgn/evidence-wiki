@@ -2126,10 +2126,13 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
                 # The same no-op an identical re-fulfil against the store is. A delegate
                 # replaying its own action must not be refused, must not be told it changed
                 # something it did not, and must not leave a second entry behind.
+                # The same projection the first call reported, for the same reason: the
+                # commit writes `status` and `source_id` and leaves `updated_at` alone, so
+                # stamping the claim's own time here would make a replay disagree with the
+                # call it is replaying -- and with the record that eventually lands.
                 projected = dict(target)
                 projected["status"] = "fulfilled"
                 projected["source_id"] = source_id
-                projected["updated_at"] = str(claim.get("claimed_at") or target.get("updated_at"))
                 return {
                     "schema_version": SCHEMA_VERSION,
                     "action": "fulfill",
@@ -2155,20 +2158,30 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
 
         now = timestamp_utc()
         if contingent is not None:
-            record_fulfilment_claim(
-                project_root,
-                contingent["orchestration_id"],
-                contingent["action_id"],
-                request_id=request_id,
-                source_id=source_id,
-                claimed_at=now,
-            )
+            try:
+                record_fulfilment_claim(
+                    project_root,
+                    contingent["orchestration_id"],
+                    contingent["action_id"],
+                    request_id=request_id,
+                    source_id=source_id,
+                    claimed_at=now,
+                )
+            except OrderClaimError as exc:
+                # Reachable only by a race -- the read above normally converts this first --
+                # but OrderClaimError is not caught by main(), so leaving it would surface a
+                # traceback where every other unreadable-ledger path produces an envelope.
+                raise SystemExit(f"Unreadable order claims: {exc.message}") from exc
             # What the caller is shown, not what the store holds: the durable record stays
             # open until the controller commits, which is the whole point of the claim.
+            # `updated_at` keeps its issued value because that is what the commit will
+            # leave: the commit writes `status` and `source_id` and nothing else, so that
+            # a replay after an interrupted finalization can revert exactly that delta and
+            # prove the rest of the record never moved. Projecting a stamp here that never
+            # lands would be the report describing a record the controller will not write.
             target = dict(target)
             target["status"] = "fulfilled"
             target["source_id"] = source_id
-            target["updated_at"] = now
         else:
             target["status"] = "fulfilled"
             target["source_id"] = source_id

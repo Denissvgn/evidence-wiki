@@ -276,12 +276,12 @@ class DelegatedAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase
 
 
 class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase):
-    """The provider arm, whose request-scope guard treats every scoped record as mutable.
+    """The provider arm, which used to be the control and is now covered by the same freeze.
 
-    Separate from the delegated cases above because it is a different verification arm with a
-    different scope rule, reached by a workspace that declares acquisition providers instead of
-    an acquirer agent. The delegated arm makes only the *fulfilled* scoped requests mutable;
-    this one makes all of them mutable, whatever became of them.
+    These began as the measurement that contingent bookkeeping reached only the delegated
+    arm: every field of a scoped request record was mutable here, so a mid-order rewrite
+    survived acceptance. An acquisition order freezes the request store whoever executes it
+    now, and both cases assert the refusal rather than the admission.
     """
 
     CANDIDATE_ID = "cand-provider-route"
@@ -399,16 +399,138 @@ class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase)
             encoding="utf-8",
         )
 
-    def test_a_scoped_requests_record_stays_rewritten_after_the_order_is_accepted(self):
-        """Measures how much of a scoped request record an order may rewrite: all of it.
+    def test_a_provider_submission_replayed_after_its_commit_still_accepts(self):
+        """The provider arm's interrupted-finalization path, which nothing else covers.
 
-        The provider arm's request-scope guard admits every request id the order names, so a
-        record's own fields -- including the rationale that says why the evidence was wanted --
-        can be edited mid-order and the submission is still accepted. The rewrite here is the
-        retrospective kind: the reason is restated to match what turned up. Nothing in the
-        acceptance path compares it against what the order was issued for, and the rewritten
-        text is what the store holds once the action is over. Pinned as a measurement of a
-        defect; only the durability of the rewrite is measured here.
+        Logic-identical to the delegated one, and that is exactly why it is worth its own
+        case: the two arms reach the same commit through different verification, so a
+        change to either arm's tolerance can break this one alone.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.init_workspace(Path(tmpdir))
+            self.enable_providers(workspace)
+            request_id = self.block_question_on_a_request(workspace)
+            self.select_candidate(workspace, request_id)
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+
+            source_id = self.deliver_paper(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            self.discover(
+                workspace,
+                [
+                    "candidates", "transition",
+                    "--candidate-id", self.CANDIDATE_ID,
+                    "--expected-state", "selected",
+                    "--to-state", "fetched",
+                    "--source-id", source_id,
+                    "--reason", "Provenance-backed evidence was inventoried and normalized.",
+                    "--actor", ACQUIRER,
+                    "--run-id", order["run_id"],
+                ],
+            )
+
+            before = session_document(workspace)
+            artifacts = [PAPER, f"{PAPER}.provenance.yml", "sources/manifest.jsonl"]
+            code, accepted = self.submit(workspace, order["action_id"], artifacts=artifacts)
+            self.assertEqual(0, code, accepted)
+            committed = stored_request(workspace, request_id)
+            self.assertEqual("fulfilled", committed["status"], committed)
+
+            # Roll the session back to the instant before the commit's own session write.
+            session_path = workspace / "runs" / "orchestrations" / ORCHESTRATION_ID / "session.json"
+            session_path.write_text(json.dumps(before, indent=2) + "\n", encoding="utf-8")
+
+            replay_code, replay = self.submit(workspace, order["action_id"], artifacts=artifacts)
+
+            self.assertEqual(0, replay_code, replay)
+            self.assertEqual(
+                committed,
+                stored_request(workspace, request_id),
+                msg="the replayed provider commit must be idempotent, not restamped",
+            )
+
+    def test_a_blocked_provider_action_that_claimed_a_fulfilment_is_refused(self):
+        """The no-change assertions cannot see a claim, so the ledger has to be checked.
+
+        A blocked attempt is one that recorded nothing. Both halves of that used to be
+        provable from the workspace: a fulfilment moved the request store and a reopen moved
+        the question page, and the two byte-equality checks caught either. Freezing both for
+        the duration of the order satisfies those checks instead of disproving them, so a
+        blocked submission that filed claims would pass them unread.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.init_workspace(Path(tmpdir))
+            self.enable_providers(workspace)
+            request_id = self.block_question_on_a_request(workspace)
+            self.select_candidate(workspace, request_id)
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+
+            source_id = self.deliver_paper(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            code, envelope = self.submit(
+                workspace, order["action_id"], outcome="blocked"
+            )
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("changed the source-request store", envelope["message"], envelope)
+            self.assertEqual(
+                [request_id], envelope["details"]["claimed_request_ids"], envelope
+            )
+
+    def test_a_blocked_action_that_claims_during_verification_is_refused(self):
+        """The ledger read happens before six workspace snapshots, and can go stale.
+
+        Every byte-equality check this arm runs would still pass -- that is the whole
+        reason it reads the ledger at all -- so a claim filed while those snapshots run
+        would be accepted as "changed nothing" and left uncommitted. The re-read at the
+        acceptance boundary is what catches it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.init_workspace(Path(tmpdir))
+            self.enable_providers(workspace)
+            request_id = self.block_question_on_a_request(workspace)
+            self.select_candidate(workspace, request_id)
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+            source_id = self.deliver_paper(workspace, request_id)
+
+            original = CONTROLLER.question_file_fingerprint_snapshot
+
+            def claim_while_verifying(*args, **kwargs):
+                CLAIMS.record_fulfilment_claim(
+                    workspace, ORCHESTRATION_ID, order["action_id"],
+                    request_id=request_id, source_id=source_id,
+                    claimed_at="2026-01-01T00:00:00Z",
+                )
+                return original(*args, **kwargs)
+
+            with mock.patch.object(
+                CONTROLLER, "question_file_fingerprint_snapshot", claim_while_verifying
+            ):
+                code, envelope = self.submit(workspace, order["action_id"], outcome="blocked")
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("while it was being verified", envelope["message"], envelope)
+            self.assertEqual([request_id], envelope["details"]["claimed_request_ids"], envelope)
+
+    def test_a_scoped_requests_record_may_not_be_rewritten_mid_order(self):
+        """No part of a scoped request record, not only its scope, survives a mid-order edit.
+
+        The provider arm's request-scope guard used to admit every request id the order
+        named, so any field of that record -- including the rationale saying why the
+        evidence was wanted -- could be restated to match whatever turned up, and the
+        submission was still accepted.
+
+        The store is frozen for the duration of an acquisition order now, and the guard
+        exempts only a record already carrying its own committed claim. The rewrite is
+        refused, and refused on the record rather than on the field, which is why a
+        rationale is a fair test of it: nothing here is scope-aware.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.init_workspace(Path(tmpdir))
@@ -452,23 +574,22 @@ class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase)
                 artifacts=[PAPER, f"{PAPER}.provenance.yml", "sources/manifest.jsonl"],
             )
 
-            self.assertEqual(
-                0,
-                code,
-                msg=f"the rewritten record did not cost the order its acceptance: {accepted}",
+            self.assertNotEqual(
+                0, code, msg=f"a mid-order rewrite must cost the order its acceptance: {accepted}"
             )
-            self.assertEqual(order["action_id"], accepted["last_completed_action_id"], accepted)
-            self.assertEqual("research", accepted["phase"], accepted)
+            self.assertIn("changed source requests outside", accepted["message"], accepted)
+            self.assertEqual(
+                [request_id],
+                accepted["details"]["source_request_scope_violations"]["changed_outside_scope"],
+                accepted,
+            )
 
+            # Refused, so nothing was committed: the fulfilment is still only a claim. The
+            # rewrite itself stands, because a refusal names an edit rather than undoing it.
             record = stored_request(workspace, request_id)
-            self.assertEqual(
-                self.REWRITTEN_RATIONALE,
-                record["rationale"],
-                msg=f"the mid-order rewrite is what the store holds afterwards: {record}",
-            )
-            self.assertEqual("fulfilled", record["status"], record)
-            self.assertEqual(source_id, record["source_id"], record)
-            self.assertEqual(1, len(stored_requests(workspace)), stored_requests(workspace))
+            self.assertEqual("open", record["status"], record)
+            self.assertIsNone(record["source_id"], record)
+            self.assertEqual(self.REWRITTEN_RATIONALE, record["rationale"], record)
 
 
 
@@ -519,10 +640,14 @@ class ClaimIdempotencyTests(DelegatedWorkspace, unittest.TestCase):
             self.assertTrue(second["contingent"], second)
             claims = claim_ledger(workspace, action_id)
             self.assertEqual([request_id], sorted(claims["fulfilments"]), claims)
+            # Compared whole, not field by field. Both are second-resolution stamps, so an
+            # assertion on `updated_at` alone passes whenever the two calls land inside one
+            # second and fails when they straddle a boundary -- which is how a real
+            # disagreement between the two branches hid here.
             self.assertEqual(
-                first["request"]["updated_at"],
-                second["request"]["updated_at"],
-                msg="a replay must report the claim it found, not a fresh stamp",
+                first["request"],
+                second["request"],
+                msg="a replay must report exactly what the call it replays reported",
             )
 
     def test_re_fulfilling_with_a_different_source_is_refused_against_the_claim(self):
@@ -586,6 +711,27 @@ class ClaimIdempotencyTests(DelegatedWorkspace, unittest.TestCase):
                 msg=f"the earlier pass's source must survive the second reopen: {claim}",
             )
             self.assertIn("req-from-an-earlier-pass", claim["request_ids"], claim)
+
+    def test_the_projection_reports_the_record_the_commit_will_write(self):
+        """What `fulfill` shows must be what lands, not a stamp the commit never writes.
+
+        The commit writes `status` and `source_id` and nothing else, so that a replay after
+        an interrupted finalization can revert exactly that delta and prove the rest of the
+        record never moved. A report projecting a fresh `updated_at` would be describing a
+        record the controller is not going to write.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, action_id = self.pending_acquisition(Path(tmpdir))
+            issued = stored_request(workspace, request_id)
+            source_id = self.deliver_for(workspace, request_id)
+
+            reported = self.fulfil(workspace, request_id, source_id)["request"]
+
+            self.assertEqual(
+                {**issued, "status": "fulfilled", "source_id": source_id},
+                reported,
+                msg=f"the projection must differ from the issued record only by the commit's delta: {reported}",
+            )
 
     def test_a_claim_read_by_a_fresh_process_is_still_the_same_claim(self):
         """A claim held in memory would make the replay depend on which process replays it.
@@ -757,6 +903,40 @@ class LedgerIsNotTrustedTests(DelegatedWorkspace, unittest.TestCase):
                 envelope["details"]["scope_pairing_failures"][0]["request_id"],
                 envelope,
             )
+
+    def test_a_forged_reopen_source_is_refused_before_it_reaches_the_page(self):
+        """A claim cannot attach evidence the manifest has no record of.
+
+        `reopen` validates every `--source-id` against the manifest before it will touch a
+        page. The ledger is a file the acquirer writes, so a claim put there directly skips
+        that command -- and naming the real source *plus* an arbitrary id would satisfy the
+        expected-ids check, which only asks that the expected set is a subset of what was
+        claimed. The commit would then write the arbitrary id into the frontmatter.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, action_id = self.pending_acquisition(Path(tmpdir))
+            source_id = self.deliver_for(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            # The real source, plus one the workspace has never seen.
+            CLAIMS.record_reopen_claim(
+                workspace, ORCHESTRATION_ID, action_id,
+                question_slug=QUESTION_SLUG,
+                source_ids=[source_id, "raw:forged-by-the-acquirer"],
+                request_ids=[request_id],
+                claimed_at="2026-01-01T00:00:00Z",
+            )
+
+            code, envelope = self.submit(workspace, action_id, artifacts=[f"raw/data/{PAYLOAD.name}"])
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("the manifest does not hold", envelope["message"], envelope)
+            self.assertEqual(
+                [{"question_slug": QUESTION_SLUG, "source_id": "raw:forged-by-the-acquirer"}],
+                envelope["details"]["unvalidated_reopen_sources"],
+                envelope,
+            )
+            self.assertEqual("blocked", question_fields(workspace)["status"], "the page must not move")
 
     def test_a_claim_filed_after_verification_began_refuses_rather_than_being_dropped(self):
         """A late claim must not be silently left uncommitted by an accepted submission."""

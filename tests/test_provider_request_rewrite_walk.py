@@ -23,10 +23,12 @@ against a temporary workspace -- and pin what was actually observed at each step
 * the narrower ``mutable_ids`` the delegated arm uses would not have refused the
   rewrite either, measured on this walk's own before/after fingerprints.
 
-The two admissions are recorded on purpose. They are measurements of what the shipped
-code does today, not an endorsement of it: naming them ``still_admitted`` is how this
-suite keeps a known hole visible and makes closing it a deliberate, reviewable change
-rather than an accident. Nothing here proposes or applies a fix.
+The two admissions this file was written to record are closed. They were measurements,
+kept visible under ``still_admitted`` names so that closing them would have to be a
+deliberate change that turned them red rather than an accident -- which is what happened:
+the request store is now frozen for the duration of an acquisition order, so an edit to a
+scoped request cannot survive it whatever the edit was. The cases are kept, inverted, so
+the route stays walked and a regression has to disagree with a named assertion.
 """
 
 import json
@@ -376,8 +378,11 @@ class ProviderArmRequestScopeRewrite(unittest.TestCase):
                 envelope,
             )
 
+            # Nothing was edited here, so the record is exactly as issued: still open,
+            # unfulfilled, and still declaring the scope the delivery contradicts.
             record = self.request_record(target, request_id)
             self.assertEqual("open", record["status"], record)
+            self.assertIsNone(record["source_id"], record)
             self.assertEqual(SCOPE_AS_ISSUED, record["scope"], record)
 
             code, envelope = self.submit_acquisition(root, target, order)
@@ -435,25 +440,31 @@ class ProviderArmRequestScopeRewrite(unittest.TestCase):
                 envelope,
             )
             self.assertEqual(
-                {"removed": [], "added_outside_scope": ["req-appended01"], "changed_outside_scope": []},
+                # The appended record and the rewritten scoped one are both named now. The
+                # rewrite used to be exempt because the scoped ids were mutable; the store
+                # is frozen, so the only exemption left is a commit replaying its own write.
+                {
+                    "removed": [],
+                    "added_outside_scope": ["req-appended01"],
+                    "changed_outside_scope": [request_id],
+                },
                 envelope["details"]["source_request_scope_violations"],
                 envelope,
             )
 
     # -- what is admitted, measured and recorded on purpose ---------------------------
 
-    def test_rewriting_the_scoped_request_scope_mid_order_is_still_admitted(self):
-        """MEASURED HOLE, recorded on purpose: the rewrite defeats ``--require-scope``.
+    def test_rewriting_the_scoped_request_scope_mid_order_is_now_refused(self):
+        """The rewrite that used to defeat ``--require-scope`` is refused at submission.
 
-        The delivery whose scope the previous case proved incompatible is fulfilled and
-        submitted successfully once the request's own ``scope`` is edited to match it.
-        No guard fires -- not the scope check, not the request-store guard, not the
-        manifest, question-transition or reconciliation guards -- and the falsified
-        ``scope`` is what the durable store holds afterwards, so the audit records a
-        request that never wanted what it originally asked for.
+        The edit still gets past ``fulfill``: that command reads the record in front of it,
+        and the record now says what the acquirer just made it say. What changed is that
+        the edit no longer survives. The store is frozen for the duration of the order, so
+        the rewritten record no longer matches the baseline the order was issued against and
+        the request-store guard names it.
 
-        This pins today's behaviour. It is a measurement, not an endorsement: closing it
-        must be a deliberate change that turns this case red on purpose.
+        The falsified scope is therefore never committed, and the audit does not end up
+        recording a request that never wanted what it originally asked for.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -466,33 +477,35 @@ class ProviderArmRequestScopeRewrite(unittest.TestCase):
             self.set_request_scope(target, request_id, SCOPE_AS_DELIVERED)
             code, payload = self.fulfill(target, request_id, source_id)
             self.assertEqual(0, code, payload)
-            self.assertTrue(payload["updated"], payload)
-            self.assertEqual(SCOPE_AS_DELIVERED, payload["request"]["scope"], payload)
+            self.assertTrue(payload["contingent"], payload)
 
             self.finish_acquisition_paperwork(
                 target, request_id=request_id, candidate_id=candidate_id, source_id=source_id, order=order
             )
-            code, session = self.submit_acquisition(root, target, order)
-            self.assertEqual(0, code, session)
-            self.assertEqual("active", session["status"], session)
-            self.assertIsNone(session["pending_action_id"], session)
+            code, envelope = self.submit_acquisition(root, target, order)
 
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("changed source requests outside", envelope["message"], envelope)
+            self.assertEqual(
+                [request_id],
+                envelope["details"]["source_request_scope_violations"]["changed_outside_scope"],
+                envelope,
+            )
             record = self.request_record(target, request_id)
-            self.assertEqual("fulfilled", record["status"], record)
-            self.assertEqual(source_id, record["source_id"], record)
-            self.assertEqual(SCOPE_AS_DELIVERED, record["scope"], record)
+            self.assertEqual("open", record["status"], record)
+            self.assertIsNone(record["source_id"], record)
 
-    def test_deleting_the_scoped_request_scope_mid_order_is_still_admitted(self):
-        """MEASURED HOLE, recorded on purpose: deletion is the cheaper defeat.
+    def test_deleting_the_scoped_request_scope_mid_order_is_now_refused(self):
+        """Deleting the key is refused for the same reason rewriting its value is.
 
-        A key the delivery never states is what ``--require-scope`` exists to refuse, and
-        it does refuse the unstamped delivery while the request still declares the key.
-        Removing the key from the request instead of matching it leaves the flag with
-        nothing to require: the same unstamped delivery then fulfils and the submission
-        is admitted, and the request is left declaring no scope at all.
+        Recorded separately because it used to be a separate hole: a repair that compared
+        declared scope values would have read straight past a key that is no longer there.
+        The freeze compares the record, not the scope, so there is no shape of edit it
+        reads past -- which is the property that makes this closed rather than narrowed.
 
-        Recorded for the same reason as the case above, and worth separating from it: a
-        fix that only compared declared values would still let this route through.
+        `fulfill` still accepts the edit: it reads the record in front of it, and the
+        record now declares nothing to contradict. What changed is that the edit does not
+        survive submission.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -515,32 +528,45 @@ class ProviderArmRequestScopeRewrite(unittest.TestCase):
             self.set_request_scope(target, request_id, None)
             code, payload = self.fulfill(target, request_id, source_id)
             self.assertEqual(0, code, payload)
-            self.assertNotIn("scope", payload["request"], payload)
+            self.assertTrue(payload["contingent"], payload)
 
             self.finish_acquisition_paperwork(
                 target, request_id=request_id, candidate_id=candidate_id, source_id=source_id, order=order
             )
-            code, session = self.submit_acquisition(root, target, order)
-            self.assertEqual(0, code, session)
-            self.assertEqual("active", session["status"], session)
+            code, envelope = self.submit_acquisition(root, target, order)
 
+            # Deleting a key and rewriting its value are the same act to the freeze, which
+            # is what makes this route closed rather than narrowed: the guard compares the
+            # record, not the declared scope, so there is no shape of edit it reads past.
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("changed source requests outside", envelope["message"], envelope)
+            self.assertEqual(
+                [request_id],
+                envelope["details"]["source_request_scope_violations"]["changed_outside_scope"],
+                envelope,
+            )
+            # The refusal names the edit; it does not repair it. The record is still open
+            # and unfulfilled, and the deleted key is still deleted -- restoring it is the
+            # operator's job, which is what the remediation asks for.
             record = self.request_record(target, request_id)
-            self.assertEqual("fulfilled", record["status"], record)
+            self.assertEqual("open", record["status"], record)
+            self.assertIsNone(record["source_id"], record)
             self.assertNotIn("scope", record, record)
+            self.assertIn("Restore", envelope["remediation"], envelope)
 
-    def test_the_narrower_fulfilled_only_change_guard_would_still_admit_the_rewrite(self):
-        """MEASURED: narrowing ``mutable_ids`` alone would not have refused the rewrite.
+    def test_freezing_the_record_is_what_made_exempting_nothing_possible(self):
+        """Why narrowing ``mutable_ids`` was rejected, and what changed instead.
 
-        The provider arm exempts the order's whole scoped request set from the store
-        guard; the delegated arm exempts only the requests this action fulfilled. On the
-        exact before/after fingerprints of the admitted rewrite, both exemptions report
-        nothing, because the rewritten request *is* the fulfilled one.
+        Narrowing could never have worked. The exemption is by record id, not by field, so
+        on the rewrite's own fingerprints both the provider width and the delegated one
+        report nothing -- the rewritten request *is* the fulfilled one. Exempting nothing
+        does report it, but used to report an honest fulfilment too, because fulfilment
+        rewrote ``status`` and ``source_id`` into the same record. No width separated them.
 
-        Exempting nothing does report the change -- and would also refuse an honest
-        fulfilment, shown here by restoring the request's issued scope and fingerprinting
-        the record again: fulfilment necessarily rewrites ``status``, ``source_id`` and
-        ``updated_at``, so no whole-record exemption width separates the two. Whatever
-        closes this has to compare the declared scope itself.
+        What changed is the other side of that comparison. A fulfilment is a claim now, so
+        an honest one leaves the record byte-identical to issuance -- which is what makes
+        exempting nothing the correct width rather than an unusable one. This measures both
+        halves: the rewrite is reported, and an untouched record is not.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -548,41 +574,41 @@ class ProviderArmRequestScopeRewrite(unittest.TestCase):
             before = self.issued_request_fingerprints(target, order)
             self.assertEqual([request_id], sorted(before), before)
 
+            # Delivered in scope, so the fulfilment below is honest and the only thing that
+            # moves the record afterwards is the hand edit.
             self.deliver_bundle(
-                target, request_id=request_id, candidate_id=candidate_id, scope=SCOPE_AS_DELIVERED
+                target, request_id=request_id, candidate_id=candidate_id, scope=SCOPE_AS_ISSUED
             )
             source_id = self.inventory_and_normalize(target)
-            self.set_request_scope(target, request_id, SCOPE_AS_DELIVERED)
+
+            # An honest fulfilment, with nothing hand-edited: the record does not move.
             code, payload = self.fulfill(target, request_id, source_id)
             self.assertEqual(0, code, payload)
-            self.finish_acquisition_paperwork(
-                target, request_id=request_id, candidate_id=candidate_id, source_id=source_id, order=order
+            self.assertTrue(payload["contingent"], payload)
+            honest_after = self.request_store_fingerprints(target)
+            self.assertEqual(before[request_id], honest_after[request_id], (before, honest_after))
+            self.assertEqual(
+                EMPTY_VIOLATIONS,
+                CONTROLLER.fingerprint_scope_violations(before, honest_after, mutable_ids=set()),
+                "exempting nothing must admit an honest fulfilment, or the freeze is unusable",
             )
-            code, session = self.submit_acquisition(root, target, order)
-            self.assertEqual(0, code, session)
 
+            # The rewrite, which no width could ever have separated from that.
+            self.set_request_scope(target, request_id, SCOPE_AS_DELIVERED)
             after = self.request_store_fingerprints(target)
             self.assertNotEqual(before[request_id], after[request_id], (before, after))
-
-            scoped_width = CONTROLLER.fingerprint_scope_violations(
-                before, after, mutable_ids={request_id}
+            self.assertEqual(
+                EMPTY_VIOLATIONS,
+                CONTROLLER.fingerprint_scope_violations(before, after, mutable_ids={request_id}),
+                "the exemption is by record id, so any width covering the fulfilled request "
+                "covers every field of it",
             )
-            self.assertEqual(EMPTY_VIOLATIONS, scoped_width, (before, after))
-
-            no_exemption = CONTROLLER.fingerprint_scope_violations(before, after, mutable_ids=set())
             self.assertEqual(
                 {"removed": [], "added_outside_scope": [], "changed_outside_scope": [request_id]},
-                no_exemption,
+                CONTROLLER.fingerprint_scope_violations(before, after, mutable_ids=set()),
                 (before, after),
             )
 
-            honest = self.request_record(target, request_id)
-            honest["scope"] = dict(SCOPE_AS_ISSUED)
-            honest_after = CONTROLLER.record_fingerprint_snapshot(
-                [honest], id_field="request_id", label="source-request store"
-            )
-            self.assertEqual(
-                {"removed": [], "added_outside_scope": [], "changed_outside_scope": [request_id]},
-                CONTROLLER.fingerprint_scope_violations(before, honest_after, mutable_ids=set()),
-                (before, honest_after),
-            )
+
+if __name__ == "__main__":
+    unittest.main()
