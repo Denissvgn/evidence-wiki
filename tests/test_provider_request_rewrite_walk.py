@@ -496,16 +496,16 @@ class ProviderArmRequestScopeRewrite(unittest.TestCase):
             self.assertIsNone(record["source_id"], record)
 
     def test_deleting_the_scoped_request_scope_mid_order_is_now_refused(self):
-        """MEASURED HOLE, recorded on purpose: deletion is the cheaper defeat.
+        """Deleting the key is refused for the same reason rewriting its value is.
 
-        A key the delivery never states is what ``--require-scope`` exists to refuse, and
-        it does refuse the unstamped delivery while the request still declares the key.
-        Removing the key from the request instead of matching it leaves the flag with
-        nothing to require: the same unstamped delivery then fulfils and the submission
-        is admitted, and the request is left declaring no scope at all.
+        Recorded separately because it used to be a separate hole: a repair that compared
+        declared scope values would have read straight past a key that is no longer there.
+        The freeze compares the record, not the scope, so there is no shape of edit it
+        reads past -- which is the property that makes this closed rather than narrowed.
 
-        Recorded for the same reason as the case above, and worth separating from it: a
-        fix that only compared declared values would still let this route through.
+        `fulfill` still accepts the edit: it reads the record in front of it, and the
+        record now declares nothing to contradict. What changed is that the edit does not
+        survive submission.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

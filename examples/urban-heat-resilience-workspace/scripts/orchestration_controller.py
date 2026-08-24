@@ -6730,6 +6730,27 @@ def project_order_claims(
     return fulfilment_claims, reopen_claims, projected_requests_by_id, committed_request_ids
 
 
+def unvalidated_reopen_claim_sources(
+    reopen_claims: dict[str, Any], by_source_id: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Claimed reopen sources that are not manifest records the workspace holds.
+
+    ``transition_reopen`` validates every ``--source-id`` against the manifest before it
+    will touch a page. The ledger is a file the acquirer writes, so a claim put there
+    directly skips that command entirely -- and a forged claim naming the real source plus
+    an arbitrary id would pass the later expected-ids check, which only asks that the
+    expected set is a *subset* of what was claimed, and the commit would then write the
+    arbitrary id into the question's frontmatter.
+    """
+    unvalidated: list[dict[str, Any]] = []
+    for slug in sorted(reopen_claims):
+        claim = reopen_claims[slug]
+        for source_id in claim.get("source_ids", []):
+            if not isinstance(source_id, str) or source_id not in by_source_id:
+                unvalidated.append({"question_slug": slug, "source_id": source_id})
+    return unvalidated
+
+
 def commit_delegated_bookkeeping(
     project_root: Path,
     config: dict[str, Any],
@@ -6761,30 +6782,6 @@ def commit_delegated_bookkeeping(
     # silently leaving the late claim uncommitted. Re-read under the ledger's own lock and
     # refuse if anything moved, so a lost claim is a refusal the acquirer can retry rather
     # than an acceptance that dropped its work.
-    lock_path = order_claims.claims_lock_path(project_root, orchestration_id, action_id)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with order_claims.workspace_lock(
-        lock_path,
-        timeout_seconds=order_claims.CLAIM_LOCK_TIMEOUT_SECONDS,
-        purpose="order claim commit",
-    ):
-        current = order_claims.load_claims(
-            order_claims.claims_path(project_root, orchestration_id, action_id)
-        )
-        if current.get("fulfilments") != fulfilment_claims or current.get("reopens") != reopen_claims:
-            # Reported as a postcondition failure, not as invalid state: the workspace is
-            # not broken, the submission simply no longer matches what was checked, and the
-            # acquirer resubmits. ORCHESTRATION_STATE_INVALID is non-recoverable everywhere
-            # else it is raised, and one code may not report two recoverabilities.
-            raise OrchestrationControllerError(
-                "ORCHESTRATION_POSTCONDITION_FAILED",
-                "order claims changed while the submission was being verified",
-                recoverable=True,
-                remediation=(
-                    "Resubmit the action; a claim filed after verification began was not part of "
-                    "what the controller checked."
-                ),
-            )
     now = timestamp_utc()
     # Reopens first, and the order matters. Finalization is replayable, so a crash can land
     # between the two halves. Reopening first leaves questions open with no blocking link --
@@ -6819,6 +6816,36 @@ def commit_delegated_bookkeeping(
                 changed = True
             if changed:
                 source_requests._write_requests_unlocked(path, records)
+    # Compared after the writes, not before them, and this ordering is forced rather than
+    # chosen. Filing takes the request-store lock and then the claim lock; a commit holding
+    # the claim lock across these writes would take them in the opposite order and the two
+    # could deadlock. Comparing afterwards leaves one window -- a claim filed while the
+    # commit ran -- and closes it by refusing rather than by locking: the writes above are
+    # idempotent, the submission fails, and the replay commits the late claim too.
+    lock_path = order_claims.claims_lock_path(project_root, orchestration_id, action_id)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with order_claims.workspace_lock(
+        lock_path,
+        timeout_seconds=order_claims.CLAIM_LOCK_TIMEOUT_SECONDS,
+        purpose="order claim commit",
+    ):
+        current = order_claims.load_claims(
+            order_claims.claims_path(project_root, orchestration_id, action_id)
+        )
+        if current.get("fulfilments") != fulfilment_claims or current.get("reopens") != reopen_claims:
+            # A postcondition failure, not invalid state: the workspace is not broken, the
+            # submission simply no longer matches what was checked. ORCHESTRATION_STATE_INVALID
+            # is non-recoverable everywhere else it is raised, and one code may not report two
+            # recoverabilities.
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                "order claims changed while the submission was being verified",
+                recoverable=True,
+                remediation=(
+                    "Resubmit the action; a claim filed after verification began was not part of "
+                    "what the controller checked, and resubmitting commits it too."
+                ),
+            )
 
 
 def verify_delegated_acquisition_postconditions(
@@ -7209,6 +7236,16 @@ def verify_delegated_acquisition_postconditions(
         if set(before.get("blocking_request_ids", [])) <= fulfilled_request_ids
         and before.get("blocking_request_ids")
     }
+    unvalidated_sources = unvalidated_reopen_claim_sources(reopen_claims, by_source_id)
+    require(
+        not unvalidated_sources,
+        "delegated acquisition claimed a reopen naming a source the manifest does not hold",
+        {"unvalidated_reopen_sources": unvalidated_sources},
+        (
+            "Reopen with source ids the manifest holds; a claim cannot attach evidence the "
+            "workspace has no record of."
+        ),
+    )
     unauthorized_reopen_claims = sorted(set(reopen_claims) - fully_unblocked)
     require(
         not unauthorized_reopen_claims,
@@ -8244,6 +8281,16 @@ def verify_action_postconditions(
             }
         # A reopen this order never scoped is caught here or nowhere: the page no longer
         # moves, so the question-file scope guard has nothing left to see.
+        unvalidated_sources = unvalidated_reopen_claim_sources(reopen_claims, by_source_id)
+        require(
+            not unvalidated_sources,
+            "acquisition claimed a reopen naming a source the manifest does not hold",
+            {"unvalidated_reopen_sources": unvalidated_sources},
+            (
+                "Reopen with source ids the manifest holds; a claim cannot attach evidence the "
+                "workspace has no record of."
+            ),
+        )
         unauthorized_reopen_claims = sorted(set(reopen_claims) - set(blocked_questions_before))
         require(
             not unauthorized_reopen_claims,
@@ -8953,6 +9000,36 @@ def verify_blocked_action_postconditions(
         {"claimed_question_slugs": sorted(blocked_claims.get("reopens", {}))},
         "Restore every question to its pre-action state; a blocked attempt cannot reopen a question.",
     )
+
+    def require_no_late_claims() -> None:
+        """Re-read the ledger at the acceptance boundary.
+
+        The read above happens before six workspace snapshots, and the acquirer can file
+        into the ledger while those run. Every byte-equality check below would still pass --
+        that is the whole reason this arm reads the ledger at all -- so the submission would
+        be accepted as "changed nothing" with a claim sitting uncommitted. Re-read rather
+        than hold the lock: filing takes the request-store lock before the claim lock, and
+        holding the claim lock across this would invert that order.
+        """
+        late = load_order_claims(
+            project_root,
+            require_safe_id(
+                work_order.get("orchestration_id") or session.get("orchestration_id"),
+                "orchestration_id",
+            ),
+            require_safe_id(work_order.get("action_id"), "action_id"),
+            order_claims,
+        )
+        require(
+            not late.get("fulfilments") and not late.get("reopens"),
+            "blocked acquisition recorded bookkeeping while it was being verified",
+            {
+                "claimed_request_ids": sorted(late.get("fulfilments", {})),
+                "claimed_question_slugs": sorted(late.get("reopens", {})),
+            },
+            "Report an attempt that recorded anything as completed rather than blocked.",
+        )
+
     # Kept as well as, not instead of: these still catch an edit that bypassed the CLI.
     current_source_requests = source_request_record_fingerprint_snapshot(project_root, config)
     require(
@@ -9298,6 +9375,7 @@ def verify_blocked_action_postconditions(
     )
     if route_failed:
         return "planning", "The scoped candidate route failed; planning may continue with remaining routes."
+    require_no_late_claims()
     return PAUSED_STATUS, "The scoped acquisition remains pending and can be replayed after resume."
 
 

@@ -11,15 +11,20 @@ integrity baseline exists to prevent.
 This module answers one question for those commands: is this mutation sanctioned by a
 pending work order right now? Two rules, one scan:
 
-- a **source request** is sanctioned when a live session's pending order is a delegated
-  acquisition order whose scope names it;
+- a **source request** is sanctioned when a live session's pending order is an acquisition
+  order whose scope names it, delegated or provider — both freeze the request store for the
+  duration of the order, so both have to be identifiable from here;
 - a **question** is sanctioned when a live session's pending order scopes its slug, in any
   phase — research orders legitimately mutate their scoped questions, so keying on the
   scope rather than the phase preserves every existing in-order path.
 
 The gate is deliberately narrow. Without the ``orchestration:`` section, or with no live
 session, nothing is refused: an operator working a workspace by hand is not driving a
-protocol, and the commands behave exactly as they did before delegation existed.
+protocol, and the commands behave exactly as they did before delegation existed. A
+non-delegating workspace is never refused for lacking a sanction either — it is only told
+which order scopes its change, so the command can file its claim there. The single refusal
+that reaches one is an ambiguity no answer resolves: two live acquisition orders scoping
+the same subject, where writing through would land in state both of them then refuse.
 
 **The scan takes no locks, by design.** Session and work-order documents are written with
 an atomic temp-file replace, so a reader observes one complete document or the previous
@@ -184,8 +189,11 @@ def require_sanctioned_mutation(
     """Raise when a live session exists and none of its pending orders sanction this change.
 
     ``delegated`` is the caller's already-validated acquisition mode. A workspace that does
-    not delegate is never gated: its acquisition happens through work orders the controller
-    issues to its own providers, and nothing about the CLI changes.
+    not delegate is never refused for *lacking* a sanction: an operator working one by hand
+    is not driving a protocol. It is still told which order scopes its change, because an
+    acquisition order freezes the request store whoever issued it, and the one refusal that
+    does reach such a workspace is an ambiguity no answer can resolve -- two live
+    acquisition orders scoping the same subject.
 
     Returns the entry of the order that sanctioned the change, or ``None`` when no gate
     applied -- an ungated workspace, or no live session. The caller needs the order itself,

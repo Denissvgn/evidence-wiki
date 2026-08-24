@@ -399,6 +399,58 @@ class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase)
             encoding="utf-8",
         )
 
+    def test_a_provider_submission_replayed_after_its_commit_still_accepts(self):
+        """The provider arm's interrupted-finalization path, which nothing else covers.
+
+        Logic-identical to the delegated one, and that is exactly why it is worth its own
+        case: the two arms reach the same commit through different verification, so a
+        change to either arm's tolerance can break this one alone.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.init_workspace(Path(tmpdir))
+            self.enable_providers(workspace)
+            request_id = self.block_question_on_a_request(workspace)
+            self.select_candidate(workspace, request_id)
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+
+            source_id = self.deliver_paper(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            self.discover(
+                workspace,
+                [
+                    "candidates", "transition",
+                    "--candidate-id", self.CANDIDATE_ID,
+                    "--expected-state", "selected",
+                    "--to-state", "fetched",
+                    "--source-id", source_id,
+                    "--reason", "Provenance-backed evidence was inventoried and normalized.",
+                    "--actor", ACQUIRER,
+                    "--run-id", order["run_id"],
+                ],
+            )
+
+            before = session_document(workspace)
+            artifacts = [PAPER, f"{PAPER}.provenance.yml", "sources/manifest.jsonl"]
+            code, accepted = self.submit(workspace, order["action_id"], artifacts=artifacts)
+            self.assertEqual(0, code, accepted)
+            committed = stored_request(workspace, request_id)
+            self.assertEqual("fulfilled", committed["status"], committed)
+
+            # Roll the session back to the instant before the commit's own session write.
+            session_path = workspace / "runs" / "orchestrations" / ORCHESTRATION_ID / "session.json"
+            session_path.write_text(json.dumps(before, indent=2) + "\n", encoding="utf-8")
+
+            replay_code, replay = self.submit(workspace, order["action_id"], artifacts=artifacts)
+
+            self.assertEqual(0, replay_code, replay)
+            self.assertEqual(
+                committed,
+                stored_request(workspace, request_id),
+                msg="the replayed provider commit must be idempotent, not restamped",
+            )
+
     def test_a_blocked_provider_action_that_claimed_a_fulfilment_is_refused(self):
         """The no-change assertions cannot see a claim, so the ledger has to be checked.
 
@@ -429,6 +481,43 @@ class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase)
             self.assertEqual(
                 [request_id], envelope["details"]["claimed_request_ids"], envelope
             )
+
+    def test_a_blocked_action_that_claims_during_verification_is_refused(self):
+        """The ledger read happens before six workspace snapshots, and can go stale.
+
+        Every byte-equality check this arm runs would still pass -- that is the whole
+        reason it reads the ledger at all -- so a claim filed while those snapshots run
+        would be accepted as "changed nothing" and left uncommitted. The re-read at the
+        acceptance boundary is what catches it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.init_workspace(Path(tmpdir))
+            self.enable_providers(workspace)
+            request_id = self.block_question_on_a_request(workspace)
+            self.select_candidate(workspace, request_id)
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+            source_id = self.deliver_paper(workspace, request_id)
+
+            original = CONTROLLER.question_file_fingerprint_snapshot
+
+            def claim_while_verifying(*args, **kwargs):
+                CLAIMS.record_fulfilment_claim(
+                    workspace, ORCHESTRATION_ID, order["action_id"],
+                    request_id=request_id, source_id=source_id,
+                    claimed_at="2026-01-01T00:00:00Z",
+                )
+                return original(*args, **kwargs)
+
+            with mock.patch.object(
+                CONTROLLER, "question_file_fingerprint_snapshot", claim_while_verifying
+            ):
+                code, envelope = self.submit(workspace, order["action_id"], outcome="blocked")
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("while it was being verified", envelope["message"], envelope)
+            self.assertEqual([request_id], envelope["details"]["claimed_request_ids"], envelope)
 
     def test_a_scoped_requests_record_may_not_be_rewritten_mid_order(self):
         """No part of a scoped request record, not only its scope, survives a mid-order edit.
@@ -814,6 +903,40 @@ class LedgerIsNotTrustedTests(DelegatedWorkspace, unittest.TestCase):
                 envelope["details"]["scope_pairing_failures"][0]["request_id"],
                 envelope,
             )
+
+    def test_a_forged_reopen_source_is_refused_before_it_reaches_the_page(self):
+        """A claim cannot attach evidence the manifest has no record of.
+
+        `reopen` validates every `--source-id` against the manifest before it will touch a
+        page. The ledger is a file the acquirer writes, so a claim put there directly skips
+        that command -- and naming the real source *plus* an arbitrary id would satisfy the
+        expected-ids check, which only asks that the expected set is a subset of what was
+        claimed. The commit would then write the arbitrary id into the frontmatter.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, action_id = self.pending_acquisition(Path(tmpdir))
+            source_id = self.deliver_for(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            # The real source, plus one the workspace has never seen.
+            CLAIMS.record_reopen_claim(
+                workspace, ORCHESTRATION_ID, action_id,
+                question_slug=QUESTION_SLUG,
+                source_ids=[source_id, "raw:forged-by-the-acquirer"],
+                request_ids=[request_id],
+                claimed_at="2026-01-01T00:00:00Z",
+            )
+
+            code, envelope = self.submit(workspace, action_id, artifacts=[f"raw/data/{PAYLOAD.name}"])
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("the manifest does not hold", envelope["message"], envelope)
+            self.assertEqual(
+                [{"question_slug": QUESTION_SLUG, "source_id": "raw:forged-by-the-acquirer"}],
+                envelope["details"]["unvalidated_reopen_sources"],
+                envelope,
+            )
+            self.assertEqual("blocked", question_fields(workspace)["status"], "the page must not move")
 
     def test_a_claim_filed_after_verification_began_refuses_rather_than_being_dropped(self):
         """A late claim must not be silently left uncommitted by an accepted submission."""
