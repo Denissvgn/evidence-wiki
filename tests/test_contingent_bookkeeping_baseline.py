@@ -164,6 +164,50 @@ class DelegatedAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase
             )
             self.assertEqual([QUESTION_SLUG], sorted(claims["reopens"]), claims)
 
+    def test_a_deleted_raw_file_is_named_even_when_derivation_fails(self):
+        """A decided tamper verdict must not be preempted by a derivation that raises.
+
+        Whether a raw file that existed at issuance was changed or removed is answered by
+        comparing two snapshots, and needs nothing from inventory. Deriving first let a
+        derivation that raises travel out ahead of it, and the operator was told to repair
+        a raw tree rather than told what they had deleted.
+
+        The two are not independent, which is what makes the wrong answer the likely one
+        rather than a coincidence: deleting raw evidence is a plausible reason the
+        derivation cannot run at all. Here it is both.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            # A bystander delivered before the session: raw evidence the order's baseline
+            # records and that nothing in the order reuses, so deleting it is a plain
+            # tamper rather than a reuse question.
+            self.deliver_unnormalized_bystander(workspace, "req-a-bystander-nobody-scopes")
+            self.start(workspace)
+            order = self.pending_order(workspace)
+            source_id = self.deliver_for(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            removed = workspace / "raw" / "data" / self.UNNORMALIZED_BYSTANDER_NAME
+            self.assertTrue(removed.is_file(), "the fixture must leave raw evidence from before the order")
+            relative = removed.relative_to(workspace).as_posix()
+            removed.unlink()
+
+            inventory = CONTROLLER.load_sibling_module("source_inventory")
+            with mock.patch.object(
+                inventory, "build_records", side_effect=RuntimeError("inventory cannot read the tree")
+            ):
+                code, envelope = self.submit(
+                    workspace, order["action_id"], artifacts=[f"raw/data/{PAYLOAD.name}"]
+                )
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn(
+                "changed or removed raw evidence that existed when the order was issued",
+                envelope["message"],
+                envelope,
+            )
+            self.assertIn(relative, envelope["details"]["raw_scope_violations"]["removed"], envelope)
+
     def test_a_refused_submission_leaves_no_bookkeeping_behind(self):
         """A refusal now undoes nothing because nothing was done.
 

@@ -1503,7 +1503,14 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
 
             envelope = self.assert_reuse_mutation_refused(workspace, order["action_id"])
 
-            self.assertIn("changed raw evidence outside newly fulfilled", envelope["message"])
+            # Named as what it is: an edit to raw evidence that existed at issuance, rather
+            # than as a delivery outside the fulfilled source scope. The two used to share a
+            # refusal, and the shared wording described only the other half.
+            self.assertIn(
+                "changed or removed raw evidence that existed when the order was issued",
+                envelope["message"],
+                envelope,
+            )
             self.assertEqual(
                 [relative], envelope["details"]["raw_scope_violations"]["changed_outside_scope"]
             )
@@ -2113,7 +2120,14 @@ class ControllerAuthorisedReuseTests(DelegatedWorkspace, unittest.TestCase):
             code, envelope = self.submit(workspace, order["action_id"])
 
             self.assertEqual(CONTROLLER.EXIT_INVALID, code, envelope)
-            self.assertIn("changed raw evidence outside newly fulfilled", envelope["message"])
+            # Named as what it is: an edit to raw evidence that existed at issuance, rather
+            # than as a delivery outside the fulfilled source scope. The two used to share a
+            # refusal, and the shared wording described only the other half.
+            self.assertIn(
+                "changed or removed raw evidence that existed when the order was issued",
+                envelope["message"],
+                envelope,
+            )
             self.assertEqual(
                 [relative], envelope["details"]["raw_scope_violations"]["changed_outside_scope"]
             )
