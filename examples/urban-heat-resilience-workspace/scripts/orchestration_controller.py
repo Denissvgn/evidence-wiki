@@ -6628,6 +6628,8 @@ def load_order_claims(
     orchestration_id: str,
     action_id: str,
     order_claims: ModuleType,
+    *,
+    arm: str,
 ) -> dict[str, Any]:
     """Read one action's claim ledger, failing closed and bounded like every other input.
 
@@ -6635,6 +6637,10 @@ def load_order_claims(
     the opposite reading -- the completed arm to know what to commit, the blocked arm to
     refuse an attempt that claimed anything -- so degrading to empty would turn an
     unreadable ledger into a silently accepted submission.
+
+    ``arm`` names the caller in the refusal, and is required rather than defaulted: both
+    acquisition arms file claims now, and an operator reading "delegated acquisition" over a
+    provider order is being told to look in the wrong place.
     """
     try:
         claims = order_claims.load_claims(
@@ -6643,7 +6649,7 @@ def load_order_claims(
     except order_claims.OrderClaimError as exc:
         raise OrchestrationControllerError(
             "ORCHESTRATION_STATE_UNREADABLE",
-            f"delegated acquisition claims could not be read: {exc.message}",
+            f"{arm} claims could not be read: {exc.message}",
             recoverable=True,
             remediation="Restore the orchestration control tree; unreadable claims cannot authorize bookkeeping.",
         ) from exc
@@ -6651,7 +6657,7 @@ def load_order_claims(
     if entries > MAX_SCOPE_GUARD_ENTRIES:
         raise OrchestrationControllerError(
             "ORCHESTRATION_SCOPE_EXCEEDED",
-            f"delegated acquisition claimed {entries} bookkeeping entries, over the {MAX_SCOPE_GUARD_ENTRIES} limit",
+            f"{arm} claimed {entries} bookkeeping entries, over the {MAX_SCOPE_GUARD_ENTRIES} limit",
             recoverable=False,
         )
     return claims
@@ -6683,7 +6689,7 @@ def project_order_claims(
     fulfilments, and the ids whose durable record already carries their own claim.
     """
     order_claims = load_sibling_module("_order_claims")
-    claims = load_order_claims(project_root, orchestration_id, action_id, order_claims)
+    claims = load_order_claims(project_root, orchestration_id, action_id, order_claims, arm=arm)
     fulfilment_claims = {
         str(key): value
         for key, value in claims.get("fulfilments", {}).items()
@@ -6731,23 +6737,42 @@ def project_order_claims(
 
 
 def unvalidated_reopen_claim_sources(
-    reopen_claims: dict[str, Any], by_source_id: dict[str, Any]
+    reopen_claims: dict[str, Any],
+    by_source_id: dict[str, Any],
+    normalized_root: Path,
 ) -> list[dict[str, Any]]:
-    """Claimed reopen sources that are not manifest records the workspace holds.
+    """Claimed reopen sources ``transition_reopen`` would have refused.
 
-    ``transition_reopen`` validates every ``--source-id`` against the manifest before it
-    will touch a page. The ledger is a file the acquirer writes, so a claim put there
-    directly skips that command entirely -- and a forged claim naming the real source plus
-    an arbitrary id would pass the later expected-ids check, which only asks that the
+    That command gates every ``--source-id`` on *two* things before it will touch a page:
+    the manifest holds the record, and the record has been normalized
+    (``SOURCE_NOT_NORMALIZED``). The ledger is a file the acquirer writes, so a claim put
+    there directly skips the command entirely -- and a forged claim naming the real source
+    plus an arbitrary id would pass the later expected-ids check, which only asks that the
     expected set is a *subset* of what was claimed, and the commit would then write the
     arbitrary id into the question's frontmatter.
+
+    Both halves are rebuilt here, and both are load-bearing: an inventoried-but-unnormalized
+    record is in the manifest, so membership alone lets it through onto a durable page as
+    evidence nothing has read.
     """
+    normalize_sources = load_sibling_module("normalize_sources")
     unvalidated: list[dict[str, Any]] = []
     for slug in sorted(reopen_claims):
         claim = reopen_claims[slug]
         for source_id in claim.get("source_ids", []):
-            if not isinstance(source_id, str) or source_id not in by_source_id:
-                unvalidated.append({"question_slug": slug, "source_id": source_id})
+            record = by_source_id.get(source_id) if isinstance(source_id, str) else None
+            if not isinstance(record, dict):
+                unvalidated.append(
+                    {"question_slug": slug, "source_id": source_id, "reason": "not_in_manifest"}
+                )
+                continue
+            normalized_path = normalize_sources.normalized_output_path_for_record(
+                record, normalized_root
+            )
+            if not normalized_path.is_file():
+                unvalidated.append(
+                    {"question_slug": slug, "source_id": source_id, "reason": "not_normalized"}
+                )
     return unvalidated
 
 
@@ -7207,10 +7232,20 @@ def verify_delegated_acquisition_postconditions(
         durable = durable_question_evidence.get(slug)
         if not isinstance(durable, dict):
             continue
+        baseline = blocked_questions_before.get(slug)
         claimed_sources = [value for value in claim.get("source_ids", []) if isinstance(value, str)]
-        projected_sources = sorted(set(durable.get("source_ids", [])) | set(claimed_sources))
+        # Projected from the frozen baseline the work order recorded, never from the durable
+        # page. `durable | claimed` compared against `durable` is satisfied by *any* superset
+        # of the claim, so a page hand-written open with extra source ids would certify
+        # itself as already-committed and exempt its whole file from the freeze below --
+        # committing evidence nothing delivered.
+        baseline_sources = (
+            set(baseline.get("source_ids_before", [])) if isinstance(baseline, dict) else set()
+        )
+        projected_sources = sorted(baseline_sources | set(claimed_sources))
         if (
-            durable.get("status") == "open"
+            isinstance(baseline, dict)
+            and durable.get("status") == "open"
             and not durable.get("blocking_request_ids")
             and sorted(durable.get("source_ids", [])) == projected_sources
         ):
@@ -7227,23 +7262,29 @@ def verify_delegated_acquisition_postconditions(
             "blocking_request_ids": [],
             "source_ids": projected_sources,
         }
-    # A question is unblocked only when every request blocking it was fulfilled. One
-    # unfulfilled blocker — scoped and failed, or outside this order entirely — leaves the
-    # question exactly as it was.
+    # A question is unblocked only when every request blocking it *that this order scoped*
+    # was fulfilled: `linked_blocked_questions_snapshot` filters the page's blocking list
+    # down to the order's request scope before recording the baseline. A scoped blocker that
+    # failed leaves the question exactly as it was. A blocker outside this order does not --
+    # it is not in the baseline, so it cannot hold the question shut here. That is a real
+    # gap when an earlier order retired a blocker non-retryably: the next order scopes only
+    # what remains, and reopening wipes a blocking link whose request is still open.
     fully_unblocked = {
         slug
         for slug, before in blocked_questions_before.items()
         if set(before.get("blocking_request_ids", [])) <= fulfilled_request_ids
         and before.get("blocking_request_ids")
     }
-    unvalidated_sources = unvalidated_reopen_claim_sources(reopen_claims, by_source_id)
+    unvalidated_sources = unvalidated_reopen_claim_sources(
+        reopen_claims, by_source_id, normalized_root
+    )
     require(
         not unvalidated_sources,
-        "delegated acquisition claimed a reopen naming a source the manifest does not hold",
+        "delegated acquisition claimed a reopen naming a source the reopen command would refuse",
         {"unvalidated_reopen_sources": unvalidated_sources},
         (
-            "Reopen with source ids the manifest holds; a claim cannot attach evidence the "
-            "workspace has no record of."
+            "Reopen with source ids the manifest holds and normalization has processed; a "
+            "claim cannot attach evidence the workspace has no readable record of."
         ),
     )
     unauthorized_reopen_claims = sorted(set(reopen_claims) - fully_unblocked)
@@ -8278,10 +8319,18 @@ def verify_action_postconditions(
             durable = durable_question_evidence.get(slug)
             if not isinstance(durable, dict):
                 continue
+            baseline = blocked_questions_before.get(slug)
             claimed_sources = [value for value in claim.get("source_ids", []) if isinstance(value, str)]
-            projected_sources = sorted(set(durable.get("source_ids", [])) | set(claimed_sources))
+            # Projected from the frozen baseline, never from the durable page -- see the
+            # delegated arm's note: projecting from the page lets any superset of the claim
+            # certify itself as already-committed and exempt its own file from the freeze.
+            baseline_sources = (
+                set(baseline.get("source_ids_before", [])) if isinstance(baseline, dict) else set()
+            )
+            projected_sources = sorted(baseline_sources | set(claimed_sources))
             if (
-                durable.get("status") == "open"
+                isinstance(baseline, dict)
+                and durable.get("status") == "open"
                 and not durable.get("blocking_request_ids")
                 and sorted(durable.get("source_ids", [])) == projected_sources
             ):
@@ -8294,14 +8343,16 @@ def verify_action_postconditions(
             }
         # A reopen this order never scoped is caught here or nowhere: the page no longer
         # moves, so the question-file scope guard has nothing left to see.
-        unvalidated_sources = unvalidated_reopen_claim_sources(reopen_claims, by_source_id)
+        unvalidated_sources = unvalidated_reopen_claim_sources(
+            reopen_claims, by_source_id, normalized_root
+        )
         require(
             not unvalidated_sources,
-            "acquisition claimed a reopen naming a source the manifest does not hold",
+            "acquisition claimed a reopen naming a source the reopen command would refuse",
             {"unvalidated_reopen_sources": unvalidated_sources},
             (
-                "Reopen with source ids the manifest holds; a claim cannot attach evidence the "
-                "workspace has no record of."
+                "Reopen with source ids the manifest holds and normalization has processed; a "
+                "claim cannot attach evidence the workspace has no readable record of."
             ),
         )
         unauthorized_reopen_claims = sorted(set(reopen_claims) - set(blocked_questions_before))
@@ -8825,6 +8876,7 @@ def verify_blocked_delegated_acquisition_postconditions(
         require_safe_id(work_order.get("orchestration_id"), "orchestration_id"),
         require_safe_id(work_order.get("action_id"), "action_id"),
         order_claims,
+        arm="blocked delegated acquisition",
     )
     require(
         not claims.get("fulfilments"),
@@ -8912,6 +8964,28 @@ def verify_blocked_delegated_acquisition_postconditions(
         current_child_state in {"fetching", "evidence_ready"},
         "blocked delegated acquisition child run is in an invalid state",
         {"child_state": current_child_state},
+    )
+    # Re-read the ledger at the acceptance boundary. The read above happens before every
+    # workspace snapshot, and the acquirer can file into the ledger while those run: the
+    # store and the pages are frozen, so each byte-equality check would still pass and the
+    # submission would be accepted as "changed nothing" with a claim sitting uncommitted.
+    # Re-read rather than hold the lock -- filing takes the request-store lock before the
+    # claim lock, and holding the claim lock across this would invert that order.
+    late_claims = load_order_claims(
+        project_root,
+        require_safe_id(work_order.get("orchestration_id"), "orchestration_id"),
+        require_safe_id(work_order.get("action_id"), "action_id"),
+        order_claims,
+        arm="blocked delegated acquisition",
+    )
+    require(
+        not late_claims.get("fulfilments") and not late_claims.get("reopens"),
+        "blocked delegated acquisition recorded bookkeeping while it was being verified",
+        {
+            "claimed_request_ids": sorted(late_claims.get("fulfilments", {})),
+            "claimed_question_slugs": sorted(late_claims.get("reopens", {})),
+        },
+        "Report an attempt that recorded anything as completed rather than blocked.",
     )
     return PAUSED_STATUS, "The delegated acquisition changed nothing and can be replayed after resume."
 
@@ -9009,6 +9083,7 @@ def verify_blocked_action_postconditions(
         ),
         require_safe_id(work_order.get("action_id"), "action_id"),
         order_claims,
+        arm="blocked acquisition",
     )
     require(
         not blocked_claims.get("fulfilments"),
@@ -9041,6 +9116,7 @@ def verify_blocked_action_postconditions(
             ),
             require_safe_id(work_order.get("action_id"), "action_id"),
             order_claims,
+            arm="blocked acquisition",
         )
         require(
             not late.get("fulfilments") and not late.get("reopens"),
@@ -9395,9 +9471,11 @@ def verify_blocked_action_postconditions(
         "blocked acquisition child run is in an invalid state",
         {"child_state": current_child_state},
     )
+    # Before the early return, not after it: a failed route still accepts the submission,
+    # so a claim filed during verification would be left uncommitted on that path too.
+    require_no_late_claims()
     if route_failed:
         return "planning", "The scoped candidate route failed; planning may continue with remaining routes."
-    require_no_late_claims()
     return PAUSED_STATUS, "The scoped acquisition remains pending and can be replayed after resume."
 
 

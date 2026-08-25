@@ -563,6 +563,59 @@ class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase)
             self.assertIn("while it was being verified", envelope["message"], envelope)
             self.assertEqual([request_id], envelope["details"]["claimed_request_ids"], envelope)
 
+    def test_a_failed_route_that_claims_during_verification_is_refused(self):
+        """The late-claim re-read sat behind the `route_failed` early return.
+
+        A blocked submission whose candidate transitioned to `failed` is still an accepted
+        submission -- it returns the orchestration to planning, exit 0 -- so a claim filed
+        during verification is left uncommitted exactly as it would be on the retryable
+        path. The guard was written for the retryable path and returned before reaching
+        this one, which is the difference this test pins.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.init_workspace(Path(tmpdir))
+            self.enable_providers(workspace)
+            request_id = self.block_question_on_a_request(workspace)
+            self.select_candidate(workspace, request_id)
+            self.start(workspace)
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+            source_id = self.deliver_paper(workspace, request_id)
+
+            self.discover(
+                workspace,
+                [
+                    "candidates", "transition",
+                    "--candidate-id", self.CANDIDATE_ID,
+                    "--expected-state", "selected",
+                    "--to-state", "failed",
+                    "--reason", "The provider route returned nothing usable.",
+                    "--actor", ACQUIRER,
+                    "--run-id", order["run_id"],
+                ],
+            )
+
+            original = CONTROLLER.question_file_fingerprint_snapshot
+
+            def claim_while_verifying(*args, **kwargs):
+                CLAIMS.record_fulfilment_claim(
+                    workspace, ORCHESTRATION_ID, order["action_id"],
+                    request_id=request_id, source_id=source_id,
+                    claimed_at="2026-01-01T00:00:00Z",
+                )
+                return original(*args, **kwargs)
+
+            with mock.patch.object(
+                CONTROLLER, "question_file_fingerprint_snapshot", claim_while_verifying
+            ):
+                code, envelope = self.submit(workspace, order["action_id"], outcome="blocked")
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("while it was being verified", envelope["message"], envelope)
+            self.assertEqual(
+                [request_id], envelope["details"]["claimed_request_ids"], envelope
+            )
+
     def test_a_scoped_requests_record_may_not_be_rewritten_mid_order(self):
         """No part of a scoped request record, not only its scope, survives a mid-order edit.
 
@@ -974,13 +1027,143 @@ class LedgerIsNotTrustedTests(DelegatedWorkspace, unittest.TestCase):
             code, envelope = self.submit(workspace, action_id, artifacts=[f"raw/data/{PAYLOAD.name}"])
 
             self.assertNotEqual(0, code, envelope)
-            self.assertIn("the manifest does not hold", envelope["message"], envelope)
+            self.assertIn("the reopen command would refuse", envelope["message"], envelope)
             self.assertEqual(
-                [{"question_slug": QUESTION_SLUG, "source_id": "raw:forged-by-the-acquirer"}],
+                [
+                    {
+                        "question_slug": QUESTION_SLUG,
+                        "source_id": "raw:forged-by-the-acquirer",
+                        "reason": "not_in_manifest",
+                    }
+                ],
                 envelope["details"]["unvalidated_reopen_sources"],
                 envelope,
             )
             self.assertEqual("blocked", question_fields(workspace)["status"], "the page must not move")
+
+    def test_a_reopen_claim_naming_an_unnormalized_source_is_refused(self):
+        """Manifest membership is only half of what `reopen` requires of a source id.
+
+        `transition_reopen` gates every `--source-id` on two things: the manifest holds the
+        record, *and* normalization has produced one (`SOURCE_NOT_NORMALIZED`). The
+        controller's stand-in for that command originally rebuilt only the membership half,
+        so an inventoried-but-un-normalized record -- which is in the manifest, and is the
+        ordinary state of a delivery a prior order never finished -- went onto a durable
+        page as evidence nothing has read.
+
+        The bystander here is exactly that state, and the CLI refuses the same edit.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, action_id = self.pending_acquisition(Path(tmpdir))
+            source_id = self.deliver_for(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+            stray = self.deliver_unnormalized_bystander(
+                workspace, "req-a-bystander-nobody-scopes"
+            )
+
+            CLAIMS.record_reopen_claim(
+                workspace, ORCHESTRATION_ID, action_id,
+                question_slug=QUESTION_SLUG,
+                source_ids=[source_id, stray],
+                request_ids=[request_id],
+                claimed_at="2026-01-01T00:00:00Z",
+            )
+
+            code, envelope = self.submit(workspace, action_id, artifacts=[f"raw/data/{PAYLOAD.name}"])
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("the reopen command would refuse", envelope["message"], envelope)
+            self.assertEqual(
+                [
+                    {
+                        "question_slug": QUESTION_SLUG,
+                        "source_id": stray,
+                        "reason": "not_normalized",
+                    }
+                ],
+                envelope["details"]["unvalidated_reopen_sources"],
+                envelope,
+            )
+            self.assertEqual("blocked", question_fields(workspace)["status"], "the page must not move")
+
+    def test_a_blocked_delegated_action_that_claims_during_verification_is_refused(self):
+        """The delegated blocked arm reads the ledger once, at the top, and then never again.
+
+        Its sibling on the provider arm re-reads at the acceptance boundary for a reason
+        that applies identically here: the store and the pages are frozen, so every
+        byte-equality check between the two reads is satisfied by a claim rather than
+        disproved by one, and a claim filed in that window rides out on an accepted
+        "changed nothing" submission with nothing to commit it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, action_id = self.pending_acquisition(Path(tmpdir))
+            # Nothing is delivered: a blocked delegated action that changed the workspace is
+            # refused for that instead, and the claim would never be the thing under test.
+            original = CONTROLLER.raw_tree_snapshot
+
+            def claim_while_verifying(*args, **kwargs):
+                CLAIMS.record_fulfilment_claim(
+                    workspace, ORCHESTRATION_ID, action_id,
+                    request_id=request_id, source_id="raw:claimed-after-the-read",
+                    claimed_at="2026-01-01T00:00:00Z",
+                )
+                return original(*args, **kwargs)
+
+            with mock.patch.object(CONTROLLER, "raw_tree_snapshot", claim_while_verifying):
+                code, envelope = self.submit(workspace, action_id, outcome="blocked")
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("while it was being verified", envelope["message"], envelope)
+            self.assertEqual(
+                [request_id], envelope["details"]["claimed_request_ids"], envelope
+            )
+
+    def test_a_page_hand_written_to_the_projection_cannot_smuggle_extra_sources(self):
+        """The replay exemption compared the page against a projection built from itself.
+
+        A page whose durable state already equals what the commit would produce is exempted
+        from the question-file freeze, so an interrupted finalization can be replayed. The
+        exactness test guarding that exemption projected `durable | claimed` and then asked
+        whether `durable` equalled it -- which is true of *any* superset of the claimed
+        sources. An acquirer could reopen through the CLI, hand-write the page open with
+        extra source ids the manifest never saw, and have the whole file exempted.
+
+        The projection is built from the frozen baseline the work order recorded, so the
+        extra ids are a difference from it rather than part of it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id, action_id = self.pending_acquisition(Path(tmpdir))
+            source_id = self.deliver_for(workspace, request_id)
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            # The claim is filed and the page is still blocked. Hand-write it to the state a
+            # committed reopen leaves behind -- plus two ids nothing delivered.
+            page = workspace / "wiki" / "questions" / f"{QUESTION_SLUG}.md"
+            text = page.read_text(encoding="utf-8")
+            self.assertIn("status: blocked", text, "the page must still be frozen at this point")
+            forged = ["raw:forged-by-hand-a", "raw:forged-by-hand-b"]
+            lines = [
+                line for line in text.splitlines(keepends=True)
+                if not line.startswith("blocking_request_ids:") and not line.startswith("- req-")
+            ]
+            text = "".join(lines).replace("status: blocked", "status: open", 1)
+            head, frontmatter, body = text.split("---\n", 2)
+            parsed = yaml.safe_load(frontmatter)
+            parsed["source_ids"] = sorted({source_id, *forged})
+            parsed.pop("blocking_request_ids", None)
+            parsed.pop("blocked_reason", None)
+            page.write_text(
+                head + "---\n" + yaml.safe_dump(parsed, sort_keys=False) + "---\n" + body,
+                encoding="utf-8",
+            )
+
+            code, envelope = self.submit(workspace, action_id, artifacts=[f"raw/data/{PAYLOAD.name}"])
+
+            self.assertNotEqual(0, code, envelope)
+            self.assertIn("question", envelope["message"], envelope)
+            # The refusal does not restore the page -- the operator is told to -- but it
+            # must commit nothing, so the fulfilment the claim describes stays uncommitted.
+            self.assertEqual("open", stored_request(workspace, request_id)["status"])
 
     def test_a_claim_filed_after_verification_began_refuses_rather_than_being_dropped(self):
         """A late claim must not be silently left uncommitted by an accepted submission."""

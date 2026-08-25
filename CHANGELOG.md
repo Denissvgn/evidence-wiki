@@ -42,6 +42,36 @@
   described only the other half, so a sidecar edit was reported as a scope problem. The
   unexpected-new-paths refusal keeps its message and its details unchanged.
 
+- **Fix: four guards over the claim ledger were looser than the commands they stand in
+  for.** An independent adversarial re-walk of the freeze — building the pre-change trees
+  and running the same probes against all of them — found four, each demonstrated by
+  submission rather than by reading.
+
+  A reopen claim naming a source the manifest holds but normalization has never processed
+  was accepted, and the source landed on the durable page. `question_resolve.py reopen`
+  gates a `--source-id` on both membership *and* a normalized record; the controller's
+  stand-in for that command rebuilt only the first, so an inventoried-but-un-normalized
+  delivery — the ordinary state of evidence a prior order never finished — went onto a
+  question as evidence nothing has read. Both halves are rebuilt now, and the refusal names
+  which one failed.
+
+  A page hand-written open with extra source ids exempted its own file from the question
+  freeze. The exemption that tolerates an interrupted finalization asked whether the durable
+  page equalled `durable ∪ claimed` — a projection built from the page it was checking, and
+  therefore true of *any* superset of the claim. It is projected from the frozen baseline the
+  work order recorded now, so padding is a difference from it rather than part of it.
+
+  A claim filed *during* verification was left uncommitted on two paths rather than refused.
+  The blocked provider arm re-reads its ledger at the acceptance boundary, because the store
+  and the pages are frozen and every byte-equality check between the two reads is satisfied
+  by a claim rather than disproved by one. That re-read sat behind the early return taken
+  when a candidate route failed, and the blocked *delegated* arm never had one at all. Both
+  are closed, and a failed route is still an accepted submission that must commit or refuse,
+  never silently drop.
+
+  Refusals over a provider order's ledger said "delegated acquisition", which sends an
+  operator to the wrong arm. They name the arm that raised them.
+
 - **Change: inside a pending acquisition order, `fulfill` and `reopen` now file a claim the
   controller commits on acceptance, instead of writing durable state as they run.** An
   order is one of those when it carries `phase: acquisition`, whether the acquirer is a
@@ -61,23 +91,43 @@
   first, because guessing files the claim into one order's ledger and leaves the other
   submitting with nothing to show.
 
-  Four things close with it, and they were four symptoms of one cause: the acquirer wrote
-  durable state before the controller had looked at the evidence, and what is written
-  outlives the order that wrote it. A refused submission no longer leaves a fulfilment
+  Three things close with it, and a fourth is reduced rather than closed. All four were
+  symptoms of one cause: the acquirer wrote durable state before the controller had looked
+  at the evidence, and what is written outlives the order that wrote it. A refused submission no longer leaves a fulfilment
   standing, because there is nothing written to leave. An `outcome: failed`, which verifies
   nothing — `prepare_submission` takes that branch without calling
   `verify_action_postconditions` at all — no longer strands the request in `fulfilled`,
   where `open_requests` selects on `status == "open"` and so no later order would see it
-  again; the request stays open and routable. The reuse refusals, whose escapes were
-  unfollowable precisely because the record had already been written, no longer speak about
-  a record that would have to be walked back: a refusal now ends an order that changed
-  nothing, and a later order finds the request exactly as issuance found it. And a scoped
+  again; the request stays open and routable. **The reuse refusals still name no escape, and that
+  is the one this change does not close.** Their two printed exits — recording an attempt
+  failure, and re-fulfilling from a better delivery — are refused because a request that has
+  been answered once will not be answered again inside the same action, and a claim
+  reproduces that state exactly: both refuse `REQUEST_ALREADY_FULFILLED` against the ledger
+  in the same words they used against the store. That is deliberate, because an identical
+  re-fulfil has to stay an idempotent no-op for a caller whose retry re-runs `fulfill`, and
+  a relink that silently succeeded would break exactly that guarantee. What did improve is
+  the wreckage rather than the dead end: a refusal now ends an order that changed nothing,
+  so a later order finds the request exactly as issuance found it, and `outcome: failed`
+  plus a fresh session is a real recovery route where before it was the hazard above. And a scoped
   request's record cannot be rewritten mid-order, because the store may not move at all
   while the order is pending: the request-scope guard's mutable set is empty now, where it
   used to hold every request the action fulfilled, so an edit to a scoped request's
   `rationale` or `scope` is a refusal where it was accepted before.
 
-  **All four hold on both acquisition arms.** Contingent bookkeeping was delegated-only when
+  Three limits of the freeze, all found by walking it rather than reading it, and none a
+  regression. The ledger is a plain file the acquirer can delete, and deleting it discards
+  the claims the controller would have refused over — so an order can be laundered out of a
+  refusal by removing an internal control file, which nothing gates and nothing detects. The
+  freeze covers the window from issuance to submission only: a hand edit to the request
+  store made *between* actions is neither gated nor reported, exactly as before. And the
+  replay exemption that lets an interrupted finalization be re-submitted still exempts a
+  question page's whole file once its evidence fields match what the commit would produce —
+  so a page hand-written to that exact state may also carry an `answer_page` or body text
+  nothing verified. Its source ids can no longer be padded (below), and closing the rest
+  needs the work order to record a page's full frontmatter and a body hash rather than only
+  its lifecycle fields.
+
+  **All of it holds on both acquisition arms.** Contingent bookkeeping was delegated-only when
   it first landed, and a provider acquisition order's request-scope guard still admitted
   every field of every request the order named, so the same mid-order rewrite was accepted
   there. It is not any more: an acquisition order freezes the request store whoever executes
