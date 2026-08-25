@@ -222,17 +222,26 @@ python3 scripts/source_requests.py fulfill --request-id req-1a2b3c4d5e --source-
    refuses the source ID, rerun inventory and inspect the manifest instead of
    hand-editing the candidate or request artifacts.
 
-   **Inside an acquisition work order both commands file claims rather than
-   writing.** The request record stays `open` with `source_id: null` and the
-   question page stays `blocked`; the controller writes both when it accepts the
-   submission, and a refused or failed submission writes neither. The JSON both
-   commands return carries `"contingent": true` and their text output says
-   `(claimed, pending acceptance)` — that is the acknowledgement, and it is the
-   only in-order record that the work was done. Two consequences for this loop:
-   re-running `list --status open` will keep returning a claimed request as open
-   for the life of the order, so do not use it to decide what is left to do; and
-   a submission this action reports as `blocked` is refused if any claim was
-   filed, because `blocked` means the action recorded nothing at all.
+   **Inside an acquisition work order `fulfill` files a claim rather than
+   writing**, and so does `reopen` in step 9. The request record stays `open`
+   with `source_id: null` and the question page stays `blocked`; the controller
+   writes both when it accepts the submission, and a refused or failed
+   submission writes neither. The JSON those two commands return carries
+   `"contingent": true` and their text output says `(claimed, pending
+   acceptance)` — that is the acknowledgement, and it is the only in-order
+   record that the work was done.
+
+   The candidate transition above is **not** contingent: `discover_sources.py`
+   files no claims, so the lifecycle write lands immediately and survives a
+   refused submission. Transition the candidate only once the evidence really is
+   inventoried and normalized, and expect to repair the candidate store by hand
+   if the submission is then refused for something else.
+
+   Two consequences for this loop: re-running `list --status open` will keep
+   returning a claimed request as open for the life of the order, so do not use
+   it to decide what is left to do; and a submission this action reports as
+   `blocked` is refused if any claim was filed, because `blocked` means the
+   action recorded nothing at all.
 
    If the request carries a `scope` mapping, `fulfill` compares it against the
    sidecar's stamped `scope:` and refuses with `REQUEST_SCOPE_MISMATCH` when a
