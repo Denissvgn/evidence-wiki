@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.3 - 2026-08-28
 
 - **Fix: a record's primary checksum was a verdict about a capture it never named.** A
   manifest record can own several delivered paths, and the primary `provenance` is whichever
