@@ -1,11 +1,13 @@
 import contextlib
+import hashlib
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from tests._script_loader import load_module as load_script_module
 
@@ -1471,6 +1473,388 @@ class RawFingerprintTests(unittest.TestCase):
             frontmatter = NORMALIZE.read_output_frontmatter(output)
             self.assertEqual("sha256:Z", frontmatter.get("raw_fingerprint"))
             self.assertEqual("2026-01-01", NORMALIZE.existing_created_date(output))
+
+
+class DeclaredRawCompanionTests(unittest.TestCase):
+    """A sidecar may declare companion files, and only what inventory resolves is admitted.
+
+    A companion is a second file a delivery names as part of the same capture. It cannot
+    arrive by being written: `should_skip` drops every dot-prefixed path component before
+    the raw walk, so a companion never becomes a source record of its own. The declaration
+    is the whole mechanism, which is why these tests measure two keys rather than one --
+    `provenance.companions` is what the delivery asked for and is inert, and
+    `provenance.companion_paths` is what inventory resolved against the tree and is the
+    only key any consumer reads.
+    """
+
+    ARTIFACT = "keepa.json"
+    ARTIFACT_RELATIVE = "raw/data/keepa.json"
+    SIDECAR_RELATIVE = "raw/data/keepa.json.provenance.yml"
+    COMPANION = ".keepa.json.schema.json"
+    COMPANION_RELATIVE = "raw/data/.keepa.json.schema.json"
+    BUNDLE = "arxiv-2601.00009v1"
+    BUNDLE_RELATIVE = "raw/papers/arxiv-2601.00009v1"
+    BUNDLE_COMPANION = ".arxiv-2601.00009v1.notes.json"
+    PAYLOAD = '{"price": 1}\n'
+    SCHEMA = '{"type": "object"}\n'
+
+    def validation_cases(self) -> tuple[tuple, ...]:
+        """label, planter, declared companions, surviving companion_paths, warns."""
+        parts = tuple(f".keepa.json.part-{index}.json" for index in range(9))
+        return (
+            ("valid", "regular", (self.COMPANION,), (self.COMPANION_RELATIVE,), False),
+            ("traversal parent", "escape", (f"../{self.COMPANION}",), (), True),
+            ("traversal nested", "nested", (f"nested/{self.COMPANION}",), (), True),
+            ("non dot", "plain named", ("keepa.json.schema.json",), (), True),
+            ("wrong prefix", "foreign", (".other.json.schema.json",), (), True),
+            ("absent", "nothing", (self.COMPANION,), (), True),
+            ("symlink", "symlink", (self.COMPANION,), (), True),
+            ("hardlink", "hardlink", (self.COMPANION,), (), True),
+            ("directory target", "bundle", (self.BUNDLE_COMPANION,), (), True),
+            ("over bound", "bulk", parts, tuple(f"raw/data/{name}" for name in parts[:8]), True),
+        )
+
+    # --- harness -----------------------------------------------------------------
+
+    def workspace(self, root: Path, name: str, *, source_root: str = "raw/data") -> Path:
+        workspace = root / name
+        (workspace / source_root).mkdir(parents=True)
+        (workspace / "sources").mkdir(parents=True)
+        (workspace / "research.yml").write_text(
+            f"raw:\n  source_roots:\n    - {source_root}\n"
+            "sources:\n  manifest_path: sources/manifest.jsonl\n  normalized_dir: sources/normalized\n",
+            encoding="utf-8",
+        )
+        return workspace
+
+    def sidecar_text(self, companions: tuple[str, ...] | None) -> str:
+        lines = [
+            "origin_url: https://api.example.org/product/B0ABC\n",
+            "license: null\n",
+            "retrieved_at: 2026-08-08T12:00:00Z\n",
+            "retrieved_by: example/provider\n",
+        ]
+        if companions is not None:
+            lines.append("companions:\n" if companions else "companions: []\n")
+            lines.extend(f"  - {json.dumps(name)}\n" for name in companions)
+        return "".join(lines)
+
+    def file_capture(
+        self,
+        root: Path,
+        name: str,
+        companions: tuple[str, ...] | None,
+        *,
+        artifact: str | None = None,
+    ) -> Path:
+        """A file-shaped capture with a sidecar: the only shape a companion may be declared on."""
+        workspace = self.workspace(root, name)
+        artifact = artifact or self.ARTIFACT
+        (workspace / "raw" / "data" / artifact).write_text(self.PAYLOAD, encoding="utf-8")
+        (workspace / "raw" / "data" / f"{artifact}.provenance.yml").write_text(
+            self.sidecar_text(companions), encoding="utf-8"
+        )
+        return workspace
+
+    def bundle_capture(self, root: Path, name: str, companions: tuple[str, ...] | None) -> Path:
+        """A directory-shaped capture, whose record already admits its whole subtree."""
+        workspace = self.workspace(root, name, source_root="raw/papers")
+        bundle = workspace / self.BUNDLE_RELATIVE
+        bundle.mkdir(parents=True)
+        (bundle / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\nBody.\n\\end{document}\n",
+            encoding="utf-8",
+        )
+        (workspace / f"{self.BUNDLE_RELATIVE}.provenance.yml").write_text(
+            self.sidecar_text(companions), encoding="utf-8"
+        )
+        return workspace
+
+    def build(self, workspace: Path) -> list[dict]:
+        config = INVENTORY.load_config(workspace)
+        records, _, _ = INVENTORY.build_records(workspace, config, previous_detected_at={})
+        return records
+
+    def declaring_record(self, workspace: Path, kind: str = "structured_data") -> dict:
+        """The one record a sidecar matched. A plain-named plant earns a record of its own."""
+        matches = [
+            record
+            for record in records_by_kind(self.build(workspace), kind)
+            if isinstance(record.get("provenance"), dict)
+        ]
+        self.assertEqual(1, len(matches), matches)
+        return matches[0]
+
+    def expected_fingerprint(self, workspace: Path, relatives: tuple[str, ...]) -> str:
+        """`compute_raw_fingerprint` rebuilt from first principles over a named input set."""
+        digest = hashlib.sha256()
+        for relative in sorted(set(relatives)):
+            file_hash = hashlib.sha256((workspace / relative).read_bytes()).hexdigest()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(file_hash.encode("ascii"))
+            digest.update(b"\n")
+        return "sha256:" + digest.hexdigest()
+
+    def prepare_case(self, root: Path, label: str, planter: str, declared: tuple[str, ...]) -> tuple[Path, str]:
+        """Build one case's workspace; returns it and the kind of the record that declares."""
+        name = label.replace(" ", "-")
+        if planter == "bundle":
+            workspace = self.bundle_capture(root, name, declared)
+            # Planted, so the refusal is earned by the target's shape rather than by the
+            # named file happening not to be there.
+            (workspace / "raw" / "papers" / self.BUNDLE_COMPANION).write_text(
+                '{"note": "x"}\n', encoding="utf-8"
+            )
+            return workspace, "paper"
+        workspace = self.file_capture(root, name, declared)
+        data = workspace / "raw" / "data"
+        if planter == "regular":
+            (data / self.COMPANION).write_text(self.SCHEMA, encoding="utf-8")
+        elif planter == "escape":
+            # Planted at the traversal *destination* too, so the refusal is earned by the
+            # name's shape rather than by the file happening not to be there.
+            (data / self.COMPANION).write_text(self.SCHEMA, encoding="utf-8")
+            (workspace / "raw" / self.COMPANION).write_text(self.SCHEMA, encoding="utf-8")
+        elif planter == "nested":
+            (data / "nested").mkdir()
+            (data / "nested" / self.COMPANION).write_text(self.SCHEMA, encoding="utf-8")
+        elif planter == "plain named":
+            (data / "keepa.json.schema.json").write_text(self.SCHEMA, encoding="utf-8")
+        elif planter == "foreign":
+            (data / ".other.json.schema.json").write_text(self.SCHEMA, encoding="utf-8")
+        elif planter == "symlink":
+            if not hasattr(Path, "symlink_to"):
+                self.skipTest("symlinks are unavailable on this platform")
+            (workspace / "aux-schema.json").write_text(self.SCHEMA, encoding="utf-8")
+            try:
+                (data / self.COMPANION).symlink_to(workspace / "aux-schema.json")
+            except (OSError, NotImplementedError):  # pragma: no cover - unprivileged Windows
+                self.skipTest("this filesystem does not allow creating a symlink")
+        elif planter == "hardlink":
+            # Linked from outside the raw root, so the capture itself keeps a link count of
+            # one and the refusal under test is the companion's own.
+            (workspace / "aux-schema.json").write_text(self.SCHEMA, encoding="utf-8")
+            try:
+                os.link(workspace / "aux-schema.json", data / self.COMPANION)
+            except (OSError, NotImplementedError, AttributeError):  # pragma: no cover
+                self.skipTest("hardlinks are unavailable on this platform")
+        elif planter == "bulk":
+            for index, part in enumerate(declared):
+                (data / part).write_text(f'{{"part": {index}}}\n', encoding="utf-8")
+        elif planter != "nothing":  # pragma: no cover - table typo guard
+            self.fail(f"unknown planter: {planter}")
+        return workspace, "structured_data"
+
+    # --- tests -------------------------------------------------------------------
+
+    def test_only_a_resolvable_bare_dot_prefixed_companion_survives_onto_the_record(self):
+        for label, planter, declared, expected, warns in self.validation_cases():
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    workspace, kind = self.prepare_case(Path(tmpdir), label, planter, declared)
+                    record = self.declaring_record(workspace, kind)
+
+                provenance = record["provenance"]
+                self.assertEqual(list(expected), provenance["companion_paths"], record)
+                self.assertEqual(list(declared), provenance["companions"], record)
+                metadata = record.get("metadata") or {}
+                if warns:
+                    self.assertTrue(
+                        any("companion" in warning for warning in metadata.get("warnings", [])),
+                        f"a dropped companion must be reported: {record}",
+                    )
+                    self.assertIs(True, metadata.get("review_required"), record)
+                else:
+                    self.assertEqual([], metadata.get("warnings", []), record)
+                    self.assertNotIn("review_required", metadata)
+
+    def test_a_declared_companion_never_enters_raw_paths(self):
+        """Source identity and the raw-attribution equality both hang off `raw_paths`."""
+        for label, planter, declared, _, _ in self.validation_cases():
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    workspace, _kind = self.prepare_case(Path(tmpdir), label, planter, declared)
+                    records = self.build(workspace)
+
+                for record in records:
+                    raw_paths = record.get("raw_paths") or []
+                    for raw_path in raw_paths:
+                        self.assertFalse(
+                            any(part.startswith(".") for part in PurePosixPath(raw_path).parts),
+                            f"a companion reached raw_paths on {record['id']}: {raw_path}",
+                        )
+                    for admitted in record.get("provenance", {}).get("companion_paths", []):
+                        self.assertNotIn(admitted, raw_paths, record)
+
+    def test_the_declared_list_stays_inert_beside_the_resolved_one(self):
+        """The sidecar folds in verbatim, so a refused entry stays visible and stays refused."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.file_capture(Path(tmpdir), "two-keys", (f"../{self.COMPANION}",))
+            (workspace / "raw" / self.COMPANION).write_text(self.SCHEMA, encoding="utf-8")
+            record = self.declaring_record(workspace)
+
+        self.assertEqual([f"../{self.COMPANION}"], record["provenance"]["companions"])
+        self.assertEqual([], record["provenance"]["companion_paths"])
+
+    def test_a_companion_arriving_between_runs_moves_the_fingerprint_and_stales_the_output(self):
+        """The sidecar bytes are identical across both runs, so only the companion moved."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.file_capture(Path(tmpdir), "arrival", (self.COMPANION,))
+            before = self.declaring_record(workspace)
+
+            (workspace / self.COMPANION_RELATIVE).write_text(self.SCHEMA, encoding="utf-8")
+            after = self.declaring_record(workspace)
+
+            self.assertEqual([], before["provenance"]["companion_paths"], before)
+            self.assertEqual([self.COMPANION_RELATIVE], after["provenance"]["companion_paths"], after)
+            self.assertNotEqual(before["raw_fingerprint"], after["raw_fingerprint"])
+
+            output = workspace / "sources" / "normalized" / "record.md"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                "---\n"
+                f"raw_fingerprint: {before['raw_fingerprint']}\n"
+                "normalizer:\n"
+                "  name: normalize_sources.py\n"
+                f"  version: {NORMALIZE.NORMALIZER_VERSION}\n"
+                "---\n# x\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(NORMALIZE.is_stale(before, output))
+            self.assertTrue(NORMALIZE.is_stale(after, output))
+
+    def test_editing_a_companions_bytes_moves_the_fingerprint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.file_capture(Path(tmpdir), "edit", (self.COMPANION,))
+            companion = workspace / self.COMPANION_RELATIVE
+            companion.write_text(self.SCHEMA, encoding="utf-8")
+            before = self.declaring_record(workspace)["raw_fingerprint"]
+
+            companion.write_text('{"type": "object", "required": ["price"]}\n', encoding="utf-8")
+            after = self.declaring_record(workspace)["raw_fingerprint"]
+
+        self.assertNotEqual(before, after)
+
+    def test_a_record_declaring_nothing_fingerprints_exactly_its_capture_and_sidecar(self):
+        """The opt-in guarantee, recomputed rather than compared against a stored constant.
+
+        No workspace written before this feature can carry a `companions:` key -- the field
+        did not exist and was dropped as an unknown provenance field -- so this is the case
+        every existing record is in, and its fingerprint has to be the one it always was.
+        The dot-prefixed file planted beside the capture is exactly what a declaration would
+        have admitted, and nothing declared it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.file_capture(Path(tmpdir), "opt-in", None)
+            (workspace / self.COMPANION_RELATIVE).write_text(self.SCHEMA, encoding="utf-8")
+            record = self.declaring_record(workspace)
+
+            self.assertNotIn("companions", record["provenance"])
+            self.assertNotIn("companion_paths", record["provenance"])
+            self.assertEqual(
+                self.expected_fingerprint(workspace, (self.ARTIFACT_RELATIVE, self.SIDECAR_RELATIVE)),
+                record["raw_fingerprint"],
+            )
+
+    def test_a_capture_whose_bytes_are_never_re_read_refuses_the_declaration(self):
+        """`.xlsx` classifies as `table`, but nothing re-derives it, so it has no fingerprint.
+
+        A companion is only worth accepting where it can move something. Admitting one here
+        would have given the record a `raw_fingerprint` spanning the companion *alone* --
+        the capture and its sidecar are outside it, because the normalizer never re-reads
+        them -- so editing the spreadsheet would leave the fingerprint still.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.file_capture(
+                Path(tmpdir), "opaque", (".sheet.xlsx.schema.json",), artifact="sheet.xlsx"
+            )
+            (workspace / "raw" / "data" / ".sheet.xlsx.schema.json").write_text(
+                self.SCHEMA, encoding="utf-8"
+            )
+            record = self.declaring_record(workspace, "table")
+
+        self.assertEqual([], record["provenance"]["companion_paths"], record)
+        self.assertNotIn("raw_fingerprint", record)
+        metadata = record.get("metadata") or {}
+        self.assertTrue(
+            any("not carried by this record's fingerprint" in warning for warning in metadata["warnings"]),
+            record,
+        )
+        self.assertIs(True, metadata.get("review_required"), record)
+
+    def test_a_declaration_a_records_kind_cannot_carry_is_refused_rather_than_recorded(self):
+        """A paper's primary sidecar can sit on its paired PDF, which is file-shaped.
+
+        The file-shaped rule alone would accept a declaration there, and the paper branch of
+        `raw_fingerprint_paths` would then never read it -- an accepted list that does
+        nothing, which is worse than a refusal because the record looks clean.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.workspace(Path(tmpdir), "paired", source_root="raw/papers")
+            bundle = workspace / self.BUNDLE_RELATIVE
+            bundle.mkdir(parents=True)
+            (bundle / "main.tex").write_text(
+                "\\documentclass{article}\n\\begin{document}\nBody.\n\\end{document}\n",
+                encoding="utf-8",
+            )
+            pdf_relative = "raw/papers/arxiv-2601.00009v1.pdf"
+            (workspace / pdf_relative).write_bytes(b"%PDF-1.4\n")
+            (workspace / f"{pdf_relative}.provenance.yml").write_text(
+                self.sidecar_text((".arxiv-2601.00009v1.pdf.schema.json",)), encoding="utf-8"
+            )
+            (workspace / "raw" / "papers" / ".arxiv-2601.00009v1.pdf.schema.json").write_text(
+                self.SCHEMA, encoding="utf-8"
+            )
+            record = self.declaring_record(workspace, "paper")
+
+        self.assertEqual(pdf_relative, record["provenance"]["path"], record)
+        self.assertEqual([], record["provenance"]["companion_paths"], record)
+        metadata = record.get("metadata") or {}
+        self.assertTrue(
+            any("not carried by this record's fingerprint" in warning for warning in metadata["warnings"]),
+            record,
+        )
+        self.assertIs(True, metadata.get("review_required"), record)
+
+    def test_an_empty_declaration_admits_nothing_and_reports_nothing(self):
+        """`companions: []` names no file, so there is nothing to review.
+
+        Written on a capture every later rule would refuse, so the silence is the empty
+        list's own and not an accident of where it was declared.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.file_capture(Path(tmpdir), "empty", (), artifact="sheet.xlsx")
+            record = self.declaring_record(workspace, "table")
+
+        self.assertEqual([], record["provenance"]["companion_paths"], record)
+        metadata = record.get("metadata") or {}
+        self.assertEqual([], metadata.get("warnings", []), record)
+        self.assertNotIn("review_required", metadata)
+
+    def test_a_directory_target_declaring_companions_drops_them_and_never_fingerprints_them(self):
+        """A bundle record admits its whole subtree already, so a declaration adds nothing."""
+        beside_bundle = f"raw/papers/{self.BUNDLE_COMPANION}"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.bundle_capture(Path(tmpdir), "bundle", (self.BUNDLE_COMPANION,))
+            before = self.declaring_record(workspace, "paper")
+
+            (workspace / beside_bundle).write_text('{"note": "x"}\n', encoding="utf-8")
+            after = self.declaring_record(workspace, "paper")
+
+        self.assertEqual([], after["provenance"]["companion_paths"], after)
+        metadata = after.get("metadata") or {}
+        self.assertTrue(
+            any("file-shaped target" in warning for warning in metadata.get("warnings", [])),
+            after,
+        )
+        self.assertIs(True, metadata.get("review_required"), after)
+        self.assertEqual(
+            before["raw_fingerprint"],
+            after["raw_fingerprint"],
+            "a refused declaration must not widen the fingerprint it was refused on",
+        )
 
 
 class NormalizedFormatContractTests(unittest.TestCase):

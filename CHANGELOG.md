@@ -1,5 +1,72 @@
 # Changelog
 
+## Unreleased
+
+- **A delivery can now declare the files that belong to a capture: the inventory half of a
+  rule where evidence grows by the files a sidecar declares, never by a directory.** A
+  downstream consumer reported a payload that is only readable beside a second file -- the
+  schema its normalized view is keyed on -- and no way to say so. Writing the second file
+  was not enough on its own: `should_skip` drops any dot-prefixed path component before the
+  raw walk, so the file never became a manifest record, and a plain-named one became a
+  record the order never fulfilled with. Either way the delivery was refused for carrying
+  raw evidence no record accounted for, and there was no shape of delivery that worked.
+
+  **Half of that is what lands here, and the report is not yet fixed.** Inventory validates
+  a declaration and `raw_fingerprint` spans what survives it, so a workspace can record and
+  re-normalize a capture that needs its companion. The acquisition guards are unchanged and
+  still refuse a companion delivered beside an artifact, because they compare the raw tree
+  against what manifest records attribute and nothing has taught them to read the
+  declaration. An acquirer submitting such a delivery today is still refused; what exists
+  now that did not before is the declaration those guards will read.
+
+  A `.provenance.yml` sidecar may now carry `companions:`, a list of file names beside the
+  capture it describes. Inventory resolves each name against the tree and writes what
+  survives to `provenance.companion_paths`, and `raw_fingerprint` spans those paths, so
+  editing a companion re-triggers normalization of the record that reads it. A name survives
+  only if it is a bare file name -- no path separator at all, which refuses traversal by
+  construction rather than by detecting it -- beginning `.<capture file name>.`, which is
+  dot-prefixed so `should_skip` keeps refusing it as a source in its own right and named
+  after its capture so it cannot be read as a neighbouring capture's; and only if it exists
+  as a singly linked regular file under the raw tree's own `lstat` rule rather than
+  `Path.is_file()`, which follows symlinks and accepts hardlinks. Anything else is a warning
+  plus `review_required` and the entry is dropped, including a name the delivery declared
+  but never wrote. A declaration on a directory target drops whole, because a bundle record
+  already admits its entire subtree. At most eight entries, and companions need no bound of
+  their own beyond that: each one is an ordinary file under a raw root and already counts
+  toward the snapshot's existing scope-guard entry and byte caps. The declared list stays on
+  the record at `provenance.companions` exactly as the sidecar wrote it, and is inert;
+  `companion_paths` is the package's answer to it and the only key a consumer reads.
+
+  The rejected alternative was to teach the raw walk to admit companion-shaped names --
+  widening `should_skip`, or filtering around it. That makes admission a property of a
+  file's *name*, so the undeclared stowaway is admitted exactly as readily as the declared
+  companion, and every dot-prefixed file already sitting under a raw root becomes a source
+  record. Deriving admission from the sidecar instead leaves the walk untouched and keeps
+  the answer to "is this evidence?" where the delivery states it, rather than where a
+  predicate infers it.
+
+  Widening `raw_fingerprint_paths` here does not reopen the decision not to widen it that
+  0.5.3 disclosed. That decision was about an *undeclared* dot-prefixed member inside a
+  bundle: nothing named it, and the field's documented purpose -- "raw files whose bytes
+  determine a record's normalized output" -- does not reach it. A declared companion the
+  normalizer keys its structured view on is precisely a file of that description. The bundle
+  case is unchanged, and still pinned by its own test.
+
+  Consequences to expect, and the first is that there are none for a workspace that declares
+  nothing. This is the exact negation of the bundle-count hazard disclosed in 0.5.3, and is
+  worth stating in those terms. No workspace written before this release can carry a
+  `companions:` key: the field did not exist, and a sidecar holding one was reported as
+  `unknown provenance field ignored` and dropped. So no existing record is rewritten and no
+  existing `raw_fingerprint` moves, which means neither `manifest_record_changed_after_issuance`
+  nor the manifest-scope `changed_outside_scope` refusal is reachable by upgrading -- where
+  the bundle-count change made both reachable for records nobody had touched. Fingerprints
+  move only for records whose own sidecars declare companions, and such a record
+  re-normalizes once. And a declaration is refused, loudly, wherever it could not do what it
+  promises: on a directory target, and on a capture whose bytes the normalizer never
+  re-reads -- an `.xlsx` under `table`, say, or a paper record whose sidecar sits on its
+  paired PDF. Each of those warns and marks the source `review_required` rather than
+  recording an accepted list that moves nothing.
+
 ## 0.5.3 - 2026-08-28
 
 - **Fix: a record's primary checksum was a verdict about a capture it never named.** A

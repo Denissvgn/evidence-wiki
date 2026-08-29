@@ -109,8 +109,34 @@ standards:                                      # optional standards-registry me
   status: published
   registry_url: https://www.iso.org/standard/77442.html
   dataset_license: ODC-BY-1.0
+companions:                                      # optional: files that belong to this capture
+  - .rows.csv.schema.json
 notes: optional free text
 ```
+
+`companions` names files delivered as part of the same capture -- a schema the
+capture's normalized view is keyed on, say -- so that editing one re-triggers
+normalization of the record that reads it. Every entry must be a bare file name
+beside the delivered artifact (no path separator of any kind), and must begin
+with a dot followed by the artifact's own file name and a dot: for
+`raw/data/rows.csv` the only valid names are `.rows.csv.<suffix>`. The leading
+dot keeps the file from being inventoried as a source of its own, and the
+artifact's name keeps one capture's companion from being read as a neighbouring
+capture's. Each named file must already exist as an ordinary regular file --
+not a symbolic link, not a second name for a file that exists elsewhere -- and
+at most eight may be declared.
+
+Inventory writes the entries it resolved to `provenance.companion_paths` on the
+manifest record and includes them in `raw_fingerprint`. The declared list stays
+at `provenance.companions` exactly as written and is not acted on. Anything that
+does not resolve is dropped with a warning and marks the source
+`review_required`, including a name that was declared but never delivered.
+`companions` is only accepted on a delivered *file* whose bytes normalization
+re-reads: `.pdf`, `.html`/`.htm`/`.xhtml`, `.csv`/`.tsv`, and `.json`/`.jsonl`.
+A directory-shaped delivery such as a LaTeX bundle already accounts for
+everything beneath it, and any other capture has no fingerprint a companion
+could move, so a declaration on either is dropped with a warning rather than
+silently recorded.
 
 All fields are optional strings (validated when present), except `license` may
 be explicit YAML `null` to record known uncertainty, `publication_year` may

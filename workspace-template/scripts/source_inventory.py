@@ -140,6 +140,7 @@ PROVENANCE_FIELDS = (
     "delivery_failure_remediation",
     "sha256",
     "checksum",
+    "companions",
     "request_id",
     "candidate_id",
     "scope",
@@ -191,6 +192,24 @@ CODEBASE_LOCAL_REPO_MARKERS = (".git", ".agent-wiki", "pyproject.toml", "package
 CODEBASE_DEFAULT_SOURCE_ROOT_NAMES = {"code", "repos", "repositories"}
 CODEBASE_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 CODEBASE_MAX_LOCAL_REPO_FILES = 10_000
+#: Most companion files one sidecar may declare beside the capture it describes.
+#: A bound rather than a budget: a companion is a named part of one capture, and a
+#: declaration long enough to need counting is describing a directory instead. No
+#: global bound is added with it, because every declared companion is an ordinary
+#: file under a raw root and so already counts toward the snapshot's existing
+#: scope-guard entry and byte caps.
+PROVENANCE_MAX_COMPANIONS = 8
+#: The capture suffixes whose bytes each fingerprinting record kind re-reads. Held once
+#: rather than twice, because the two questions that read it have to agree: which captures
+#: `raw_fingerprint` covers, and which captures a companion declaration is worth accepting
+#: on. A declaration the fingerprint could not carry would be a promise -- edit this and
+#: normalization re-runs -- that the record has no way to keep.
+RAW_FINGERPRINT_CAPTURE_SUFFIXES = {
+    "pdf": PDF_EXTENSIONS,
+    "html": HTML_EXTENSIONS,
+    "table": TABLE_TEXT_EXTENSIONS,
+    "structured_data": STRUCTURED_DATA_EXTENSIONS,
+}
 INVENTORY_REPORT_SCHEMA_VERSION = "1.0"
 INVENTORY_REPORT_DOCUMENT_TYPE = "source_inventory_report"
 ACQUISITION_INCOMPLETE_SUFFIX = ".acquisition-incomplete.json"
@@ -1631,6 +1650,18 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
                 continue
             data[field] = parsed
             continue
+        if field == "companions":
+            # Shape only. This function is handed the sidecar's own path and nothing else,
+            # so it cannot stat a declared name, decide whether it sits beside the capture,
+            # or know how many the record may carry; `merge_sidecar_provenance` holds
+            # `project_root` and does all of that. What survives here is a list of
+            # non-empty strings, and it stays untrusted until that pass rules on it.
+            parsed = parse_string_list(value)
+            if parsed is None:
+                warnings.append(f"{relative_path}: provenance companions must be a list of file names")
+                continue
+            data[field] = parsed
+            continue
         if field == "authors":
             parsed = parse_string_list(value)
             if parsed is None:
@@ -1785,6 +1816,134 @@ def provenance_candidate_paths(record: dict[str, Any]) -> list[str]:
     return unique_values(candidates)
 
 
+def companion_admission_failure(path: Path) -> str | None:
+    """Why the raw tree would refuse this companion, or None when it admits it.
+
+    "Regular file" here means what the raw-tree snapshot means by it, checked the way the
+    snapshot checks it: ``lstat`` rather than ``is_file``, a real regular file rather than
+    a symlink to one, and a link count of exactly one. ``Path.is_file()`` resolves symlinks
+    and accepts hardlinks, so it would admit two kinds of entry the snapshot refuses to
+    enumerate at all -- and a record must not fingerprint bytes the tree declines to show.
+    """
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return "does not exist"
+    except OSError as exc:
+        return f"could not be inspected: {exc.strerror or exc}"
+    if not stat.S_ISREG(metadata.st_mode):
+        return "is not a regular file"
+    if int(getattr(metadata, "st_nlink", 1) or 1) != 1:
+        return "is a multiply linked file"
+    return None
+
+
+def resolve_declared_companions(
+    project_root: Path,
+    record: dict[str, Any],
+    target_rel: str,
+    sidecar_path: str,
+    declared: list[str],
+    warnings: list[str],
+) -> list[str]:
+    """Resolve one sidecar's declared companions against the tree, dropping what fails.
+
+    A companion is a second file a delivery names as part of the same capture -- the
+    schema a payload is keyed on, say. Declaring it is the only way it can reach a record:
+    ``should_skip`` refuses every dot-prefixed path component before the raw walk sees it,
+    so a companion is never inventoried as a source of its own. What a surviving
+    declaration buys is a place in the capture's ``raw_fingerprint``, so editing the
+    companion re-triggers normalization of the record whose output depends on it.
+
+    That is also the whole test of where a declaration may sit: on a file-shaped capture,
+    on a record kind whose fingerprint covers that capture's bytes. A bundle record already
+    admits its entire subtree, and a record the fingerprint does not reach has nothing a
+    companion could move, so both are refused rather than recorded as an accepted list that
+    quietly does nothing.
+
+    Every rejection is a warning plus ``review_required``, and the entry is dropped rather
+    than the sidecar failed: inventory does not hard-fail on sidecar content, and a dropped
+    entry is one the record neither admits nor fingerprints. A declared-but-absent
+    companion is the same -- the record simply carries fewer entries than the delivery
+    claimed, which is a thing to review rather than a reason to lose the capture.
+
+    None of this widens ``raw_paths``. A companion is part of one capture's evidence, not a
+    source of its own, and adding it there would move both source identity and the
+    raw-attribution equality the guards are written against.
+    """
+
+    def refuse(message: str) -> None:
+        warning = f"{sidecar_path}: {message}"
+        append_record_warning(record, warning)
+        ensure_metadata(record)["review_required"] = True
+        warnings.append(warning)
+
+    if not declared:
+        return []
+    try:
+        target_is_file = stat.S_ISREG((project_root / target_rel).lstat().st_mode)
+    except OSError:
+        target_is_file = False
+    if not target_is_file:
+        # A directory target is a bundle, and a bundle record already declares its whole
+        # subtree in ``raw_paths``; every regular file beneath it is attributed to the
+        # record already. A companion list there would name evidence the record admits
+        # anyway, under wording that reads as though it had added some.
+        refuse(f"provenance companions require a file-shaped target: {target_rel}")
+        return []
+    kind = record.get("kind")
+    eligible_suffixes = RAW_FINGERPRINT_CAPTURE_SUFFIXES.get(kind if isinstance(kind, str) else "")
+    if eligible_suffixes is None or PurePosixPath(target_rel).suffix.lower() not in eligible_suffixes:
+        # What a companion buys is a place in `raw_fingerprint`, so a capture with no
+        # fingerprint of its own has nothing to offer it. Accepting the declaration anyway
+        # would write `companion_paths` onto a record whose fingerprint could never carry
+        # it, and silence is the worst way to break that promise: the acquirer would read
+        # a clean record and believe editing the companion re-triggers normalization.
+        refuse(f"provenance companions are not carried by this record's fingerprint: {target_rel}")
+        return []
+
+    target_path = PurePosixPath(target_rel)
+    directory = target_path.parent
+    required_prefix = f".{target_path.name}."
+    if len(declared) > PROVENANCE_MAX_COMPANIONS:
+        refuse(
+            f"provenance companions declares {len(declared)} entries, above the "
+            f"{PROVENANCE_MAX_COMPANIONS}-entry limit; the entries past it are ignored"
+        )
+    accepted: list[str] = []
+    for name in declared[:PROVENANCE_MAX_COMPANIONS]:
+        # A bare file name, refused as such rather than normalized and then inspected for
+        # traversal. A name carrying no separator at all cannot address anything outside
+        # the directory it is joined to, so "resolves into the artifact's own directory"
+        # holds by construction instead of by a check that has to be right.
+        if "/" in name or "\\" in name or name in {".", ".."}:
+            refuse(f"provenance companion must be a bare file name beside {target_rel}: {name}")
+            continue
+        if not name.startswith(required_prefix):
+            # Dot-prefixed, and named after the capture it belongs to. The leading dot is
+            # what keeps ``should_skip`` refusing it as a source in its own right; the
+            # capture's own file name is what stops one capture's companion from being
+            # read as a neighbouring capture's. Together they also put every companion
+            # outside the set of paths any record can hold, since no record's path has a
+            # dot-prefixed component.
+            refuse(
+                f"provenance companion must be named {required_prefix}<suffix> "
+                f"beside {target_rel}: {name}"
+            )
+            continue
+        relative = (directory / name).as_posix()
+        if relative in {target_rel, sidecar_path}:
+            refuse(f"provenance companion may not name the capture or its own sidecar: {name}")
+            continue
+        failure = companion_admission_failure(project_root / relative)
+        if failure is not None:
+            refuse(f"provenance companion {failure}: {relative}")
+            continue
+        if relative not in accepted:
+            accepted.append(relative)
+    return accepted
+
+
 def merge_sidecar_provenance(
     project_root: Path,
     record: dict[str, Any],
@@ -1832,6 +1991,16 @@ def merge_sidecar_provenance(
         append_record_warning(record, warning)
         ensure_metadata(record)["review_required"] = True
         warnings.append(warning)
+    companions = provenance.get("companions")
+    if isinstance(companions, list):
+        # Two keys, and only one of them is load-bearing. `provenance` opens as a copy of
+        # the whole parsed sidecar, so the *declared* list stays visible at `companions`
+        # exactly as the delivery wrote it, and stays untrusted. `companion_paths` is the
+        # package's own answer to that declaration and the only key a consumer reads --
+        # the same division `sidecar_path` sits on, one line above.
+        provenance["companion_paths"] = resolve_declared_companions(
+            project_root, record, target_rel, entry["sidecar_path"], companions, warnings
+        )
     return provenance
 
 
@@ -1908,6 +2077,27 @@ def apply_unusable_evidence_flags(records: list[dict[str, Any]]) -> None:
             record.pop("unusable_evidence_reasons", None)
 
 
+def record_companion_paths(record: dict[str, Any]) -> list[str]:
+    """The companions a record's primary provenance actually admits.
+
+    Only ``companion_paths`` is read, never the declared ``companions`` beside it: the
+    first is what inventory resolved against the tree, the second is what the delivery
+    asked for and is never acted on.
+
+    The primary provenance is the whole answer for every kind this is asked about. A
+    record owns more than one delivered path in exactly two shapes -- a paper bundle
+    paired with its PDF, and a link record merging several link files -- and neither is a
+    kind whose fingerprint companions reach.
+    """
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        return []
+    companions = provenance.get("companion_paths")
+    if not isinstance(companions, list):
+        return []
+    return [path for path in companions if isinstance(path, str)]
+
+
 def raw_fingerprint_paths(project_root: Path, record: dict[str, Any]) -> list[Path]:
     """Raw files whose bytes determine a record's normalized output.
 
@@ -1941,23 +2131,8 @@ def raw_fingerprint_paths(project_root: Path, record: dict[str, Any]) -> list[Pa
             sidecar = project_root / f"{raw_pdf}{PROVENANCE_SIDECAR_SUFFIX}"
             if sidecar.is_file():
                 paths.append(sidecar)
-    elif kind == "pdf":
-        raw_paths = record.get("raw_paths")
-        if isinstance(raw_paths, list):
-            for raw_path in raw_paths:
-                if isinstance(raw_path, str) and raw_path.lower().endswith(".pdf"):
-                    pdf = project_root / raw_path
-                    if pdf.is_file():
-                        paths.append(pdf)
-                    sidecar = project_root / f"{raw_path}{PROVENANCE_SIDECAR_SUFFIX}"
-                    if sidecar.is_file():
-                        paths.append(sidecar)
-    elif kind in {"html", "table", "structured_data"}:
-        eligible_suffixes = {
-            "html": HTML_EXTENSIONS,
-            "table": TABLE_TEXT_EXTENSIONS,
-            "structured_data": STRUCTURED_DATA_EXTENSIONS,
-        }[kind]
+    elif kind in RAW_FINGERPRINT_CAPTURE_SUFFIXES:
+        eligible_suffixes = RAW_FINGERPRINT_CAPTURE_SUFFIXES[kind]
         raw_paths = record.get("raw_paths")
         if isinstance(raw_paths, list):
             for raw_path in raw_paths:
@@ -1969,6 +2144,22 @@ def raw_fingerprint_paths(project_root: Path, record: dict[str, Any]) -> list[Pa
                 sidecar = project_root / f"{raw_path}{PROVENANCE_SIDECAR_SUFFIX}"
                 if sidecar.is_file():
                     paths.append(sidecar)
+        # Appended outside the suffix filter above, which selects which *captures*
+        # a record re-reads and would drop every companion on sight: a companion is named
+        # by its capture's sidecar rather than found by its own extension, so a `.json`
+        # schema beside a `.csv` matches none of them. Every other kind is absent because
+        # no declaration survives onto one: `resolve_declared_companions` reads this same
+        # map and refuses a companion the fingerprint here could not carry.
+        #
+        # This is what `raw_fingerprint_paths` is for rather than a widening of it: a
+        # declared companion the normalizer keys its structured view on is a raw file whose
+        # bytes determine the record's normalized output, which is the sentence at the top
+        # of this function. The undeclared dot-prefixed member of a bundle stays outside,
+        # and stays outside for the same reason -- nothing declared it.
+        for relative in record_companion_paths(record):
+            companion = project_root / relative
+            if companion_admission_failure(companion) is None:
+                paths.append(companion)
     return paths
 
 
