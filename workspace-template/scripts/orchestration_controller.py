@@ -3572,9 +3572,14 @@ def derived_raw_attribution(
                         files.add(relative_workspace_path(project_root, member))
                     except OSError:
                         continue
+                # The bundle's own sidecar sits BESIDE the directory rather than inside
+                # it, so the walk above never reaches it and this branch has to add it.
+                # Not routed through ``record_admitted_raw_paths``: that helper answers
+                # the file-shaped question, and pairing a directory with a companion list
+                # is a shape no delivery may declare.
+                files.add(f"{raw_path}{RAW_PROVENANCE_SIDECAR_SUFFIX}")
             else:
-                files.add(raw_path)
-            files.add(f"{raw_path}.provenance.yml")
+                files |= record_admitted_raw_paths(record, raw_path)
         attribution[source_id] = {
             "raw_paths": [path for path in raw_paths if isinstance(path, str)],
             "files": files,
@@ -3632,6 +3637,70 @@ def raw_attribution_mismatches(
                 ),
             }
     return mismatches
+
+
+#: Spelled once. Every raw-scope admission that names a sidecar names it through this.
+RAW_PROVENANCE_SIDECAR_SUFFIX = ".provenance.yml"
+
+
+def record_admitted_raw_paths(record: Any, raw_path: str) -> set[str]:
+    """Every raw entry one file-shaped delivered path on one record accounts for.
+
+    The delivery itself, the provenance sidecar beside it, and each companion the record's
+    resolved provenance names in that same directory.
+
+    Single-sourced for the reason ``allowed_normalized_paths_for_record`` is. The raw-scope
+    guards answer this question in two places: inventory attribution, which the completed
+    arms and the blocked arm's newly appended records reach, and the blocked arm's own
+    re-add for correlated records that pre-date the order, which consults attribution not
+    at all. One of them admitting a companion the other refuses is how two blocked partial
+    deliveries of the same evidence get different answers for no reason an acquirer can act
+    on -- the one that appends the record admits it, the one continuing an order whose
+    record was already there does not.
+
+    File-shaped only, and deliberately. A directory-valued ``raw_path`` is expanded to its
+    whole subtree by ``derived_raw_attribution`` and by nothing else, because that expansion
+    may widen admission only for records the acting order created; the blocked arm's re-add
+    must keep not expanding directories, and must not acquire the behaviour by calling here.
+
+    What is read is ``companion_paths`` -- what inventory resolved -- through
+    ``source_inventory.record_companion_paths``, never the ``companions`` a delivery declared
+    beside it. But the reach a companion buys is re-derived here rather than inherited,
+    because the two callers hold records of different provenance: attribution's come from a
+    derivation this action just ran, while the blocked arm's pre-existing records come
+    straight out of the manifest, which is acquirer-writable text this arm elsewhere refuses
+    to trust. So every entry has to earn admission again from the ``raw_path`` in hand:
+
+    * it must sit in that path's own directory. A record owning more than one raw path
+      carries one companion list -- whatever its primary sidecar resolved -- so pairing that
+      list with every path would admit a file beside a capture no sidecar named it for;
+    * its file name must be ``.<capture file name>.<suffix>``, the rule inventory applied
+      when it resolved the declaration. Without that, a stale or hand-edited
+      ``companion_paths`` naming an ordinary file would let a delivery add a source-shaped
+      capture that no record accounts for -- one file wider, which is the whole allowance, is
+      a *companion* wider and not any neighbour of the acquirer's choosing.
+    """
+    if not (
+        isinstance(raw_path, str)
+        and raw_path.startswith("raw/")
+        and safe_snapshot_relative_path(raw_path)
+    ):
+        return set()
+    admitted = {raw_path, f"{raw_path}{RAW_PROVENANCE_SIDECAR_SUFFIX}"}
+    if not isinstance(record, dict):
+        return admitted
+    source_inventory = load_sibling_module("source_inventory")
+    capture = PurePosixPath(raw_path)
+    for companion in source_inventory.record_companion_paths(record):
+        if not safe_snapshot_relative_path(companion):
+            continue
+        candidate = PurePosixPath(companion)
+        if candidate.parent != capture.parent:
+            continue
+        if not candidate.name.startswith(f".{capture.name}."):
+            continue
+        admitted.add(companion)
+    return admitted
 
 
 def attributed_raw_paths(
@@ -9445,9 +9514,13 @@ def verify_blocked_action_postconditions(
         if not isinstance(raw_paths, list):
             continue
         for raw_path in raw_paths:
-            if isinstance(raw_path, str) and raw_path.startswith("raw/") and safe_snapshot_relative_path(raw_path):
-                allowed_new_raw_paths.add(raw_path)
-                allowed_new_raw_paths.add(f"{raw_path}.provenance.yml")
+            # The same per-record admission the attribution pass applies, so a partial
+            # delivery continuing an order whose correlated record was already in the
+            # manifest reads the same answer as one that appends the record itself. What
+            # this loop admits is otherwise unchanged: the literal declared paths, with no
+            # directory expansion, because the helper answers the file-shaped question only
+            # for the reason stated above.
+            allowed_new_raw_paths |= record_admitted_raw_paths(record, raw_path)
     unexpected_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
     require(
         not any(raw_scope_violations.values()) and not unexpected_raw_paths,

@@ -138,6 +138,17 @@ everything beneath it, and any other capture has no fingerprint a companion
 could move, so a declaration on either is dropped with a warning rather than
 silently recorded.
 
+Delivering a companion inside an acquisition order is accepted on every arm, but
+only once inventory has resolved it: the acquisition guards read
+`provenance.companion_paths`, never the declared `companions` beside it. So write
+the companion before the inventory run that records the capture -- a declaration
+naming a file that is not yet there resolves to nothing, and the file is then
+refused as raw evidence no record accounts for. A companion is admitted only in
+the directory of the delivered path it belongs to and only under the name
+inventory resolved it under. Admission covers *adding* the file, not changing it:
+a companion that was already in the workspace when the order was issued is
+immutable raw evidence like any other, and editing it inside the order is refused.
+
 All fields are optional strings (validated when present), except `license` may
 be explicit YAML `null` to record known uncertainty, `publication_year` may
 be an integer or four-digit string, `date_metadata` is a scalar mapping,
