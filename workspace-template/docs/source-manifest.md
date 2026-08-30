@@ -57,7 +57,7 @@ the manifest by hand.
 | `code_archive` | `.zip`, `.tar`, `.gz`, `.tgz`, `.bz2`, `.xz`, `.7z`, `.rar`, `.tar.gz`, `.tar.bz2`, `.tar.xz` |
 | `unknown` | any other file |
 
-`link` is reserved for raw link files that could not be parsed into URL records and require review. Hidden files and placeholder files such as `.gitkeep` are ignored.
+`link` is reserved for raw link files that could not be parsed into URL records and require review. No dot-prefixed file is classified as a source of its own, placeholder files such as `.gitkeep` included; one delivered beside a file-shaped capture reaches that capture's record only as a companion the capture's sidecar declares (see `source-delivery.md`), which gives it neither a kind nor a source id. One delivered *inside* a directory-shaped bundle is a different case: the bundle record admits its whole subtree, so such a member is counted and attributed without being fingerprinted.
 
 ## LaTeX Bundle Records
 
@@ -86,7 +86,7 @@ Bundle metadata may include:
 - `metadata.file_count`: count of every regular file inside the bundle directory, dot-prefixed members included.
 - `metadata.warnings`: non-fatal detection warnings.
 
-For a bundle, `metadata.file_count` counts **every** regular file beneath the bundle directory, dot-prefixed members such as `.latexmkrc` or a `.build/` subdirectory included, and classifies entries the way the orchestration controller's raw tree snapshot does: a symbolic link and a multiply-linked file are excluded, because the snapshot refuses either rather than enumerating it. The whole subtree is counted because the whole subtree is what the record admits (see [Raw Path Attribution](#raw-path-attribution)) and what the controller fingerprints when it takes the raw evidence baseline. Suppressing dot-prefixed members from the count let a delivered bundle hold a file its own record never accounted for. The count is not a member list and does not bound what a bundle may contain: `raw_fingerprint` still covers only the paths normalization re-reads, which exclude dot-prefixed members, so such a file moves `metadata.file_count` without triggering re-normalization.
+For a bundle, `metadata.file_count` counts **every** regular file beneath the bundle directory, dot-prefixed members such as `.latexmkrc` or a `.build/` subdirectory included, and classifies entries the way the orchestration controller's raw tree snapshot does: a symbolic link and a multiply-linked file are excluded, because the snapshot refuses either rather than enumerating it. The whole subtree is counted because the whole subtree is what the record admits (see [Raw Path Attribution](#raw-path-attribution)) and what the controller fingerprints when it takes the raw evidence baseline. Suppressing dot-prefixed members from the count let a delivered bundle hold a file its own record never accounted for. The count is not a member list and does not bound what a bundle may contain: a bundle's `raw_fingerprint` still covers only the paths normalization re-reads, which exclude its dot-prefixed members — a `companions` declaration, the one route by which a dot-prefixed file joins a fingerprint, is refused on a directory-shaped delivery — so such a file moves `metadata.file_count` without triggering re-normalization.
 
 ## PDF Pairing Records
 

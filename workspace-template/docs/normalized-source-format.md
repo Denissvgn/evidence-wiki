@@ -217,7 +217,7 @@ Optional field meanings:
 | `extraction_method` | Method used, such as `latex`, `pdf_text`, `html_text`, `table_text`, `link_stub`, `manual`, `web_stub`, `codebase_context`, or `codebase_stub`. |
 | `pdf_extractor` | PDF records only: the selected backend `name` (`pypdf` or `poppler`) and resolved backend `version`. Changing the configured backend makes an existing PDF record stale and regenerates it. |
 | `content_hash` | Hash of normalized extracted content for reproducibility. |
-| `raw_fingerprint` | Content hash of the raw inputs (paper bundle, PDF, HTML page, or CSV/TSV file) copied from the manifest. Re-running normalization compares it to the manifest to re-generate only records whose raw source changed. Absent for links and codebase records. |
+| `raw_fingerprint` | Content hash of the raw inputs (paper bundle, PDF, HTML page, CSV/TSV file, or structured payload, together with the provenance sidecars delivered beside them and the companion files those sidecars declared) copied from the manifest. Re-running normalization compares it to the manifest to re-generate only records whose raw source changed. Absent for links and codebase records. |
 | `references_source_ids` | Matched citation-graph neighbors from local BibTeX bibliographies. v1 matches only arXiv IDs and DOI strings against existing manifest records; no title, author, or fuzzy matching is performed. |
 | `academic` | Provider-backed publication metadata copied from provenance when available: provider, source type, venue, publication year, OA status, peer-review/publication status, and provider ids. |
 | `standards` | Standards-registry metadata copied from `provenance.standards` when available. Typical fields include registry provider, standards body, designation, title, edition or year, status, registry URL, product category, legal act, OJEU reference, dataset license, and replacement-chain fields. |
@@ -405,12 +405,13 @@ action, select the action's own sources by id — see
 Unchanged existing records are not overwritten unless `--force` is supplied. A
 record is re-normalized automatically when its raw inputs change: inventory
 records a `raw_fingerprint` (a content hash of the paper bundle, PDF, HTML
-page, or CSV/TSV file) in the manifest, normalization stores the same value in
-the record's frontmatter, and a later run regenerates any record whose stored
-fingerprint no longer matches the manifest. Links and codebase records carry no
-fingerprint and keep skip-if-exists behavior. Use `--force` with `--source-id`
-for a precise refresh or with `--all` to regenerate everything. `--append-log`
-is skipped during `--dry-run`.
+page, CSV/TSV file, or structured payload, with the provenance sidecars and the
+declared companion files delivered beside them) in the manifest, normalization
+stores the same value in the record's frontmatter, and a later run regenerates
+any record whose stored fingerprint no longer matches the manifest. Links and
+codebase records carry no fingerprint and keep skip-if-exists behavior. Use
+`--force` with `--source-id` for a precise refresh or with `--all` to regenerate
+everything. `--append-log` is skipped during `--dry-run`.
 
 The first run after upgrading the tooling re-normalizes existing paper and PDF
 records once to backfill `raw_fingerprint`; later runs only touch changed
