@@ -2,22 +2,23 @@
 
 ## Unreleased
 
-- **A delivery can now declare the files that belong to a capture: the inventory half of a
-  rule where evidence grows by the files a sidecar declares, never by a directory.** A
-  downstream consumer reported a payload that is only readable beside a second file -- the
-  schema its normalized view is keyed on -- and no way to say so. Writing the second file
-  was not enough on its own: `should_skip` drops any dot-prefixed path component before the
-  raw walk, so the file never became a manifest record, and a plain-named one became a
-  record the order never fulfilled with. Either way the delivery was refused for carrying
-  raw evidence no record accounted for, and there was no shape of delivery that worked.
+- **A delivery can now declare the files that belong to a capture, and every acquisition arm
+  admits what it declares: evidence grows by the files a sidecar declares, never by a
+  directory.** A downstream consumer reported a payload that is only readable beside a
+  second file -- the schema its normalized view is keyed on -- and no way to say so. Writing
+  the second file was not enough on its own: `should_skip` drops any dot-prefixed path
+  component before the raw walk, so the file never became a manifest record, and a
+  plain-named one became a record the order never fulfilled with. Either way the delivery
+  was refused for carrying raw evidence no record accounted for, and there was no shape of
+  delivery that worked.
 
-  **Half of that is what lands here, and the report is not yet fixed.** Inventory validates
-  a declaration and `raw_fingerprint` spans what survives it, so a workspace can record and
-  re-normalize a capture that needs its companion. The acquisition guards are unchanged and
-  still refuse a companion delivered beside an artifact, because they compare the raw tree
-  against what manifest records attribute and nothing has taught them to read the
-  declaration. An acquirer submitting such a delivery today is still refused; what exists
-  now that did not before is the declaration those guards will read.
+  **Both halves are here and the report is fixed.** Inventory validates a declaration and
+  `raw_fingerprint` spans what survives it, so a workspace can record and re-normalize a
+  capture that needs its companion; and the raw-scope guards on all three acquisition arms
+  -- delegated, provider, and the blocked partial delivery -- now read that resolved list
+  and admit what it names. An acquirer that delivers a capture, a sidecar declaring its
+  companion, and the companion itself is accepted; one that delivers an *undeclared* file
+  beside a capture is refused exactly as before, naming the path.
 
   A `.provenance.yml` sidecar may now carry `companions:`, a list of file names beside the
   capture it describes. Inventory resolves each name against the tree and writes what
@@ -36,6 +37,21 @@
   toward the snapshot's existing scope-guard entry and byte caps. The declared list stays on
   the record at `provenance.companions` exactly as the sidecar wrote it, and is inert;
   `companion_paths` is the package's answer to it and the only key a consumer reads.
+
+  What the guards admit is answered in one place, `record_admitted_raw_paths`, because two
+  of them were answering it separately. The completed arms and a partial delivery that
+  appends its record admit through inventory attribution; a partial delivery continuing an
+  order whose correlated record was already in the manifest admits through that arm's own
+  per-record re-add, which consults attribution not at all. Left as two writers, one of them
+  would have learned about companions and the other would not, and the same delivery would
+  have been submittable as one shape of partial delivery and refused as the other. A
+  companion is admitted only in the directory of the delivered path it is claimed for and
+  only under the `.<capture file name>.` name inventory resolved it under, so a stale or
+  hand-edited `companion_paths` cannot turn the allowance into a licence to add an ordinary
+  capture; directory-shaped deliveries keep their own expansion, which is still confined to
+  records the acting order created. Only the *additions* the guards allow are widened.
+  Editing a companion that existed when the order was issued is still refused as a change to
+  immutable raw evidence, on every arm.
 
   The rejected alternative was to teach the raw walk to admit companion-shaped names --
   widening `should_skip`, or filtering around it. That makes admission a property of a
