@@ -114,8 +114,8 @@ companions:                                      # optional: files that belong t
 notes: optional free text
 ```
 
-`companions` names files delivered as part of the same capture -- a schema the
-capture's normalized view is keyed on, say -- so that editing one re-triggers
+`companions` names files delivered as part of the same capture — a schema the
+capture's normalized view is keyed on, say — so that editing one re-triggers
 normalization of the record that reads it. Every entry must be a bare file name
 beside the delivered artifact (no path separator of any kind), and must begin
 with a dot followed by the artifact's own file name and a dot: for
@@ -123,7 +123,7 @@ with a dot followed by the artifact's own file name and a dot: for
 dot keeps the file from being inventoried as a source of its own, and the
 artifact's name keeps one capture's companion from being read as a neighbouring
 capture's. Each named file must already exist as an ordinary regular file --
-not a symbolic link, not a second name for a file that exists elsewhere -- and
+not a symbolic link, not a second name for a file that exists elsewhere — and
 at most eight may be declared.
 
 Inventory writes the entries it resolved to `provenance.companion_paths` on the
@@ -144,8 +144,8 @@ only once inventory has resolved it: the acquisition guards read
 the companion before the inventory run that records the capture. A declaration
 naming a file that is not yet there resolves to nothing: the record it lands on
 carries no `companion_paths` for it and its `raw_fingerprint` never spans it, so
-the promise the declaration was made for -- edit the companion and normalization
-re-runs -- is not one that record can keep. Inventory says as much, marking the
+the promise the declaration was made for — edit the companion and normalization
+re-runs — is not one that record can keep. Inventory says as much, marking the
 record `review_required` and naming the companion it could not find; running
 inventory again once the file is in place is what makes the declaration hold. A
 companion is admitted only in the directory of the delivered path it belongs to
@@ -473,7 +473,10 @@ Behavior in `source_inventory.py`:
   frontmatter on the next normalization, so exported citations carry
   `origin_url`, `license`, academic venue/status metadata, and unusable-evidence
   reasons when present (see `export_answers.py`).
-- Sidecar bytes count toward `raw_fingerprint` for every record whose fingerprint reaches the capture the sidecar sits beside — paper, PDF, HTML, CSV/TSV table, and structured payload: correcting a sidecar re-triggers normalization for that source, keeping normalized provenance current.
+- Sidecar bytes count toward `raw_fingerprint` for every record whose
+  fingerprint reaches its capture, so correcting a sidecar re-triggers
+  normalization for that source and keeps normalized provenance current. The
+  companions a sidecar declares and inventory resolved count the same way.
 
 Deliveries without sidecars (typically human drag-and-drop) behave exactly as before; provenance is additive.
 
