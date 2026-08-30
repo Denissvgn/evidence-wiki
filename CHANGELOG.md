@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-08-30
 
 - **A delivery can now declare the files that belong to a capture, and every acquisition arm
   admits what it declares: evidence grows by the files a sidecar declares, never by a
@@ -12,46 +12,66 @@
   was refused for carrying raw evidence no record accounted for, and there was no shape of
   delivery that worked.
 
-  **Both halves are here and the report is fixed.** Inventory validates a declaration and
-  `raw_fingerprint` spans what survives it, so a workspace can record and re-normalize a
-  capture that needs its companion; and the raw-scope guards on all three acquisition arms
-  -- delegated, provider, and the blocked partial delivery -- now read that resolved list
-  and admit what it names. An acquirer that delivers a capture, a sidecar declaring its
-  companion, and the companion itself is accepted; one that delivers an *undeclared* file
-  beside a capture is refused exactly as before, naming the path.
-
   A `.provenance.yml` sidecar may now carry `companions:`, a list of file names beside the
   capture it describes. Inventory resolves each name against the tree and writes what
-  survives to `provenance.companion_paths`, and `raw_fingerprint` spans those paths, so
-  editing a companion re-triggers normalization of the record that reads it. A name survives
-  only if it is a bare file name -- no path separator at all, which refuses traversal by
-  construction rather than by detecting it -- beginning `.<capture file name>.`, which is
-  dot-prefixed so `should_skip` keeps refusing it as a source in its own right and named
-  after its capture so it cannot be read as a neighbouring capture's; and only if it exists
-  as a singly linked regular file under the raw tree's own `lstat` rule rather than
-  `Path.is_file()`, which follows symlinks and accepts hardlinks. Anything else is a warning
-  plus `review_required` and the entry is dropped, including a name the delivery declared
-  but never wrote. A declaration on a directory target drops whole, because a bundle record
-  already admits its entire subtree. At most eight entries, and companions need no bound of
-  their own beyond that: each one is an ordinary file under a raw root and already counts
-  toward the snapshot's existing scope-guard entry and byte caps. The declared list stays on
-  the record at `provenance.companions` exactly as the sidecar wrote it, and is inert;
-  `companion_paths` is the package's answer to it and the only key a consumer reads.
+  survives to `provenance.companion_paths`; `raw_fingerprint` spans those paths, so editing a
+  companion re-triggers normalization of the record that reads it; and the raw-scope guards
+  on all three acquisition arms -- delegated, provider, and the blocked partial delivery --
+  admit what that resolved list names. An acquirer that delivers a capture, a sidecar
+  declaring its companion, and the companion itself is accepted. One that delivers an
+  *undeclared* file beside a capture is refused exactly as before, naming the path.
 
-  What the guards admit is answered in one place, `record_admitted_raw_paths`, because two
-  of them were answering it separately. The completed arms and a partial delivery that
-  appends its record admit through inventory attribution; a partial delivery continuing an
-  order whose correlated record was already in the manifest admits through that arm's own
-  per-record re-add, which consults attribution not at all. Left as two writers, one of them
-  would have learned about companions and the other would not, and the same delivery would
-  have been submittable as one shape of partial delivery and refused as the other. A
-  companion is admitted only in the directory of the delivered path it is claimed for and
-  only under the `.<capture file name>.` name inventory resolved it under, so a stale or
-  hand-edited `companion_paths` cannot turn the allowance into a licence to add an ordinary
-  capture; directory-shaped deliveries keep their own expansion, which is still confined to
-  records the acting order created. Only the *additions* the guards allow are widened.
-  Editing a companion that existed when the order was issued is still refused as a change to
-  immutable raw evidence, on every arm.
+  A name survives only if it is a bare file name -- no path separator at all, which refuses
+  traversal by construction rather than by detecting it -- beginning `.<capture file name>.`,
+  which is dot-prefixed so `should_skip` keeps refusing it as a source in its own right and
+  named after its capture so it cannot be read as a neighbouring capture's. It must also be
+  a name a filesystem would use verbatim: a name carrying a control character is refused, and
+  so is one wrapped in whitespace or ending in a dot, because Windows strips those at the API
+  layer and would resolve such a name onto a different file than the one written. And the
+  entry must exist as a singly linked regular file under the raw tree's own `lstat` rule
+  rather than `Path.is_file()`, which follows symlinks and accepts hardlinks. Every rejection
+  is a warning plus `review_required` with the entry dropped, including a name the delivery
+  declared but never wrote, and including a `companions:` value that is not a list of file
+  names -- that one drops whole, valid entries with it, because half a declaration is a
+  fingerprint between what the delivery asked for and what it wrote. At most eight entries.
+  Companions need no bound of their own beyond that: each is an ordinary file under a raw
+  root and already counts toward the snapshot's existing scope-guard entry and byte caps.
+
+  A declaration on a directory target drops whole. A bundle record already admits its entire
+  subtree, and a companion is only ever resolved *beside* its capture -- on a bundle root
+  that lands outside the subtree entirely, so there is no shape of declaration a bundle
+  record could honour. It also drops on a capture whose bytes the normalizer never re-reads,
+  an `.xlsx` under `table` say, and on a paper record, whose fingerprint spans its bundle and
+  paired PDF but is never widened by a companion list.
+
+  The declared list stays on the record at `provenance.companions`, read exactly as written,
+  untruncated and unresolved -- duplicates and over-the-bound entries included -- and is
+  inert: nothing downstream reads it to make a decision. `companion_paths` is the package's
+  answer to it and the only key a consumer reads.
+
+  What the guards admit for a *file-shaped* delivered path is answered in one place,
+  `record_admitted_raw_paths`, because two of them were answering it separately. The
+  completed arms and a partial delivery that appends its record admit through inventory
+  attribution; a partial delivery continuing an order whose correlated record was already in
+  the manifest admits through that arm's own per-record re-add, which consults attribution
+  not at all. Left as two writers, one of them would have learned about companions and the
+  other would not, and the same delivery would have been submittable as one shape of partial
+  delivery and refused as the other. Directory-shaped paths keep their own answer in
+  `derived_raw_attribution` and are deliberately not routed through the helper, because that
+  expansion may widen admission only for records the acting order created. A companion is
+  admitted only in the directory of the delivered path it is claimed for and only under the
+  `.<capture file name>.` name inventory resolved it under, so a stale or hand-edited
+  `companion_paths` cannot turn the allowance into a licence to add an ordinary capture.
+  Only the *additions* the guards allow are widened. Editing a companion that existed when
+  the order was issued is still refused as a change to immutable raw evidence, on every arm.
+
+  A record's stored `companion_paths` must also agree with what inventory derives from the
+  delivered tree at verification time, on all three arms. Without that, a companion written
+  *after* the acquirer's inventory run was admitted by the completed arms -- which re-derive
+  attribution and would resolve it then -- while the blocked arm, which reads the manifest,
+  refused the identical delivery; and the order closed green holding raw evidence its own
+  record neither carried nor fingerprinted. The refusal names both directions of the
+  disagreement and the remediation is to re-run inventory, never to delete the file.
 
   The rejected alternative was to teach the raw walk to admit companion-shaped names --
   widening `should_skip`, or filtering around it. That makes admission a property of a
@@ -68,20 +88,22 @@
   normalizer keys its structured view on is precisely a file of that description. The bundle
   case is unchanged, and still pinned by its own test.
 
-  Consequences to expect, and the first is that there are none for a workspace that declares
-  nothing. This is the exact negation of the bundle-count hazard disclosed in 0.5.3, and is
-  worth stating in those terms. No workspace written before this release can carry a
-  `companions:` key: the field did not exist, and a sidecar holding one was reported as
-  `unknown provenance field ignored` and dropped. So no existing record is rewritten and no
-  existing `raw_fingerprint` moves, which means neither `manifest_record_changed_after_issuance`
-  nor the manifest-scope `changed_outside_scope` refusal is reachable by upgrading -- where
-  the bundle-count change made both reachable for records nobody had touched. Fingerprints
-  move only for records whose own sidecars declare companions, and such a record
-  re-normalizes once. And a declaration is refused, loudly, wherever it could not do what it
-  promises: on a directory target, and on a capture whose bytes the normalizer never
-  re-reads -- an `.xlsx` under `table`, say, or a paper record whose sidecar sits on its
-  paired PDF. Each of those warns and marks the source `review_required` rather than
-  recording an accepted list that moves nothing.
+  Consequences to expect, and for a workspace this package wrote there are none. No record
+  it wrote is rewritten and no such `raw_fingerprint` moves, verified byte-identical over
+  every fingerprinting record kind, so neither `manifest_record_changed_after_issuance` nor
+  the manifest-scope `changed_outside_scope` refusal is reachable by upgrading. That is the
+  negation of the bundle-count hazard disclosed in 0.5.3, which made `changed_outside_scope`
+  reachable for records nobody had touched. Fingerprints move only for records whose own
+  sidecars declare companions, and such a record re-normalizes once.
+
+  One exception, for a workspace whose sidecars were written by hand. A `.provenance.yml`
+  that already carried a `companions:` key was reported as `unknown provenance field ignored`
+  and dropped, so the key reached no record; it is now recognised, and the first inventory
+  run after upgrading adds `companions` and `companion_paths` to that record. The record
+  therefore changes even where its fingerprint does not, and an order issued before the
+  upgrade and submitted after it is refused by the manifest-scope guard naming that record.
+  Drain pending acquisition orders before upgrading, or re-run inventory from a quiescent
+  workspace afterwards.
 
 ## 0.5.3 - 2026-08-28
 
