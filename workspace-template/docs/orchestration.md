@@ -337,7 +337,8 @@ fingerprint (a `codebase:` artifact bundle), is refused rather than reused.
 acquisition may append to the evidence manifest exactly the new ids its
 fulfilled scoped requests cite; may create under `raw/` and
 `sources/normalized/` only those records' declared raw files, their
-`.provenance.yml` sidecars, their normalized records and the structured-view
+`.provenance.yml` sidecars, the companion files those sidecars declare and
+inventory resolved, their normalized records and the structured-view
 sidecars those records declare (plus the one normalized output per source the
 order recorded as correlated-but-not-yet-normalized); and may create nothing
 else durable except attempt-failure audit events for scoped requests carrying
@@ -353,7 +354,13 @@ refused with `ORCHESTRATION_POSTCONDITION_FAILED`, naming the unexpected and the
 missing paths. The structured-view sidecar is the one asymmetry: allowed when
 the record declares a `structured_view`, never required, because a source that
 binds no view writes only the record, and demanding the sidecar would refuse
-every non-structured fulfilment.
+every non-structured fulfilment. On the raw half a companion is admitted only
+through the record that names it, never on its own: the guards read
+`provenance.companion_paths`, the list inventory resolved against the delivered
+tree, and take an entry only in the directory of the capture it belongs to and
+under the `.<capture file name>.` name that resolution requires (the form
+`docs/source-delivery.md` describes). A neighbour no sidecar declares is
+admitted by nothing, and the raw-scope refusal names the path to remove.
 
 **A new record's `raw_paths` is inventory-derived, not acquirer-declared.**
 Verification re-runs inventory's own derivation over the delivered tree — a

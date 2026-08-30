@@ -30,7 +30,7 @@ Naming guidance:
 
 - Keep names stable and content-derived (arXiv ID, DOI-derived slug, dataset name). Manifest IDs are derived from relative paths, so renaming a file later creates a new source ID.
 - Raw files are immutable once delivered (`raw.immutable: true`). Deliver a newer version as a new file; never overwrite.
-- Hidden files (dotfiles) are ignored by inventory.
+- A dot-prefixed file is never inventoried as a source of its own. Delivered beside a file-shaped capture, it reaches that capture's record only through a `companions` declaration in the capture's sidecar (see "Provenance Sidecars" below), which puts its bytes in the record's `raw_fingerprint` and still gives it no source id of its own.
 - Symlinked sources are refused, not followed. Inventory excludes any symlink under `raw/` (whether it points inside or outside the workspace), and any path that resolves outside the workspace, recording a `refusing symlink in raw root: <path>` (or `refusing path that resolves outside workspace: <path>`) warning. Deliver real files, never links.
 
 ## Delivery Atomicity
@@ -141,19 +141,25 @@ silently recorded.
 Delivering a companion inside an acquisition order is accepted on every arm, but
 only once inventory has resolved it: the acquisition guards read
 `provenance.companion_paths`, never the declared `companions` beside it. So write
-the companion before the inventory run that records the capture -- a declaration
-naming a file that is not yet there resolves to nothing, and the file is then
-refused as raw evidence no record accounts for. A companion is admitted only in
-the directory of the delivered path it belongs to and only under the name
-inventory resolved it under. Admission covers *adding* the file, not changing it:
-a companion that was already in the workspace when the order was issued is
-immutable raw evidence like any other, and editing it inside the order is refused.
+the companion before the inventory run that records the capture. A declaration
+naming a file that is not yet there resolves to nothing: the record it lands on
+carries no `companion_paths` for it and its `raw_fingerprint` never spans it, so
+the promise the declaration was made for -- edit the companion and normalization
+re-runs -- is not one that record can keep. Inventory says as much, marking the
+record `review_required` and naming the companion it could not find; running
+inventory again once the file is in place is what makes the declaration hold. A
+companion is admitted only in the directory of the delivered path it belongs to
+and only under the name inventory resolved it under. Admission covers *adding*
+the file, not changing it: a companion that was already in the workspace when
+the order was issued is immutable raw evidence like any other, and editing it
+inside the order is refused.
 
 All fields are optional strings (validated when present), except `license` may
 be explicit YAML `null` to record known uncertainty, `publication_year` may
 be an integer or four-digit string, `date_metadata` is a scalar mapping,
-`supported_evidence_areas` is a list of non-empty strings, and `scope` is a
-mapping of string keys to scalar values. Each `scope` key must match
+`supported_evidence_areas` is a list of non-empty strings, `companions` is a
+list of bare file names, and `scope` is a mapping of string keys to scalar
+values. Each `scope` key must match
 `^[a-z0-9_][a-z0-9._-]*$`; values are opaque and are compared as text. A
 non-string scalar is accepted and coerced — an unquoted `2026` matches a
 request scope of `"2026"` — but booleans, sequences, mappings, and empty
@@ -467,7 +473,7 @@ Behavior in `source_inventory.py`:
   frontmatter on the next normalization, so exported citations carry
   `origin_url`, `license`, academic venue/status metadata, and unusable-evidence
   reasons when present (see `export_answers.py`).
-- Sidecar bytes count toward `raw_fingerprint` for paper and PDF records: correcting a sidecar re-triggers normalization for that source, keeping normalized provenance current.
+- Sidecar bytes count toward `raw_fingerprint` for every record whose fingerprint reaches the capture the sidecar sits beside — paper, PDF, HTML, CSV/TSV table, and structured payload: correcting a sidecar re-triggers normalization for that source, keeping normalized provenance current.
 
 Deliveries without sidecars (typically human drag-and-drop) behave exactly as before; provenance is additive.
 
@@ -543,8 +549,10 @@ was found:
   equal the set of fulfilled source ids, so a record is caught by arithmetic and not
   only by membership; and
 - the raw-scope guard admits new files under the configured raw roots only where
-  inventory attributes them to one of those newly fulfilled sources, which catches the
-  capture that was delivered but never inventoried at all.
+  inventory attributes them to one of those newly fulfilled sources — the delivered
+  path, the `.provenance.yml` sidecar beside it, and each companion that record's
+  resolved provenance names — which catches the capture that was delivered but never
+  inventoried at all.
 
 All three refuse with `ORCHESTRATION_POSTCONDITION_FAILED`, which is recoverable: the
 action stays pending, and removing the residue and resubmitting is the repair.
