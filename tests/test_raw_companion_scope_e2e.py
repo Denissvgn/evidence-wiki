@@ -120,6 +120,13 @@ BLOCKED_RAW_SCOPE_REFUSAL = (
 MANIFEST_SCOPE_REFUSAL = (
     "changed, removed, or added evidence-manifest records outside fulfilled source scope"
 )
+# The companion half of the inventory-agreement check, spelled the same way on each arm and
+# for the same reason: the provider spelling is the bare one, the other two prefix it.
+COMPANION_MISMATCH_REFUSAL = (
+    "acquisition manifest companion_paths do not match inventory-derived attribution"
+)
+DELEGATED_COMPANION_MISMATCH_REFUSAL = f"delegated {COMPANION_MISMATCH_REFUSAL}"
+BLOCKED_COMPANION_MISMATCH_REFUSAL = f"blocked {COMPANION_MISMATCH_REFUSAL}"
 
 #: What the companion looks like: an extra capture named after the artifact it was observed
 #: beside, dot-prefixed and carrying no provenance sidecar of its own. One shape for the
@@ -1794,6 +1801,559 @@ class ProviderDeclaredCompanionTests(ProviderHarness, unittest.TestCase):
                 ),
             )
 
+
+def record_provenance(workspace: Path, source_id: str) -> dict:
+    """One record's whole ``provenance`` block, so a case can assert a key is ABSENT.
+
+    ``resolved_companions`` reads a missing ``companion_paths`` and an empty one as the
+    same ``[]``, which is the right answer for a guard and the wrong one for the case
+    that has to show a workspace declaring nothing anywhere.
+    """
+    for record in manifest_records(workspace):
+        if str(record.get("id")) == source_id:
+            provenance = record.get("provenance")
+            return provenance if isinstance(provenance, dict) else {}
+    raise AssertionError(f"no manifest record {source_id} under {workspace}")
+
+
+class DelegatedStaleCompanionRecordTests(DelegatedWorkspace, unittest.TestCase):
+    """The delegated arm: a companion delivered after the inventory run that recorded its capture.
+
+    Every other declared case in this file writes the companion BEFORE inventory, which is
+    the order that produces an honest record: inventory resolves the declaration against a
+    tree that contains the file, and ``provenance.companion_paths`` names it. Reverse those
+    two moments and the record is left saying the delivery has no companion while the tree
+    says it has one.
+
+    Nothing about the file changes -- same name, same body, same directory, same
+    declaration. What changes is whether the manifest accounts for it, and the record is
+    where the accounting lives: ``raw_fingerprint`` covers the companions the record
+    carries, so a companion no record carries is raw evidence whose edits re-trigger no
+    normalization, which is the whole point of declaring it.
+
+    The verification passes could not see that. The completed arms answer raw scope from
+    ``derived_raw_attribution``, which re-runs inventory at submission time over the tree as
+    it now stands and resolves the declaration a SECOND time -- so the late companion is
+    admitted, by a derivation whose answer is thrown away rather than by the record that
+    persists. ``raw_attribution_mismatches`` compares ``raw_paths`` and nothing else, and
+    ``raw_paths`` is unaffected by a companion, so it passed the delivery through.
+
+    So the equality check is asked of the other list too, and asked at the same moment: with
+    the ``raw_paths`` check, before the raw-scope subtraction. Every case here asserts that
+    it was the mismatch check and not the subtraction that refused -- an acquirer told
+    "you wrote a stray file" would delete the evidence, and the true repair is to re-run
+    inventory so the record accounts for it.
+    """
+
+    maxDiff = None
+
+    # The one delivery helper the declared cases use, bound rather than re-written: what
+    # separates these cases from those is the `written` argument alone, and a second
+    # delivery body would let that difference drift into something else. Bound as an
+    # unbound function off the class, which collects no tests from it.
+    deliver_declaring = DelegatedDeclaredCompanionTests.deliver_declaring
+
+    def assert_the_refusal_names_the_late_companion(
+        self, payload: dict, source_id: str, companion: str, workspace: Path
+    ) -> None:
+        """The refusal is the mismatch check, and it names the record and the file."""
+        self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", payload["error_code"], payload)
+        self.assertTrue(payload["recoverable"], payload)
+        self.assertIn(
+            DELEGATED_COMPANION_MISMATCH_REFUSAL,
+            payload["message"],
+            diagnose(
+                "delegated",
+                "the companion-agreement check to be the one that refuses",
+                CONTROLLER.EXIT_INVALID, payload, workspace,
+            ),
+        )
+        self.assertNotIn(
+            RAW_SCOPE_REFUSAL,
+            payload["message"],
+            "the acquirer must be told the manifest is stale, not that it wrote a stray "
+            "file: the raw-scope subtraction admits this companion and would refuse the "
+            "delivery for something else, or not at all",
+        )
+        mismatches = payload["details"]["raw_companion_mismatches"]
+        self.assertEqual(
+            [source_id],
+            sorted(mismatches),
+            f"the refusal must name the record whose companions are stale: {payload}",
+        )
+        self.assertEqual(
+            [],
+            mismatches[source_id]["declared_companion_paths"],
+            "the persisted record resolved no companion, which is exactly the state the "
+            "check exists to surface",
+        )
+        self.assertEqual(
+            [companion],
+            mismatches[source_id]["derived_companion_paths"],
+            f"inventory over the delivered tree now resolves the companion: {payload}",
+        )
+        self.assertEqual(
+            [companion],
+            mismatches[source_id]["derived_not_declared"],
+            "the payload must name the file the record does not account for",
+        )
+        self.assertEqual(
+            [],
+            mismatches[source_id]["declared_not_derived"],
+            "nothing the record claims went missing; the disagreement is one-sided",
+        )
+        self.assertIn(
+            "source_inventory.py --report",
+            payload["remediation"],
+            "the remediation must be the repair the control below performs",
+        )
+
+    def test_a_companion_delivered_after_the_inventory_run_is_refused_and_repaired(self):
+        """Refused for the stale record, then accepted once inventory records the companion.
+
+        The refusal and its repair are one case on purpose. The remediation this check
+        prints tells the acquirer to re-run inventory, and a refusal test alone cannot say
+        whether that is true advice -- if re-running inventory did not clear it, the guard
+        would be a wall rather than a check. So the same action id is resubmitted after the
+        one command the remediation names, and has to close the order.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            order = self.pending_order(workspace)
+
+            companion = companion_beside(DELEGATED_ARTIFACT)
+            source_id = self.deliver_declaring(
+                workspace,
+                request_id,
+                declared=[PurePosixPath(companion).name],
+                written={},
+            )
+            self.assertEqual(
+                [],
+                resolved_companions(workspace, source_id),
+                "the record must be written while the companion is absent, or this case is "
+                f"the ordinary declared one. Raw tree: {raw_tree_files(workspace)}",
+            )
+            self.fulfil_and_reopen(workspace, request_id, source_id)
+
+            # The acquirer's second capture, landing after the run that recorded the first.
+            write_raw_file(workspace, companion, UNDECLARED_BODY)
+            before = self.evidence_bytes(workspace)
+
+            code, payload = self.submit(workspace, order["action_id"])
+            self.assertEqual(
+                CONTROLLER.EXIT_INVALID,
+                code,
+                diagnose(
+                    "delegated",
+                    f"the stale record to be refused (exit {CONTROLLER.EXIT_INVALID}) rather "
+                    "than admitted by a derivation whose answer is discarded",
+                    code, payload, workspace,
+                ),
+            )
+            self.assert_the_refusal_names_the_late_companion(
+                payload, source_id, companion, workspace
+            )
+            self.assertEqual(
+                before,
+                self.evidence_bytes(workspace),
+                "a refused submission writes nothing of its own and removes nothing",
+            )
+
+            # The control: the remediation, performed. Nothing about the delivery changes --
+            # the companion stays exactly where the acquirer wrote it -- and the record now
+            # accounts for it.
+            self.run_script(DELEGATED_INVENTORY, ["--report"], workspace)
+            self.assertEqual(
+                [companion],
+                resolved_companions(workspace, source_id),
+                "re-running inventory must be what puts the companion on the record; if it "
+                "does not, the remediation this guard prints is not the repair",
+            )
+            self.run_script(DELEGATED_NORMALIZE, ["--source-id", source_id], workspace)
+            code, session = self.submit(workspace, order["action_id"])
+            self.assertEqual(
+                0,
+                code,
+                diagnose(
+                    "delegated",
+                    "the repaired record to close the order (exit 0)",
+                    code, session, workspace,
+                ),
+            )
+            self.assertEqual("research", session["phase"], session)
+            self.assertIn(
+                companion,
+                raw_tree_files(workspace),
+                "the repair is a record that accounts for the delivery, never a delivery "
+                "deleted to satisfy a guard",
+            )
+
+    def test_a_delivery_declaring_no_companion_is_unaffected_on_the_delegated_arm(self):
+        """The opt-in guarantee: a workspace that declares nothing earns no new refusal.
+
+        The shipped acquirer loop, whose sidecar carries no ``companions:`` key at all, so
+        the record carries no ``companion_paths`` and inventory resolves none. Both sides of
+        the comparison are empty and the order closes exactly as it did before the check
+        existed. Asserted as the ABSENCE of the key rather than as an empty list, because an
+        empty list is a state a delivery has to opt into.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace, request_id = self.make_workspace(Path(tmpdir))
+            self.start(workspace)
+            order = self.pending_order(workspace)
+
+            source_id = self.acquire(workspace, request_id)
+            provenance = record_provenance(workspace, source_id)
+            self.assertNotIn(
+                "companions",
+                provenance,
+                "the shipped delivery must declare nothing; a fixture that declares makes "
+                "this case a test of the declared path",
+            )
+            self.assertNotIn(
+                "companion_paths",
+                provenance,
+                "and inventory must have resolved nothing onto it, so neither side of the "
+                "companion comparison exists",
+            )
+
+            code, session = self.submit(workspace, order["action_id"])
+            self.assertEqual(
+                0,
+                code,
+                diagnose(
+                    "delegated",
+                    "a delivery declaring no companion to close the order (exit 0)",
+                    code, session, workspace,
+                ),
+            )
+            self.assertEqual("research", session["phase"], session)
+
+
+class ProviderStaleCompanionRecordTests(ProviderHarness, unittest.TestCase):
+    """The same late companion on the provider and blocked-partial arms.
+
+    Both arms are here because the check has to be on all three or it becomes the
+    inconsistency it was added to close: a delivery refused as a completed acquisition and
+    accepted as the partial one that precedes it tells an acquirer nothing it can act on.
+
+    The blocked arm reaches this through the record it APPENDS. Its companion comparison
+    covers exactly the records the action appended, which is the set its ``raw_paths``
+    comparison covers and for the same reason: a correlated record that pre-dates the order
+    is manifest text nothing re-derives, and comparing it against a fresh derivation would
+    refuse the partial delivery that re-supplies a companion such a record already names --
+    a delivery ``ProviderDeclaredCompanionTests`` pins as admitted, and which stays so.
+
+    A pre-existing correlated record whose own companion list is stale is therefore refused
+    on that arm by the raw-scope subtraction, which names the file rather than the record.
+    Nothing is admitted that should not be, and the difference is what the acquirer is told;
+    the reasoning is at the check itself.
+    """
+
+    maxDiff = None
+
+    def deliver_declaring_an_absent_companion(
+        self, target: Path, request_id: str, candidate_id: str
+    ) -> tuple[str, str]:
+        """One file-shaped capture whose sidecar names a companion that is not on disk yet.
+
+        The delivery `ProviderDeclaredCompanionTests` makes minus one write, so what
+        separates a refused case here from an accepted one there is the moment the companion
+        lands and nothing else.
+        """
+        relative = self.write_a_file_shaped_capture(target, request_id, candidate_id)
+        companion = companion_beside(relative)
+        declare_companions_in_sidecar(target, relative, [PurePosixPath(companion).name])
+        return relative, companion
+
+    def inventory_with_the_companion_absent(self, target: Path, relative: str) -> str:
+        """Run the acquirer's inventory over a tree the declared companion is missing from.
+
+        Not `inventory_and_assert_the_capture_is_the_only_record`: that helper requires
+        `ready_for_normalization`, and a declaration inventory cannot resolve is precisely
+        what makes this record review-required. The warning is asserted in its place, so the
+        fixture stays pinned to the state under test -- a record inventory wrote while the
+        companion was absent, having said out loud that it was.
+        """
+        inventory = self.assert_json_script_ok(
+            INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
+        )
+        self.assertEqual("needs_review", inventory["readiness"], inventory)
+        self.assertTrue(
+            any(
+                "provenance companion does not exist" in str(warning)
+                for warning in inventory["warnings"]
+            ),
+            f"inventory must report the declaration it could not resolve: {inventory}",
+        )
+        records = self.manifest_records(target)
+        self.assertEqual(
+            [[relative]],
+            [record.get("raw_paths") for record in records],
+            "the capture must be the one record the order inherits, and inventory must "
+            f"derive it as the file itself; raw tree was {raw_tree_files(target)}",
+        )
+        return str(records[0]["id"])
+
+    def assert_the_refusal_names_the_late_companion(
+        self,
+        arm: str,
+        message: str,
+        raw_scope_needle: str,
+        payload: dict,
+        source_id: str,
+        companion: str,
+        target: Path,
+    ) -> None:
+        """The refusal is the mismatch check, and it names the record and the file."""
+        self.assertEqual("ORCHESTRATION_POSTCONDITION_FAILED", payload["error_code"], payload)
+        self.assertTrue(payload["recoverable"], payload)
+        self.assertIn(
+            message,
+            payload["message"],
+            diagnose(
+                arm,
+                "the companion-agreement check to be the one that refuses",
+                CONTROLLER.EXIT_INVALID, payload, target,
+            ),
+        )
+        self.assertNotIn(
+            raw_scope_needle,
+            payload["message"],
+            "the acquirer must be told the manifest is stale, not that it wrote a stray file",
+        )
+        mismatches = payload["details"]["raw_companion_mismatches"]
+        self.assertEqual([source_id], sorted(mismatches), payload)
+        self.assertEqual([], mismatches[source_id]["declared_companion_paths"], payload)
+        self.assertEqual([companion], mismatches[source_id]["derived_companion_paths"], payload)
+        self.assertEqual(
+            [companion],
+            mismatches[source_id]["derived_not_declared"],
+            "the payload must name the file the record does not account for",
+        )
+        self.assertEqual([], mismatches[source_id]["declared_not_derived"], payload)
+        self.assertIn("source_inventory.py --report", payload["remediation"], payload)
+
+    def test_a_companion_delivered_after_the_inventory_run_is_refused_on_the_provider_arm(self):
+        """Refused for the stale record, then accepted once inventory records the companion."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target, request_id, candidate_id, order = self.walk_to_acquisition(root)
+
+            relative, companion = self.deliver_declaring_an_absent_companion(
+                target, request_id, candidate_id
+            )
+            source_id = self.inventory_with_the_companion_absent(target, relative)
+            self.assertEqual(
+                [],
+                resolved_companions(target, source_id),
+                "the record must be written while the companion is absent, or this case is "
+                f"the ordinary declared one. Raw tree: {raw_tree_files(target)}",
+            )
+            self.fulfil(target, request_id, candidate_id, order, source_id)
+
+            write_raw_file(target, companion, UNDECLARED_BODY)
+            before = self.evidence_bytes(target)
+
+            code, payload, stderr = self.submit(
+                root, target, order["action_id"],
+                summary="Delivered the capture, then the companion its sidecar declares.",
+                artifacts=[relative, f"{relative}.provenance.yml", companion, "sources/manifest.jsonl"],
+            )
+            self.assertEqual(
+                CONTROLLER.EXIT_INVALID,
+                code,
+                diagnose(
+                    "provider",
+                    f"the stale record to be refused (exit {CONTROLLER.EXIT_INVALID})",
+                    code, payload, target,
+                ),
+            )
+            self.assert_the_refusal_names_the_late_companion(
+                "provider", COMPANION_MISMATCH_REFUSAL, RAW_SCOPE_REFUSAL,
+                payload, source_id, companion, target,
+            )
+            self.assertEqual(
+                before,
+                self.evidence_bytes(target),
+                "a refused submission writes nothing of its own and removes nothing",
+            )
+
+            # The control: the remediation, performed, with the delivery left alone.
+            self.assert_json_script_ok(
+                INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
+            )
+            self.assertEqual(
+                [companion],
+                resolved_companions(target, source_id),
+                "re-running inventory must be what puts the companion on the record",
+            )
+            self.assert_json_script_ok(
+                NORMALIZE,
+                ["--project-root", str(target), "--source-id", source_id, "--format", "json"],
+            )
+            code, session, stderr = self.submit(
+                root, target, order["action_id"],
+                summary="Re-ran inventory so the record accounts for the companion.",
+                artifacts=[relative, f"{relative}.provenance.yml", companion, "sources/manifest.jsonl"],
+            )
+            self.assertEqual(
+                0,
+                code,
+                diagnose(
+                    "provider",
+                    "the repaired record to close the order (exit 0)",
+                    code, session, target,
+                ),
+            )
+            self.assertIn(
+                companion,
+                raw_tree_files(target),
+                f"the repair is a record that accounts for the delivery, not a deletion: {stderr}",
+            )
+
+    def test_a_companion_delivered_after_the_inventory_run_is_refused_on_the_blocked_partial_arm(self):
+        """The same stale record, submitted as a partial delivery, earns the same refusal.
+
+        The correlated record is appended by this action, so the arm's companion comparison
+        covers it -- the same set its ``raw_paths`` comparison covers. A partial delivery is
+        accepted with a pause rather than an exit 0, so the control asserts that instead.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target, request_id, candidate_id, order = self.walk_to_acquisition(root)
+
+            relative, companion = self.deliver_declaring_an_absent_companion(
+                target, request_id, candidate_id
+            )
+            source_id = self.inventory_with_the_companion_absent(target, relative)
+            self.assertEqual(
+                [],
+                resolved_companions(target, source_id),
+                "the record must be written while the companion is absent, or this case is "
+                f"the ordinary declared one. Raw tree: {raw_tree_files(target)}",
+            )
+
+            write_raw_file(target, companion, UNDECLARED_BODY)
+            before = self.evidence_bytes(target)
+
+            code, payload, stderr = self.submit(
+                root, target, order["action_id"],
+                outcome="blocked",
+                summary="Captured the artifact and its companion but could not finish.",
+                artifacts=[relative, f"{relative}.provenance.yml", companion, "sources/manifest.jsonl"],
+            )
+            self.assertEqual(
+                CONTROLLER.EXIT_INVALID,
+                code,
+                diagnose(
+                    "blocked-partial",
+                    f"the stale record to be refused (exit {CONTROLLER.EXIT_INVALID}) rather "
+                    "than paused, so the two arms agree about the same delivery",
+                    code, payload, target,
+                ),
+            )
+            self.assert_the_refusal_names_the_late_companion(
+                "blocked-partial", BLOCKED_COMPANION_MISMATCH_REFUSAL, BLOCKED_RAW_SCOPE_REFUSAL,
+                payload, source_id, companion, target,
+            )
+            self.assertEqual(
+                before,
+                self.evidence_bytes(target),
+                "a refused submission writes nothing of its own and removes nothing",
+            )
+            session = CONTROLLER.load_session(target, "orch-test")
+            self.assertEqual(
+                order["action_id"],
+                session["pending_action_id"],
+                f"the refusal must leave the same order open for the acquirer to repair: {stderr}",
+            )
+
+            # The control: the remediation, performed, and the partial delivery pauses.
+            self.assert_json_script_ok(
+                INVENTORY, ["--project-root", str(target), "--report", "--format", "json"]
+            )
+            self.assertEqual(
+                [companion],
+                resolved_companions(target, source_id),
+                "re-running inventory must be what puts the companion on the record",
+            )
+            code, paused, stderr = self.submit(
+                root, target, order["action_id"],
+                outcome="blocked",
+                summary="Re-ran inventory so the record accounts for the companion.",
+                artifacts=[relative, f"{relative}.provenance.yml", companion, "sources/manifest.jsonl"],
+            )
+            self.assertEqual(
+                CONTROLLER.EXIT_PAUSED,
+                code,
+                diagnose(
+                    "blocked-partial",
+                    f"the repaired partial delivery to pause the session (exit {CONTROLLER.EXIT_PAUSED})",
+                    code, paused, target,
+                ),
+            )
+            self.assertEqual("paused", paused["status"], paused)
+
+    def test_a_delivery_declaring_no_companion_is_unaffected_on_the_provider_arm(self):
+        """The opt-in guarantee on the provider arm: no declaration, no new refusal."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target, request_id, candidate_id, order = self.walk_to_acquisition(root)
+
+            relative = self.write_a_file_shaped_capture(target, request_id, candidate_id)
+            source_id = self.inventory_and_assert_the_capture_is_the_only_record(target, relative)
+            provenance = record_provenance(target, source_id)
+            self.assertNotIn("companions", provenance, provenance)
+            self.assertNotIn("companion_paths", provenance, provenance)
+            self.fulfil(target, request_id, candidate_id, order, source_id)
+
+            code, session, stderr = self.submit(
+                root, target, order["action_id"],
+                summary="Delivered one capture that declares no companion.",
+                artifacts=[relative, f"{relative}.provenance.yml", "sources/manifest.jsonl"],
+            )
+            self.assertEqual(
+                0,
+                code,
+                diagnose(
+                    "provider",
+                    "a delivery declaring no companion to close the order (exit 0)",
+                    code, session, target,
+                ),
+            )
+
+    def test_a_delivery_declaring_no_companion_is_unaffected_on_the_blocked_partial_arm(self):
+        """The opt-in guarantee on the blocked-partial arm, whose acceptance is a pause."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target, request_id, candidate_id, order = self.walk_to_acquisition(root)
+
+            relative = self.write_a_file_shaped_capture(target, request_id, candidate_id)
+            source_id = self.inventory_and_assert_the_capture_is_the_only_record(target, relative)
+            provenance = record_provenance(target, source_id)
+            self.assertNotIn("companions", provenance, provenance)
+            self.assertNotIn("companion_paths", provenance, provenance)
+
+            code, paused, stderr = self.submit(
+                root, target, order["action_id"],
+                outcome="blocked",
+                summary="Fetched one capture that declares no companion and stopped.",
+                artifacts=[relative, f"{relative}.provenance.yml", "sources/manifest.jsonl"],
+            )
+            self.assertEqual(
+                CONTROLLER.EXIT_PAUSED,
+                code,
+                diagnose(
+                    "blocked-partial",
+                    "a partial delivery declaring no companion to pause the session "
+                    f"(exit {CONTROLLER.EXIT_PAUSED})",
+                    code, paused, target,
+                ),
+            )
+            self.assertEqual("paused", paused["status"], paused)
 
 if __name__ == "__main__":
     unittest.main()

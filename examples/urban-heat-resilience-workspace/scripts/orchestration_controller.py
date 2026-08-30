@@ -3457,17 +3457,23 @@ def derived_raw_attribution(
 ) -> dict[str, dict[str, Any]]:
     """Re-run inventory derivation over the delivered raw tree, writing nothing.
 
-    Returns ``source_id -> {"raw_paths": [...], "files": {...}}`` where ``raw_paths`` is
-    the list inventory derives for that record over the tree as delivered, and ``files``
-    is the set of snapshot-level entries those paths denote: a regular-file entry denotes
-    itself, a directory-shaped entry (arXiv/LaTeX bundle, local code repo) denotes every
-    regular file beneath it, and every entry additionally denotes its
-    ``<entry>.provenance.yml`` sidecar.
+    Returns ``source_id -> {"raw_paths": [...], "companion_paths": [...], "files": {...}}``
+    where ``raw_paths`` is the list inventory derives for that record over the tree as
+    delivered, ``companion_paths`` is the companion list inventory resolves onto it from the
+    same tree, and ``files`` is the set of snapshot-level entries those paths denote: a
+    regular-file entry denotes itself, a directory-shaped entry (arXiv/LaTeX bundle, local
+    code repo) denotes every regular file beneath it, and every entry additionally denotes
+    its ``<entry>.provenance.yml`` sidecar.
 
-    This is the single predicate both raw-scope questions are answered from: which new
+    This is the single predicate every raw-scope question is answered from: which new
     raw files a completed acquisition may create (the union of ``files`` over the
-    admitted record ids), and whether a new manifest record's declared ``raw_paths`` is
-    what inventory itself would derive (list equality against ``raw_paths``).
+    admitted record ids), whether a new manifest record's declared ``raw_paths`` is
+    what inventory itself would derive (list equality against ``raw_paths``), and whether
+    the companions that record persisted are the ones the delivered tree resolves now (list
+    equality against ``companion_paths``). ``companion_paths`` is reported beside ``files``
+    rather than read back out of it because the two answer different questions: ``files`` is
+    flattened across every declared path and expanded over directories, so it cannot say
+    which companions one record resolved, in which order.
 
     ``source_inventory.build_records`` writes neither the manifest nor the activity log,
     which is what makes it usable as a verification predicate -- but it is not literally
@@ -3582,6 +3588,10 @@ def derived_raw_attribution(
                 files |= record_admitted_raw_paths(record, raw_path)
         attribution[source_id] = {
             "raw_paths": [path for path in raw_paths if isinstance(path, str)],
+            # Read through the same helper the admission side reads, so "what inventory
+            # resolved" means one thing across the guards: the resolved ``companion_paths``
+            # and never the ``companions`` a delivery declared beside it.
+            "companion_paths": source_inventory.record_companion_paths(record),
             "files": files,
         }
     if cache is not None and entry_key is not None:
@@ -3636,6 +3646,83 @@ def raw_attribution_mismatches(
                     else None
                 ),
             }
+    return mismatches
+
+
+def raw_companion_mismatches(
+    attribution: dict[str, dict[str, Any]],
+    new_records_by_id: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Each new record whose stored companions are not the ones inventory resolves now.
+
+    The sibling of ``raw_attribution_mismatches``, asked of the other list a record carries,
+    and the check that keeps a declaration from widening admission behind the manifest's
+    back. ``raw_attribution_mismatches`` compares ``raw_paths`` and nothing else, so a
+    companion written AFTER the acquirer's inventory run passes it untouched: the record's
+    ``raw_paths`` is still exactly what inventory derives, and the late file reaches the
+    allowed set only because ``derived_raw_attribution`` re-runs the derivation at
+    verification time and resolves the declaration a second time -- against a tree that now
+    contains it. The record persisted in the manifest never learns of it. Its
+    ``companion_paths`` stays empty, so ``raw_fingerprint`` does not cover the companion and
+    editing it re-triggers no normalization, which is the one thing a declaration is made
+    for; and the admission sites that read the persisted record rather than the fresh
+    derivation refuse the same delivery, so the same bytes close an order on one arm and are
+    a violation on another.
+
+    List (pinned-order) equality, for the reason ``raw_attribution_mismatches`` uses it:
+    ``source_inventory.resolve_declared_companions`` walks the declared names in the order the
+    sidecar spells them and appends what it resolves, so a record inventory wrote reproduces
+    the derived list entry for entry, and running inventory is the only sanctioned route to a
+    manifest record. Set equality would additionally admit reorderings and duplicates, which
+    no shipped tool produces.
+
+    A record that declares nothing compares ``[]`` against ``[]`` and is never a mismatch:
+    ``record_companion_paths`` reads a record with no ``companions:`` anywhere in its
+    provenance as the empty list on both sides, so a workspace that has never declared one
+    earns no refusal here. That is the whole opt-in guarantee, and it is load-bearing.
+
+    Each mismatch names both lists and both differences, because the interesting direction is
+    the one the ``raw_paths`` check has no use for: ``derived_not_declared`` is the companion
+    the delivered tree resolves and the record does not account for -- the late arrival --
+    while ``declared_not_derived`` is the companion the record still claims and the tree no
+    longer supplies. An id inventory derives nothing for reports ``derived_companion_paths:
+    null`` and every stored companion as surplus, which is the shape the ``raw_paths`` check
+    reports for the same id; that check refuses such a record first, and this agrees with it
+    rather than contradicting it.
+    """
+    mismatches: dict[str, dict[str, Any]] = {}
+    for source_id in sorted(new_records_by_id):
+        record = new_records_by_id[source_id]
+        # Loaded here rather than once at the top, and cached by ``load_sibling_module``
+        # anyway: this is the only line that needs inventory, and an arm with no new record
+        # to compare -- a reuse-only acquisition -- must not have to load it to be told it
+        # has nothing to check. ``raw_attribution_mismatches`` loads nothing for the same
+        # reason.
+        declared = (
+            load_sibling_module("source_inventory").record_companion_paths(record)
+            if isinstance(record, dict)
+            else None
+        )
+        entry = attribution.get(source_id)
+        derived = entry.get("companion_paths") if entry is not None else None
+        if isinstance(declared, list) and declared == derived:
+            continue
+        declared_present = set(declared) if isinstance(declared, list) else set()
+        derived_present = set(derived) if isinstance(derived, list) else set()
+        mismatches[source_id] = {
+            "declared_companion_paths": declared,
+            "derived_companion_paths": derived,
+            "declared_not_derived": (
+                [path for path in declared if path not in derived_present]
+                if isinstance(declared, list)
+                else None
+            ),
+            "derived_not_declared": (
+                [path for path in derived if path not in declared_present]
+                if isinstance(derived, list)
+                else None
+            ),
+        }
     return mismatches
 
 
@@ -3719,6 +3806,16 @@ def attributed_raw_paths(
 RAW_ATTRIBUTION_REMEDIATION = (
     "Run source_inventory.py --report so every new record's raw_paths is exactly what "
     "inventory derives from the delivered files; never hand-edit raw_paths."
+)
+
+#: The repair is re-running inventory, not deleting the file: a companion the tree resolves
+#: and the record does not carry is usually evidence delivered after the inventory run, and
+#: the honest fix is a record that accounts for what was delivered.
+RAW_COMPANION_REMEDIATION = (
+    "Run source_inventory.py --report so every new record's provenance.companion_paths is "
+    "exactly the companions inventory resolves from the delivered files -- a companion "
+    "written after the inventory run reaches no record until inventory runs again; never "
+    "hand-edit companion_paths."
 )
 
 
@@ -7600,6 +7697,22 @@ def verify_delegated_acquisition_postconditions(
         {"raw_attribution_mismatches": attribution_mismatches},
         RAW_ATTRIBUTION_REMEDIATION,
     )
+    # Beside the raw_paths check and before the scope subtraction below, deliberately. The
+    # subtraction reads the derivation's answer, which resolves a declaration against the
+    # tree as it is NOW, so a companion delivered after the acquirer's inventory run would
+    # pass it while the record persisted in the manifest still accounts for no such file.
+    # Refusing here tells the acquirer the true thing -- the manifest is stale -- rather
+    # than letting the delivery through, or refusing it a check later as a stray file.
+    companion_mismatches = raw_companion_mismatches(
+        raw_attribution,
+        {source_id: by_source_id.get(source_id) for source_id in expected_new_source_ids},
+    )
+    require(
+        not companion_mismatches,
+        "delegated acquisition manifest companion_paths do not match inventory-derived attribution",
+        {"raw_companion_mismatches": companion_mismatches},
+        RAW_COMPANION_REMEDIATION,
+    )
     allowed_new_raw_paths = attributed_raw_paths(raw_attribution, expected_new_source_ids)
     actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
     unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
@@ -8671,6 +8784,19 @@ def verify_action_postconditions(
             {"raw_attribution_mismatches": attribution_mismatches},
             RAW_ATTRIBUTION_REMEDIATION,
         )
+        # Same predicate, same position in the sequence, and on this arm for the same
+        # reason it is on the delegated one: the scope subtraction below would admit a
+        # companion the persisted record does not carry.
+        companion_mismatches = raw_companion_mismatches(
+            raw_attribution,
+            {source_id: by_source_id.get(source_id) for source_id in expected_new_source_ids},
+        )
+        require(
+            not companion_mismatches,
+            "acquisition manifest companion_paths do not match inventory-derived attribution",
+            {"raw_companion_mismatches": companion_mismatches},
+            RAW_COMPANION_REMEDIATION,
+        )
         allowed_new_raw_paths = attributed_raw_paths(raw_attribution, expected_new_source_ids)
         actual_new_raw_paths = set(current_raw_entries) - set(before_raw_entries)
         unexpected_new_raw_paths = sorted(actual_new_raw_paths - allowed_new_raw_paths)
@@ -9500,6 +9626,29 @@ def verify_blocked_action_postconditions(
         "blocked acquisition manifest raw_paths do not match inventory-derived attribution",
         {"raw_attribution_mismatches": attribution_mismatches},
         RAW_ATTRIBUTION_REMEDIATION,
+    )
+    # Over the newly appended correlated records, which is exactly the set the raw_paths
+    # check covers -- and it has to be. A correlated record this action did not append is
+    # manifest text nothing re-derives, so comparing it against a fresh derivation would
+    # refuse the partial delivery that RE-SUPPLIES a companion the record already names:
+    # that record's list is honest and the tree is the half that is behind, and this arm
+    # admits that delivery on purpose.
+    #
+    # Which leaves one arrangement this check does not reach, stated rather than implied: a
+    # correlated record that pre-dates the order and whose OWN companion list is stale. The
+    # late file is still refused there -- the per-record re-add below reads the persisted
+    # list, so it admits nothing extra and the raw-scope subtraction names the companion --
+    # but it is refused as a stray file rather than as a stale record. Widening this check
+    # to cover it would refuse the legitimate re-supply above, and the repair it would print
+    # is unreachable on this arm regardless: re-running inventory rewrites a pre-existing
+    # manifest record, which the manifest-scope guard earlier in this function refuses.
+    # Nothing is admitted that should not be; the acquirer is told the narrower thing.
+    companion_mismatches = raw_companion_mismatches(raw_attribution, correlated_new_records)
+    require(
+        not companion_mismatches,
+        "blocked acquisition manifest companion_paths do not match inventory-derived attribution",
+        {"raw_companion_mismatches": companion_mismatches},
+        RAW_COMPANION_REMEDIATION,
     )
     # Attribution expands a directory entry to its whole subtree, so it may only widen
     # admission for records this action created. Handing it every correlated record --
