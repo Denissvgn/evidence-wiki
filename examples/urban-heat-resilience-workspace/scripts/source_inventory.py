@@ -1970,6 +1970,20 @@ def resolve_declared_companions(
         if "/" in name or "\\" in name or name in {".", ".."}:
             refuse(f"provenance companion must be a bare file name beside {target_rel}: {name}")
             continue
+        # A name the filesystem would not use verbatim. Windows strips trailing spaces and
+        # trailing dots inside the path layer, so `lstat(".keepa.json.schema.json ")` there
+        # opens `.keepa.json.schema.json` -- a *different* file, admitted under a path
+        # `raw_tree_snapshot` never enumerates, while the file it really named reads as an
+        # unexpected new raw path. POSIX refuses that same name outright, so leaving this
+        # to the admission check hands one delivery two verdicts depending on which machine
+        # ran inventory. Refused here on the declared spelling, for the same reason a
+        # declared name is never stripped before it is resolved.
+        if name != name.strip() or name.endswith("."):
+            refuse(
+                "provenance companion must be named exactly as the file is, with no "
+                f"surrounding whitespace and no trailing dot: {name!r}"
+            )
+            continue
         if not name.startswith(required_prefix):
             # Dot-prefixed, and named after the capture it belongs to. The leading dot is
             # what keeps ``should_skip`` refusing it as a source in its own right; the

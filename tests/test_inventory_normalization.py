@@ -1525,6 +1525,13 @@ class DeclaredRawCompanionTests(unittest.TestCase):
     # --- harness -----------------------------------------------------------------
 
     def workspace(self, root: Path, name: str, *, source_root: str = "raw/data") -> Path:
+        """Build one case's workspace under ``root``, in a directory called ``name``.
+
+        ``name`` becomes a real directory, so it may not be a Windows reserved device name
+        -- ``con``, ``prn``, ``aux``, ``nul``, ``com1``-``com9``, ``lpt1``-``lpt9`` -- which
+        that platform refuses to create at any path. A case about the NUL byte is called
+        ``nul-byte`` for exactly that reason.
+        """
         workspace = root / name
         (workspace / source_root).mkdir(parents=True)
         (workspace / "sources").mkdir(parents=True)
@@ -1908,7 +1915,7 @@ class DeclaredRawCompanionTests(unittest.TestCase):
 
     def test_a_companion_named_with_a_nul_is_refused_and_the_run_still_finishes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = self.file_capture(Path(tmpdir), "nul", (self.NUL_COMPANION,))
+            workspace = self.file_capture(Path(tmpdir), "nul-byte", (self.NUL_COMPANION,))
             record = self.declaring_record(workspace)
             self.assert_refused_for_control_characters(record)
             # Inert and verbatim: the record shows exactly what the delivery declared, and
@@ -1967,34 +1974,49 @@ class DeclaredRawCompanionTests(unittest.TestCase):
                         )
                     self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_a_name_wrapped_in_whitespace_is_refused_rather_than_trimmed_onto_its_neighbour(self):
-        """A declared name is read exactly as written, because trimming picks a different file.
+    def test_a_name_the_filesystem_would_not_use_verbatim_is_refused_on_every_platform(self):
+        """One delivery must not earn two verdicts depending on which machine ran inventory.
 
-        The companion the trimmed spelling would land on is planted and admissible, so an
-        implementation that strips before resolving fingerprints a file this delivery did
-        not name -- and says nothing, because from its side the declaration resolved.
+        Windows strips trailing spaces and trailing dots inside its path layer, so a
+        declaration of `".keepa.json.schema.json "` opens `.keepa.json.schema.json` there
+        and is refused as absent on POSIX. Admitting it would put a path in
+        `companion_paths` that `raw_tree_snapshot` never enumerates, while the file the
+        name really landed on reads as an unexpected new raw path.
+
+        Both files are planted where the filesystem allows: the neighbour a trimmed
+        spelling resolves onto, and the exact declared name. So on POSIX the entry is
+        admissible and refused by the rule rather than by absence, which is the same
+        refusal Windows needs and the same one a stripping resolver would skip.
         """
         for label, name in (
             ("trailing space", f"{self.COMPANION} "),
             ("leading space", f" {self.COMPANION}"),
             ("no-break space", f"{self.COMPANION}\xa0"),
+            ("trailing dot", f"{self.COMPANION}."),
+            ("trailing dot and space", f"{self.COMPANION}. "),
         ):
             with self.subTest(case=label):
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    workspace = self.file_capture(Path(tmpdir), "whitespace", (name,))
+                    workspace = self.file_capture(Path(tmpdir), "verbatim", (name,))
                     (workspace / self.COMPANION_RELATIVE).write_text(self.SCHEMA, encoding="utf-8")
+                    planted = self.plant_if_the_filesystem_allows(workspace, name)
                     record = self.declaring_record(workspace)
 
                     self.assertEqual([], record["provenance"]["companion_paths"], record)
                     self.assertEqual(
                         self.expected_fingerprint(workspace, (self.ARTIFACT_RELATIVE, self.SIDECAR_RELATIVE)),
                         record["raw_fingerprint"],
-                        "a refused name must not pull its neighbour into the fingerprint",
+                        "a refused name must not pull any file into the fingerprint",
                     )
 
                 metadata = record["metadata"]
                 self.assertTrue(any("companion" in warning for warning in metadata["warnings"]), record)
                 self.assertIs(True, metadata.get("review_required"), record)
+                if planted:
+                    self.assertFalse(
+                        any("does not exist" in warning for warning in metadata["warnings"]),
+                        f"the file was there to admit, so absence cannot be the reason: {record}",
+                    )
 
     def test_a_control_character_name_is_dropped_on_its_own_beside_a_valid_companion(self):
         """The name rules are per entry, so one unusable name costs only itself."""
