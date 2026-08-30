@@ -4,6 +4,8 @@ import io
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -1492,6 +1494,12 @@ class DeclaredRawCompanionTests(unittest.TestCase):
     SIDECAR_RELATIVE = "raw/data/keepa.json.provenance.yml"
     COMPANION = ".keepa.json.schema.json"
     COMPANION_RELATIVE = "raw/data/.keepa.json.schema.json"
+    #: A name that is well shaped by every other rule and still cannot be handed to the
+    #: operating system, so nothing but the control-character rule stands between it and
+    #: `lstat`. The sidecar carries a six-character YAML escape, which is the only spelling
+    #: that reaches these rules at all: PyYAML's reader refuses a literal control byte
+    #: anywhere in a document, so a sidecar written that way never parses.
+    NUL_COMPANION = ".keepa.json.\x00evil.json"
     BUNDLE = "arxiv-2601.00009v1"
     BUNDLE_RELATIVE = "raw/papers/arxiv-2601.00009v1"
     BUNDLE_COMPANION = ".arxiv-2601.00009v1.notes.json"
@@ -1517,6 +1525,13 @@ class DeclaredRawCompanionTests(unittest.TestCase):
     # --- harness -----------------------------------------------------------------
 
     def workspace(self, root: Path, name: str, *, source_root: str = "raw/data") -> Path:
+        """Build one case's workspace under ``root``, in a directory called ``name``.
+
+        ``name`` becomes a real directory, so it may not be a Windows reserved device name
+        -- ``con``, ``prn``, ``aux``, ``nul``, ``com1``-``com9``, ``lpt1``-``lpt9`` -- which
+        that platform refuses to create at any path. A case about the NUL byte is called
+        ``nul-byte`` for exactly that reason.
+        """
         workspace = root / name
         (workspace / source_root).mkdir(parents=True)
         (workspace / "sources").mkdir(parents=True)
@@ -1855,6 +1870,370 @@ class DeclaredRawCompanionTests(unittest.TestCase):
             after["raw_fingerprint"],
             "a refused declaration must not widen the fingerprint it was refused on",
         )
+
+    # --- names no path can carry ---------------------------------------------------
+    #
+    # A sidecar is acquirer-authored, so no name it can write may end an inventory run. A
+    # companion name is the one piece of sidecar content that becomes a path, and a path is
+    # the one piece of a record handed to the operating system. A name carrying a NUL never
+    # reaches a syscall at all -- `lstat` raises `ValueError` first -- so one line of
+    # delivered YAML could otherwise take down every record in the workspace rather than
+    # only the capture that declared it. Two independent layers stop that, and both are
+    # measured below: the name is refused before it is joined to a path, and the admission
+    # check answers "cannot be inspected" for whatever reaches it anyway.
+
+    def assert_refused_for_control_characters(self, record: dict) -> None:
+        metadata = record.get("metadata") or {}
+        self.assertEqual([], record["provenance"]["companion_paths"], record)
+        self.assertTrue(
+            any("control characters" in warning for warning in metadata.get("warnings", [])),
+            f"a name no path can carry must be refused as such: {record}",
+        )
+        self.assertIs(True, metadata.get("review_required"), record)
+
+    def plant_if_the_filesystem_allows(self, workspace: Path, name: str) -> bool:
+        """Write a companion under a hostile name, so a refusal is never merely absence.
+
+        Returns whether the file exists afterwards. A name POSIX accepts and Windows does
+        not is a difference in the filesystem rather than in the rule under test, so the
+        case runs either way instead of skipping.
+        """
+        try:
+            (workspace / "raw" / "data" / name).write_text(self.SCHEMA, encoding="utf-8")
+        except (OSError, ValueError):
+            return False
+        return True
+
+    def run_cli(self, workspace: Path) -> subprocess.CompletedProcess:
+        """Inventory as an operator runs it: a real process over a real workspace tree."""
+        return subprocess.run(
+            [sys.executable, str(INVENTORY_PATH), "--project-root", str(workspace), "--report"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_a_companion_named_with_a_nul_is_refused_and_the_run_still_finishes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.file_capture(Path(tmpdir), "nul-byte", (self.NUL_COMPANION,))
+            record = self.declaring_record(workspace)
+            self.assert_refused_for_control_characters(record)
+            # Inert and verbatim: the record shows exactly what the delivery declared, and
+            # shows that inventory admitted none of it.
+            self.assertEqual([self.NUL_COMPANION], record["provenance"]["companions"], record)
+
+            result = self.run_cli(workspace)
+            manifest = workspace / "sources" / "manifest.jsonl"
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(manifest.is_file(), result.stderr)
+            rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+        self.assertEqual(1, len(rows), rows)
+        self.assertEqual([], rows[0]["provenance"]["companion_paths"], rows[0])
+        self.assertIs(True, rows[0]["metadata"]["review_required"], rows[0])
+
+    def test_every_other_control_character_in_a_name_is_refused_the_same_way(self):
+        """Both placements matter: `str.strip()` deletes nine of these characters.
+
+        A rule applied to a trimmed copy of a declared name would let a trailing control
+        character through *and* resolve the declaration onto the untrimmed name's
+        neighbour, so the valid companion planted below is exactly what a trimming
+        implementation admits instead of refusing.
+        """
+        for label, character in (
+            ("start of heading", "\x01"),
+            ("tab", "\t"),
+            ("newline", "\n"),
+            ("unit separator", "\x1f"),
+            ("escape", "\x1b"),
+            ("delete", "\x7f"),
+            ("next line", "\x85"),
+            ("c1 control", "\x9f"),
+        ):
+            for position, name in (
+                ("inside", f".keepa.json.{character}evil.json"),
+                ("trailing", f"{self.COMPANION}{character}"),
+            ):
+                with self.subTest(case=label, position=position):
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        workspace = self.file_capture(Path(tmpdir), "control", (name,))
+                        (workspace / self.COMPANION_RELATIVE).write_text(self.SCHEMA, encoding="utf-8")
+                        planted = self.plant_if_the_filesystem_allows(workspace, name)
+                        record = self.declaring_record(workspace)
+                        result = self.run_cli(workspace)
+
+                    self.assert_refused_for_control_characters(record)
+                    if planted:
+                        # The file was there to admit under its declared name, so the
+                        # refusal is that name's own rather than the ordinary "does not
+                        # exist" every absent companion earns.
+                        self.assertFalse(
+                            any("does not exist" in warning for warning in record["metadata"]["warnings"]),
+                            record,
+                        )
+                    self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_name_the_filesystem_would_not_use_verbatim_is_refused_on_every_platform(self):
+        """One delivery must not earn two verdicts depending on which machine ran inventory.
+
+        Windows strips trailing spaces and trailing dots inside its path layer, so a
+        declaration of `".keepa.json.schema.json "` opens `.keepa.json.schema.json` there
+        and is refused as absent on POSIX. Admitting it would put a path in
+        `companion_paths` that `raw_tree_snapshot` never enumerates, while the file the
+        name really landed on reads as an unexpected new raw path.
+
+        Both files are planted where the filesystem allows: the neighbour a trimmed
+        spelling resolves onto, and the exact declared name. So on POSIX the entry is
+        admissible and refused by the rule rather than by absence, which is the same
+        refusal Windows needs and the same one a stripping resolver would skip.
+        """
+        for label, name in (
+            ("trailing space", f"{self.COMPANION} "),
+            ("leading space", f" {self.COMPANION}"),
+            ("no-break space", f"{self.COMPANION}\xa0"),
+            ("trailing dot", f"{self.COMPANION}."),
+            ("trailing dot and space", f"{self.COMPANION}. "),
+        ):
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    workspace = self.file_capture(Path(tmpdir), "verbatim", (name,))
+                    (workspace / self.COMPANION_RELATIVE).write_text(self.SCHEMA, encoding="utf-8")
+                    planted = self.plant_if_the_filesystem_allows(workspace, name)
+                    record = self.declaring_record(workspace)
+
+                    self.assertEqual([], record["provenance"]["companion_paths"], record)
+                    self.assertEqual(
+                        self.expected_fingerprint(workspace, (self.ARTIFACT_RELATIVE, self.SIDECAR_RELATIVE)),
+                        record["raw_fingerprint"],
+                        "a refused name must not pull any file into the fingerprint",
+                    )
+
+                metadata = record["metadata"]
+                self.assertTrue(any("companion" in warning for warning in metadata["warnings"]), record)
+                self.assertIs(True, metadata.get("review_required"), record)
+                if planted:
+                    self.assertFalse(
+                        any("does not exist" in warning for warning in metadata["warnings"]),
+                        f"the file was there to admit, so absence cannot be the reason: {record}",
+                    )
+
+    def test_a_control_character_name_is_dropped_on_its_own_beside_a_valid_companion(self):
+        """The name rules are per entry, so one unusable name costs only itself."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.file_capture(Path(tmpdir), "beside", (self.COMPANION, self.NUL_COMPANION))
+            (workspace / self.COMPANION_RELATIVE).write_text(self.SCHEMA, encoding="utf-8")
+            record = self.declaring_record(workspace)
+
+            self.assertEqual([self.COMPANION_RELATIVE], record["provenance"]["companion_paths"], record)
+            self.assertEqual(
+                self.expected_fingerprint(
+                    workspace, (self.ARTIFACT_RELATIVE, self.SIDECAR_RELATIVE, self.COMPANION_RELATIVE)
+                ),
+                record["raw_fingerprint"],
+            )
+
+        metadata = record["metadata"]
+        self.assertTrue(any("control characters" in warning for warning in metadata["warnings"]), record)
+        self.assertIs(True, metadata.get("review_required"), record)
+
+    def test_the_admission_check_answers_rather_than_raises_for_a_name_no_syscall_accepts(self):
+        """The second layer, driven directly: no name rule stands between it and the path.
+
+        `resolve_declared_companions` refuses a NUL before building a path at all, so this
+        is the only way to reach the branch underneath it. It earns its own case because a
+        caller added later gets the same answer without having to know the rule above.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failure = INVENTORY.companion_admission_failure(Path(tmpdir) / self.NUL_COMPANION)
+
+        self.assertIsNotNone(failure)
+        self.assertIn("could not be inspected", failure)
+
+    # --- declarations that are not lists of file names -----------------------------
+    #
+    # The failure mode closed off here is a record that reads perfectly clean while its
+    # `raw_fingerprint` does not span a companion sitting right there on disk. An acquirer
+    # reading that record would believe editing the companion re-triggers normalization,
+    # and nothing on the record would say otherwise -- the opposite of what declaring a
+    # companion buys. So the whole list fails closed *and* the record carries the refusal.
+
+    def malformed_cases(self) -> tuple[tuple[str, object], ...]:
+        """label, the `companions:` value a delivery wrote."""
+        return (
+            ("mixed valid and non-string", [self.COMPANION, 7]),
+            ("integer entry", [7]),
+            ("empty entry", [""]),
+            ("null entry", [None]),
+            ("nested list entry", [[self.COMPANION]]),
+            ("bare string", self.COMPANION),
+            ("mapping", {"schema": self.COMPANION}),
+            ("null", None),
+        )
+
+    def malformed_capture(self, root: Path, name: str, value: object) -> Path:
+        """A capture whose companion is present on disk, declared by a value that is not a list.
+
+        Written straight rather than through `sidecar_text`, which renders a sequence of
+        names and so cannot express the shapes under test.
+        """
+        workspace = self.workspace(root, name)
+        data = workspace / "raw" / "data"
+        (data / self.ARTIFACT).write_text(self.PAYLOAD, encoding="utf-8")
+        (data / self.COMPANION).write_text(self.SCHEMA, encoding="utf-8")
+        (data / f"{self.ARTIFACT}.provenance.yml").write_text(
+            "origin_url: https://api.example.org/product/B0ABC\n"
+            "license: null\n"
+            "retrieved_at: 2026-08-08T12:00:00Z\n"
+            "retrieved_by: example/provider\n"
+            f"companions: {json.dumps(value)}\n",
+            encoding="utf-8",
+        )
+        return workspace
+
+    def test_a_declaration_that_is_not_a_list_of_file_names_is_refused_on_the_record(self):
+        for label, value in self.malformed_cases():
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    workspace = self.malformed_capture(Path(tmpdir), "malformed", value)
+                    record = self.declaring_record(workspace)
+
+                metadata = record.get("metadata") or {}
+                self.assertTrue(
+                    any("must be a list of file names" in warning for warning in metadata.get("warnings", [])),
+                    f"a refused declaration must be reported on the record: {record}",
+                )
+                self.assertIs(True, metadata.get("review_required"), record)
+
+    def test_a_valid_name_beside_a_non_name_does_not_survive_and_the_record_says_so(self):
+        """The decision, stated: the list fails closed, and nothing about that is silent.
+
+        Half a declaration is a fingerprint somewhere between what the delivery asked for
+        and what it wrote, so the readable entry is refused with the rest. The companion is
+        planted and present, so it *could* have been admitted -- what stops it is the rule,
+        and the record carries the reason.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.malformed_capture(Path(tmpdir), "mixed", [self.COMPANION, 7])
+            record = self.declaring_record(workspace)
+
+            self.assertEqual([], record["provenance"]["companion_paths"], record)
+            # Dropped rather than shown: a value inventory could not read as file names is
+            # not a declared list, and leaving arbitrary delivered YAML on the key would
+            # put it in front of every manifest reader as though it were one.
+            self.assertNotIn("companions", record["provenance"])
+            self.assertEqual(
+                self.expected_fingerprint(workspace, (self.ARTIFACT_RELATIVE, self.SIDECAR_RELATIVE)),
+                record["raw_fingerprint"],
+                "a refused declaration must not reach the fingerprint",
+            )
+
+        metadata = record["metadata"]
+        self.assertTrue(any("must be a list of file names" in warning for warning in metadata["warnings"]), record)
+        self.assertIs(True, metadata.get("review_required"), record)
+
+    def test_a_malformed_declaration_never_costs_the_record_or_the_run(self):
+        """Inventory does not hard-fail on sidecar content, whatever a delivery writes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = self.malformed_capture(Path(tmpdir), "survives", {"schema": self.COMPANION})
+            result = self.run_cli(workspace)
+            manifest = workspace / "sources" / "manifest.jsonl"
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(manifest.is_file(), result.stderr)
+            rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+        self.assertEqual(1, len(rows), rows)
+        self.assertEqual([], rows[0]["provenance"]["companion_paths"], rows[0])
+        self.assertNotIn("companions", rows[0]["provenance"], rows[0])
+
+    def test_a_sidecar_carrying_only_companions_is_told_it_holds_no_provenance(self):
+        """`companions` names other files; it says nothing about where this capture came from.
+
+        The key reaches the parsed sidecar unread so that one function can rule on it with
+        the record in hand, which is also why it must not count as content: a sidecar whose
+        only field is an unusable declaration would otherwise pass for one that carried an
+        origin, a licence and a retrieval time. The declaration itself still resolves.
+        """
+        for label, rendered in (("resolvable", json.dumps([self.COMPANION])), ("unreadable", '"oops"')):
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    workspace = self.workspace(Path(tmpdir), "companions-only")
+                    data = workspace / "raw" / "data"
+                    (data / self.ARTIFACT).write_text(self.PAYLOAD, encoding="utf-8")
+                    (data / self.COMPANION).write_text(self.SCHEMA, encoding="utf-8")
+                    (data / f"{self.ARTIFACT}.provenance.yml").write_text(
+                        f"companions: {rendered}\n", encoding="utf-8"
+                    )
+                    config = INVENTORY.load_config(workspace)
+                    records, warnings, _ = INVENTORY.build_records(workspace, config, previous_detected_at={})
+
+                self.assertTrue(any("no usable fields" in warning for warning in warnings), warnings)
+                record = next(record for record in records if isinstance(record.get("provenance"), dict))
+                expected = [self.COMPANION_RELATIVE] if label == "resolvable" else []
+                self.assertEqual(expected, record["provenance"]["companion_paths"], record)
+
+
+class ProvenanceStringListFieldTests(unittest.TestCase):
+    """`parse_string_list` still owns every provenance list that is not `companions`.
+
+    Companion validation moved out from under it so that one function could rule on a
+    declaration with the record in hand. Nothing else moved: these fields are metadata a
+    record reports rather than paths it reads, so a malformed one is dropped against a
+    run-level warning exactly as before. Pinned here because the shared helper is one edit
+    away from taking all of them with it.
+    """
+
+    FIELDS = ("authors", "openalex_reported_authors", "supported_evidence_areas", "redirect_chain")
+
+    def build(self, root: Path, field: str, rendered: str) -> tuple[dict, list[str]]:
+        workspace = root / field
+        (workspace / "raw" / "data").mkdir(parents=True)
+        (workspace / "research.yml").write_text(
+            "raw:\n  source_roots:\n    - raw/data\n"
+            "sources:\n  manifest_path: sources/manifest.jsonl\n  normalized_dir: sources/normalized\n",
+            encoding="utf-8",
+        )
+        (workspace / "raw" / "data" / "keepa.json").write_text('{"price": 1}\n', encoding="utf-8")
+        (workspace / "raw" / "data" / "keepa.json.provenance.yml").write_text(
+            "origin_url: https://api.example.org/product/B0ABC\n"
+            "license: null\n"
+            "retrieved_at: 2026-08-08T12:00:00Z\n"
+            "retrieved_by: example/provider\n"
+            f"{field}: {rendered}\n",
+            encoding="utf-8",
+        )
+        config = INVENTORY.load_config(workspace)
+        records, warnings, _ = INVENTORY.build_records(workspace, config, previous_detected_at={})
+        record = next(record for record in records if isinstance(record.get("provenance"), dict))
+        return record, warnings
+
+    def test_a_mixed_list_still_drops_the_whole_key(self):
+        self.assertIsNone(INVENTORY.parse_string_list(["kept", 7]))
+        self.assertIsNone(INVENTORY.parse_string_list("kept"))
+        self.assertEqual(["kept"], INVENTORY.parse_string_list([" kept "]))
+        self.assertEqual([], INVENTORY.parse_string_list([]))
+
+    def test_a_mixed_list_is_reported_at_run_level_and_leaves_the_record_clean(self):
+        for field in self.FIELDS:
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    record, warnings = self.build(Path(tmpdir), field, json.dumps(["kept", 7]))
+
+                self.assertNotIn(field, record["provenance"])
+                self.assertTrue(any(field in warning for warning in warnings), warnings)
+                metadata = record.get("metadata") or {}
+                self.assertEqual([], metadata.get("warnings", []), record)
+                self.assertNotIn("review_required", metadata)
+
+    def test_a_well_formed_list_is_kept_stripped(self):
+        for field in self.FIELDS:
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    record, warnings = self.build(Path(tmpdir), field, json.dumps([" kept ", "second"]))
+
+                self.assertEqual(["kept", "second"], record["provenance"][field], record)
+                self.assertEqual([], warnings)
 
 
 class NormalizedFormatContractTests(unittest.TestCase):

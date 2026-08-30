@@ -157,6 +157,12 @@ PROVENANCE_FIELDS = (
 # `additional_provenance` entries are stripped of them and correlation keeps reading
 # the primary alone.
 PROVENANCE_CORRELATION_FIELDS = frozenset({"request_id", "candidate_id"})
+# Recognised fields that say nothing about where this capture came from. A sidecar
+# carrying only these has no provenance in it, whatever else it does, and is told so --
+# which is the whole of what "no usable fields" ever meant. Named explicitly because
+# `companions` reaches `data` unread, so a malformed one would otherwise count as
+# provenance simply by being present.
+PROVENANCE_NON_PROVENANCE_FIELDS = frozenset({"companions"})
 PROVENANCE_CHECKSUM_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 INVENTORY_CHECKSUM_REQUIRED = "INVENTORY_CHECKSUM_REQUIRED"
@@ -199,6 +205,12 @@ CODEBASE_MAX_LOCAL_REPO_FILES = 10_000
 #: file under a raw root and so already counts toward the snapshot's existing
 #: scope-guard entry and byte caps.
 PROVENANCE_MAX_COMPANIONS = 8
+#: Characters no bare file name may carry, matched on a declared companion before the
+#: name is ever joined to a path. Unicode's two control ranges, C0 and C1: the NUL among
+#: them cannot even be handed to the operating system -- ``lstat`` raises before it
+#: reaches a syscall -- and the rest are characters no delivery writes into a file name
+#: on purpose. Matched against the name exactly as declared, never a stripped copy of it.
+PROVENANCE_COMPANION_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 #: The capture suffixes whose bytes each fingerprinting record kind re-reads. Held once
 #: rather than twice, because the two questions that read it have to agree: which captures
 #: `raw_fingerprint` covers, and which captures a companion declaration is worth accepting
@@ -1651,16 +1663,15 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
             data[field] = parsed
             continue
         if field == "companions":
-            # Shape only. This function is handed the sidecar's own path and nothing else,
-            # so it cannot stat a declared name, decide whether it sits beside the capture,
-            # or know how many the record may carry; `merge_sidecar_provenance` holds
-            # `project_root` and does all of that. What survives here is a list of
-            # non-empty strings, and it stays untrusted until that pass rules on it.
-            parsed = parse_string_list(value)
-            if parsed is None:
-                warnings.append(f"{relative_path}: provenance companions must be a list of file names")
-                continue
-            data[field] = parsed
+            # Copied through unread, shape included. This function is handed the sidecar's
+            # own path and nothing else, so it cannot stat a declared name, decide whether
+            # it sits beside the capture, or know how many the record may carry -- and it
+            # cannot report a refusal anywhere a consumer will see it, because the record
+            # this sidecar belongs to has not been matched yet. Refusing a shape here
+            # would drop the key against a warning that attaches to nothing, which reads
+            # as a record that declared nothing at all. `resolve_declared_companions` has
+            # the record in hand and owns every companion rule, this one included.
+            data[field] = value
             continue
         if field == "authors":
             parsed = parse_string_list(value)
@@ -1753,7 +1764,7 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
         data["origin_url"] = data["url"]
     if "sha256" in data and "checksum" not in data:
         data["checksum"] = data["sha256"]
-    if not data:
+    if not set(data) - PROVENANCE_NON_PROVENANCE_FIELDS:
         warnings.append(f"{relative_path}: provenance sidecar has no usable fields")
     return data, warnings
 
@@ -1824,6 +1835,13 @@ def companion_admission_failure(path: Path) -> str | None:
     a symlink to one, and a link count of exactly one. ``Path.is_file()`` resolves symlinks
     and accepts hardlinks, so it would admit two kinds of entry the snapshot refuses to
     enumerate at all -- and a record must not fingerprint bytes the tree declines to show.
+
+    Refusing is the only answer this returns, including for a path the operating system
+    will not be asked about at all: a name carrying a NUL raises ``ValueError`` out of
+    ``lstat`` before any syscall, and letting that escape would end the whole inventory
+    run over one line of acquirer-authored sidecar. Every caller here is deciding whether
+    to admit one companion, and "this one cannot be inspected" is an answer all of them
+    already handle.
     """
     try:
         metadata = path.lstat()
@@ -1831,6 +1849,8 @@ def companion_admission_failure(path: Path) -> str | None:
         return "does not exist"
     except OSError as exc:
         return f"could not be inspected: {exc.strerror or exc}"
+    except ValueError as exc:
+        return f"could not be inspected: {exc}"
     if not stat.S_ISREG(metadata.st_mode):
         return "is not a regular file"
     if int(getattr(metadata, "st_nlink", 1) or 1) != 1:
@@ -1843,9 +1863,9 @@ def resolve_declared_companions(
     record: dict[str, Any],
     target_rel: str,
     sidecar_path: str,
-    declared: list[str],
+    declared: Any,
     warnings: list[str],
-) -> list[str]:
+) -> list[str] | None:
     """Resolve one sidecar's declared companions against the tree, dropping what fails.
 
     A companion is a second file a delivery names as part of the same capture -- the
@@ -1870,6 +1890,14 @@ def resolve_declared_companions(
     None of this widens ``raw_paths``. A companion is part of one capture's evidence, not a
     source of its own, and adding it there would move both source identity and the
     raw-attribution equality the guards are written against.
+
+    Every companion rule is here, the declaration's own shape included, because a rule
+    applied where the record is out of reach can only warn at run level -- and a run-level
+    warning attaches to nothing a consumer reads. A record whose declaration was refused
+    for its shape and a record that declared nothing would then be byte-identical, so the
+    acquirer would read a clean record and believe a companion the fingerprint never
+    reached was being watched. ``None`` comes back for a value that is not a list of file
+    names at all, which is the one answer the caller acts on rather than records.
     """
 
     def refuse(message: str) -> None:
@@ -1878,6 +1906,20 @@ def resolve_declared_companions(
         ensure_metadata(record)["review_required"] = True
         warnings.append(warning)
 
+    # Not ``parse_string_list``, which strips each entry: that is right for a display
+    # string and wrong for a file name, because ``str.strip()`` removes nine of the very
+    # control characters refused below and would silently resolve a declaration to a
+    # neighbouring file the delivery did not name. A name is read exactly as written, and
+    # surrounding whitespace makes it a name that is simply not there.
+    if not isinstance(declared, list) or not all(
+        isinstance(name, str) and name.strip() for name in declared
+    ):
+        # Failed closed on the whole list rather than per entry: a declaration carrying
+        # something that is not a file name is not a list this function can rule on, and
+        # admitting the readable half would put a record's fingerprint somewhere between
+        # what the delivery asked for and what it wrote.
+        refuse("provenance companions must be a list of file names")
+        return None
     if not declared:
         return []
     try:
@@ -1912,12 +1954,35 @@ def resolve_declared_companions(
         )
     accepted: list[str] = []
     for name in declared[:PROVENANCE_MAX_COMPANIONS]:
+        # A control character is not part of any name a delivery means to write, and the
+        # refusal is here rather than left to the admission check so that the name is
+        # never joined to a path at all: `lstat` raises `ValueError` on an embedded NUL
+        # instead of reporting a missing file, and a rule that depends on a downstream
+        # `except` to hold is a rule stated in the wrong place. Reported as a repr because
+        # the characters it names are the ones a warning cannot show.
+        if PROVENANCE_COMPANION_CONTROL_RE.search(name):
+            refuse(f"provenance companion must not contain control characters: {name!r}")
+            continue
         # A bare file name, refused as such rather than normalized and then inspected for
         # traversal. A name carrying no separator at all cannot address anything outside
         # the directory it is joined to, so "resolves into the artifact's own directory"
         # holds by construction instead of by a check that has to be right.
         if "/" in name or "\\" in name or name in {".", ".."}:
             refuse(f"provenance companion must be a bare file name beside {target_rel}: {name}")
+            continue
+        # A name the filesystem would not use verbatim. Windows strips trailing spaces and
+        # trailing dots inside the path layer, so `lstat(".keepa.json.schema.json ")` there
+        # opens `.keepa.json.schema.json` -- a *different* file, admitted under a path
+        # `raw_tree_snapshot` never enumerates, while the file it really named reads as an
+        # unexpected new raw path. POSIX refuses that same name outright, so leaving this
+        # to the admission check hands one delivery two verdicts depending on which machine
+        # ran inventory. Refused here on the declared spelling, for the same reason a
+        # declared name is never stripped before it is resolved.
+        if name != name.strip() or name.endswith("."):
+            refuse(
+                "provenance companion must be named exactly as the file is, with no "
+                f"surrounding whitespace and no trailing dot: {name!r}"
+            )
             continue
         if not name.startswith(required_prefix):
             # Dot-prefixed, and named after the capture it belongs to. The leading dot is
@@ -1991,16 +2056,27 @@ def merge_sidecar_provenance(
         append_record_warning(record, warning)
         ensure_metadata(record)["review_required"] = True
         warnings.append(warning)
-    companions = provenance.get("companions")
-    if isinstance(companions, list):
+    if "companions" in provenance:
         # Two keys, and only one of them is load-bearing. `provenance` opens as a copy of
         # the whole parsed sidecar, so the *declared* list stays visible at `companions`
         # exactly as the delivery wrote it, and stays untrusted. `companion_paths` is the
         # package's own answer to that declaration and the only key a consumer reads --
         # the same division `sidecar_path` sits on, one line above.
-        provenance["companion_paths"] = resolve_declared_companions(
-            project_root, record, target_rel, entry["sidecar_path"], companions, warnings
+        #
+        # Entered on the key's presence rather than on its type, because a declaration of
+        # the wrong shape is the one case that most needs an answer written onto the
+        # record, and `resolve_declared_companions` is where every companion rule lives.
+        admitted = resolve_declared_companions(
+            project_root, record, target_rel, entry["sidecar_path"], provenance["companions"], warnings
         )
+        if admitted is None:
+            # Not a list of file names, so not a declared list either. Dropped rather than
+            # shown: the key's whole contract is that a reader can see what the delivery
+            # named, and arbitrary delivered YAML left under it would sit on every manifest
+            # row claiming to be that. The refusal above is what the record shows instead.
+            provenance.pop("companions")
+            admitted = []
+        provenance["companion_paths"] = admitted
     return provenance
 
 
