@@ -133,7 +133,7 @@ class VerifyQuotesError(ScriptRefusal):
 
     This is the refusal type ``question_resolve`` and ``export_answers`` already
     catch by name, so it keeps its name and its ``(error_code, message, *,
-    details)`` constructor. Since CR-6 it is also a :class:`ScriptRefusal`, which
+    details)`` constructor. It is also a :class:`ScriptRefusal`, which
     is what lets ``run_verify`` raise it straight at an embedding host and lets
     ``main`` render it with the one shared catch arm.
 

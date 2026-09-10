@@ -285,7 +285,7 @@ SEARCH_QUERY_PLACEHOLDER = "{query}"
 # Transport seam so tests exercise the HTTP adapter without real network I/O.
 SEARCH_HTTP_TRANSPORT = None
 
-# --- Registered discovery providers (CR-5 T7) --------------------------------
+# --- Registered discovery providers -------------------------------------------
 # A registered provider is code-declared rather than config-declared: an
 # installed distribution advertises it through an entry point and declares, in
 # machine-checkable form, which hosts it may reach. The provider *plans*; this
@@ -957,7 +957,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     # The id flag is --id, never --provider: the academic route already stores a
     # provider list in `args.provider`, and a second option writing that dest
-    # would silently overwrite it (CR-5 §7.2).
+    # would silently overwrite it.
     registered_search.add_argument(
         "--id",
         dest="provider_id",
@@ -1291,7 +1291,7 @@ def require_discovery_enabled(config: dict[str, Any], command: str) -> dict[str,
 
 
 def provider_not_registered(command: str, label: str, exc: ProviderNotRegisteredError) -> DiscoverSourcesError:
-    """Turn an unsupplied authorized id into the CR-5 refusal hosts switch on.
+    """Turn an unsupplied authorized id into the registration refusal hosts switch on.
 
     An id in ``integrations.discovery.providers`` that neither a built-in nor an
     installed registration supplies is deploy drift on an *authorization*
@@ -4882,7 +4882,7 @@ def run_search_discovery(
     return report
 
 
-# --- Registered discovery providers (CR-5 T7) --------------------------------
+# --- Registered discovery providers -------------------------------------------
 #
 # The house philosophy for plugins, stated once: the *code* is authorized (an
 # operator installed the distribution and named its id in research.yml), the
@@ -4937,7 +4937,7 @@ def registered_error(
 
 
 def require_registered_discovery_provider(provider_id: str):
-    """Resolve an authorized id to its installed registration, or refuse with CR-5's codes.
+    """Resolve an authorized id to its installed registration, or refuse with the registration codes.
 
     The declared credential *names* are registered for redaction here, the moment
     the declaration is known, rather than when the transport later resolves them.
@@ -5164,7 +5164,7 @@ def reserve_registered_provider_requests(
             },
         )
     except ACCOUNTING.ProviderAccountingError as exc:
-        # The shared module's codes are the CR-5 codes for this route, so they
+        # The shared module's codes are the registered-provider codes for this route, so they
         # pass through unchanged; only the academic route has an older
         # host-visible vocabulary that has to be preserved.
         raise registered_error(
@@ -8448,7 +8448,7 @@ def run_discovery_command(args: argparse.Namespace) -> dict[str, Any]:
             require_discovery_provider_allowed("authors", discovery, ("openalex",))
         return run_authors_discovery(project_root, config, args)
     if args.command == "registered":
-        # A discovery provider supplied by an installed distribution (CR-5 T7).
+        # A discovery provider supplied by an installed distribution.
         # Read-only like every other discovery route: it proposes candidates
         # through the package's own transport and never fetches evidence. The
         # per-provider authorization check lives inside the route, beside the

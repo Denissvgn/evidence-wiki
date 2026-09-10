@@ -408,7 +408,7 @@ def provider_list_finding(
 
     An unresolved id keeps the sentence hosts already parse and gains the registration
     remediation plus a stable code, because the old advice — use only the built-ins —
-    is the closed-world statement CR-5 exists to retire, and it would now be wrong.
+    is the closed-world statement provider registration exists to retire, and it would now be wrong.
     Every other provider-list defect keeps its recommendation verbatim.
     """
 

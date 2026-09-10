@@ -1941,7 +1941,14 @@ def resolve_declared_companions(
         # would write `companion_paths` onto a record whose fingerprint could never carry
         # it, and silence is the worst way to break that promise: the acquirer would read
         # a clean record and believe editing the companion re-triggers normalization.
-        refuse(f"provenance companions are not carried by this record's fingerprint: {target_rel}")
+        allowed = ", ".join(
+            f"{record_kind}: {'/'.join(sorted(suffixes))}" for record_kind, suffixes in RAW_FINGERPRINT_CAPTURE_SUFFIXES.items()
+        )
+        refuse(
+            "provenance companions are not carried by this record's fingerprint: "
+            f"{target_rel} is classified {kind!r} and only a capture whose kind and suffix both "
+            f"fingerprint carries companions ({allowed})"
+        )
         return []
 
     target_path = PurePosixPath(target_rel)

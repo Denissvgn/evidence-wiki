@@ -1,5 +1,90 @@
 # Changelog
 
+## Unreleased
+
+- **Scale budgets and branch coverage are now measured by automation.** The frozen
+  `standard` and `near-partition` profiles have carried release budgets for time, memory,
+  and output size, and nothing ran them: the default suite measures a tiny case and no
+  workflow invoked a large profile. A new `Scale and coverage evidence` workflow measures
+  the profiles weekly, on demand, and for pull requests labelled `performance`, and the
+  release gate measures `standard` for every candidate and stores the result with the
+  distributions. `tools/scale_benchmark.py --require-budget` exits `3` on a violation, and
+  every result now records the commit, Python, platform, and runner it was measured on, so
+  a slow machine and a regression are told apart by reading rather than by retrying. The
+  same workflow publishes branch coverage of the default suite with workspace-script
+  subprocesses measured and copied workspace scripts folded back onto their template
+  sources, which the previous coverage configuration silently left out.
+
+- **CI and the release gate validate built distributions through one tool, and the sdist is
+  now installed too.** The two workflows carried separate copies of the installed-wheel
+  smoke, and they had drifted: only the release copy probed the round-trip YAML dependency,
+  and neither installed anything built from the sdist. `tools/validate_installed_artifacts.py`
+  is the single gate both now run. It checks every archive member against the packaging
+  policy -- required assets present, internal documents, reports, caches, environments, and
+  build output absent -- installs the wheel into a fresh environment and exercises it from
+  outside the checkout, then unpacks the sdist, builds a wheel from it, requires that wheel to
+  carry the same members as the direct one, and repeats the installed checks on it. The
+  summary it prints records each artifact's SHA-256 digest and the version it verified, and
+  the release workflow stores that summary beside the distributions it uploads.
+
+  The sdist path found a real defect on its first run. `.gitignore` ignores `AGENTS.md`
+  everywhere and re-admits the three tracked copies with `!` rules; the sdist builder
+  honoured the ignore and not the re-admission, so every sdist shipped without
+  `workspace-template/AGENTS.md`, a required starter asset, and a wheel built from an sdist
+  could not locate its own assets root. The wheel built directly from a checkout was never
+  affected. The sdist now force-includes the tracked copies, and the gate requires every
+  contract-named asset in both archives.
+
+- **Warm script loads no longer reread the whole script tree.** Every in-process load of a
+  packaged workspace script rehashed all of its siblings -- fifty-odd files, over three
+  megabytes -- to prove the cache key still held. The content hash is now remembered
+  behind the tree's stat signature (name, size, modification time, change time, inode)
+  and recomputed only when that signature moves, observed before and after hashing so a
+  tree edited mid-hash is never remembered under a signature it does not match. A warm
+  load now reads no script bytes; an edited sibling still invalidates the cached module.
+  The signature is metadata: an edit that preserves all four fields is not seen, which is
+  the same stated limit as any stat-based check.
+
+- **Public guidance points only at published files, and a refused companion declaration
+  says why.** The README linked an architecture index and a release process that are not
+  part of the repository; it now links the publishing workflow and the workspace
+  documents, and the contributing guide carries the release steps itself. The inventory
+  warning for a `companions:` declaration on a capture whose kind and suffix do not both
+  carry a fingerprint now names the record's kind and the kind/suffix pairs that do. The
+  `starter_version` field is documented as the starter-content version, distinct from the
+  installed package version, with neither proving deployed script bytes.
+
+- **`upgrade` now refuses to strand a pending acquisition order.** The 0.6.0 notes asked
+  operators to drain pending orders before upgrading; a downstream host reported the failure
+  that instruction guards against, a fulfilled request whose order could no longer be
+  submitted after its scripts and metadata were replaced underneath it. Write mode and
+  `--dry-run` now both refuse with `UPGRADE_PENDING_ORDER` while any orchestration session
+  holds a pending work order, naming the session, action, phase, and the request ids the
+  order scopes, and refuse the same way for a session whose `session.json` cannot be read.
+  Write mode takes the upgrade lock and then every session lock, holding all of them until
+  the replacement finishes; a session whose lock a live driver holds is reported as
+  `driver_active`. On the other side, `start`, `next`, `resume`, and `submit` take their
+  session lock and then probe the upgrade lock, refusing with
+  `ORCHESTRATION_UPGRADE_IN_PROGRESS` while an upgrade holds it. Because each side takes its
+  own lock before looking at the other's, an order cannot become pending between the
+  upgrade's preflight and its replacement. A workspace never upgraded has no upgrade lock
+  file and the probe creates none. Repair of a workspace already stranded by an earlier
+  upgrade is not part of this change; it stays a refusal with exact identifiers.
+
+- **`build-index` now publishes a search index whose fingerprint describes the pages it
+  actually read.** The builder lock serializes builders, not page edits. A page edited
+  between the moment the builder read it and the moment it fingerprinted the corpus was
+  stored with the *new* corpus fingerprint, so query mode accepted the index as fresh and
+  served the old page: the new text was findable by a fresh in-memory scan and not by the
+  index. The build now takes an optimistic snapshot -- it records every indexed file's size
+  and modification time, reads, and records them again -- and publishes only a read whose
+  two observations agree, under the fingerprint those observations produced. A corpus that
+  changes during the read is re-read; after three consecutive changed reads the build aborts
+  naming the paths that moved, leaves any prior index untouched, and removes its own
+  temporary database. The fingerprint remains metadata-only, and the documentation now
+  says so: an edit that preserves both size and modification time is invisible to it, at
+  build time and at query time alike.
+
 ## 0.6.0 - 2026-08-30
 
 - **A delivery can now declare the files that belong to a capture, and every acquisition arm

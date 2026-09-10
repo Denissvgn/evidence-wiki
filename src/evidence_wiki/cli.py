@@ -77,6 +77,16 @@ def _run_upgrader(forwarded_args: list[str]) -> int:
         initializer = _load_initializer(starter_root)
         try:
             return int(initializer.upgrade_main(args) or 0)
+        except initializer.UpgradeRefusedError as exc:
+            return int(
+                initializer.emit_initializer_error(
+                    str(exc),
+                    operation="upgrade",
+                    error_code=exc.error_code,
+                    remediation=exc.remediation,
+                    details=exc.details,
+                )
+            )
         except initializer.UpgradeWriteError as exc:
             return int(
                 initializer.emit_initializer_error(

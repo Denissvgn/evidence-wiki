@@ -263,8 +263,11 @@ Write-mode `upgrade` refreshes only starter-managed tooling, may update
 `workspace-system.yml`, uses `.locks/`, and conditionally appends one audit
 entry to `log.md` when it applies material changes. It preserves prior log
 history, `research.yml`, `raw/`, `sources/`, `wiki/`, `index.md`, and other user
-data. `--dry-run` writes nothing. Optional skills and docs have additional
-conflict rules documented in [workspace initialization][workspace-initialization].
+data. `--dry-run` writes nothing. Both modes refuse with `UPGRADE_PENDING_ORDER`
+while an orchestration session holds a pending work order or an active driver,
+naming the session and order: drain orchestration before upgrading. Optional
+skills and docs have additional conflict rules documented in
+[workspace initialization][workspace-initialization].
 
 Domain packs have a separate, explicit lifecycle. Preview and apply a new
 revision of the already-installed pack with:
@@ -392,9 +395,11 @@ when it conforms.
   [human editing and snapshots][human-editing], [codebase
   analysis][codebase-analysis], [production readiness][production-readiness],
   and [publication readiness][publication-readiness].
-- **Project development:** [architecture index][architecture],
-  [contributing][contributing], [changelog][changelog], [release
-  process][releasing], [third-party notices][third-party], and [license][license].
+- **Project development:** [contributing][contributing], [changelog][changelog],
+  [publishing workflow][publishing-workflow], [third-party notices][third-party],
+  and [license][license]. Architecture notes live in the workspace documents
+  above, starting with [workspace initialization][workspace-initialization] and
+  [orchestration][orchestration].
 
 Development setup, repository boundaries, style rules, and the full verification
 suite are documented in [CONTRIBUTING.md][contributing].
@@ -437,9 +442,8 @@ EvidenceWiki is available under the [MIT License][license].
 [research-init]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/skills/research-init.md
 [research-run]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/skills/research-run.md
 [research-orchestrate]: https://github.com/Denissvgn/evidence-wiki/blob/main/orchestrator/skills/research-orchestrate.md
-[architecture]: https://github.com/Denissvgn/evidence-wiki/blob/main/docs/llm_wiki/index.md
 [contributing]: https://github.com/Denissvgn/evidence-wiki/blob/main/CONTRIBUTING.md
 [changelog]: https://github.com/Denissvgn/evidence-wiki/blob/main/CHANGELOG.md
-[releasing]: https://github.com/Denissvgn/evidence-wiki/blob/main/RELEASING.md
+[publishing-workflow]: https://github.com/Denissvgn/evidence-wiki/blob/main/.github/workflows/publish.yml
 [third-party]: https://github.com/Denissvgn/evidence-wiki/blob/main/THIRD_PARTY_NOTICES.md
 [license]: https://github.com/Denissvgn/evidence-wiki/blob/main/LICENSE

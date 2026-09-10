@@ -1901,7 +1901,7 @@ def run_add(args: argparse.Namespace) -> dict[str, Any]:
         }
         if scope:
             # Present only when declared: an empty mapping would read as "nothing satisfies
-            # this", and its absence keeps unscoped records identical to pre-CR-4 ones.
+            # this", and its absence keeps unscoped records identical to pre-scope ones.
             record["scope"] = scope
         _append_request_unlocked(path, record)
     append_log_entry(
@@ -1983,7 +1983,7 @@ def check_fulfill_scope(
 ) -> None:
     """Refuse a fulfilment whose scope evidence contradicts the request. Never writes.
 
-    Three layers, each answering a different failure (CR-4 §2.3):
+    Three layers, each answering a different failure:
 
     1. **Contradiction** — keys the request and the delivery both declare must agree.
        Unconditional, because it cannot fire unless both sides opted into scope: a
@@ -1993,7 +1993,7 @@ def check_fulfill_scope(
        facet-X request into accepting facet-Y evidence.
     3. **Absence** (``--require-scope``) — a key the delivery never states, whether the
        request declared it or the caller asserted it. Tolerated by default, since no
-       pre-CR-4 delivery stamps scope; refused on request by hosts whose pipeline does,
+       pre-scope delivery stamps scope; refused on request by hosts whose pipeline does,
        which closes the hole where omitting scope evades layers 1 and 2. Asserted keys
        belong in this set: layer 2 can only catch an assertion the delivery *disagrees*
        with, so without this an explicit ``--match-scope`` claim against an unstamped

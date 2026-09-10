@@ -238,7 +238,7 @@ EXIT_RUNNER_FAILED = 5
 #: manual ``next``, or a second host. Unlike a one-shot CLI call, this driver has
 #: a durable session in flight and a worker mid-action, so aborting the entire run
 #: because another process held the lock for a moment is far more costly than
-#: waiting a few seconds. Before CR-8 this call inherited the lock's own 10 s
+#: waiting a few seconds. Before driver-busy refusals this call inherited the lock's own 10 s
 #: bounded wait and almost always won; this restores that rather than adopting the
 #: refuse-immediately default meant for callers that can cheaply retry.
 MANAGED_DRIVER_WAIT_SECONDS = 10.0

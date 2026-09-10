@@ -316,6 +316,21 @@ bounded remediation on stderr, and no Python traceback. The failing temporary
 file is removed; restore write access or free space, preview with `--dry-run`,
 and retry.
 
+An orchestration session with a pending work order was issued against the
+scripts and metadata the upgrade would replace, and replacing them strands it.
+Both write mode and `--dry-run` therefore refuse with exit code `2` and
+`UPGRADE_PENDING_ORDER`, naming each blocking session, its pending action id,
+phase, and the request ids the order scopes; an unreadable `session.json`
+blocks for the same reason, because the upgrade cannot prove nothing is
+pending. Complete or fail the order through the driver, or preserve the session
+for audit and start a fresh one after upgrading. Dry run reads sessions without
+taking any lock. Write mode takes the upgrade lock, then every session lock, and
+holds them all until the upgrade finishes; a session whose lock is held by a
+live driver is reported as `driver_active` and refused the same way. A driver
+that starts while the upgrade lock is held refuses on its own side with
+`ORCHESTRATION_UPGRADE_IN_PROGRESS`, so an order cannot become pending between
+the preflight and the replacement.
+
 If an MCP server is running for the workspace, restart any active MCP server
 subprocesses after upgrade completes. The upgrade refreshes scripts on disk, but
 already running Python processes keep their loaded server code, direct imports,

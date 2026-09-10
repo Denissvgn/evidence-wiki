@@ -53,6 +53,21 @@ or cleanup on POSIX and Windows, and atomically publishes only a complete index.
 Failed builds retain the prior complete database and remove their own temporary
 database and SQLite sidecars.
 
+The builder lock serializes builders, not ordinary page edits. A build therefore
+reads the corpus as an optimistic snapshot: it records every indexed file's size
+and modification time, reads the documents, and records the same metadata
+again. Only a read whose two observations agree is published, and the
+fingerprint it publishes is the one the documents were read under, so query mode
+can never trust an index whose content predates its fingerprint. When a file is
+added, removed, or edited during the read, the build re-reads; after three
+consecutive changed reads it aborts, names the paths that moved, and leaves the
+prior index untouched. Rerun `build-index` once edits have settled.
+
+The fingerprint is metadata only: path, size, and modification time. An edit
+that preserves both size and modification time is invisible to it, both during
+the build and at query time. That is a stated limit of stat-based freshness, not
+a content-level guarantee; rebuild explicitly after such an edit.
+
 Use SQLite FTS when:
 
 - the workspace has hundreds or thousands of Markdown files;
@@ -80,7 +95,11 @@ files remain authoritative, and query mode treats the index as a fast path that
 can disappear or change. A rebuild, removal, or replacement can happen between
 evaluate_index and query_fts_index after the freshness check has passed. If that
 race makes the index unreadable, query mode catches the SQLite error, prints a
-short `note:`, and falls back to the in-memory scan.
+short `note:`, and falls back to the in-memory scan. The freshness check runs
+once per query, immediately before the index is read; a page edited after that
+check is served from the index for that query and detected by the next one.
+Because a build publishes a complete database atomically, a concurrent query
+sees either the prior index or the new one, never a partially written file.
 
 Unprocessed-evidence signal: every query also reports how many discovered
 sources are not yet normalized and therefore not searchable, as a footer note in

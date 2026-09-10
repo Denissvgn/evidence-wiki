@@ -10,7 +10,7 @@ The file uses one top-level mapping:
 
 ```yaml
 workspace_system:
-  starter_version: "0.1.0"
+  starter_version: "0.3.0"
   schema_version: "0.1"
   created: "2026-05-10"
   compatible_research_yml_contract: "0.1"
@@ -20,7 +20,7 @@ Required fields:
 
 | Field | Meaning |
 |-------|---------|
-| `starter_version` | Version of the reusable starter content copied or used to generate the workspace. |
+| `starter_version` | Version of the reusable starter content copied or used to generate the workspace. It is not the installed package version, which `evidence-wiki --version` and `Workspace.versions()` report separately, and neither value proves that the deployed script bytes match a release; compare the files themselves when that matters. |
 | `schema_version` | Version of the `workspace-system.yml` metadata shape. |
 | `created` | Date this starter metadata record was created, using `YYYY-MM-DD`. |
 | `compatible_research_yml_contract` | `research.yml` contract version this starter metadata is expected to work with. |

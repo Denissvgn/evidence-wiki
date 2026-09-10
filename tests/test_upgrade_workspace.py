@@ -5,7 +5,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -27,6 +29,47 @@ TEMPLATE_INIT = REPO_ROOT / "workspace-template" / "scripts" / "init_research_wo
 
 
 INIT = load_script_module("research_init_for_upgrade", INIT_PATH)
+
+
+CONTROLLER_PATH = REPO_ROOT / "workspace-template" / "scripts" / "orchestration_controller.py"
+CONTROLLER = load_script_module("research_controller_for_upgrade", CONTROLLER_PATH)
+
+HOLDING_LOCK = """
+import importlib.util, os, sys, time
+from pathlib import Path
+
+scripts, lock_path, ready, release = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("held_workspace_locks", str(Path(scripts) / "_workspace_locks.py"))
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+with module.workspace_lock(Path(lock_path), timeout_seconds=0.0, purpose="test holder"):
+    Path(ready).write_text(str(os.getpid()), encoding="utf-8")
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and not Path(release).exists():
+        time.sleep(0.02)
+"""
+
+
+def controller(target: Path, *args: str) -> tuple[int, dict, str]:
+    process = subprocess.run(  # noqa: S603
+        [sys.executable, "-B", str(CONTROLLER_PATH), "--project-root", str(target), *args, "--format", "json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    text = process.stdout.strip() or process.stderr.strip()
+    return process.returncode, json.loads(text) if text else {}, process.stderr
+
+
+def issue_pending_order(target: Path, orchestration_id: str = "orch-upgrade") -> dict:
+    """Drive a real session to a pending work order through the controller."""
+    code, _, stderr = controller(target, "start", "--orchestration-id", orchestration_id, "--agent-id", "agent-a")
+    assert code == 0, stderr
+    code, order, stderr = controller(target, "next", "--orchestration-id", orchestration_id, "--agent-id", "agent-a")
+    assert code == 0, stderr
+    return order
 
 
 def run_cli(*args: str) -> tuple[int, str]:
@@ -499,6 +542,155 @@ class UpgradeUnitTests(unittest.TestCase):
             # refusal must come from the starter-root guard, not the marker check.
             with self.assertRaises(SystemExit):
                 INIT.upgrade_workspace(starter, starter, ["scripts"], dry_run=False)
+
+
+class UpgradePendingOrderTests(unittest.TestCase):
+    """The upgrade refuses to replace what a pending order was issued under."""
+
+    def spawn_lock_holder(self, target: Path, lock_path: Path, scratch: Path) -> Callable[[], None]:
+        """Hold ``lock_path`` from a second process; returns the release callable.
+
+        Two hosts is the situation the lock exists for, so the holder is a process.
+        The caller releases it before its temporary directory disappears; the
+        cleanup registration is only the safety net.
+        """
+        scratch.mkdir(parents=True, exist_ok=True)
+        ready = scratch / "ready"
+        release = scratch / "release"
+        process = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-B", "-c", HOLDING_LOCK, str(target / "scripts"), str(lock_path), str(ready), str(release)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        def stop() -> None:
+            with contextlib.suppress(OSError):
+                release.touch()
+            try:
+                process.wait(30)
+            except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+                process.kill()
+                process.wait(30)
+
+        self.addCleanup(stop)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not ready.exists():
+            if process.poll() is not None:
+                self.fail(f"lock holder exited early: {process.stderr.read()}")
+            time.sleep(0.02)
+        self.assertTrue(ready.exists(), "lock holder never reported holding the lock")
+        return stop
+
+    def test_upgrade_refuses_while_an_orchestration_order_is_pending(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = init_workspace(Path(tmpdir) / "workspace")
+            order = issue_pending_order(target)
+            drifted = target / "scripts" / "query_index.py"
+            drifted.write_text("# stale local copy\n")
+            log_before = (target / "log.md").read_text()
+            session_path = target / "runs" / "orchestrations" / "orch-upgrade" / "session.json"
+            session_before = session_path.read_bytes()
+
+            for mode in ("write", "dry-run"):
+                with self.subTest(mode=mode):
+                    argv = ["upgrade", "--target", str(target)] + (["--dry-run"] if mode == "dry-run" else [])
+                    code, stdout, stderr = run_cli_result(*argv)
+                    self.assertEqual(2, code, stderr)
+                    self.assertIn("UPGRADE_PENDING_ORDER", stderr)
+                    self.assertIn("orch-upgrade", stderr)
+                    self.assertIn(order["action_id"], stderr)
+                    self.assertIn(order["phase"], stderr)
+                    self.assertNotIn("Upgraded research workspace", stdout)
+                    self.assertNotIn("would update", stdout)
+                    self.assertEqual("# stale local copy\n", drifted.read_text(), "a refused upgrade must replace nothing")
+                    self.assertEqual(log_before, (target / "log.md").read_text())
+                    self.assertEqual(session_before, session_path.read_bytes())
+                    self.assertFalse((target / ".locks" / "upgrade.lock").exists(), "no lock residue on refusal")
+            self.assertEqual([], list((target / "runs" / "orchestrations" / "orch-upgrade" / ".locks").glob("*.holder.json")))
+
+            # Drained: the same workspace with no pending order upgrades normally.
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            session["pending_action_id"] = None
+            session_path.write_text(json.dumps(session, indent=2), encoding="utf-8")
+            code, stdout, stderr = run_cli_result("upgrade", "--target", str(target))
+            self.assertEqual(0, code, stderr)
+            self.assertIn("Upgraded research workspace", stdout)
+            self.assertEqual(TEMPLATE_QUERY_INDEX.read_bytes(), drifted.read_bytes())
+
+    def test_unreadable_session_blocks_the_upgrade_conservatively(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = init_workspace(Path(tmpdir) / "workspace")
+            session_dir = target / "runs" / "orchestrations" / "orch-garbled"
+            session_dir.mkdir(parents=True)
+            (session_dir / "session.json").write_text("{not json", encoding="utf-8")
+            code, _stdout, stderr = run_cli_result("upgrade", "--target", str(target), "--dry-run")
+            self.assertEqual(2, code, stderr)
+            self.assertIn("UPGRADE_PENDING_ORDER", stderr)
+            self.assertIn("orch-garbled", stderr)
+            self.assertIn("unreadable", stderr)
+
+    def test_upgrade_refuses_while_a_driver_holds_a_session_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = init_workspace(root / "workspace")
+            code, _, stderr = controller(target, "start", "--orchestration-id", "orch-held", "--agent-id", "agent-a")
+            self.assertEqual(0, code, stderr)
+            lock_path = CONTROLLER.session_lock_path(target, "orch-held")
+            release = self.spawn_lock_holder(target, lock_path, root / "scratch-held")
+            drifted = target / "scripts" / "query_index.py"
+            drifted.write_text("# stale local copy\n")
+
+            code, _stdout, stderr = run_cli_result("upgrade", "--target", str(target))
+
+            self.assertEqual(2, code, stderr)
+            self.assertIn("UPGRADE_PENDING_ORDER", stderr)
+            self.assertIn("orch-held", stderr)
+            self.assertIn("active driver", stderr)
+            self.assertEqual("# stale local copy\n", drifted.read_text())
+            self.assertFalse((target / ".locks" / "upgrade.lock").exists())
+
+            release()
+            code, stdout, stderr = run_cli_result("upgrade", "--target", str(target))
+            self.assertEqual(0, code, stderr)
+            self.assertIn("Upgraded research workspace", stdout)
+
+    def test_upgrade_and_controller_agree_on_the_lock_and_session_layout(self):
+        # Two scripts, one protocol: the paths are hand-mirrored, so compare them.
+        self.assertEqual(CONTROLLER.UPGRADE_LOCK_RELATIVE, INIT.UPGRADE_LOCK_RELATIVE.as_posix())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.assertEqual(CONTROLLER.upgrade_lock_path(root), INIT.upgrade_lock_path(root))
+            self.assertEqual(
+                CONTROLLER.session_lock_path(root, "orch"),
+                CONTROLLER.session_dir(root, "orch") / Path(*INIT.ORCHESTRATION_SESSION_LOCK_RELATIVE.parts),
+            )
+            self.assertEqual(CONTROLLER.orchestration_root(root), root / Path(*INIT.ORCHESTRATION_SESSIONS_RELATIVE.parts))
+        self.assertEqual(CONTROLLER.SESSION_FILENAME, INIT.ORCHESTRATION_SESSION_FILENAME)
+        self.assertEqual(CONTROLLER.WORK_ORDERS_DIR, INIT.ORCHESTRATION_WORK_ORDERS_DIR)
+
+    def test_driver_refuses_while_a_workspace_upgrade_holds_its_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = init_workspace(root / "workspace")
+            self.assertFalse((target / ".locks" / "upgrade.lock").exists())
+            code, _, stderr = controller(target, "start", "--orchestration-id", "orch-probe", "--agent-id", "agent-a")
+            self.assertEqual(0, code, stderr)
+            self.assertFalse((target / ".locks" / "upgrade.lock").exists(), "the probe must not create the lock file")
+
+            release = self.spawn_lock_holder(target, INIT.upgrade_lock_path(target), root / "scratch-upgrade")
+            code, payload, _stderr = controller(target, "start", "--orchestration-id", "orch-late", "--agent-id", "agent-a")
+            self.assertNotEqual(0, code)
+            self.assertEqual("ORCHESTRATION_UPGRADE_IN_PROGRESS", payload.get("error_code"), payload)
+            self.assertIs(True, payload.get("recoverable"), payload)
+            self.assertFalse((target / "runs" / "orchestrations" / "orch-late" / "session.json").exists())
+            code, payload, _stderr = controller(target, "next", "--orchestration-id", "orch-probe", "--agent-id", "agent-a")
+            self.assertEqual("ORCHESTRATION_UPGRADE_IN_PROGRESS", payload.get("error_code"), payload)
+
+            release()
+            code, payload, stderr = controller(target, "start", "--orchestration-id", "orch-late", "--agent-id", "agent-a")
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("orch-late", payload.get("orchestration_id"))
 
 
 if __name__ == "__main__":

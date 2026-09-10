@@ -3919,7 +3919,7 @@ def sync_structured_view(
     file or the file is not there.
 
     Returns the `{path, content_hash}` block to stamp, or ``None`` when the record binds
-    no structured view. Native tabular emission (CR-7 T13) is the second caller.
+    no structured view. Native tabular emission is the second caller.
     """
     sidecar = expected_structured_path(normalized_root, source_id)
     if payload is None:

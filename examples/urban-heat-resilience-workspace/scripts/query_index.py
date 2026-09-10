@@ -53,6 +53,8 @@ TABLE_NORMALIZABLE_EXTENSIONS = (".csv", ".tsv")
 MAX_REPORTED_UNNORMALIZED = 25
 DEFAULT_INDEX_PATH = ".research-cache/query-index.sqlite3"
 INDEX_SCHEMA_VERSION = "1"
+INDEX_BUILD_ATTEMPTS = 3
+MAX_REPORTED_CHANGED_PATHS = 5
 PROVIDER_REQUEST_SCHEMA_VERSION = "1"
 LEXICAL_ENGINE = "lexical"
 HYBRID_ENGINE = "hybrid"
@@ -663,6 +665,30 @@ def iter_scope_markdown_files(project_root: Path, config: dict[str, Any], scope:
     return files
 
 
+def corpus_stat_entries(project_root: Path, config: dict[str, Any], scope: str) -> dict[str, str]:
+    """Map each indexed file's workspace-relative path to its size and mtime.
+
+    This is the stat-only observation both the builder and query mode compare.
+    It sees additions, deletions, and any edit that changes size or mtime; an
+    edit that preserves both is invisible to it, which is a documented limit of
+    metadata-only freshness rather than a promise of content-level detection.
+    """
+    entries: dict[str, str] = {}
+    for path in sorted(iter_scope_markdown_files(project_root, config, scope), key=lambda item: item.as_posix()):
+        try:
+            stat = path.stat()
+            relative = path.relative_to(project_root).as_posix()
+        except (OSError, ValueError):
+            continue
+        entries[relative] = f"{stat.st_size}:{stat.st_mtime_ns}"
+    return entries
+
+
+def fingerprint_stat_entries(entries: dict[str, str]) -> str:
+    lines = [f"{relative}:{observed}" for relative, observed in entries.items()]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
 def corpus_fingerprint(project_root: Path, config: dict[str, Any], scope: str) -> str:
     """Stat-only fingerprint of the indexed corpus for cheap staleness detection.
 
@@ -670,15 +696,42 @@ def corpus_fingerprint(project_root: Path, config: dict[str, Any], scope: str) -
     and modification time without reading contents, so a fresh persistent index
     can be trusted without re-reading every document on each query.
     """
-    entries: list[str] = []
-    for path in sorted(iter_scope_markdown_files(project_root, config, scope), key=lambda item: item.as_posix()):
-        try:
-            stat = path.stat()
-            relative = path.relative_to(project_root).as_posix()
-        except (OSError, ValueError):
-            continue
-        entries.append(f"{relative}:{stat.st_size}:{stat.st_mtime_ns}")
-    return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
+    return fingerprint_stat_entries(corpus_stat_entries(project_root, config, scope))
+
+
+def changed_stat_paths(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    changed = {relative for relative in before.keys() | after.keys() if before.get(relative) != after.get(relative)}
+    return sorted(changed)
+
+
+def snapshot_corpus(project_root: Path, config: dict[str, Any], scope: str) -> tuple[list[Document], str]:
+    """Read the corpus and return it with the fingerprint it was actually read under.
+
+    Ordinary document edits are not serialized by the index-builder lock, so a
+    page can change between reading it and fingerprinting the corpus. Publishing
+    the old page under the new fingerprint would make query mode trust stale
+    content as fresh. This optimistic snapshot observes the stat entries before
+    and after the read and only accepts a read whose two observations agree,
+    which binds the fingerprint to the documents in hand. A corpus that keeps
+    changing is retried a bounded number of times and then refused with the
+    paths that moved, leaving any prior index untouched.
+    """
+    last_changed: list[str] = []
+    for _attempt in range(INDEX_BUILD_ATTEMPTS):
+        before = corpus_stat_entries(project_root, config, scope)
+        documents = build_index(project_root, config, scope)
+        after = corpus_stat_entries(project_root, config, scope)
+        if before == after:
+            return documents, fingerprint_stat_entries(after)
+        last_changed = changed_stat_paths(before, after)
+    shown = ", ".join(last_changed[:MAX_REPORTED_CHANGED_PATHS])
+    if len(last_changed) > MAX_REPORTED_CHANGED_PATHS:
+        shown += f", and {len(last_changed) - MAX_REPORTED_CHANGED_PATHS} more"
+    raise SystemExit(
+        f"query index build aborted: indexed files changed during each of {INDEX_BUILD_ATTEMPTS} "
+        f"consecutive read attempts (last changed: {shown}); the existing index was left unchanged. "
+        "Retry build-index when edits have settled."
+    )
 
 
 def count_terms(tokens: list[str], terms: set[str]) -> int:
@@ -1251,7 +1304,7 @@ def write_fts_index(project_root: Path, config: dict[str, Any], scope: str, inde
 
     index_path.parent.mkdir(parents=True, exist_ok=True)
     with workspace_lock(query_index_lock_path(index_path), purpose=f"query index build {index_path.name}"):
-        documents = build_index(project_root, config, scope)
+        documents, fingerprint = snapshot_corpus(project_root, config, scope)
         tmp_path = unique_index_temp_path(index_path)
         connection: sqlite3.Connection | None = None
         cleanup_failures: list[Path] = []
@@ -1264,7 +1317,7 @@ def write_fts_index(project_root: Path, config: dict[str, Any], scope: str, inde
                     ("schema_version", INDEX_SCHEMA_VERSION),
                     ("scope", scope),
                     ("document_count", str(len(documents))),
-                    ("corpus_fingerprint", corpus_fingerprint(project_root, config, scope)),
+                    ("corpus_fingerprint", fingerprint),
                 ],
             )
             connection.executemany(

@@ -18,6 +18,11 @@ _REMEDIATIONS = {
         "Restore write access and free space for the target workspace, preview the same command with "
         "--dry-run, then retry the upgrade."
     ),
+    "UPGRADE_PENDING_ORDER": (
+        "Complete or fail the pending work order through the orchestration driver, or preserve the "
+        "session for audit and start a fresh one after upgrading; then retry the upgrade once no driver "
+        "is active."
+    ),
     "DOMAIN_PACK_INVALID": (
         "Fix the domain pack so it passes evidence-wiki pack validate, then rerun the command."
     ),
@@ -204,6 +209,10 @@ _REMEDIATIONS = {
     "ORCHESTRATION_DRIVER_BUSY": (
         "Retry after the holder's call completes, or serialize drivers host-side; status polling never "
         "requires this lock. Pass --driver-wait-seconds SECONDS to wait instead of refusing."
+    ),
+    "ORCHESTRATION_UPGRADE_IN_PROGRESS": (
+        "Wait for the workspace upgrade holding .locks/upgrade.lock to finish, then retry the same command; "
+        "the refused call wrote nothing."
     ),
     "ORCHESTRATION_WRITE_FAILED": "Restore workspace write access or free space, then retry the idempotent command.",
     "ORCHESTRATION_WORKSPACE_UNSAFE": (
@@ -752,7 +761,7 @@ def classify_error_code(message: str) -> str:
 # conflict or a corrupt artifact, not an input a caller can correct and resend. Mirrored in
 # ``src/evidence_wiki/errors.py``; `test_non_recoverable_codes_are_mirrored` pins the pair.
 #
-# CR-15a added five. Each was previously answered *both* ways across its own raise sites —
+# The recoverability audit added five. Each was previously answered *both* ways across its own raise sites —
 # `ORCHESTRATION_STATE_INVALID` three ways across 25 — so a host branching on `recoverable`
 # retried some occurrences of one code and not others, with nothing in the envelope
 # explaining the difference. Declaring them here rather than annotating every site keeps

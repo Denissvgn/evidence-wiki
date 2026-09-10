@@ -25,6 +25,9 @@ from . import resources
 
 _SCRIPT_MODULE_CACHE: dict[str, ModuleType] = {}
 _LOADER_MODULE_CACHE: dict[str, ModuleType] = {}
+# The loader file's content hash, remembered behind the stat signature it was
+# read under, so a warm load does not reread the loader to find its own cache key.
+_LOADER_HASH_MEMO: dict[Path, tuple[tuple[int, int, int, int], str]] = {}
 
 # Serializes every workspace-script load in this process.
 #
@@ -66,12 +69,34 @@ _SHARED_ASSETS_STACK: contextlib.ExitStack | None = None
 _SHARED_ASSETS_ROOT: Path | None = None
 
 
+def _loader_signature(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
+
+
+def _loader_content_hash(path: Path) -> str:
+    """Hash the loader file, rereading it only when its stat signature moves.
+
+    Observed before and after the read, remembered only when both agree, for the
+    same reason the loader's own tree hash is: a file edited mid-read must never be
+    remembered under a signature it does not match.
+    """
+    before = _loader_signature(path)
+    remembered = _LOADER_HASH_MEMO.get(path)
+    if remembered is not None and remembered[0] == before:
+        return remembered[1]
+    content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    if _loader_signature(path) == before:
+        _LOADER_HASH_MEMO[path] = (before, content_hash)
+    return content_hash
+
+
 def _load_workspace_loader(script_dir: Path) -> ModuleType:
     root = script_dir.expanduser().resolve()
     path = root / "_workspace_module_loader.py"
     if not path.is_file():
         raise SystemExit(f"Missing packaged script loader: {path}")
-    content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    content_hash = _loader_content_hash(path)
     key = f"{root}\0{content_hash}"
     if key in _LOADER_MODULE_CACHE:
         return _LOADER_MODULE_CACHE[key]

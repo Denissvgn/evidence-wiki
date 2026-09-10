@@ -93,6 +93,25 @@ Optional scale checks remain outside the default suite:
 EVIDENCE_WIKI_RUN_SCALE=1 .venv/bin/python -m pytest -q tests/test_scale_smoke.py
 ```
 
+Scale budgets are enforced by automation, not by the fast gate. The
+`Scale and coverage evidence` workflow measures the frozen `standard` profile
+weekly, on demand, and for pull requests labelled `performance` (both profiles
+on the schedule); the release gate measures `standard` for every release
+candidate and stores the JSON beside the distributions. Each run calls
+`tools/scale_benchmark.py --profile <name> --require-budget --output <file>`,
+which exits `3` on a budget violation and records the commit, Python,
+platform, and runner beside the timings. The budgets in
+`tools/scale_benchmark.py` are calibrated for GitHub-hosted `ubuntu-latest`
+runners; cold `workspace_status` and warm `workspace_status_cached` are
+measured separately. A violation is a measurement to read against the recorded
+environment, not a prompt to rerun until a sample passes: a slower runner or a
+regression both fail, and telling them apart is the reviewer's job. Run the
+same command locally to compare a laptop sample, remembering that it is
+evidence about the laptop. The same workflow publishes branch coverage of the
+default suite, with workspace-script subprocesses and copied workspace scripts
+folded back onto their template sources; treat the report as evidence of what
+ran, with unmeasured execution explicit in it, not as a threshold.
+
 Agent-quality evaluation is a manual check for comparing prompts or agent-runner
 behavior against the deterministic fixture in
 `tests/fixtures/agent-quality-eval/`:
@@ -119,10 +138,24 @@ Before proposing a release, build and inspect both distribution formats:
 The wheel must contain the starter workspace, domain packs, and orchestrator
 guide. The source distribution additionally carries tests and development
 tools. Neither artifact should contain reports, caches, virtual environments,
-scratch workspaces, or build output. See `RELEASING.md` for the maintainer
-checklist. PyPI uploads are intentionally unavailable from pull requests, tag
-pushes, and manual workflow dispatches; only a published GitHub Release can
-start the verified publishing workflow.
+scratch workspaces, or build output. One tool checks all of that and is the
+gate both CI and the publishing workflow run:
+
+```bash
+.venv/bin/python tools/validate_installed_artifacts.py --dist-dir /tmp/evidence-wiki-dist
+```
+
+It checks archive membership against the packaging policy, installs the wheel
+into a fresh virtual environment and exercises it from outside the checkout,
+then unpacks the sdist, builds a wheel from it, and repeats the same checks on
+that install. Its JSON summary records each artifact's SHA-256 digest. Pass
+`--membership-only` for the fast archive check alone. A release is cut by bumping the version in
+`pyproject.toml` and `src/evidence_wiki/__init__.py`, dating the changelog
+heading, tagging the merged commit `v<version>`, and publishing a GitHub
+Release; the publishing workflow in `.github/workflows/publish.yml` verifies
+the tag, version, changelog heading, and built wheel before uploading. PyPI
+uploads are intentionally unavailable from pull requests, tag pushes, and manual
+workflow dispatches; only a published GitHub Release can start that workflow.
 
 ## Documentation
 

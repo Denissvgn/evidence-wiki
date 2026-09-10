@@ -215,7 +215,7 @@ class PolicyRuleError(Exception):
 class FieldRef:
     """One field reference: which document, and where in it.
 
-    Field addressing reuses CR-7's scheme rather than inventing a second one. ``pointer``
+    Field addressing reuses the structured-view scheme rather than inventing a second one. ``pointer``
     is an RFC 6901 JSON pointer in the form `_structured_view.normalize_pointer` returns,
     and ``root`` is the namespace segment the declaration wrote in front of it. ``root``
     is ``None`` for a ``question_field``, which resolves against the question's whole

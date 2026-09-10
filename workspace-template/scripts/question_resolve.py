@@ -1860,7 +1860,7 @@ def transition_grounding_set(
     merging two sets invites duplicate claims in an order nobody chose. Replacement also
     invalidates any verifier stamp on the page, so those are dropped in the same write.
 
-    Verification is deliberately not performed here (CR-7 §7.2). The two-step flow writes
+    Verification is deliberately not performed here. The two-step flow writes
     grounding while cited evidence may still be normalizing, and ``verify_quotes.py --slug S``
     already *is* the check step — a second spelling of it would be a second door every
     future change to verification semantics had to remember.
@@ -2141,7 +2141,7 @@ def render_log(action: str, slug: str, agent_id: str, result: dict[str, Any]) ->
         # The audit entry must not credit scope for a pairing scope did not make: a tie
         # settled on the order --source-id was passed is the positional guess this
         # feature replaced, and writing it down as "paired by declared scope" is exactly
-        # the false audited fact CR-4 set out to stop.
+        # the false audited fact declared scope set out to stop.
         by_decision: dict[str, list[str]] = {}
         for pair in result["pairs"]:
             # Default to the weaker claim: a pair that somehow reaches here without a
@@ -2284,7 +2284,7 @@ def _run_command(project_root: str | Path, args: argparse.Namespace) -> dict[str
     host that answers or blocks a question in-process rewrites the page and writes
     no audit entry, while the CLI doing the same thing writes one — the trail this
     package exists to guarantee would then record only the callers who came
-    through the command line. CR-6 AC-1 requires the two doors to produce
+    through the command line. The library contract requires the two doors to produce
     byte-identical workspace state and audit entries, and this is where that is
     either true or not.
     """

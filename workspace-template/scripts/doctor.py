@@ -757,7 +757,7 @@ def _unsatisfied_authorization_findings(
     authorization: dict[str, Any],
     seen: set[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Report every authorized id no valid registration supplies (backlog §2.7).
+    """Report every authorized id no valid registration supplies.
 
     The refusal text comes from ``require_registration`` rather than being written
     again here, so what doctor explains is word-for-word what smoke and the

@@ -50,8 +50,8 @@ EXIT_DRIVER_BUSY = 6
 # artifact is not a thing the caller can retry its way out of; every other condition is
 # something they can correct and resend. The two sets are hand-mirrored, so
 # ``test_non_recoverable_codes_are_mirrored`` compares them rather than trusting this
-# comment -- the pair had no check at all until CR-15a, which is how five codes came to
-# answer two ways at once across their own raise sites.
+# comment -- the pair had no check at all until the recoverability audit, which is how five
+# codes came to answer two ways at once across their own raise sites.
 _NON_RECOVERABLE_CODES = frozenset(
     {
         "CLAIM_HELD",
@@ -186,6 +186,11 @@ ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     # An upgrade that cannot write is a workspace-level filesystem problem, the
     # same family an operator is already checking when the workspace is unreadable.
     "UPGRADE_WRITE_FAILED": ConfigError,
+    # An upgrade refused because an orchestration session holds a pending order
+    # or an active driver. The upgrade is CLI-only, so no library call raises it;
+    # it is registered so a host that maps CLI envelopes onto these families
+    # files it with the session state it names rather than with the base class.
+    "UPGRADE_PENDING_ORDER": OrchestrationError,
     # A domain-pack lifecycle refusal means the workspace's tracked pack state,
     # candidate revision, or transaction cannot safely support the requested
     # CLI mutation. Keep these in the existing workspace/configuration family:
@@ -262,7 +267,7 @@ ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     "WORKSPACE_REQUIRED_DIRECTORY_MISSING": ConfigError,
     "WORKSPACE_REQUIRED_FILE_MISSING": ConfigError,
     "WORKSPACE_ROOT_MISSING": ConfigError,
-    # The normalized-record contract (CR-2). A record that breaches it is a
+    # The normalized-record contract. A record that breaches it is a
     # statement about a source, not about the workspace.
     "NORMALIZED_CONTRACT_": SourceError,
     "SIDECAR_INVALID": SourceError,
@@ -275,7 +280,7 @@ ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     # Run execution: budgets the run controller enforces, and how a runner ended.
     "BUDGET_": RunError,
     "RUNNER_": RunError,
-    # Per-policy human review (CR-1), recorded against a question.
+    # Per-policy human review, recorded against a question.
     "REVIEWER_INVALID": QuestionError,
     "REVIEW_": QuestionError,
     # Argument-level refusals, raised before any workspace state is consulted.

@@ -57,7 +57,7 @@ from _orchestration_config import (
 )
 from _provider_plugins import registered_ids
 from _provider_registry import ProviderListError, ProviderNotRegisteredError, validate_provider_ids
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _script_errors import emit_error, handle_system_exit, json_mode_requested, remediation_for
 from _workspace_locks import LockUnavailableError, read_lock_holder, workspace_lock
 from _workspace_module_loader import load_workspace_module
 from source_failure_taxonomy import is_attempt_failure_code, is_retryable_attempt_failure_code
@@ -398,6 +398,44 @@ def session_lock_path(project_root: Path, orchestration_id: str) -> Path:
     return session_dir(project_root, orchestration_id) / ".locks" / "session.lock"
 
 
+# Mirrored by ``init_research_workspace.UPGRADE_LOCK_RELATIVE``: the workspace upgrade holds
+# this lock while it replaces managed scripts and metadata, and takes every session lock
+# after it. A driver takes its session lock first and then probes this one, so whichever
+# side the race falls, one of them sees the other and refuses.
+UPGRADE_LOCK_RELATIVE = ".locks/upgrade.lock"
+
+
+def upgrade_lock_path(project_root: Path) -> Path:
+    return project_root.joinpath(*UPGRADE_LOCK_RELATIVE.split("/"))
+
+
+def refuse_if_upgrade_in_progress(project_root: Path, orchestration_id: str) -> None:
+    """Refuse a driver command while a workspace upgrade holds its lock.
+
+    Called with the session lock already held. The probe is a zero-wait acquisition of
+    the upgrade lock that is released immediately; it exists to observe contention, not
+    to hold anything. A workspace that has never been upgraded has no lock file, and the
+    probe creates none: the upgrade creates the file when it begins, and any upgrade that
+    began after this probe enumerates sessions afterwards and finds this one held.
+    """
+    lock_path = upgrade_lock_path(project_root)
+    if not lock_path.is_file():
+        return
+    try:
+        with workspace_lock(lock_path, timeout_seconds=0.0, purpose="upgrade-in-progress probe"):
+            return
+    except LockUnavailableError as error:
+        if not getattr(error, "contended", False):
+            raise
+        raise OrchestrationControllerError(
+            "ORCHESTRATION_UPGRADE_IN_PROGRESS",
+            f"a workspace upgrade is in progress; session {orchestration_id} cannot be driven until it finishes",
+            recoverable=True,
+            remediation=remediation_for("ORCHESTRATION_UPGRADE_IN_PROGRESS"),
+            details={"orchestration_id": orchestration_id, "upgrade_lock": UPGRADE_LOCK_RELATIVE},
+        ) from error
+
+
 #: Identity of the driver currently holding this process's session lock, or
 #: ``None`` outside a ``driver_session_lock`` block.
 #:
@@ -475,7 +513,7 @@ def driver_identity(command: str, agent_id: Any) -> dict[str, Any]:
 def event_driver_block() -> dict[str, Any] | None:
     """Return the audit block naming the driver that appended an event.
 
-    Post-hoc visibility only (CR-8 D14). It records *who wrote this*, so that an
+    Post-hoc visibility only. It records *who wrote this*, so that an
     interleaving that slipped past the per-invocation lock -- two hosts taking
     turns under a long ``--driver-wait-seconds``, say -- is legible afterwards in
     ``events.jsonl`` instead of being reconstructed from timestamps. It is not a
@@ -680,7 +718,7 @@ def driver_session_lock(
 ) -> Iterator[Any]:
     """Hold the session lock for one driver command, refusing a busy session loudly.
 
-    This is the whole of CR-8's behaviour change. The lock itself is unchanged --
+    This is the whole of the driver-busy behaviour change. The lock itself is unchanged --
     same file, same module, same scope -- but losing the race is now an outcome a
     host can act on instead of a ten-second pause followed by an interleaved
     write. ``wait_seconds`` defaults to 0, a single non-blocking attempt; a host
@@ -740,6 +778,7 @@ def driver_session_lock(
                 raise
             raise driver_busy_error(lock_path, orchestration_id) from error
 
+        refuse_if_upgrade_in_progress(project_root, orchestration_id)
         previous = _ACTIVE_DRIVER
         _ACTIVE_DRIVER = published if published is not None else driver_identity(command, agent_id)
         stack.callback(_restore_active_driver, previous)
@@ -6765,7 +6804,7 @@ def delegated_fulfilment_correlation_failures(
     sidecar delivered beside the artifact, which is what makes "the source carries a
     provenance sidecar" checkable rather than merely asserted.
 
-    **CR-4 seam.** When a source request grows a structured ``scope``, ``--match-scope``
+    **Scope seam.** When a source request grows a structured ``scope``, ``--match-scope``
     verification is one added predicate in this function — compare the request's declared
     scope keys against the record's delivery/provenance metadata — with no change to the
     verifier arm that calls it.

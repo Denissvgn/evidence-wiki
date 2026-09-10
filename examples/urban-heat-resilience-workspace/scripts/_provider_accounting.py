@@ -13,8 +13,8 @@ The discipline this module generalizes already exists. ``discover_sources.py``
 has kept a per-run ledger of academic provider calls since the academic
 discovery route landed: ``runs/<run_id>/academic-provider-requests.jsonl``, one
 compact JSON object per line, reserved *before* transport so a crash counts the
-attempt rather than losing it. CR-5 needs the same guarantee for a registered
-provider's declared ``rate_limit``, and a second ledger with its own subtly
+attempt rather than losing it. Registered providers need the same guarantee for a
+declared ``rate_limit``, and a second ledger with its own subtly
 different rules would be the beginning of two budgets that disagree. This module
 is that machinery with the academic vocabulary lifted out: the caller names the
 ledger file, the lock file, and the schema version, so the existing academic
@@ -81,7 +81,7 @@ from _workspace_locks import workspace_lock  # noqa: E402
 
 ACCOUNTING_SCHEMA_VERSION = "1.0"
 
-# Stable machine-readable codes. ACQUISITION_PROVIDER_RATE_LIMITED is the CR-5
+# Stable machine-readable codes. ACQUISITION_PROVIDER_RATE_LIMITED is the registered-provider
 # refusal code and is shared by both ceilings (details["ceiling"] says which
 # one fired); the rest describe damage to, or misuse of, the ledger itself.
 # A calling surface with its own established code for the same condition should

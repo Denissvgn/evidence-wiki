@@ -826,6 +826,11 @@ the reported paths.
 
 After upgrading the package, refresh an existing workspace's managed scripts
 and inspect the retained phase before deciding whether it is safe to resume.
+`upgrade` refuses with `UPGRADE_PENDING_ORDER` while any session holds a
+pending work order or an active driver, so drain orchestration first: submit or
+fail the pending action, or preserve the session for audit and start a fresh one
+afterwards. While an upgrade holds `.locks/upgrade.lock`, `start`, `next`,
+`resume`, and `submit` refuse with `ORCHESTRATION_UPGRADE_IN_PROGRESS`.
 Preview both steps first:
 
 ```bash

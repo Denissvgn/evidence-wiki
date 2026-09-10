@@ -88,7 +88,7 @@ from _workspace_module_loader import load_workspace_module
 class ExportRefusal(ScriptRefusal, SystemExit):
     """A coded export refusal, raised from inside ``build_export``.
 
-    Before CR-6 this file declared no exception at all: ``build_export`` refused
+    Before the library seam this file declared no exception at all: ``build_export`` refused
     by constructing a bare ``SystemExit`` and hanging ``error_code`` and
     ``details`` on it as ad-hoc attributes. Naming the type is the improvement;
     the envelope it produces is unchanged.

@@ -147,7 +147,7 @@ WEB_DEFAULT_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 WEB_TIMEOUT_SECONDS = 30.0
 WEB_RETRIEVED_BY = "fetch_sources.py/web"
 WEB_TRANSPORT = None
-# --- Registered third-party acquisition (CR-5 T5) -----------------------------
+# --- Registered third-party acquisition ---------------------------------------
 # A registered provider plans requests and interprets responses; this script fetches,
 # bounds, and writes. Registered ids deliberately stay out of PROVIDER_REGISTRY and
 # ACQUISITION_PROVIDER_IDS: the built-in allow-lists are a closed set by design, and a
@@ -3552,7 +3552,7 @@ def run_web_command(project_root: Path, context: dict[str, Any], args: argparse.
     )
 
 
-# --- Registered provider acquisition (CR-5 T5) --------------------------------
+# --- Registered provider acquisition ------------------------------------------
 #
 # The plugin is a request planner and a response interpreter; it never opens a socket and
 # never touches the workspace. This section is the whole of what the package does on its

@@ -382,7 +382,7 @@ def _capability_summary(capabilities: Any) -> tuple[CapabilitySummary | None, li
         errors.append("capabilities.request_kinds entries must be non-empty ids without surrounding whitespace")
     else:
         # Checked like allowed_domains and credentials above. The field is recorded rather
-        # than routed in v1, but it is the declared seam for CR-4 kind routing, where a
+        # than routed in v1, but it is the declared seam for request-kind routing, where a
         # repeated id stops being cosmetic and becomes an ambiguity to resolve.
         duplicate_kinds = _duplicates(request_kinds)
         if duplicate_kinds:
