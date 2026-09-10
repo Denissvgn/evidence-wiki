@@ -820,7 +820,9 @@ def build_question_record(
     return record
 
 
-def build_export(project_root: Path, status_filter: list[str] | None) -> dict[str, Any]:
+def build_export(
+    project_root: Path, status_filter: list[str] | None, *, question_slugs: frozenset[str] | None = None,
+) -> dict[str, Any]:
     project_root = Path(project_root).expanduser().resolve()
     config = load_config(project_root)
     question_status = load_sibling_module("question_status")
@@ -835,6 +837,8 @@ def build_export(project_root: Path, status_filter: list[str] | None) -> dict[st
     records: list[dict[str, Any]] = []
     if questions_dir.is_dir():
         for path in sorted(questions_dir.glob("*.md")):
+            if question_slugs is not None and path.stem not in question_slugs:
+                continue
             frontmatter = question_status.load_frontmatter(path)
             if frontmatter is None or frontmatter.get("type") != "question":
                 continue

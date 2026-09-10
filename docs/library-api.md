@@ -60,7 +60,7 @@ importantly, what it does not.
 
 ## The Surface
 
-Twenty-six operations. Most hang off an open handle, in namespaces; the
+Twenty-seven operations. Most hang off an open handle, in namespaces; the
 exceptions are `Workspace.open` itself and the two module-level functions that
 belong to no single workspace.
 
@@ -73,6 +73,7 @@ belong to no single workspace.
 | `workspace.versions` | `ws.versions() -> dict` |
 | `workspace.status` | `ws.status(*, no_cache=False, run_id=None, **counters) -> dict` |
 | `workspace.export_answers` | `ws.export_answers(status: list[str] \| None = None) -> dict` |
+| `workspace.publish_selected` | `ws.publish_selected(question_slugs: list[str], *, expected_revision=None) -> dict` |
 | `workspace.doctor` | `ws.doctor() -> dict` |
 
 `ws.status()` takes nine optional counter keywords — `questions_processed_this_run`,
@@ -168,7 +169,7 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "1"
+assert library_api["version"] == "2"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -176,15 +177,75 @@ assert "coverage.evaluate" in library_api["surface"]
 compatibility signal. The list is a *declaration*, deliberately not introspected
 from live objects — walking the classes at call time would make the published
 contract depend on import order and would silently widen or narrow the API every
-time an internal helper was renamed. A change that a version `"1"` caller cannot
-absorb bumps `version` rather than editing the list in place, so a host that
-understands `"1"` knows exactly which names the list may contain.
+time an internal helper was renamed. The version advances when the declared surface changes. Version `"2"` adds
+selected publication and a versioned operation matrix; callers that only understand
+version `"1"` must negotiate before using the expanded contract.
 
 One public method is intentionally absent from that list:
 `ws.orchestrate.session(orchestration_id)` returns a driver for an existing
 session without touching it (naming a session is not reading one), so a host that
 restarts can reconstruct its drivers without a controller spawn per session. It
-is not a declared v1 operation; the four operations it gives access to are.
+is a handle constructor; the four protocol operations are declared separately.
+
+## Operation Boundaries
+
+`contract()["library_api"]` includes `matrix_version`, `operations`, `cli_only`,
+and `timeout_policy`. Every supported operation has a CLI entry point (or an
+explicit lack of an equivalent), mutation effects, locking behavior, and a
+subprocess boundary. The independently versioned matrix is caller-owned JSON.
+Hosts should check the declared surface at startup and retain an outer timeout.
+Orchestration still launches one version-matched controller process per call;
+`doctor` may probe external tools with individual timeouts.
+
+Lifecycle, full normalization, source inventory and request mutation, coverage
+editing, lint, and workspace-wide publication bundles remain CLI-only. The
+matrix names their supported entry points. Package API use alone does not
+establish that an operation has no subprocesses or writes.
+
+## Selected Publication
+
+```python
+report = ws.publish_selected(["battery-lifetime", "charging-safety"])
+if report["verdict"] == "ship":
+    answers = report["export"]["questions"]
+# Optionally refuse if the workspace differs from this exact captured input:
+again = ws.publish_selected(report["question_slugs"],
+                            expected_revision=report["revision"]["revision_id"])
+```
+
+The CLI uses the same operation:
+
+```bash
+evidence-wiki publication --target /path/to/workspace --question battery-lifetime --question charging-safety
+```
+
+Selections must contain 1–1,000 portable question slugs. Duplicates collapse to a
+sorted set; empty, malformed, and unknown selections refuse. The response binds
+readiness and exported answers to one content identity and a separate trusted
+producer identity. Question lifecycle, review, grounding, citations, and coverage
+are evaluated for the selected questions. Source/configuration integrity, active
+source normalization, request and candidate integrity, claims/contradictions,
+licensing, curation, secrets, and retained output checks remain global. An
+unrelated pending question review is excluded; an unrelated source defect can
+block the selected result. Read `gate_scope` and consume the returned verdict.
+
+The operation captures all workspace files except declared runtime caches and
+Git metadata, evaluates a private read-only materialization, then revalidates
+live bytes. It executes trusted installed scripts. Captured scripts are data.
+Known secret patterns are checked before materialization; this heuristic is not
+permission to export sensitive data. Configured paths must stay within the
+workspace. Three bounded evaluation attempts end in a typed refusal if inputs or
+the producer keep changing. Timestamps and inode values do not enter content
+identity. Identity establishes bytes, not authenticity, historical availability,
+or training rights.
+
+Capture is limited to 10,000 files, 20,000 directory entries, 256 MiB total,
+16 MiB per file, and depth 64. Symlinks, hardlinks, special files, and nonportable
+paths refuse. Platforms lacking no-follow descriptor operations, including
+Windows, return `EVIDENCE_REVISION_UNSUPPORTED`. The live workspace is unchanged;
+CLI `--output` must name a destination outside it. Exit 0 means `ship`, exit 1
+means another research verdict, and exit 2 means refusal. The unscoped operation
+and its bundle behavior retain their existing contract.
 
 ## Errors
 
@@ -200,7 +261,7 @@ carries the whole error envelope:
 | `details` | Structured context, possibly empty. |
 | `exit_code` | The status the CLI would have exited with: `2` for a fatal caller-fixable error, `3` for a conflict, `6` for `ORCHESTRATION_DRIVER_BUSY`. Envelopes carry no status, so it is reconstructed from `error_code`; a code whose script exits with something other than `2` must be registered in `errors._EXIT_CODE_OVERRIDES` for the two doors to agree. Dispatch on `error_code` when you need a specific condition — this attribute groups several. |
 
-Thirteen families sit under the base class. The family is selected from the code
+Error families sit under the base class. The family is selected from the code
 by prefix, with exact codes winning over prefixes and longer prefixes over
 shorter ones — which is how `QUESTION_NOT_CLAIMED` lands in `ClaimError` while
 `QUESTION_REOPEN_DELEGATED` lands in `RequestError`:
@@ -211,6 +272,8 @@ shorter ones — which is how `QUESTION_NOT_CLAIMED` lands in `ClaimError` while
 | `LockError` | `LOCK_UNAVAILABLE` — no workspace lock backend could be established, or a workspace lock stayed held past a call's bounded wait. A contended *orchestration session* lock is not this: it is `OrchestrationError` / `ORCHESTRATION_DRIVER_BUSY`. |
 | `ClaimError` | A claim could not be taken, stolen, released, or resolved: `CLAIM_*`, `STEAL_*`, `STATUS_NOT_*`, `QUESTION_NOT_CLAIMED`. |
 | `QuestionError` | A question, slug, or answer page is unusable: `QUESTION_*`, `SLUG_*`, `ANSWER_*`, `PAGE_INVALID`, `RESOLUTION_REASON_INVALID`. |
+| `PublicationError` | Selected publication selection, configuration, safety, or output refusal: `PUBLICATION_*`. |
+| `RevisionError` | Bounded capture, unsafe paths, unsupported platform, or concurrent changes: `EVIDENCE_REVISION_*`. |
 | `CoverageError` | `COVERAGE_*`, `FACET_SCOPE_CONFLICT`. |
 | `GroundingError` | `GROUNDING_*` — a claim is not grounded in a verifiable quote from an accepted source. |
 | `RequestError` | Source requests: `REQUEST_*`, `SOURCE_REQUEST_FULFILL_DELEGATED`, `QUESTION_REOPEN_DELEGATED`, `ATTEMPT_FAILURE_CODE_INVALID`. |
@@ -271,39 +334,23 @@ maintained. Each operation has exactly one implementation — a `run_<op>(...) -
 dict` seam in the workspace script — and both front ends render from it: the CLI
 prints the returned document or the raised refusal's envelope, the API returns
 the document or raises the typed exception built from that same envelope.
-`tests/test_seam_conformance.py` runs the CLI as a real subprocess against the
-seam over identical inputs and requires them to agree on the success document, on
-the refusal envelope, and on the exit code, for every enrolled script. A change
-to one path cannot quietly move only one of them.
+Both interfaces preserve the owning operation’s document, refusal code, and
+exit status. Presentation choices such as JSON indentation and output files belong
+to the CLI.
 
 ## Thread Safety
 
-**Concurrent API calls are as safe as concurrent CLI processes, and no safer.**
-That is the guarantee, and it is the reason to adopt the API at all: the
-filesystem arbitrates, exactly as it does between processes.
+The operation matrix declares each operation's filesystem effects and locking.
+Per-question claims and controller sessions use their owning locks. Coverage
+rewrites and question intake have no transaction lock; hosts must serialize
+writers to those surfaces. Atomic cache replacement protects individual cache
+files, without making a sequence of workspace reads a transaction.
 
-- **Contention surfaces as a typed refusal, never as corruption.** Two writers
-  racing for the same claim produce one winner and one `ClaimError` /
-  `CLAIM_HELD` (`recoverable=False`, `exit_code=3`), or a `LockError` /
-  `LOCK_UNAVAILABLE` if the workspace write lock itself was contended. Both
-  outcomes are correct; what never happens is two writers both believing they
-  hold the claim.
-- **The API introduces no process-global mutation.** In particular it **never
-  redirects `sys.stdout`**, not on the success path and not on the refusal path
-  where the CLI renders an envelope. That is what makes it usable from a
-  multithreaded server: a host that captured its own stdout concurrently would
-  have had its capture swapped out from under it, and putting the original back
-  afterwards would not help. `tests/test_library_concurrency.py` asserts this by
-  object *identity*, which is the only assertion that notices.
-- **Two threads through one handle each get a whole answer.** Not two halves of
-  one, and not one shared `dict` handed to every caller — results are distinct
-  objects, so a host that mutates its own result cannot corrupt another
-  request's.
-- **A cold start under contention is safe.** Loading a packaged workspace script
-  briefly mutates `sys.path` and `sys.modules`; one process-wide reentrant lock
-  covers every such load, including the lazy sibling loads a script performs
-  *while a seam is running*. The lock is a load-time lock only — a warm operation
-  takes no loads at all, so concurrent operations stay concurrent.
+The API never redirects `sys.stdout`. Script loading temporarily changes
+`sys.path` and `sys.modules` under a process-wide reentrant lock and restores
+those bindings. Sibling loading uses the same lock. Returned documents are
+separate caller-owned objects. Selected publication instead captures and
+revalidates bytes, retrying or refusing when the workspace changes.
 
 What remains the host's job:
 

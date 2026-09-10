@@ -206,6 +206,21 @@ class Workspace:
         """
         return call_seam(self._script, "export_answers", "run_export", self._root, status=status)
 
+    def publish_selected(
+        self, question_slugs: list[str], *, expected_revision: str | None = None,
+    ) -> dict[str, Any]:
+        """Return selected-question readiness and answers from one coherent revision.
+
+        Duplicates collapse to a sorted set. Empty or unknown selections refuse.
+        Source/configuration integrity stays global; question review and coverage
+        are scoped. Concurrent edits retry at most three times, then raise a typed
+        refusal. This call creates no files in the live workspace.
+        """
+        return call_seam(
+            self._script, "publication_readiness", "run_selected_publication", self._root,
+            question_slugs, expected_revision=expected_revision,
+        )
+
     def doctor(self) -> dict[str, Any]:
         """Diagnose this workspace's runtime, tooling, and configuration.
 

@@ -3785,7 +3785,9 @@ def generate_recommendations(results: dict[str, Any]) -> None:
     results["recommendations"] = recommendations
 
 
-def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
+def run_checks(
+    project_root: Path, config: dict[str, Any], *, question_paths: frozenset[Path] | None = None,
+) -> dict[str, Any]:
     workspace_health = evaluate_workspace_health(project_root)
     raw_config = config_mapping(config, "raw")
     sources_config = config_mapping(config, "sources")
@@ -3979,7 +3981,8 @@ def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if lint_config.get("validate_claims", True):
         check_claims(project_root, wiki_root, wiki_files, results)
     if lint_config.get("validate_questions", True):
-        check_questions(project_root, wiki_files, claim_staleness_window_hours(config), results, config)
+        selected_files = wiki_files if question_paths is None else [path for path in wiki_files if path in question_paths]
+        check_questions(project_root, selected_files, claim_staleness_window_hours(config), results, config)
     levels = severity_order(config)
     results["stats"]["issue_counts"] = issue_counts(results, levels)
     generate_recommendations(results)

@@ -25,12 +25,13 @@ from types import ModuleType
 from typing import Any
 
 from . import __version__
+from ._operations import operation_matrix
 from ._script_host import load_packaged_script, shared_assets_root
 from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "1"
+LIBRARY_API_VERSION = "2"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -58,6 +59,7 @@ LIBRARY_API_SURFACE = (
     "workspace.versions",
     "workspace.status",
     "workspace.export_answers",
+    "workspace.publish_selected",
     "workspace.doctor",
     "coverage.evaluate",
     "grounding.verify",
@@ -325,6 +327,7 @@ def contract() -> dict:
             "canonical_instruction_file": "AGENTS.md",
         },
         "library_api": {
+            **operation_matrix(),
             "version": LIBRARY_API_VERSION,
             "surface": list(LIBRARY_API_SURFACE),
         },
@@ -356,6 +359,8 @@ def contract() -> dict:
             "run_report": run_report_module.SCHEMA_VERSION,
             "coverage_manifest": coverage_manifest_module.SCHEMA_VERSION,
             "publication_readiness": publication_readiness_module.SCHEMA_VERSION,
+            "selected_publication": "evidence-selected-publication/v1",
+            "workspace_revision": "evidence-workspace-revision/v1",
             "fleet_status": fleet_status_module.SCHEMA_VERSION,
             "error_envelope": script_errors_module.SCHEMA_VERSION,
         },

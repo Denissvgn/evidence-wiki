@@ -10,6 +10,16 @@ from typing import Any
 SCHEMA_VERSION = "1.0"
 
 _REMEDIATIONS = {
+    'EVIDENCE_REVISION_INVALID': "Correct the selected scope or workspace input before retrying publication.",
+    'EVIDENCE_REVISION_LIMIT': "Correct the selected scope or workspace input before retrying publication.",
+    'EVIDENCE_REVISION_UNSAFE': "Correct the selected scope or workspace input before retrying publication.",
+    'EVIDENCE_REVISION_UNSUPPORTED': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_SELECTION_INVALID': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_QUESTION_UNKNOWN': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_CONFIG_INVALID': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_SAFETY_REFUSED': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_OUTPUT_INVALID': "Correct the selected scope or workspace input before retrying publication.",
+    "EVIDENCE_REVISION_CHANGED": "Retry after workspace writers finish, using the current revision.",
     "DEPENDENCY_MISSING": "Install the missing runtime dependency and rerun the command.",
     "CONFIG_MISSING": "Run from an initialized workspace or pass --project-root to one.",
     "CONFIG_INVALID": "Fix research.yml so it is valid YAML and matches the workspace contract.",
@@ -775,6 +785,16 @@ NON_RECOVERABLE_CODES = frozenset(
         "ORCHESTRATION_STATE_INVALID",
         "PROVIDER_REGISTRATION_INVALID",
         "WORKSPACE_UNREADABLE",
+        'EVIDENCE_REVISION_INVALID',
+        'EVIDENCE_REVISION_LIMIT',
+        'EVIDENCE_REVISION_UNSAFE',
+        'EVIDENCE_REVISION_UNSUPPORTED',
+        'PUBLICATION_SELECTION_INVALID',
+        'PUBLICATION_QUESTION_UNKNOWN',
+        'PUBLICATION_CONFIG_INVALID',
+        'PUBLICATION_SAFETY_REFUSED',
+        'PUBLICATION_OUTPUT_INVALID',
+
     }
 )
 

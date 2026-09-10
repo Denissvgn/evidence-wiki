@@ -136,15 +136,15 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
         cls.block = evidence_wiki.contract()["library_api"]
 
     def test_the_block_is_version_gated_rather_than_introspected(self):
-        self.assertEqual({"version", "surface"}, set(self.block))
-        self.assertEqual("1", self.block["version"])
+        self.assertEqual({"version", "surface", "matrix_version", "operations", "cli_only", "timeout_policy"}, set(self.block))
+        self.assertEqual("2", self.block["version"])
         self.assertEqual(contract_module.LIBRARY_API_VERSION, self.block["version"])
         # A JSON payload cannot carry the declaration tuple, so the surface has to
         # arrive as a list on both sides of the CLI boundary.
         self.assertIsInstance(self.block["surface"], list)
         self.assertEqual(list(contract_module.LIBRARY_API_SURFACE), self.block["surface"])
 
-    def test_the_surface_names_every_v1_operation_exactly_once(self):
+    def test_the_surface_names_every_declared_operation_exactly_once(self):
         surface = self.block["surface"]
         self.assertEqual(sorted(set(surface)), sorted(surface))
         for name in surface:
@@ -159,6 +159,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "workspace.versions",
             "workspace.status",
             "workspace.export_answers",
+            "workspace.publish_selected",
             "workspace.doctor",
             "coverage.evaluate",
             "grounding.verify",
@@ -195,6 +196,32 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
         self.assertIn("library_api", payload)
         self.assertIn("orchestration_capabilities", payload)
         self.assertIn("artifact_schemas", payload)
+
+    def test_every_declared_operation_resolves_and_has_one_boundary(self):
+        from evidence_wiki import Workspace, _facades
+
+        owners = {
+            "workspace": Workspace, "coverage": _facades.CoverageNamespace,
+            "grounding": _facades.GroundingNamespace, "normalize": _facades.NormalizeNamespace,
+            "questions": _facades.QuestionsNamespace, "orchestrate": _facades.OrchestrateNamespace,
+            "orchestrate.session": _facades.OrchestrationSession,
+        }
+        boundaries = self.block["operations"]
+        self.assertEqual(len(self.block["surface"]), len(boundaries))
+        self.assertEqual(set(self.block["surface"]), {row["operation"] for row in boundaries})
+        self.assertFalse(set(self.block["surface"]) & {row["operation"] for row in self.block["cli_only"]})
+        for row in boundaries:
+            name = row["operation"]
+            with self.subTest(operation=name):
+                owner, _, attribute = name.rpartition(".")
+                self.assertTrue(callable(getattr(owners.get(owner, evidence_wiki), attribute)))
+                for field in ("mutation", "locking", "subprocess"):
+                    self.assertTrue(row[field])
+
+    def test_operation_boundaries_are_caller_owned(self):
+        first = evidence_wiki.contract()
+        first["library_api"]["operations"][0]["mutation"] = "changed by caller"
+        self.assertNotEqual("changed by caller", evidence_wiki.contract()["library_api"]["operations"][0]["mutation"])
 
 
 class PackPolicyRulesTests(unittest.TestCase):

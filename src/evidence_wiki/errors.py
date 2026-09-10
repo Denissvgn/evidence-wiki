@@ -61,6 +61,16 @@ _NON_RECOVERABLE_CODES = frozenset(
         "ORCHESTRATION_STATE_INVALID",
         "PROVIDER_REGISTRATION_INVALID",
         "WORKSPACE_UNREADABLE",
+        'EVIDENCE_REVISION_INVALID',
+        'EVIDENCE_REVISION_LIMIT',
+        'EVIDENCE_REVISION_UNSAFE',
+        'EVIDENCE_REVISION_UNSUPPORTED',
+        'PUBLICATION_SELECTION_INVALID',
+        'PUBLICATION_QUESTION_UNKNOWN',
+        'PUBLICATION_CONFIG_INVALID',
+        'PUBLICATION_SAFETY_REFUSED',
+        'PUBLICATION_OUTPUT_INVALID',
+
     }
 )
 
@@ -177,7 +187,17 @@ class UsageError(EvidenceWikiError):
 # longer prefix wins over a shorter one, so the handful of codes that share a
 # prefix with a different family (``QUESTION_NOT_CLAIMED`` is a claim failure,
 # ``QUESTION_REOPEN_DELEGATED`` is a request handoff) land where they belong.
+class PublicationError(EvidenceWikiError):
+    """Selected evidence cannot be published under the requested scope."""
+
+
+class RevisionError(EvidenceWikiError):
+    """A coherent workspace revision cannot be captured or matched."""
+
+
 ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
+    "PUBLICATION_": PublicationError,
+    "EVIDENCE_REVISION_": RevisionError,
     # Workspace / runtime preconditions.
     "CONFIG_": ConfigError,
     "WORKSPACE_UNREADABLE": ConfigError,

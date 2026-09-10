@@ -113,6 +113,7 @@ REQUIRED_SDIST_MEMBERS = (
     "src/evidence_wiki/__init__.py",
     "tools/smoke_installed_orchestration.py",
     "tools/validate_installed_artifacts.py",
+    "tests/_publication_fixture.py",
     "tests/fixtures/fake_codex_cli.py",
     "tests/fixtures/madrid-autonomo-workspace/AGENTS.md",
     "examples/urban-heat-resilience-workspace/AGENTS.md",
@@ -318,6 +319,74 @@ INSTALLED_PROBE = textwrap.dedent(
 )
 
 
+PUBLICATION_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    import yaml
+    import evidence_wiki
+    from evidence_wiki import Workspace
+    from evidence_wiki.errors import PublicationError, RevisionError
+
+    cli, fixture_path, profile_path, target = map(Path, sys.argv[1:])
+    assert Path(evidence_wiki.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+    spec = importlib.util.spec_from_file_location("publication_fixture", fixture_path)
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    profile = yaml.safe_load(profile_path.read_text())
+    profile["workspace_init"]["target_path"] = str(target)
+    profile["workspace_init"]["questions"] = [{"id": "vendor-product-spec", "question": "What is the product spec?", "priority": "high"}]
+    local_profile = target.parent / "publication-profile.yml"
+    local_profile.write_text(yaml.safe_dump(profile))
+    subprocess.run([str(cli), "init", "--profile", str(local_profile)], check=True, capture_output=True, text=True, timeout=60)
+    fixture.write_ship_ready_vendor_fixture(target)
+    question = target / "wiki/questions/vendor-product-spec.md"
+    (question.parent / "awaiting-review.md").write_text(question.read_text().replace("status: answered", "status: human_review"))
+    def contents():
+        return {str(p.relative_to(target)): p.read_bytes() for p in target.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
+    before = contents()
+    command = [str(cli), "publication", "--target", str(target), "--format", "json", "--question"]
+    with Workspace.open(target) as workspace:
+        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            try:
+                workspace.publish_selected(["vendor-product-spec"])
+            except RevisionError as error:
+                assert error.error_code == "EVIDENCE_REVISION_UNSUPPORTED"
+            else:
+                raise AssertionError("unsupported capture was accepted")
+            result = subprocess.run([*command, "vendor-product-spec"], capture_output=True, text=True, timeout=60)
+            assert result.returncode == 2 and json.loads(result.stderr)["error_code"] == "EVIDENCE_REVISION_UNSUPPORTED"
+            outcome = "unsupported-refusal-verified"
+        else:
+            document = workspace.publish_selected(["vendor-product-spec"])
+            result = subprocess.run([*command, "vendor-product-spec"], capture_output=True, text=True, timeout=60)
+            assert result.returncode == 0, result.stderr + result.stdout
+            rendered = json.loads(result.stdout)
+            assert document["verdict"] == "ship"
+            for key in ("revision", "producer_id", "gate_scope", "question_slugs", "verdict"):
+                assert document[key] == rendered[key], key
+            assert document["export"]["questions"] == rendered["export"]["questions"]
+            try:
+                workspace.publish_selected(["absent"])
+            except PublicationError as error:
+                refusal = {key: getattr(error, key) for key in ("error_code", "message", "details", "recoverable", "remediation")}
+            else:
+                raise AssertionError("unknown question was accepted")
+            result = subprocess.run([*command, "absent"], capture_output=True, text=True, timeout=60)
+            rendered_refusal = json.loads(result.stderr)
+            assert result.returncode == 2
+            assert all(rendered_refusal.get(key, {}) == value for key, value in refusal.items())
+            outcome = "passed"
+    assert before == contents(), "publication changed the live workspace"
+    print(json.dumps({"selected_publication": outcome}))
+    '''
+)
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -377,7 +446,13 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     )
     probe_result = json.loads(probe.strip().splitlines()[-1])
     run([str(python), str(SMOKE_TOOL), "--cli", str(cli)], cwd=outside)
-    return {"label": label, **probe_result, "managed_smoke": "passed"}
+    publication = run([
+        str(python), "-c", PUBLICATION_PROBE, str(cli),
+        str(REPO_ROOT / "tests/_publication_fixture.py"),
+        str(REPO_ROOT / "tests/fixtures/workspace-init-profile.yml"),
+        str(scratch / "publication-workspace"),
+    ], cwd=outside)
+    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

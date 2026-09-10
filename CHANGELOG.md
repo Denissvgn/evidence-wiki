@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Publish selected questions from one captured workspace revision.**
+  `Workspace.publish_selected` and `evidence-wiki publication --question SLUG`
+  return scoped readiness and answers with a content identity, explicit global
+  gates, and bounded retry or refusal when evidence changes. Unrelated pending
+  question reviews do not block the selection; source and configuration defects
+  remain global. The operation preserves live workspace files. Library API
+  contract version 2 also declares each operation's CLI, write, lock, and
+  subprocess boundaries.
+
 - **Acquisition progress now survives partial deliveries across orders.** Provider and
   delegated acquisition retain fulfilled requests while other blockers remain. A
   question reopens only after every blocker is fulfilled, with earlier evidence

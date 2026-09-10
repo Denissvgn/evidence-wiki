@@ -456,6 +456,26 @@ def _run_questions_add(forwarded: list[str]) -> int:
     return int(script.EXIT_OK)
 
 
+def _run_publication(args: list[str]) -> int:
+    script = _packaged_script("publication_readiness")
+    forwarded = _forward_target(args, prog="evidence-wiki publication")
+    parsed = script.parse_args(forwarded)
+    if parsed.question is None or parsed.command or parsed.citation_verification:
+        return int(script.main(forwarded))
+    if parsed.output and Path(parsed.output).expanduser().resolve().is_relative_to(Path(parsed.project_root).expanduser().resolve()):
+        return int(script.main(forwarded))
+    try:
+        document = _handle(parsed.project_root).publish_selected(parsed.question, expected_revision=parsed.expected_revision)
+    except EvidenceWikiError as exc:
+        return _refuse(exc, json_mode=True)
+    rendered = script.render(document)
+    if parsed.output:
+        Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
+    else:
+        sys.stdout.write(rendered)
+    return int(script.EXIT_READY if document["verdict"] == script.VERDICT_SHIP else script.EXIT_NOT_READY)
+
+
 def _run_questions_export(forwarded: list[str]) -> int:
     script = _packaged_script("export_answers")
     parsed = script.parse_args(forwarded)
@@ -607,6 +627,7 @@ def _print_help() -> None:
         "  evidence-wiki questions add|export [--target PATH] [options]\n"
         "  evidence-wiki status [--target PATH] [--format text|json]\n"
         "  evidence-wiki export [--target PATH] [--format json]\n"
+        "  evidence-wiki publication [--target PATH] --question SLUG [--question SLUG ...]\n"
         "  evidence-wiki normalize verify [--target PATH] [--source-id ID] [--format json|text]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
         "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [options]\n"
@@ -697,6 +718,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_fleet_status(args)
     if command == "status":
         return _run_status(args)
+    if command == "publication":
+        return _run_publication(args)
     if command == "export":
         return _run_export(args)
     if command == "serve-mcp":
