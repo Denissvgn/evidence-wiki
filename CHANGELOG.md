@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Execution evidence preserves observations, hypotheses, and evaluator receipts.**
+  The `execution_evidence/v1` profile validates a bounded closure of original
+  inputs, outputs, logs, environment, and verification scope. Failed and
+  inconclusive outcomes remain explicit. The `independent_execution_pass`
+  coverage policy requires a complete passing receipt bound to the selected
+  observation and authenticated by a separately controlled evaluator through
+  the host's external trust policy. Library API contract version 4 adds
+  `Workspace.normalize.validate_execution` and a matching CLI operation.
+
 - **Qualified codebase packets retain their original qualifications.** Opt in to
   `qualified_context_packet/v1` to check bounded delivery bytes and the pinned
   producer's native packet contract offline. Normalization, verification, lint,

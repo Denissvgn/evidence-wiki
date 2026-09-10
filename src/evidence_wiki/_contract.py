@@ -31,7 +31,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "3"
+LIBRARY_API_VERSION = "4"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -66,6 +66,7 @@ LIBRARY_API_SURFACE = (
     "normalize.verify",
     "normalize.profiles",
     "normalize.validate_packet",
+    "normalize.validate_execution",
     "questions.claim",
     "questions.release",
     "questions.answer",
@@ -365,6 +366,8 @@ def contract() -> dict:
             "publication_readiness": publication_readiness_module.SCHEMA_VERSION,
             "selected_publication": "evidence-selected-publication/v1",
             "workspace_revision": "evidence-workspace-revision/v1",
+            "execution_evidence": "execution-evidence/v1",
+            "evidence_authentication": "evidence-authentication/v1",
             "fleet_status": fleet_status_module.SCHEMA_VERSION,
             "error_envelope": script_errors_module.SCHEMA_VERSION,
         },

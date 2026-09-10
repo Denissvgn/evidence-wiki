@@ -468,6 +468,54 @@ PACKET_PROBE = textwrap.dedent(
 )
 
 
+EXECUTION_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    from evidence_wiki import Workspace, contract
+
+    cli, fixture, root = map(Path, sys.argv[1:])
+    spec = importlib.util.spec_from_file_location("laboratory_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    authority = root.parent / "laboratory-authority.json"
+    data.host_policy(authority)
+    os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"] = str(authority.resolve())
+    _config, record, folder = data.workspace(root)
+    with Workspace.open(root) as workspace:
+        report = workspace.normalize.validate_execution(record["id"])
+        checked = subprocess.run([str(cli), "normalize", "execution", "--target", str(root), "--source-id", record["id"]],
+                                 capture_output=True, text=True, timeout=60)
+        cli_report = json.loads(checked.stdout)
+        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            assert not report["valid"] and checked.returncode == 1, report
+            calculation = "unsupported_capture_refused"
+        else:
+            assert report["valid"] and report["verification"]["eligible"], report
+            assert cli_report["valid"] and cli_report["verification"]["eligible"] and checked.returncode == 0, cli_report
+            assert [item["outcome"] for item in report["records"]] == ["failed", "inconclusive", "passed"]
+            files = {path.name: path.read_bytes() for path in folder.iterdir()}
+            for observation in report["records"]:
+                if observation["record_type"] == "observation":
+                    assert data.independently_recalculate(files, observation["payload"])[2] == observation["outcome"]
+            policy = json.loads(authority.read_bytes())
+            policy["revoked_keys"] = ["evaluator-key"]
+            authority.write_bytes(data.canonical(policy))
+            revoked = workspace.normalize.validate_execution(record["id"])
+            assert revoked["valid"] and not revoked["verification"]["eligible"]
+            (folder / "result.txt").write_bytes(b"changed original bytes")
+            assert not workspace.normalize.validate_execution(record["id"])["valid"]
+            calculation = "independently_recalculated"
+        assert "normalize.validate_execution" in contract()["library_api"]["surface"]
+    print(json.dumps({"execution_evidence": "validated", "calculation": calculation}))
+    '''
+)
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -538,7 +586,11 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(REPO_ROOT / "tests/fixtures/codebase-intake/native-packets"),
         str(scratch / "packet-workspace"),
     ], cwd=outside)
-    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication), **json.loads(packets)}
+    execution = run([
+        str(python), "-c", EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_execution_fixture.py"),
+        str(scratch / "execution-workspace"),
+    ], cwd=outside)
+    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication), **json.loads(packets), **json.loads(execution)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

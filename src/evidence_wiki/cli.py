@@ -550,17 +550,19 @@ def _run_normalize_packet_operation(operation: str, forwarded: list[str]) -> int
     parsed = script.parse_args([operation, *forwarded])
     try:
         namespace = _handle(Path(parsed.project_root).expanduser().resolve()).normalize
-        report = namespace.profiles() if operation == "profiles" else namespace.validate_packet(parsed.source_id)
+        operation_function = {"packet": namespace.validate_packet, "execution": namespace.validate_execution}
+        report = namespace.profiles() if operation == "profiles" else operation_function[operation](parsed.source_id)
     except EvidenceWikiError as exc:
         return _refuse(exc, json_mode=True)
     print(json.dumps(report, indent=2, sort_keys=True))
-    return int(operation == "packet" and (not report["valid"] or not report.get("policy_satisfied")))
+    return int(operation != "profiles" and (not report["valid"] or operation == "packet" and not report.get("policy_satisfied")))
 
 
 _NORMALIZE_SHELLS = {
     "verify": _run_normalize_verify,
     "profiles": lambda forwarded: _run_normalize_packet_operation("profiles", forwarded),
     "packet": lambda forwarded: _run_normalize_packet_operation("packet", forwarded),
+    "execution": lambda forwarded: _run_normalize_packet_operation("execution", forwarded),
 }
 
 
@@ -570,7 +572,8 @@ def _print_normalize_help() -> None:
         "Usage:\n"
         "  evidence-wiki normalize verify [--target PATH] [--source-id ID ...] [--format json|text]\n\n"
         "  evidence-wiki normalize profiles [--target PATH]\n"
-        "  evidence-wiki normalize packet [--target PATH] --source-id ID\n\n"
+        "  evidence-wiki normalize packet [--target PATH] --source-id ID\n"
+        "  evidence-wiki normalize execution [--target PATH] --source-id ID\n\n"
         "`verify` checks normalized records against the published record contract\n"
         "(docs/normalized-source-format.md) and reports each breach with a stable\n"
         "code. Records written by an external normalizer are checked exactly as\n"

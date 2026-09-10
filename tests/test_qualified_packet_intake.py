@@ -260,8 +260,10 @@ def test_api_cli_are_read_only_and_share_the_same_report(tmp_path):
     with Workspace.open(tmp_path) as workspace:
         expected = workspace.normalize.validate_packet(SOURCE_ID)
         assert expected == INTAKE.inspect_packet(tmp_path, config, record)
-        assert workspace.normalize.profiles() == INTAKE.profiles()
-        for command, report in [("profiles", INTAKE.profiles()), ("packet", expected)]:
+        profiles = workspace.normalize.profiles()
+        assert {**profiles, "profiles": profiles["profiles"][:-1]} == INTAKE.profiles()
+        assert profiles["profiles"][-1]["name"] == "execution_evidence/v1"
+        for command, report in [("profiles", profiles), ("packet", expected)]:
             args = ["normalize", command, "--target", str(tmp_path)]
             if command == "packet":
                 args += ["--source-id", SOURCE_ID]
@@ -274,5 +276,5 @@ def test_api_cli_are_read_only_and_share_the_same_report(tmp_path):
     with pytest.raises(ConfigError):
         workspace.normalize.validate_packet(SOURCE_ID)
     assert before == {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
-    assert contract()["intake_profiles"] == INTAKE.profiles()
+    assert contract()["intake_profiles"] == profiles
     assert "NORMALIZED_CONTRACT_QUALIFIED_PACKET_INVALID" in contract()["normalized_source_format"]["violation_codes"]

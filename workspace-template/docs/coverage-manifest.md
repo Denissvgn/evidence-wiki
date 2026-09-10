@@ -73,6 +73,7 @@ Equivalent contract metadata appears in `evidence-wiki contract`:
       "academic_indexed",
       "canonical_repository",
       "domain_pack_allowed",
+      "independent_execution_pass",
       "manual_review_required",
       "official_primary",
       "official_standards_registry",

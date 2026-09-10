@@ -1250,6 +1250,7 @@ def check_normalized_record_contract(
             low_coverage_records += 1
         if not _normalized_contract.declares_foreign_normalizer(frontmatter):
             violations = _normalized_contract.check_qualified_packet(project_root, config or {}, manifest_by_id, frontmatter)
+            violations.extend(_normalized_contract.check_execution_evidence(project_root, config or {}, manifest_by_id, frontmatter))
         else:
             foreign_records += 1
             violations = _normalized_contract.validate_record(

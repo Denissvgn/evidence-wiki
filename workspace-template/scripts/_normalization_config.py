@@ -59,6 +59,7 @@ NATIVE_SOURCE_KINDS = frozenset(
         "html",
         "table",
         "codebase_architecture",
+        "execution_evidence",
     }
 )
 

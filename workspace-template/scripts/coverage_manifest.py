@@ -113,6 +113,7 @@ ALLOWED_EVIDENCE_PATHS = {
     "vendor_product_spec",
 }
 ALLOWED_SOURCE_POLICIES = {
+    "independent_execution_pass",
     "official_primary",
     "primary_or_official",
     "academic_indexed",
@@ -164,6 +165,7 @@ BASE_POLICY_DEFINITIONS = {
         "vendor_product_spec": "Product, service, hardware, software, or API capability from a vendor-controlled source.",
     },
     "source_policy": {
+        "independent_execution_pass": "Selected passing observation and scope-complete receipt authenticated under current host policy by an independently controlled evaluator.",
         "official_primary": "Primary authority of record.",
         "primary_or_official": "Primary source or official aggregator that republishes authoritative source material.",
         "academic_indexed": "Scholarly index, publisher, DOI resolver, arXiv record, OpenAlex record, or equivalent bibliographic index.",

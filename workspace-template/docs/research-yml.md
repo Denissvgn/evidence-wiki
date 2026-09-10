@@ -234,7 +234,7 @@ normalization:
   resolves to exactly one adapter, so two adapters may not claim the same kind.
   Membership is open — a domain pack may declare its own namespaced kinds — but kinds
   `normalize_sources.py` extracts itself (`paper`, `pdf`, `repo_link`, `web_link`,
-  `html`, `table`, `codebase_architecture`) are refused, because adapters exist to fill
+  `html`, `table`, `codebase_architecture`, `execution_evidence`) are refused, because adapters exist to fill
   a gap rather than to override a built-in extractor from one config line.
 - `provider`: `command` (the only value today). Required rather than defaulted, so
   `research.yml` states plainly that the workspace executes something.

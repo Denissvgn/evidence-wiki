@@ -21,6 +21,7 @@ _ROWS = (
     ("normalize.verify", "evidence-wiki normalize verify", "none", "none", "none"),
     ("normalize.profiles", "evidence-wiki normalize profiles", "none", "none", "none"),
     ("normalize.validate_packet", "evidence-wiki normalize packet", "none", "bounded optimistic delivery capture; at most three attempts", "none"),
+    ("normalize.validate_execution", "evidence-wiki normalize execution", "none", "bounded original closure capture; external host authority checked at one current clock", "none"),
     ("questions.claim", "scripts/question_claim.py claim", "question claim and activity log", "per-question lock; separate log append lock", "none"),
     ("questions.release", "scripts/question_claim.py release", "question claim and activity log", "per-question lock; separate log append lock", "none"),
     ("questions.answer", "scripts/question_resolve.py answer", "question resolution and activity log", "per-question lock; separate log append lock", "none"),

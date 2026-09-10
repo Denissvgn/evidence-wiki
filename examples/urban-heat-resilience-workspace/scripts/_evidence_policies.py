@@ -622,6 +622,8 @@ def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> li
     reasons: list[str] = []
     packet = load_workspace_module(_SCRIPT_DIR, "_qualified_packet")
     reasons.extend(packet.normalized_issues(inputs.project_root, inputs.config, record, normalized))
+    execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence")
+    reasons.extend(execution.normalized_issues(inputs.project_root, inputs.config, record, normalized))
     for document in candidate_values(normalized, metadata, provenance, record):
         reasons.extend(explicit_unusable_reasons(document))
     return unique_strings(reasons)
@@ -1921,6 +1923,20 @@ def evaluate_source_policy(
     unusable = unusable_evidence_result(policy, ids, present, inputs)
     if unusable:
         return unusable
+    if policy == "independent_execution_pass":
+        if missing:
+            return missing_result(policy, ids, missing)
+        execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence")
+        evaluated_at = now or datetime.now(timezone.utc)
+        reasons = []
+        verdict = VERDICT_OK
+        for source_id in present:
+            report = execution.inspect_execution(inputs.project_root, inputs.config, inputs.manifest_records[source_id])
+            assessment = execution.assess_verification(report, inputs.project_root, inputs.config, evaluated_at)
+            reasons.append(f"{source_id}: {assessment['reason']}")
+            if not assessment["eligible"]:
+                verdict = VERDICT_FAIL
+        return result(policy, verdict, ids, reasons)
     if policy == "manual_review_required":
         return manual_result(policy, ids, ["Source policy requires manual review and cannot pass automatically."])
     if policy == "domain_pack_allowed":

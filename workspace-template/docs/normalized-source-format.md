@@ -1370,6 +1370,12 @@ Maintained source text copied from a trusted manual note.
 
 Opted-in qualified codebase sources also carry the `qualified_context` report
 described in [Codebase Analysis](codebase-analysis.md#qualified-context-packet-intake).
+
+Execution sources carry an `execution_evidence` structural report and retain
+the original observations, hypotheses, receipts, and artifacts described in
+[Execution evidence](execution-evidence.md). Invalid structure makes evidence
+unusable. A failed execution outcome does not: independent passing authority is
+evaluated separately by the `independent_execution_pass` coverage policy.
 This report is bound to the original packet and delivery bytes. Readers check
 that binding independently of the declared normalizer and refuse missing or
 altered qualifications when the source or workspace requires the profile.

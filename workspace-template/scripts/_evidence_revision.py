@@ -127,7 +127,7 @@ def read_observed_file(root: Path, relative: str, expected: tuple[int, ...]) -> 
         for part in parts[:-1]:
             current = os.open(part, directory_flags, dir_fd=current)
             descriptors.append(current)
-        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
+        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current)
         descriptors.append(descriptor)
         if observation(os.fstat(descriptor)) != expected:
             raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.", path=relative)

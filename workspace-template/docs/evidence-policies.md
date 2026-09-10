@@ -433,6 +433,7 @@ installation can decide it without a human.
 | `standards_body_primary` | Requires the standards body's own catalogue, open-data, browsing, or publication record for the referenced standard. |
 | `domain_pack_allowed` | Uses a domain-pack-defined source family that has been reviewed as acceptable for that domain. |
 | `manual_review_required` | Cannot pass on automation alone; a reviewer must inspect and record acceptance. |
+| `independent_execution_pass` | Requires an intact [execution evidence](execution-evidence.md) closure and a currently authenticated passing receipt from a separately controlled evaluator for the selected observation. Historical, absent, failed, or inconclusive receipts do not satisfy it. |
 
 ## Freshness Policies
 

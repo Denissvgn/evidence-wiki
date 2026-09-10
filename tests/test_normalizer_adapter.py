@@ -1003,7 +1003,7 @@ class AdapterReportingTests(AdapterWorkspaceMixin, unittest.TestCase):
         self.assertEqual(1, report["summary"]["methods"]["adapter"])
         # Every extractor keeps a key, so a consumer iterating methods sees a stable set.
         self.assertEqual(
-            {"latex", "pdf", "links", "html", "tables", "codebase", "adapter"},
+            {"latex", "pdf", "links", "html", "tables", "codebase", "execution", "adapter"},
             set(report["summary"]["methods"]),
         )
 

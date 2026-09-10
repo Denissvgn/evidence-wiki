@@ -19,6 +19,10 @@ class NormalizeNamespace(Namespace):
         """Validate original delivery bytes; invalid packets are report verdicts."""
         return self._call("qualified_packet", "validate_source", self._root, source_id)
 
+    def validate_execution(self, source_id: str) -> dict[str, Any]:
+        """Validate the original run closure and assess independent authority at the current clock."""
+        return self._call("qualified_packet", "validate_execution", self._root, source_id)
+
     def verify(self, source_ids: Sequence[str] | None = None) -> dict[str, Any]:
         """Check normalized records against the published record contract.
 

@@ -171,7 +171,7 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "3"
+assert library_api["version"] == "4"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -183,6 +183,12 @@ time an internal helper was renamed. The version advances when the declared surf
 selected publication and a versioned operation matrix; callers that only understand
 version `"1"` must negotiate before using the expanded contract. Version `"3"`
 adds offline qualified packet profile discovery and original-byte validation.
+Version `"4"` adds `normalize.validate_execution(source_id)` and
+`evidence-wiki normalize execution --target PATH --source-id ID`. This read-only
+operation returns execution structure and current independent evaluation
+authority as separate results. A structurally valid failed run remains usable
+evidence. Execution CLI exit 1 means the original structure is invalid;
+callers must inspect `verification.eligible` when a passing evaluation is required.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;
