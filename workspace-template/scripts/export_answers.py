@@ -825,6 +825,7 @@ def build_export(
 ) -> dict[str, Any]:
     project_root = Path(project_root).expanduser().resolve()
     config = load_config(project_root)
+    load_sibling_module("_usage_gate").require_unrestricted_legacy(project_root, config)
     question_status = load_sibling_module("question_status")
     questions_dir = question_status.questions_directory(project_root, config)
 

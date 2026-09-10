@@ -516,6 +516,81 @@ EXECUTION_PROBE = textwrap.dedent(
 )
 
 
+USAGE_PROBE = textwrap.dedent(
+    '''
+    import base64
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    import yaml
+    from evidence_wiki import Workspace, contract
+    from evidence_wiki.errors import SourceError
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("usage_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+    host = data.UsageFixture(directory, Environment())
+    (host.root / "research.yml").write_text(yaml.safe_dump(host.config))
+    with Workspace.open(host.root) as workspace:
+        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            try:
+                workspace.usage.status()
+            except SourceError as exc:
+                assert exc.error_code == "EVIDENCE_USAGE_REFUSED"
+            else:
+                raise AssertionError("Unsupported host storage was accepted")
+            print(json.dumps({"evidence_usage": "unsupported_host_refused"}))
+            sys.exit(0)
+        assert workspace.usage.status()["initialized"] is False
+        command = host.command("initialize")
+        host.checkpoint = workspace.usage.transact(command)["checkpoint"]
+        body, files = host.source()
+        command = host.command("deposit", body)
+        request = {"command": command, "artifacts": {path: base64.b64encode(value).decode() for path, value in files.items()}}
+        result = subprocess.run([str(cli), "usage", "transact", "--target", str(host.root)],
+                                input=json.dumps(request), capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr
+        receipt = json.loads(result.stdout)
+        assert workspace.usage.transact(command, artifacts=files) == receipt
+        host.checkpoint = receipt["checkpoint"]
+        decision = workspace.usage.check(body["source_revision"], uses=["training", "export"],
+                                         purpose="training-snapshot", consumer="evidence-wiki")
+        assert decision["eligible"], decision
+        result = workspace.usage.materialize(body["source_revision"])
+        assert (host.root / result["path"]).read_bytes() == files["normalized.md"]
+        assert not workspace.usage.materialize(body["source_revision"])["changed"]
+        command = host.command("revoke", {"source_id": body["source_id"], "source_revision": body["source_revision"],
+                                           "scope": "revision", "reason": "owner-withdrawal"})
+        receipt = workspace.usage.transact(command)
+        assert workspace.usage.transact(command) == receipt
+        assert workspace.usage.status(request_id=command["payload"]["request_id"])["receipt"] == receipt
+        decision = workspace.usage.check(body["source_revision"], uses=["retrieval"], purpose="research", consumer="evidence-wiki")
+        assert not decision["eligible"], decision
+        assert workspace.usage.lineage(body["source_revision"])["complete"]
+        try:
+            workspace.usage.materialize(body["source_revision"])
+        except SourceError as exc:
+            assert exc.error_code == "EVIDENCE_USAGE_REFUSED"
+        else:
+            raise AssertionError("Revoked materialization was accepted")
+        assert contract()["evidence_usage"]["retention"] == ["host-managed"]
+    print(json.dumps({"evidence_usage": "validated", "revocation": "current", "command_retry": "idempotent"}))
+    '''
+)
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -590,7 +665,12 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(python), "-c", EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_execution_fixture.py"),
         str(scratch / "execution-workspace"),
     ], cwd=outside)
-    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication), **json.loads(packets), **json.loads(execution)}
+    usage = run([
+        str(python), "-c", USAGE_PROBE, str(cli), str(REPO_ROOT / "tests/_usage_fixture.py"),
+        str(scratch / "usage-evidence"),
+    ], cwd=outside)
+    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
+            **json.loads(packets), **json.loads(execution), **json.loads(usage)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

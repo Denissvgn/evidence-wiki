@@ -620,6 +620,8 @@ def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> li
     metadata = source_metadata(inputs, source_id)
     provenance = inputs.provenance_by_source_id.get(source_id, {})
     reasons: list[str] = []
+    usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate")
+    reasons.extend(usage.normalized_issues(inputs.project_root, inputs.config, record, normalized))
     packet = load_workspace_module(_SCRIPT_DIR, "_qualified_packet")
     reasons.extend(packet.normalized_issues(inputs.project_root, inputs.config, record, normalized))
     execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence")

@@ -687,6 +687,7 @@ from _provider_registry import (
     validate_provider_ids,
 )
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
 
 STANDARDS_PROVIDER_IDS = STANDARDS_DISCOVERY_PROVIDER_IDS
@@ -8414,6 +8415,7 @@ def run_discovery_command(args: argparse.Namespace) -> dict[str, Any]:
         # a workspace-local yml file and never contacts a provider, so it runs
         # before the discovery gate (profiles can be curated with discovery off).
         return run_jurisdictions_command(project_root, config, args)
+    require_host_intake(config)
     discovery = require_discovery_enabled(config, args.command)
     if args.command == "academic":
         for provider in args.provider:

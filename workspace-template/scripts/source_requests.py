@@ -158,6 +158,7 @@ from _request_scope import (
     scope_match,
 )
 from _script_errors import emit_error, handle_system_exit, json_mode_requested, remediation_for
+from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import ATTEMPT_FAILURE_CODES, is_attempt_failure_code
 
@@ -2078,6 +2079,7 @@ def check_fulfill_scope(
 def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
     config = load_config(project_root)
+    require_host_intake(config)
     path = requests_path(project_root, config)
 
     request_id = args.request_id.strip()

@@ -88,6 +88,10 @@ def validate_before_materialization(files: Any, readiness: Any) -> dict[str, Any
     if not isinstance(config, dict):
         raise refuse("PUBLICATION_CONFIG_INVALID", "research.yml must contain a mapping.")
     validate_config_paths(config)
+    usage = load_workspace_module(SCRIPT_DIR, "_usage_gate")
+    usage.require_legacy_export(config)
+    if any(usage.bytes_have_claims(name, data, config) for name, data in files.items()):
+        raise usage.refusal("explicit_usage_requires_host_authorization")
     reasons = readiness.empty_reasons()
     for name, data in files.items():
         if Path(name).parts[0] in readiness.SCAN_ROOTS and Path(name).suffix.lower() in readiness.SECRET_SCAN_SUFFIXES:

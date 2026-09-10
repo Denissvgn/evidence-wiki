@@ -162,6 +162,7 @@ class PackageCliTests(unittest.TestCase):
                     "academic_indexed",
                     "canonical_repository",
                     "domain_pack_allowed",
+                    "independent_execution_pass",
                     "manual_review_required",
                     "official_primary",
                     "official_standards_registry",
@@ -233,7 +234,7 @@ class PackageCliTests(unittest.TestCase):
         payload = json.loads(self.run_cli("contract"))
 
         library_api = payload["library_api"]
-        self.assertEqual("3", library_api["version"])
+        self.assertEqual("5", library_api["version"])
         surface = library_api["surface"]
         self.assertIsInstance(surface, list)
         for operation in (

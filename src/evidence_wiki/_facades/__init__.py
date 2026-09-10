@@ -21,6 +21,7 @@ from .grounding import GroundingNamespace
 from .normalize import NormalizeNamespace
 from .orchestrate import OrchestrateNamespace, OrchestrationSession
 from .questions import QuestionsNamespace
+from .usage import UsageNamespace
 
 __all__ = [
     "CoverageNamespace",
@@ -31,4 +32,5 @@ __all__ = [
     "OrchestrateNamespace",
     "OrchestrationSession",
     "QuestionsNamespace",
+    "UsageNamespace",
 ]

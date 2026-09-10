@@ -36,6 +36,7 @@ from _record_artifacts import (
     validate_file_bounds,
     validate_members,
 )
+from _workspace_module_loader import load_workspace_module
 
 PROFILE = "execution_evidence/v1"
 SCHEMA = "execution-evidence/v1"
@@ -305,11 +306,15 @@ def validate_closure(source_id: str, files: dict[str, bytes]) -> dict[str, Any]:
 
 
 def inspect_execution(root: Path, config: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    usage = load_workspace_module(Path(__file__).resolve().parent, "_usage_gate")
+
     try:
         if profile_for(record) is None:
             raise EvidenceInvalid("execution_profile_not_selected")
         source_id = safe_source_id(record["id"])
-        files = capture_artifacts(root, f"sources/evidence/{source_id}")
+        files = usage.original_artifacts(root, config, record)
+        if files is None:
+            files = capture_artifacts(root, f"sources/evidence/{source_id}")
         return validate_closure(record["id"], files)
     except EvidenceInvalid as exc:
         reason = str(exc)

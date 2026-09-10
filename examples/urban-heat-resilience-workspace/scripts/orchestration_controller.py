@@ -6346,6 +6346,7 @@ def finish_session(
 
 
 def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    load_sibling_module("_usage_gate").require_host_intake(load_config(project_root))
     agent_id = require_agent_id(args.agent_id)
     orchestration_id = require_safe_id(args.orchestration_id or generated_orchestration_id(), "orchestration_id")
     # Refuse before creating durable state when the workspace contract cannot be read.
@@ -6425,6 +6426,7 @@ def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any
 
 
 def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    load_sibling_module("_usage_gate").require_host_intake(load_config(project_root))
     orchestration_id = require_safe_id(args.orchestration_id, "orchestration_id")
     with driver_session_lock(
         project_root,
@@ -9989,6 +9991,7 @@ def repair_last_completion_events(project_root: Path, session: dict[str, Any]) -
 
 
 def submit_result(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    load_sibling_module("_usage_gate").require_host_intake(load_config(project_root))
     orchestration_id = require_safe_id(args.orchestration_id, "orchestration_id")
     action_id = require_safe_id(args.action_id, "action_id")
     result = load_result(Path(args.result_file).expanduser().resolve(), action_id, project_root)

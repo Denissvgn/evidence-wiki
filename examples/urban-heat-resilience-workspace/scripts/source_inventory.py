@@ -232,6 +232,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _request_scope import normalize_scope
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import (
     DELIVERY_FAILURE_CODES,
@@ -2883,6 +2884,7 @@ def run_inventory(args: argparse.Namespace) -> int:
 
     project_root = Path(args.project_root).resolve()
     config = load_config(project_root)
+    require_host_intake(config)
     sources_config = config.get("sources") or {}
     if not isinstance(sources_config, dict):
         raise SystemExit("research.yml sources must be a mapping")

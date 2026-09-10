@@ -815,6 +815,7 @@ def write_json(path: Path, document: dict[str, Any]) -> None:
 def build_bundle(project_root: Path, run_id: str) -> dict[str, Any]:
     run_id = validate_run_id(run_id)
     config = load_config(project_root)
+    load_sibling_module("_usage_gate").require_unrestricted_legacy(project_root, config)
     status_module = load_sibling_module("workspace_status")
     lint_module = load_sibling_module("lint")
     export_module = load_sibling_module("export_answers")

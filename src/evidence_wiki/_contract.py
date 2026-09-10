@@ -31,7 +31,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "4"
+LIBRARY_API_VERSION = "5"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -67,6 +67,11 @@ LIBRARY_API_SURFACE = (
     "normalize.profiles",
     "normalize.validate_packet",
     "normalize.validate_execution",
+    "usage.status",
+    "usage.transact",
+    "usage.check",
+    "usage.lineage",
+    "usage.materialize",
     "questions.claim",
     "questions.release",
     "questions.answer",
@@ -337,6 +342,20 @@ def contract() -> dict:
         },
         "required_asset_manifest": required_asset_manifest(),
         "intake_profiles": qualified_packet_module.profiles(),
+        "evidence_usage": {
+            "state_environment": "EVIDENCE_WIKI_STATE_DIR",
+            "authority_environment": "EVIDENCE_WIKI_AUTHORITY_FILE",
+            "platform": "POSIX with no-follow directory descriptors and advisory file locking",
+            "actions": ["initialize", "deposit", "authorize", "revoke", "register"],
+            "uses": ["retrieval", "training", "export"],
+            "retention": ["host-managed"],
+            "limits": {"state_bytes": 67108864, "events": 10000, "nodes": 4096,
+                       "lineage_depth": 64, "revision_files": 256, "file_bytes": 16777216},
+            "legacy_qa_export": "compatible only without usage declarations",
+            "protected_query": "approved normalized bytes, in memory, current permission required",
+            "protected_legacy_publication": "refused; requires approved artifact closure",
+            "contract_document": "docs/evidence-usage.md",
+        },
         "source_providers": {
             "discovery": list(provider_registry_module.DISCOVERY_PROVIDER_IDS),
             "acquisition": list(provider_registry_module.ACQUISITION_PROVIDER_IDS),
@@ -368,6 +387,11 @@ def contract() -> dict:
             "workspace_revision": "evidence-workspace-revision/v1",
             "execution_evidence": "execution-evidence/v1",
             "evidence_authentication": "evidence-authentication/v1",
+            "evidence_usage_state": "evidence-usage-state/v1",
+            "evidence_usage_command": "evidence-usage-command/v1",
+            "evidence_usage_grant": "evidence-usage-grant/v1",
+            "evidence_scrub_receipt": "evidence-scrub-receipt/v1",
+            "evidence_source_revision": "evidence-source-revision/v1",
             "fleet_status": fleet_status_module.SCHEMA_VERSION,
             "error_envelope": script_errors_module.SCHEMA_VERSION,
         },

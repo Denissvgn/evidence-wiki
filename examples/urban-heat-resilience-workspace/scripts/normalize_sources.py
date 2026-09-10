@@ -208,11 +208,12 @@ from _normalizer_adapter import (
     build_request,
     run_adapter,
 )
-from _script_errors import emit_error, handle_system_exit
+from _script_errors import ScriptRefusal, emit_error, emit_refusal, handle_system_exit
 
 # Aliased because this module already has a `content_hash` — that one hashes a record's
 # extracted content, this one hashes the sidecar bytes a `structured_view` block binds.
 from _structured_view import content_hash as structured_view_content_hash
+from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import unusable_evidence_reasons as delivery_unusable_evidence_reasons
 
@@ -986,6 +987,8 @@ def normalize_selected_record(
     *,
     pdftotext_path: str | None = None,
 ) -> NormalizedSource:
+
+    require_host_intake(config, [item.record])
     if pdftotext_path is not None:
         if pdf_extractor is not None:
             raise TypeError("pass pdf_extractor or pdftotext_path, not both")
@@ -1033,6 +1036,8 @@ def normalize_adapter_record(
     manifest and the validated response, so a buggy adapter cannot make a record claim
     more than it earned.
     """
+
+    require_host_intake(config, [record])
     configured = normalization_config(config)["adapters"] if adapters is None else adapters
     source_id = record_id(record)
     adapter = adapter_for_kind(configured, record.get("kind"))
@@ -4283,6 +4288,8 @@ def run_normalization(args: argparse.Namespace) -> int:
     json_output = args.format == "json"
     project_root = Path(args.project_root).resolve()
     config = load_config(project_root)
+
+    require_host_intake(config)
     manifest_path_text, normalized_dir_text = source_paths(config)
     manifest_path = project_root / manifest_path_text
     normalized_root = project_root / normalized_dir_text
@@ -4554,6 +4561,8 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = args.format == "json"
     try:
         return run_normalization(args)
+    except ScriptRefusal as exc:
+        return emit_refusal(exc, json_mode=json_mode)
     except LockUnavailableError as exc:
         emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
         return 2

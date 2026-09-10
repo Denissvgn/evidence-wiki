@@ -65,7 +65,10 @@ SCOPES = ("wiki", "normalized", "all")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from _script_errors import handle_system_exit, json_mode_requested
+from _evidence_usage import configured
+from _script_errors import ScriptRefusal, emit_refusal, handle_system_exit, json_mode_requested
+from _usage_gate import require_unrestricted_legacy
+from _usage_query import query_authorized
 from _workspace_locks import workspace_lock
 
 # Field weights for lexical scoring. Titles, headings, and source IDs are
@@ -541,6 +544,7 @@ def corpus_roots_for_provider(project_root: Path, config: dict[str, Any], scope:
 
 
 def build_index(project_root: Path, config: dict[str, Any], scope: str) -> list[Document]:
+    require_unrestricted_legacy(project_root, config)
     documents: list[Document] = []
     for document_scope, root in scope_roots(project_root, config, scope):
         documents.extend(collect_documents(root, project_root, document_scope))
@@ -1299,6 +1303,7 @@ def create_fts_schema(connection: sqlite3.Connection) -> None:
 
 
 def write_fts_index(project_root: Path, config: dict[str, Any], scope: str, index_path: Path) -> int:
+    require_unrestricted_legacy(project_root, config)
     if not sqlite_fts5_available():
         raise SystemExit("SQLite FTS5 is required to build the persistent query index.")
 
@@ -1523,6 +1528,7 @@ def query_with_optional_fts(
     *,
     warnings: list[dict[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
+    require_unrestricted_legacy(project_root, config)
     limit = effective_query_limit(limit)
     usable, note = evaluate_index(project_root, config, index_path, scope)
     if usable:
@@ -1597,6 +1603,18 @@ def main(argv: list[str] | None = None) -> int:
     project_root = Path(args.project_root).expanduser().resolve()
     try:
         config = load_config(project_root)
+        if configured(config) and args.command != "build-index":
+            query = " ".join(args.query).strip()
+            if not query:
+                raise SystemExit("Provide one or more query terms.")
+            payload = query_authorized(project_root, config, args.scope, query,
+                                       effective_query_limit(args.limit), globals())
+            if args.format == "json":
+                print(json.dumps(payload, indent=2))
+            else:
+                sys.stdout.write(render_text(query, args.scope, payload["results"], payload["indexed_documents"]))
+            return 0
+        require_unrestricted_legacy(project_root, config)
         index_path = resolve_index_path(project_root, args.index_path)
 
         if args.command == "build-index":
@@ -1647,6 +1665,8 @@ def main(argv: list[str] | None = None) -> int:
         results = enrich_related_source_ids(results, citation_relation_graph(project_root, config))
         results = enrich_evidence_links(results, evidence_path_graph(project_root, config))
         unnormalized = unnormalized_source_ids(project_root, config)
+    except ScriptRefusal as exc:
+        return emit_refusal(exc, json_mode=json_mode)
     except SystemExit as exc:
         if not json_mode:
             raise

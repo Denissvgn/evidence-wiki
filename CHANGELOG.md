@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Host-owned evidence revisions carry separate retrieval, training, and export permissions.**
+  Authenticated grants and scrub receipts bind exact sanitized bytes before storage.
+  A locked external event log preserves revocations and downstream lineage across
+  workspace rollbacks. Protected queries read currently authorized source revisions;
+  incompatible intake, caches, and publication paths refuse safely. Library API
+  contract version 5 adds `Workspace.usage` and matching CLI operations for signed
+  transactions, status, eligibility, lineage, and exact source materialization.
+
 - **Execution evidence preserves observations, hypotheses, and evaluator receipts.**
   The `execution_evidence/v1` profile validates a bounded closure of original
   inputs, outputs, logs, environment, and verification scope. Failed and

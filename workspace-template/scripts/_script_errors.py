@@ -998,6 +998,8 @@ def handle_system_exit(
     remediation: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> int:
+    if is_refusal(exc):
+        return emit_refusal(exc, json_mode=json_mode)
     if not isinstance(exc.code, str):
         raise exc
     emit_error(

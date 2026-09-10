@@ -41,6 +41,8 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from _workspace_module_loader import load_workspace_module
 
+require_host_intake = load_workspace_module(_SCRIPT_DIR, "_usage_gate").require_host_intake
+
 _academic_identity = load_workspace_module(_SCRIPT_DIR, "_academic_identity")
 author_sets_match = _academic_identity.author_sets_match
 
@@ -829,6 +831,8 @@ def acquisition_context(
     registered: tuple[str, ...] = (),
     requested_id: str | None = None,
 ) -> dict[str, Any]:
+
+    require_host_intake(config)
     acquisition = acquisition_config(config)
     providers = validate_provider_list(
         acquisition.get("providers", []),
@@ -4744,6 +4748,8 @@ def run_github_command(project_root: Path, context: dict[str, Any], args: argpar
 def run_provider_command(args: argparse.Namespace) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
     config = load_config(project_root)
+
+    require_host_intake(config)
     if args.provider == REGISTERED_SUBCOMMAND:
         # args.provider holds the literal subcommand word here; the provider id is --id.
         return run_registered_command(project_root, config, args)
@@ -4782,6 +4788,8 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = json_mode_requested(argv, default_json=args.output_format == "json")
     try:
         report = run_provider_command(args)
+    except _script_errors.ScriptRefusal as exc:
+        return _script_errors.emit_refusal(exc, json_mode=json_mode)
     except FetchSourcesError as exc:
         emit_error(
             redact_diagnostic(exc.message),

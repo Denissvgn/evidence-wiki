@@ -22,6 +22,7 @@ from ._facades.grounding import GroundingNamespace
 from ._facades.normalize import NormalizeNamespace
 from ._facades.orchestrate import OrchestrateNamespace
 from ._facades.questions import QuestionsNamespace
+from ._facades.usage import UsageNamespace
 from .errors import ConfigError
 
 #: Marker file that makes a directory a workspace rather than an ordinary directory.
@@ -75,6 +76,7 @@ class Workspace:
         "grounding",
         "questions",
         "normalize",
+        "usage",
         "orchestrate",
         "diagnostics",
     )
@@ -86,6 +88,7 @@ class Workspace:
         self.grounding = GroundingNamespace(self)
         self.questions = QuestionsNamespace(self)
         self.normalize = NormalizeNamespace(self)
+        self.usage = UsageNamespace(self)
         self.orchestrate = OrchestrateNamespace(self)
         self.diagnostics = DiagnosticsNamespace(self)
 

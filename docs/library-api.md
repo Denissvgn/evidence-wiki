@@ -60,7 +60,7 @@ importantly, what it does not.
 
 ## The Surface
 
-Twenty-seven operations. Most hang off an open handle, in namespaces; the
+Thirty-five operations. Most hang off an open handle, in namespaces; the
 exceptions are `Workspace.open` itself and the two module-level functions that
 belong to no single workspace.
 
@@ -92,10 +92,25 @@ CLI flag of the same name one for one, plus `no_cache` and `run_id`.
 | `normalize.verify` | `ws.normalize.verify(source_ids: Sequence[str] \| None = None) -> dict` |
 | `normalize.profiles` | `ws.normalize.profiles() -> dict` |
 | `normalize.validate_packet` | `ws.normalize.validate_packet(source_id: str) -> dict` |
+| `normalize.validate_execution` | `ws.normalize.validate_execution(source_id: str) -> dict` |
 
 `coverage.evaluate` is not a read: the recomputed facet verdicts, coverage
 verdict and `updated_at` are written back to `sources/coverage/<slug>.yml`,
 exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
+
+**`ws.usage`** — host-authorized source revisions:
+
+| Operation | Signature |
+|-----------|-----------|
+| `usage.status` | `ws.usage.status(*, request_id=None) -> dict` |
+| `usage.transact` | `ws.usage.transact(command: dict, *, artifacts: dict[str, bytes] \| None = None) -> dict` |
+| `usage.check` | `ws.usage.check(revision: str, *, uses: list[str], purpose: str, consumer: str) -> dict` |
+| `usage.lineage` | `ws.usage.lineage(revision: str, *, limit=4096) -> dict` |
+| `usage.materialize` | `ws.usage.materialize(revision: str, *, expected_content_hash=None) -> dict` |
+
+These operations use separately provisioned host authority and state. See
+[Evidence usage](evidence-usage.md) for the signing, sanitization, revocation,
+retention, and legacy compatibility contracts.
 
 **`ws.questions`** — the question lifecycle. Every keyword mirrors the CLI flag
 of the same name, and every mutating call writes its `log.md` entry and its page
@@ -171,7 +186,7 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "4"
+assert library_api["version"] == "5"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -189,6 +204,9 @@ operation returns execution structure and current independent evaluation
 authority as separate results. A structurally valid failed run remains usable
 evidence. Execution CLI exit 1 means the original structure is invalid;
 callers must inspect `verification.eligible` when a passing evaluation is required.
+Version `"5"` adds the five `usage` operations and the `evidence_usage`
+capability description. A usage check returns ineligibility as a verdict;
+invalid operations raise `SourceError` with `EVIDENCE_USAGE_REFUSED`.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;

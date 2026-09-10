@@ -20,6 +20,7 @@ from _evidence_revision import observation, read_observed_file
 from _normalized_contract import safe_source_id
 from _packet_vendor_services_context_packet import ContextPacketError, validate_context_packet
 from _script_errors import ScriptRefusal
+from _workspace_module_loader import load_workspace_module
 
 PROFILE = "qualified_context_packet/v1"
 VALIDATOR = "agent-wiki-cli/1.8.0:offline-validation-closure/v1"
@@ -247,6 +248,9 @@ def validate_delivery(files: dict[str, bytes], source_id: str) -> tuple[dict[str
 
 def inspect_packet(root: Path, config: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
     """Validate the original bytes and preserve every qualification in a loss-explicit view."""
+    usage = load_workspace_module(Path(__file__).resolve().parent, "_usage_gate")
+    EvidenceInvalid = usage.EvidenceInvalid
+
     report: dict[str, Any] = {
         "profile": PROFILE, "validator": VALIDATOR, "source_id": record.get("id"), "valid": False,
         "delivery_integrity": "not_validated", "native_validation": None,
@@ -260,7 +264,9 @@ def inspect_packet(root: Path, config: dict[str, Any], record: dict[str, Any]) -
         if isinstance(raw_intake, dict) and raw_intake.get("bounded") is False:
             raise IntakeInvalid("raw_snapshot_bound_exceeded")
         relative = artifact_relative(config, record)
-        files = capture_delivery(root, relative)
+        files = usage.original_artifacts(root, config, record)
+        if files is None:
+            files = capture_delivery(root, relative)
         manifest, packet_path = validate_delivery(files, record["id"])
         report["delivery_integrity"] = "valid"
         report["delivery_manifest"] = {"path": f"{relative}/{MANIFEST}", "sha256": hashlib.sha256(files[MANIFEST]).hexdigest(), "provenance": manifest}
@@ -282,7 +288,7 @@ def inspect_packet(root: Path, config: dict[str, Any], record: dict[str, Any]) -
         report["policy_reason"] = "live_reconciliation_required" if required else "structural_intake_accepted"
     except ContextPacketError as exc:
         report["reason"] = getattr(exc, "code", "native_packet_invalid")
-    except IntakeInvalid as exc:
+    except (IntakeInvalid, EvidenceInvalid) as exc:
         report["valid"] = False
         report["reason"] = str(exc)
     except (OSError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError):

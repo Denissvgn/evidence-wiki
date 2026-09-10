@@ -244,6 +244,7 @@ ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     "SOURCE_": SourceError,
     "MANIFEST_": SourceError,
     "INVENTORY_": SourceError,
+    "EVIDENCE_USAGE_": SourceError,
     # External intake.
     "INTAKE_": IntakeError,
     "HANDOFF_SIGNATURE_INVALID": IntakeError,

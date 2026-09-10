@@ -75,6 +75,7 @@ RENDERED_COVERAGE_INVALID = "NORMALIZED_CONTRACT_RENDERED_COVERAGE_INVALID"
 STRUCTURED_VIEW_INVALID = "NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID"
 QUALIFIED_PACKET_INVALID = "NORMALIZED_CONTRACT_QUALIFIED_PACKET_INVALID"
 EXECUTION_EVIDENCE_INVALID = "NORMALIZED_CONTRACT_EXECUTION_EVIDENCE_INVALID"
+USAGE_EVIDENCE_INVALID = "NORMALIZED_CONTRACT_USAGE_EVIDENCE_INVALID"
 
 VIOLATION_CODES = (
     FRONTMATTER_MISSING,
@@ -87,6 +88,7 @@ VIOLATION_CODES = (
     STRUCTURED_VIEW_INVALID,
     QUALIFIED_PACKET_INVALID,
     EXECUTION_EVIDENCE_INVALID,
+    USAGE_EVIDENCE_INVALID,
 )
 
 # A rendering that caps content is honest only if it says so. `extraction_method:
@@ -1206,6 +1208,7 @@ def validate_document(
     violations = check_frontmatter(frontmatter)
     violations.extend(check_qualified_packet(project_root, config or {}, manifest_by_id, frontmatter))
     violations.extend(check_execution_evidence(project_root, config or {}, manifest_by_id, frontmatter))
+    violations.extend(check_usage_evidence(project_root, config or {}, manifest_by_id, frontmatter))
     violations.extend(check_format_version(frontmatter))
     violations.extend(check_sections(body))
     violations.extend(check_parse_warnings(frontmatter, body))
@@ -1305,3 +1308,14 @@ def check_execution_evidence(
     return [Violation(EXECUTION_EVIDENCE_INVALID, reason, field="execution_evidence",
                       remediation="Restore the complete original execution closure and normalize it again.")
             for reason in execution.normalized_issues(project_root, config, record, frontmatter)]
+
+
+def check_usage_evidence(
+    project_root: Path | None, config: dict[str, Any], manifest_by_id: dict[str, dict[str, Any]], frontmatter: dict[str, Any],
+) -> list[Violation]:
+    source_id = frontmatter.get("source_id")
+    record = manifest_by_id.get(source_id, {}) if isinstance(source_id, str) else {}
+    usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate")
+    return [Violation(USAGE_EVIDENCE_INVALID, reason, field="usage_revision_id",
+                      remediation="Restore current host authorization and the exact approved normalized bytes.")
+            for reason in usage.normalized_issues(project_root, config, record, frontmatter)]
