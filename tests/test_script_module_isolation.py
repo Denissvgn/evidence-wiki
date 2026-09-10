@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import py_compile
 import shutil
 import sys
 import tempfile
@@ -123,6 +124,8 @@ class ScriptModuleIsolationTests(unittest.TestCase):
             script_root = Path(tmpdir) / "workspace" / "scripts"
             write_script_asset(script_root, "aaaa")
             helper = script_root / "helper.py"
+            cached_bytecode = Path(py_compile.compile(str(helper), doraise=True))
+            bytecode_before = cached_bytecode.read_bytes()
             before = helper.stat()
             first = cli._load_script(script_root / "target.py", "legacy-name")
             self.assertEqual("aaaa", first.origin())
@@ -132,14 +135,11 @@ class ScriptModuleIsolationTests(unittest.TestCase):
             os.utime(helper, ns=(before.st_atime_ns, before.st_mtime_ns))
             after = helper.stat()
             self.assertEqual((before.st_size, before.st_mtime_ns), (after.st_size, after.st_mtime_ns))
-            # Python's own bytecode cache validates by source size and mtime, so it would
-            # serve the stale ``helper`` regardless of what the loader decides. Clear it:
-            # the property under test is the loader's invalidation, not the pyc's.
-            shutil.rmtree(script_root / "__pycache__", ignore_errors=True)
-
             edited = cli._load_script(script_root / "target.py", "legacy-name")
             self.assertEqual("bbbb", edited.origin())
             self.assertIsNot(first, edited)
+            self.assertEqual(bytecode_before, cached_bytecode.read_bytes())
+            self.assertEqual(1, len(cli._SCRIPT_MODULE_CACHE))
 
 
 class TreeHashMemoTests(unittest.TestCase):

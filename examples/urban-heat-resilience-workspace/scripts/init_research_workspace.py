@@ -27,9 +27,9 @@ except ImportError as exc:  # pragma: no cover - environment guard
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-# Shared containment definition (SEC-E1-T03): refuses a symlink, then requires the
+# Shared containment definition: refuses a symlink, then requires the
 # resolved path to stay inside an already-resolved root. Reused here for the
-# init/upgrade *writer* paths so the readers and writers cannot drift (SEC-E1-T04).
+# init/upgrade *writer* paths so the readers and writers cannot drift.
 from _handoff_signature import handoff_secret, sign_handoff
 from _provider_plugins import ProviderPluginError, registered_ids, require_registration
 
@@ -54,7 +54,7 @@ from _provider_registry import (
     validate_provider_ids,
 )
 from _script_errors import error_envelope, remediation_for
-from _workspace_locks import LockUnavailableError, workspace_lock
+from _workspace_locks import LockUnavailableError, workspace_lock, workspace_lock_contended
 from _workspace_module_loader import load_workspace_module
 from source_inventory import is_contained_nonsymlink
 
@@ -2681,12 +2681,14 @@ def raise_upgrade_pending_order(blockers: list[dict[str, Any]], *, dry_run: bool
 
 
 def preflight_orchestration_dry_run(target: Path) -> None:
-    """Disclose pending orders without taking any lock or writing anything."""
-    blockers = [
-        blocker
-        for session_dir in orchestration_session_dirs(target)
-        if (blocker := session_upgrade_blocker(session_dir)) is not None
-    ]
+    """Disclose pending orders and held driver locks without filesystem writes."""
+    blockers = []
+    for session_dir in orchestration_session_dirs(target):
+        blocker = session_upgrade_blocker(session_dir)
+        if blocker is not None:
+            blockers.append(blocker)
+        elif workspace_lock_contended(session_dir / Path(*ORCHESTRATION_SESSION_LOCK_RELATIVE.parts)):
+            blockers.append({"orchestration_id": session_dir.name, "reason": "driver_active"})
     if blockers:
         raise_upgrade_pending_order(blockers, dry_run=True)
 
@@ -2878,7 +2880,7 @@ def refresh_managed_path(
         # parent would otherwise redirect both the `.tmp` write and the atomic
         # `replace` below outside the workspace; a symlinked leaf would be read
         # through by `is_file()`/`read_bytes()`. is_contained_nonsymlink is the
-        # shared containment definition (SEC-E1-T03/T04).
+        # shared containment definition.
         if not is_contained_nonsymlink(destination, target_resolved):
             raise SystemExit(f"Refusing to write through symlink in workspace: {destination}")
         if destination.exists() and destination.is_dir():

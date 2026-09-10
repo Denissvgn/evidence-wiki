@@ -131,8 +131,13 @@ manifest record and includes them in `raw_fingerprint`. The declared list stays
 at `provenance.companions` exactly as written and is not acted on. Anything that
 does not resolve is dropped with a warning and marks the source
 `review_required`, including a name that was declared but never delivered.
-`companions` is only accepted on a delivered *file* whose bytes normalization
-re-reads: `.pdf`, `.html`/`.htm`/`.xhtml`, `.csv`/`.tsv`, and `.json`/`.jsonl`.
+`companions` is only accepted when both the record kind and delivered *file*
+suffix support fingerprinting: `pdf` with `.pdf`, `html` with
+`.html`/`.htm`/`.xhtml`, `table` with `.csv`/`.tsv`, or `structured_data` with
+`.json`/`.jsonl`. Classification alone does not establish eligibility: an
+`.xlsx` file may be classified as a table but has no supported raw fingerprint.
+These suffix restrictions apply to the capture; a companion may have another
+suffix if its name and file satisfy the rules above.
 A directory-shaped delivery such as a LaTeX bundle already accounts for
 everything beneath it, and any other capture has no fingerprint a companion
 could move, so a declaration on either is dropped with a warning rather than
@@ -485,7 +490,7 @@ Deliveries without sidecars (typically human drag-and-drop) behave exactly as be
 Some facets are answered by more than one capture rather than by one document: a
 supplier offer and the freight quote a landed cost is computed from, a specification
 and the errata sheet that amends it. The supported model is **two scoped source
-requests on the same question, both fulfilled in the same order**, each by its own
+requests on the same question**, each fulfilled by its own
 capture with its own sidecar. This is not a workaround for a missing multi-file
 delivery form. It follows from the identity model stated above — a distinct capture at
 a distinct path is a distinct source carrying its own provenance — and there is no way
@@ -512,18 +517,17 @@ Three costs come with the model, and each is cheaper to plan for than to discove
   scope to compete over and the refusal arrives later, from the delegated correlation
   check at submission, as `ORCHESTRATION_POSTCONDITION_FAILED`. Two requests need two
   captures at two paths with two sidecars.
-- **A partial outcome is not a partial success.** Fulfilling one request and recording
-  an attempt failure against the other is an *accepted* submission — a partial batch is
-  a completed action, not a refused one — and that is exactly what makes it expensive,
-  because nothing refuses it at the moment the damage is done. A blocked question is
-  reopened only when **every** request named in its `blocking_request_ids` was fulfilled
-  by the same action, and an order scopes only requests that are still open, so the
-  request fulfilled here can never be scoped into a later order. No later order can
-  satisfy that condition, the question stays `blocked` with a fulfilled request that
-  unblocks nothing, and the session eventually retires `blocked_on_sources` asking an
-  operator to reconcile the blocked questions with their source requests by hand. If
-  either capture is missing, record an attempt failure against **both** requests and
-  deliver neither.
+- **Partial delivery is durable progress.** Submit a partial batch as `completed`,
+  with a fulfilment or an attempt failure for every scoped request. The controller
+  commits accepted fulfilments while preserving every blocker link on a question
+  that still lacks evidence. A later order can fulfil the remaining requests and
+  reopen the question, attaching evidence from both orders. Every blocker on the
+  page must be fulfilled, including blockers outside the current order; earlier
+  fulfilments must still match the records captured when the new order was issued.
+  Failed, exhausted, or missing blockers keep the question blocked. The `reopen`
+  command refuses premature attempts with `QUESTION_BLOCKERS_UNFULFILLED` and
+  adds evidence from earlier fulfilled blockers automatically. This applies to
+  both provider and delegated acquisition.
 - **The pair is not corroboration and must not be reported as such.** `min_sources`
   (see [coverage-manifest.md](coverage-manifest.md)) counts distinct accepted source
   ids, and nothing in this package tests those sources for independence — no publisher,

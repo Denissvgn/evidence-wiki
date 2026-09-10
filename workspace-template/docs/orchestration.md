@@ -509,7 +509,7 @@ to the host's own connectors, which no managed worker can be.
 has performed and the controller has not yet verified — "request `R` is fulfilled
 by source `S`", "question `Q` reopens with these sources" — and never a statement
 about the evidence itself, which is still checked against the manifest, the
-normalized tree, and the raw tree exactly as before. Inside a pending delegated
+normalized tree, and the raw tree exactly as before. Inside a pending provider or delegated
 acquisition order `source_requests.py fulfill` writes a claim to
 `runs/order-claims/<orchestration_id>/<action_id>.json` rather than to
 `sources/source-requests.jsonl`, and `question_resolve.py reopen` writes one
@@ -547,6 +547,16 @@ page straight through, since no acquisition submission would ever come along to
 commit a claim for it, while a workspace acquiring through its own providers is
 covered on the same terms as a delegated one — both are verified by a submission
 that can accept or refuse what was done, which is the whole requirement.
+
+A question can accumulate fulfilled blockers across orders. Each new order captures
+all blocker links and the complete original question page. Reopening requires every
+blocker to be fulfilled; earlier fulfilments must match their captured request
+records. Partially delivered questions retain their blocker links and remain
+eligible for later acquisition. Commit recovery recognizes only the exact page
+rendered from that original page, the accepted sources, and the claim's timestamp.
+Changes to the body, unrelated frontmatter, or answer link remain scope violations.
+A pending order without these complete baselines requires an audited fresh-session
+recovery; current fulfilled state alone cannot reconstruct its issuance authority.
 
 **Result semantics.** Every scoped request must end the action with a claimed
 fulfilment **or** a recorded attempt failure naming that action; a request with

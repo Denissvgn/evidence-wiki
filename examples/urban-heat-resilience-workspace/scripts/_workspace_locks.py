@@ -215,6 +215,51 @@ def multiprocess_lock_supported() -> bool:
     return bool(lock_capability()["native_backends"])
 
 
+def workspace_lock_contended(lock_path: Path) -> bool:
+    """Observe an existing lock without creating, changing, or removing files.
+
+    This is an instantaneous dry-run observation, never authority to mutate.
+    Unknown native state refuses; an exclusive fallback record is retained and
+    treated as busy even if old. Only the owning write path may recover it.
+    """
+    normalized = Path(lock_path)
+    if os.path.lexists(_exclusive_lock_path(normalized)):
+        return True
+    try:
+        metadata = normalized.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise LockUnavailableError(f"Cannot safely inspect workspace lock {normalized}")
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(normalized, flags)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise LockUnavailableError(f"Cannot inspect workspace lock {normalized}: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise LockUnavailableError(f"Workspace lock changed while inspecting {normalized}")
+        try:
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                raise LockUnavailableError(f"No read-only native lock probe available for {normalized}")
+        except OSError as exc:
+            if exc.errno in _CONTENDED_ERRNOS:
+                return True
+            raise LockUnavailableError(f"Cannot inspect workspace lock {normalized}: {exc}") from exc
+        return False
+    finally:
+        os.close(descriptor)
+
+
 def lock_holder_path(lock_path: Path) -> Path:
     """Return the sidecar path that carries optional holder metadata."""
     normalized = Path(lock_path)

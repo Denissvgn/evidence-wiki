@@ -5,11 +5,13 @@ name: Scale and coverage evidence
 # budgets, and a branch-coverage report of the default suite. It runs on a
 # schedule, on demand, and for pull requests a maintainer labels `performance`.
 # A budget violation fails the job and is reported with the environment it was
-# measured on; nothing here retries until a passing sample appears. Budgets are
-# calibrated for GitHub-hosted ubuntu runners; a sample from any other machine
-# is evidence about that machine, and the stored JSON says which it was.
+# measured on; nothing here retries until a passing sample appears. The stored
+# JSON identifies each runner; local measurements do not establish calibration
+# for GitHub-hosted runners.
 
 on:
+  schedule:
+    - cron: "23 3 * * 1"
   workflow_dispatch:
     inputs:
       profile:
@@ -117,6 +119,11 @@ jobs:
           # workspace-script subprocess its own data file; combine folds them, and
           # the copied-script paths, back onto the template sources.
           .venv/bin/python -m coverage run -m pytest -q
+
+      - name: Generate coverage reports even when a test fails
+        if: always()
+        shell: bash
+        run: |
           .venv/bin/python -m coverage combine
           .venv/bin/python -m coverage report --show-missing --skip-empty | tee coverage-report.txt
           .venv/bin/python -m coverage xml -o coverage.xml

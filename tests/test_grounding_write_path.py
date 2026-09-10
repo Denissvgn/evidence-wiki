@@ -1,4 +1,4 @@
-"""The supported write path for grounding (CR-7 T5/T7/T8).
+"""The supported write path for grounding.
 
 Before this path existed, every host that wanted to record grounding hand-edited question
 frontmatter: load the YAML, mutate a list, dump it back — reordering keys and retyping
@@ -335,7 +335,7 @@ class GroundingSetWriteTests(GroundingWriteFixture):
         self.assertNotIn("grounding_verified_at", frontmatter)
 
     def test_the_envelope_names_verification_as_not_performed_and_what_performs_it(self):
-        """No `--verify` flag by design: `verify_quotes.py` already is that seam (CR-7 §7.2)."""
+        """No `--verify` flag by design: `verify_quotes.py` already is that seam."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.make_workspace(root)
@@ -644,7 +644,7 @@ class AnswerGroundingFileTests(GroundingWriteFixture):
         self.assertEqual(2, payload["grounding_count"])
 
     def test_a_failing_anchor_refuses_with_the_anchor_code_and_writes_nothing(self):
-        """CR-7's fail-closed acceptance criterion, on the new code path."""
+        """Unverified grounding cannot enter the accepted write path."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.make_workspace(root)

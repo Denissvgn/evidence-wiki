@@ -641,6 +641,13 @@ class UpgradePendingOrderTests(unittest.TestCase):
             drifted = target / "scripts" / "query_index.py"
             drifted.write_text("# stale local copy\n")
 
+            before = {path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+            code, _stdout, stderr = run_cli_result("upgrade", "--target", str(target), "--dry-run")
+            self.assertEqual(2, code, stderr)
+            self.assertIn("UPGRADE_PENDING_ORDER", stderr)
+            self.assertIn("active driver", stderr)
+            self.assertEqual(before, {path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()})
+
             code, _stdout, stderr = run_cli_result("upgrade", "--target", str(target))
 
             self.assertEqual(2, code, stderr)

@@ -3314,6 +3314,12 @@ class OrchestrationControllerTests(unittest.TestCase):
         request_id = "req-existing-evidence"
         candidate_id = "cand-existing-evidence"
         source_id = "html:existing-evidence"
+        page_before = (
+            "---\ntype: question\nstatus: blocked\n"
+            f"blocking_request_ids: [{request_id}]\nsource_ids: []\n---\n\n"
+            "# Existing evidence question\n"
+        )
+        page_fingerprint = "sha256:" + hashlib.sha256(page_before.encode()).hexdigest()
         work_order = {
             "phase": "acquisition",
             # Both written by the real issuer, and both needed now that the arm reads the
@@ -3334,7 +3340,9 @@ class OrchestrationControllerTests(unittest.TestCase):
                         "test-question": {
                             "status": "blocked",
                             "blocking_request_ids": [request_id],
+                            "page_blocking_request_ids": [request_id],
                             "source_ids_before": [],
+                            "page_before": page_before,
                         }
                     },
                 },
@@ -3475,7 +3483,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                         "sources/normalized/existing.md": normalized_fingerprint,
                     },
                     "question_file_fingerprints_before": {
-                        "test-question.md": "sha256:" + "4" * 64,
+                        "test-question.md": page_fingerprint,
                     },
                 }
             )
@@ -3485,6 +3493,8 @@ class OrchestrationControllerTests(unittest.TestCase):
                 # a workspace with no ledger is exactly the empty-claims case it handles.
                 if stem == "_order_claims":
                     return load_script_module("reconciliation_order_claims", SCRIPTS / "_order_claims.py")
+                if stem in {"question_resolve", "question_status"}:
+                    return load_script_module(f"reconciliation_{stem}", SCRIPTS / f"{stem}.py")
                 return {
                     "run_controller": run_controller,
                     "source_requests": source_requests,
@@ -3512,7 +3522,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                         # these bytes at the baseline. A page that reached any other status
                         # did so by being written, which is what the fingerprint shows.
                         return_value={
-                            "test-question.md": "sha256:" + ("4" if frozen else "5") * 64
+                            "test-question.md": page_fingerprint if frozen else "sha256:" + "5" * 64
                         },
                     ),
                     mock.patch.object(
@@ -4345,7 +4355,10 @@ class OrchestrationControllerTests(unittest.TestCase):
                 CONTROLLER.DELEGATED_EXHAUSTED_TERMINAL_REASON,
             )
             self.assertEqual(
-                {"exhausted_requests": {request_id: "provider_throttled"}},
+                {
+                    "exhausted_requests": {request_id: "provider_throttled"},
+                    "linked_question_slugs": ["test-question"],
+                },
                 context["event_data"],
             )
 
@@ -4375,7 +4388,13 @@ class OrchestrationControllerTests(unittest.TestCase):
             route, context = self.route_for(target)
 
             self.assertIsNone(route)
-            self.assertEqual({"exhausted_requests": {request_id: "not_authorized"}}, context["event_data"])
+            self.assertEqual(
+                {
+                    "exhausted_requests": {request_id: "not_authorized"},
+                    "linked_question_slugs": ["test-question"],
+                },
+                context["event_data"],
+            )
 
     def test_a_configured_budget_replaces_the_default(self):
         # Two workspaces rather than one with a mid-test recording: with a session live the
@@ -5126,7 +5145,16 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.controller(target, "next", "--orchestration-id", "orch-test")
 
             source_id = self.deliver_for_request(target, first)
-            self.fulfil_and_reopen(target, first, source_id, "test-question")
+            self.assert_json_script_ok(
+                SOURCE_REQUESTS,
+                ["--project-root", str(target), "fulfill", "--request-id", first,
+                 "--source-id", source_id, "--format", "json"],
+            )
+            # Exercise the controller independently of the CLI's early refusal.
+            CONTROLLER.load_sibling_module("_order_claims").record_reopen_claim(
+                target, "orch-test", "action-0001", question_slug="test-question",
+                source_ids=[source_id], request_ids=[first], claimed_at="2026-09-10T00:00:00Z",
+            )
             self.record_attempt(target, second, code="no_result", session="orch-test", action="action-0001")
 
             code, error, _ = self.submit_delegated(target)
@@ -6423,7 +6451,12 @@ class OrchestrationControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             target, request_id = self.delegated_action(Path(tmpdir))
             source_id = self.deliver_for_request(target, request_id)
-            self.reopen_question(target, request_id, source_id, "test-question")
+            claims = CONTROLLER.load_sibling_module("_order_claims")
+            claims.record_reopen_claim(
+                target, "orch-test", "action-0001", question_slug="test-question",
+                source_ids=[source_id], request_ids=[request_id],
+                claimed_at="2026-09-10T12:00:00Z",
+            )
 
             code, error, _ = self.submit_delegated(target, outcome="blocked", summary="Aborted.")
 
@@ -7412,7 +7445,9 @@ class OrchestrationControllerTests(unittest.TestCase):
                     "test-question": {
                         "status": "blocked",
                         "blocking_request_ids": [request_id],
+                        "page_blocking_request_ids": [request_id],
                         "source_ids_before": [],
+                        "page_before": (target / "wiki/questions/test-question.md").read_text(),
                     }
                 },
                 acquisition_guards["linked_blocked_questions_reopened"]["blocked_questions_before"],

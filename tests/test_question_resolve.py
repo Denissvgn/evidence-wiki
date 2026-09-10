@@ -201,6 +201,16 @@ class QuestionResolveTests(unittest.TestCase):
         self.assertEqual(0, code, stdout.getvalue())
         return json.loads(stdout.getvalue())["request"]["request_id"]
 
+    def fulfill_requests(self, target: Path, pairs: list[tuple[str, str]]) -> None:
+        for request_id, source_id in pairs:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = REQUESTS.main([
+                    "--project-root", str(target), "fulfill", "--request-id", request_id,
+                    "--source-id", source_id, "--format", "json",
+                ])
+            self.assertEqual(0, code, stdout.getvalue() + stderr.getvalue())
+
     def seed_manifest(self, target: Path, source_id: str = "raw:bench-survey-2026") -> None:
         record = {
             "id": source_id,
@@ -1172,6 +1182,7 @@ class QuestionResolveTests(unittest.TestCase):
             )
             self.seed_manifest(target, "raw:bench-survey-2026")
             self.seed_normalized_record(target, "raw:bench-survey-2026")
+            self.fulfill_requests(target, [(request_id, "raw:bench-survey-2026")])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1202,8 +1213,6 @@ class QuestionResolveTests(unittest.TestCase):
             # The reopened question is actionable again: it can be claimed and answered.
             self.run_claim(target, "needs-evidence", agent_id="agent-b")
 
-    # -- CR-4 T6: scope-based request -> source pairing on reopen -------------------
-    #
     # Delivery is exercised through the real chain (raw file + .provenance.yml sidecar
     # -> source_inventory.py -> normalize_sources.py) rather than a hand-written
     # manifest, because the sidecar `scope` reaching `provenance.scope` on the manifest
@@ -1248,12 +1257,7 @@ class QuestionResolveTests(unittest.TestCase):
         raise AssertionError(f"no manifest record for {raw_path}")
 
     def set_request_scope(self, target: Path, request_id: str, scope: dict) -> None:
-        """Stamp a structured scope onto an existing request record.
-
-        ``source_requests.py add --scope`` is a sibling CR-4 unit; the record shape is
-        the contract between them, so these tests write the field directly rather than
-        depending on the flag's landing order.
-        """
+        """Stamp a structured scope onto an existing request record."""
         path = target / "sources" / "source-requests.jsonl"
         lines = []
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -1282,7 +1286,7 @@ class QuestionResolveTests(unittest.TestCase):
         return heat, shade
 
     def test_reopen_pairs_scoped_requests_with_matching_sources_in_any_order(self):
-        """The CR's literal acceptance criterion: pairing is semantic, not positional."""
+        """Pairing follows declared scope regardless of argument order."""
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             heat_request, shade_request = self.two_scoped_requests_blocked(target)
@@ -1291,6 +1295,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.inventory_and_normalize(target)
             heat_source = self.source_id_for(target, "raw/papers/heat-index.html")
             shade_source = self.source_id_for(target, "raw/papers/shade-cover.html")
+            self.fulfill_requests(target, [(heat_request, heat_source), (shade_request, shade_source)])
 
             # Sources and requests are supplied in deliberately mismatched positional
             # order: zipping the two lists would pair heat with shade and vice versa.
@@ -1428,6 +1433,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.deliver_scoped_source(target, "combined-survey", None)
             self.inventory_and_normalize(target)
             source_id = self.source_id_for(target, "raw/papers/combined-survey.html")
+            self.fulfill_requests(target, [(first, source_id), (second, source_id)])
 
             def refuse_lookup(source_id_value: str) -> dict:
                 raise AssertionError(f"pairing read provenance scope for {source_id_value}")
@@ -1469,6 +1475,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.inventory_and_normalize(target)
             heat_source = self.source_id_for(target, "raw/papers/heat-index.html")
             other_source = self.source_id_for(target, "raw/papers/combined-survey.html")
+            self.fulfill_requests(target, [(scoped, heat_source), (unscoped, other_source)])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1529,6 +1536,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.inventory_and_normalize(target)
             one = self.source_id_for(target, "raw/papers/quote-one.html")
             two = self.source_id_for(target, "raw/papers/quote-two.html")
+            self.fulfill_requests(target, [(first, one), (second, two)])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1592,6 +1600,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.inventory_and_normalize(target)
             stamped = self.source_id_for(target, "raw/papers/quote-one.html")
             bare = self.source_id_for(target, "raw/papers/quote-bare.html")
+            self.fulfill_requests(target, [(first, stamped), (second, bare)])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1646,6 +1655,7 @@ class QuestionResolveTests(unittest.TestCase):
                 self.source_id_for(target, f"raw/papers/quote-{name}.html")
                 for name in ("one", "two", "three")
             ]
+            self.fulfill_requests(target, list(zip((first, second, third), sources, strict=True)))
 
             args = ["reopen", "--slug", "needs-evidence", "--agent-id", "fetch-agent"]
             for source_id in sources:
@@ -1869,6 +1879,10 @@ class QuestionResolveTests(unittest.TestCase):
             self.deliver_scoped_source(target, "heat-index", {"facet_id": "heat-index"})
             self.deliver_scoped_source(target, "shade-cover", {"facet_id": "shade-cover"})
             self.inventory_and_normalize(target)
+            self.fulfill_requests(target, [
+                (heat_request, self.source_id_for(target, "raw/papers/heat-index.html")),
+                (shade_request, self.source_id_for(target, "raw/papers/shade-cover.html")),
+            ])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1907,6 +1921,8 @@ class QuestionResolveTests(unittest.TestCase):
             self.block_on_requests(target, "needs-evidence", [first, second])
             self.deliver_scoped_source(target, "combined-survey", None)
             self.inventory_and_normalize(target)
+            source_id = self.source_id_for(target, "raw/papers/combined-survey.html")
+            self.fulfill_requests(target, [(first, source_id), (second, source_id)])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1936,6 +1952,10 @@ class QuestionResolveTests(unittest.TestCase):
             self.deliver_scoped_source(target, "heat-index", {"facet_id": "heat-index"})
             self.deliver_scoped_source(target, "shade-cover", {"facet_id": "shade-cover"})
             self.inventory_and_normalize(target)
+            self.fulfill_requests(target, [
+                (heat_request, self.source_id_for(target, "raw/papers/heat-index.html")),
+                (shade_request, self.source_id_for(target, "raw/papers/shade-cover.html")),
+            ])
             requests_path = target / "sources" / "source-requests.jsonl"
             before = requests_path.read_bytes()
 

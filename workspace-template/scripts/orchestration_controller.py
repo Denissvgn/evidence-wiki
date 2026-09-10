@@ -2499,6 +2499,7 @@ def valid_scope_id_list(value: Any) -> bool:
 def valid_blocked_question_baseline(value: Any) -> bool:
     if not isinstance(value, dict) or len(value) > MAX_SCOPE_IDS:
         return False
+    total_bytes = 0
     for slug, snapshot in value.items():
         if (
             not isinstance(slug, str)
@@ -2506,11 +2507,40 @@ def valid_blocked_question_baseline(value: Any) -> bool:
             or len(slug) > MAX_SCOPE_ID_LENGTH
             or "\x00" in slug
             or not isinstance(snapshot, dict)
-            or set(snapshot) != {"status", "blocking_request_ids", "source_ids_before"}
+            or set(snapshot) != {
+                "status", "blocking_request_ids", "page_blocking_request_ids", "source_ids_before", "page_before"
+            }
             or snapshot.get("status") != "blocked"
             or not valid_scope_id_list(snapshot.get("blocking_request_ids"))
             or not snapshot.get("blocking_request_ids")
+            or not valid_scope_id_list(snapshot.get("page_blocking_request_ids"))
+            or not set(snapshot["blocking_request_ids"]) <= set(snapshot["page_blocking_request_ids"])
             or not valid_scope_id_list(snapshot.get("source_ids_before"))
+            or not isinstance(snapshot.get("page_before"), str)
+        ):
+            return False
+        try:
+            total_bytes += len(snapshot["page_before"].encode("utf-8"))
+        except UnicodeError:
+            return False
+        if total_bytes > MAX_SCOPE_GUARD_BYTES:
+            return False
+        text = snapshot["page_before"].replace("\r\n", "\n").replace("\r", "\n")
+        end = text.find("\n---", 4)
+        if not text.startswith("---\n") or end == -1:
+            return False
+        try:
+            fields = yaml.safe_load(text[4:end])
+        except (yaml.YAMLError, RecursionError, ValueError):
+            return False
+        if (
+            not isinstance(fields, dict)
+            or fields.get("type") != "question"
+            or fields.get("status") != "blocked"
+            or not valid_scope_id_list(fields.get("blocking_request_ids"))
+            or not valid_scope_id_list(fields.get("source_ids", []))
+            or sorted(fields["blocking_request_ids"]) != snapshot["page_blocking_request_ids"]
+            or sorted(fields.get("source_ids", [])) != snapshot["source_ids_before"]
         ):
             return False
     return True
@@ -2588,7 +2618,15 @@ def require_acquisition_evidence_baselines(work_order: dict[str, Any]) -> None:
     ) and valid_file_fingerprint_snapshot(
         normalized_files_before,
         prefix="sources/",
-    ) and valid_question_file_fingerprint_snapshot(question_files_before):
+    ) and valid_question_file_fingerprint_snapshot(question_files_before) and all(
+        question_files_before.get(f"{slug}.md")
+        == f"sha256:{hashlib.sha256(before['page_before'].encode('utf-8')).hexdigest()}"
+        and slug in work_order.get("scope", {}).get("question_slugs", [])
+        and set(before["blocking_request_ids"]) == (
+            set(before["page_blocking_request_ids"]) & set(work_order.get("scope", {}).get("request_ids", []))
+        )
+        for slug, before in blocked_questions_before.items()
+    ):
         return
     raise OrchestrationControllerError(
         "ORCHESTRATION_ACQUISITION_BASELINE_UNAVAILABLE",
@@ -4499,6 +4537,9 @@ def linked_blocked_questions_snapshot(
     """Capture only blocked scoped questions linked to the scoped source requests."""
     request_scope = set(request_ids)
     linked: dict[str, dict[str, Any]] = {}
+    question_status = load_sibling_module("question_status")
+    questions_dir = question_status.questions_directory(project_root, config)
+    total_bytes = 0
     for slug, snapshot in scoped_question_evidence_snapshot(project_root, config, slugs).items():
         blocking_request_ids = [
             request_id
@@ -4507,10 +4548,26 @@ def linked_blocked_questions_snapshot(
         ]
         if snapshot.get("status") != "blocked" or not blocking_request_ids:
             continue
+        payload = bounded_regular_bytes(
+            questions_dir / f"{slug}.md",
+            max_bytes=MAX_SCOPE_GUARD_BYTES - total_bytes,
+            error_code="ORCHESTRATION_SCOPE_EXCEEDED",
+            label="blocked question baseline",
+            containment_root=project_root,
+        )
+        total_bytes += len(payload)
+        try:
+            page_before = payload.decode("utf-8")
+        except UnicodeError as exc:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_SCOPE_INVALID", "blocked question is not UTF-8", recoverable=False
+            ) from exc
         linked[slug] = {
             "status": "blocked",
             "blocking_request_ids": blocking_request_ids,
+            "page_blocking_request_ids": list(snapshot.get("blocking_request_ids", [])),
             "source_ids_before": list(snapshot.get("source_ids", [])),
+            "page_before": page_before,
         }
     if not valid_blocked_question_baseline(linked):
         raise OrchestrationControllerError(
@@ -5386,10 +5443,18 @@ def delegated_acquisition_route(
     )
 
     if not routable:
+        blocked_question_slugs = sorted({
+            slug
+            for request in requests
+            if request.get("request_id") in exhausted
+            for slug in request.get("question_slugs", [])
+            if isinstance(slug, str) and slug
+        })
         if exhausted:
             reason = (
                 f"{DELEGATED_EXHAUSTED_TERMINAL_REASON}: "
                 f"{len(exhausted)} request(s) ({summarize_reason_slugs(sorted(exhausted))}). "
+                f"Linked questions: {summarize_reason_slugs(blocked_question_slugs)}. "
                 "Fix the acquirer-side cause, then start a new session."
             )
         else:
@@ -5405,7 +5470,10 @@ def delegated_acquisition_route(
             "terminal_status": "blocked_on_sources",
             "reason": reason,
             "workspace_status": status,
-            "event_data": {"exhausted_requests": dict(sorted(exhausted.items()))},
+            "event_data": {
+                "exhausted_requests": dict(sorted(exhausted.items())),
+                "linked_question_slugs": blocked_question_slugs,
+            },
         }
 
     # Truncation is not a loss: requests dropped by the cap stay open and are scoped by
@@ -5880,6 +5948,7 @@ def action_spec(
         # provider-mode order, which is what every pre-delegation order is.
         spec["acquisition_mode"] = ACQUISITION_MODE_DELEGATED
         spec["assigned_agent_id"] = context["acquirer_agent_id"]
+    require_acquisition_evidence_baselines(spec)
     return spec
 
 
@@ -6981,6 +7050,81 @@ def unvalidated_reopen_claim_sources(
     return unvalidated
 
 
+def acquisition_question_outcomes(
+    blocked_questions_before: dict[str, Any],
+    fulfilled_by_request_id: dict[str, Any],
+    durable_requests: list[dict[str, Any]],
+    source_requests_before: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    """Evaluate every page blocker using scoped outcomes and unchanged durable siblings."""
+    durable_by_id = {record["request_id"]: record for record in durable_requests}
+    outcomes: dict[str, dict[str, Any]] = {}
+    for slug, before in blocked_questions_before.items():
+        remaining: list[str] = []
+        untrusted: list[str] = []
+        sources = set(before["source_ids_before"])
+        scoped = set(before["blocking_request_ids"])
+        for request_id in before["page_blocking_request_ids"]:
+            if request_id in scoped:
+                record = fulfilled_by_request_id.get(request_id)
+            else:
+                record = durable_by_id.get(request_id)
+                fingerprint = (
+                    canonical_json_fingerprint(record, label="sibling source request")[0]
+                    if record is not None else None
+                )
+                if fingerprint is None or fingerprint != source_requests_before.get(request_id):
+                    untrusted.append(request_id)
+                    continue
+            source_id = record.get("source_id") if isinstance(record, dict) else None
+            if (
+                not isinstance(record, dict)
+                or record.get("status") != "fulfilled"
+                or slug not in record.get("question_slugs", [])
+                or not isinstance(source_id, str)
+                or not source_id
+            ):
+                remaining.append(request_id)
+            else:
+                sources.add(source_id)
+        outcomes[slug] = {
+            "fully_unblocked": not remaining and not untrusted,
+            "remaining_request_ids": sorted(remaining),
+            "untrusted_request_ids": sorted(untrusted),
+            "required_source_ids": sorted(sources),
+        }
+    return outcomes
+
+
+def project_question_reopen_claims(
+    project_root: Path,
+    config: dict[str, Any],
+    blocked_questions_before: dict[str, Any],
+    reopen_claims: dict[str, Any],
+) -> tuple[dict[str, Any], set[str]]:
+    """Exempt a replayed page only when all its bytes equal the authorized edit."""
+    current = scoped_question_evidence_snapshot(project_root, config, list(blocked_questions_before))
+    committed: set[str] = set()
+    question_resolve = load_sibling_module("question_resolve")
+    question_status = load_sibling_module("question_status")
+    questions_dir = question_status.questions_directory(project_root, config)
+    for slug, claim in reopen_claims.items():
+        before = blocked_questions_before.get(slug)
+        if not isinstance(before, dict) or slug not in current:
+            continue
+        projected_sources = sorted(set(before["source_ids_before"]) | set(claim["source_ids"]))
+        expected = question_resolve.render_reopen_page(
+            before["page_before"], claim["source_ids"], claim["claimed_at"]
+        ).encode("utf-8")
+        actual_digest = file_digest(
+            questions_dir / f"{slug}.md", max_bytes=MAX_SCOPE_GUARD_BYTES, containment_root=project_root
+        )
+        if actual_digest == f"sha256:{hashlib.sha256(expected).hexdigest()}":
+            committed.add(slug)
+        current[slug] = {"status": "open", "blocking_request_ids": [], "source_ids": projected_sources}
+    return current, committed
+
+
 def commit_delegated_bookkeeping(
     project_root: Path,
     config: dict[str, Any],
@@ -7012,18 +7156,13 @@ def commit_delegated_bookkeeping(
     # silently leaving the late claim uncommitted. Re-read under the ledger's own lock and
     # refuse if anything moved, so a lost claim is a refusal the acquirer can retry rather
     # than an acceptance that dropped its work.
-    now = timestamp_utc()
-    # Reopens first, and the order matters. Finalization is replayable, so a crash can land
-    # between the two halves. Reopening first leaves questions open with no blocking link --
-    # a state the health guard does not inspect. Fulfilling first would leave a *blocked*
-    # question whose blocking request reads fulfilled, which lint reports and readiness
-    # turns into ORCHESTRATION_WORKSPACE_HEALTH_CHANGED, refused as unrecoverable before the
-    # replay ever reaches finalization. The cheaper half-state is the one to leave behind.
+    # Both halves are replayable. The claim's clock fixes the exact authorized page bytes
+    # even when finalization is retried on a later day.
     for slug, claim in sorted(reopen_claims.items()):
         if slug in committed_slugs:
             continue
         source_ids = [value for value in claim.get("source_ids", []) if isinstance(value, str)]
-        question_resolve.commit_reopen_claim(project_root, config, slug, source_ids, now)
+        question_resolve.commit_reopen_claim(project_root, config, slug, source_ids, claim["claimed_at"])
     if fulfilment_claims:
         path = source_requests.requests_path(project_root, config)
         with source_requests.workspace_lock(
@@ -7424,62 +7563,19 @@ def verify_delegated_acquisition_postconditions(
         remediation="Start a fresh orchestration session; never infer question transitions after execution.",
     )
     fulfilled_by_request_id = {str(item.get("request_id")): item for item in fulfilled}
-    durable_question_evidence = scoped_question_evidence_snapshot(
-        project_root,
-        config,
-        list(blocked_questions_before),
+    question_outcomes = acquisition_question_outcomes(
+        blocked_questions_before, fulfilled_by_request_id, all_requests, source_requests_before
     )
-    # The page is frozen too, so what a reopen *did* is read from its claim projected onto
-    # the frozen page -- exactly the edit the controller will commit.
-    current_question_evidence = dict(durable_question_evidence)
-    committed_question_slugs: set[str] = set()
-    for slug, claim in reopen_claims.items():
-        durable = durable_question_evidence.get(slug)
-        if not isinstance(durable, dict):
-            continue
-        baseline = blocked_questions_before.get(slug)
-        claimed_sources = [value for value in claim.get("source_ids", []) if isinstance(value, str)]
-        # Projected from the frozen baseline the work order recorded, never from the durable
-        # page. `durable | claimed` compared against `durable` is satisfied by *any* superset
-        # of the claim, so a page hand-written open with extra source ids would certify
-        # itself as already-committed and exempt its whole file from the freeze below --
-        # committing evidence nothing delivered.
-        baseline_sources = (
-            set(baseline.get("source_ids_before", [])) if isinstance(baseline, dict) else set()
-        )
-        projected_sources = sorted(baseline_sources | set(claimed_sources))
-        if (
-            isinstance(baseline, dict)
-            and durable.get("status") == "open"
-            and not durable.get("blocking_request_ids")
-            and sorted(durable.get("source_ids", [])) == projected_sources
-        ):
-            # Already committed by an interrupted finalization. The evidence fields must
-            # match the projection exactly, not merely look reopened: two lifecycle fields
-            # alone would exempt the whole page fingerprint for this slug on the strength of
-            # a state an edit could also produce. A page whose *body* was edited after the
-            # crash is still admitted for this one slug -- the frontmatter is what the
-            # controller reads, and the body is covered for every slug it does not exempt.
-            committed_question_slugs.add(slug)
-            continue
-        current_question_evidence[slug] = {
-            "status": "open",
-            "blocking_request_ids": [],
-            "source_ids": projected_sources,
-        }
-    # A question is unblocked only when every request blocking it *that this order scoped*
-    # was fulfilled: `linked_blocked_questions_snapshot` filters the page's blocking list
-    # down to the order's request scope before recording the baseline. A scoped blocker that
-    # failed leaves the question exactly as it was. A blocker outside this order does not --
-    # it is not in the baseline, so it cannot hold the question shut here. That is a real
-    # gap when an earlier order retired a blocker non-retryably: the next order scopes only
-    # what remains, and reopening wipes a blocking link whose request is still open.
-    fully_unblocked = {
-        slug
-        for slug, before in blocked_questions_before.items()
-        if set(before.get("blocking_request_ids", [])) <= fulfilled_request_ids
-        and before.get("blocking_request_ids")
-    }
+    require(
+        not any(item["untrusted_request_ids"] for item in question_outcomes.values()),
+        "delegated acquisition cannot trust changed or missing sibling source requests",
+        {"question_outcomes": question_outcomes},
+        "Restore the unchanged sibling request records captured when this order was issued.",
+    )
+    current_question_evidence, committed_question_slugs = project_question_reopen_claims(
+        project_root, config, blocked_questions_before, reopen_claims
+    )
+    fully_unblocked = {slug for slug, outcome in question_outcomes.items() if outcome["fully_unblocked"]}
     unvalidated_sources = unvalidated_reopen_claim_sources(
         reopen_claims, by_source_id, normalized_root
     )
@@ -7505,12 +7601,8 @@ def verify_delegated_acquisition_postconditions(
     question_transition_failures: list[dict[str, Any]] = []
     for slug in sorted(fully_unblocked):
         before = blocked_questions_before[slug]
-        expected_source_ids = {
-            str(fulfilled_by_request_id[request_id].get("source_id"))
-            for request_id in before.get("blocking_request_ids", [])
-        }
         current_question = current_question_evidence.get(slug, {})
-        required_source_ids = set(before.get("source_ids_before", [])) | expected_source_ids
+        required_source_ids = set(question_outcomes[slug]["required_source_ids"])
         if (
             current_question.get("status") != "open"
             or set(current_question.get("blocking_request_ids", []))
@@ -8516,52 +8608,19 @@ def verify_action_postconditions(
             "acquisition work order lacks a valid blocked-question baseline",
             remediation="Start a fresh orchestration session; never infer question transitions after execution.",
         )
-        # Snapshotted over the questions this order held blocked *and* every question a
-        # fulfilled request names. The wider set is what the still-blocked check below needs:
-        # it used to read workspace status, which covered the whole workspace, and a frozen
-        # page means status can no longer answer. Narrowing it to the baseline would have
-        # left that check unable to fail.
-        linked_question_slugs = {
-            str(slug)
-            for request in fulfilled
-            for slug in request.get("question_slugs", [])
-            if isinstance(slug, str) and slug
-        }
-        durable_question_evidence = scoped_question_evidence_snapshot(
-            project_root,
-            config,
-            sorted(set(blocked_questions_before) | linked_question_slugs),
+        question_outcomes = acquisition_question_outcomes(
+            blocked_questions_before, fulfilled_by_request_id, all_requests, source_requests_before
         )
-        # The page is frozen too, so what a reopen *did* is its claim projected onto the
-        # frozen page -- exactly the edit the controller will commit.
-        current_question_evidence = dict(durable_question_evidence)
-        committed_question_slugs: set[str] = set()
-        for slug, claim in reopen_claims.items():
-            durable = durable_question_evidence.get(slug)
-            if not isinstance(durable, dict):
-                continue
-            baseline = blocked_questions_before.get(slug)
-            claimed_sources = [value for value in claim.get("source_ids", []) if isinstance(value, str)]
-            # Projected from the frozen baseline, never from the durable page -- see the
-            # delegated arm's note: projecting from the page lets any superset of the claim
-            # certify itself as already-committed and exempt its own file from the freeze.
-            baseline_sources = (
-                set(baseline.get("source_ids_before", [])) if isinstance(baseline, dict) else set()
-            )
-            projected_sources = sorted(baseline_sources | set(claimed_sources))
-            if (
-                isinstance(baseline, dict)
-                and durable.get("status") == "open"
-                and not durable.get("blocking_request_ids")
-                and sorted(durable.get("source_ids", [])) == projected_sources
-            ):
-                committed_question_slugs.add(slug)
-                continue
-            current_question_evidence[slug] = {
-                "status": "open",
-                "blocking_request_ids": [],
-                "source_ids": projected_sources,
-            }
+        require(
+            not any(item["untrusted_request_ids"] for item in question_outcomes.values()),
+            "acquisition cannot trust changed or missing sibling source requests",
+            {"question_outcomes": question_outcomes},
+            "Restore the unchanged sibling request records captured when this order was issued.",
+        )
+        fully_unblocked = {slug for slug, outcome in question_outcomes.items() if outcome["fully_unblocked"]}
+        current_question_evidence, committed_question_slugs = project_question_reopen_claims(
+            project_root, config, blocked_questions_before, reopen_claims
+        )
         # A reopen this order never scoped is caught here or nowhere: the page no longer
         # moves, so the question-file scope guard has nothing left to see.
         unvalidated_sources = unvalidated_reopen_claim_sources(
@@ -8576,33 +8635,22 @@ def verify_action_postconditions(
                 "claim cannot attach evidence the workspace has no readable record of."
             ),
         )
-        unauthorized_reopen_claims = sorted(set(reopen_claims) - set(blocked_questions_before))
+        unauthorized_reopen_claims = sorted(set(reopen_claims) - fully_unblocked)
         require(
             not unauthorized_reopen_claims,
-            "acquisition changed a question this order did not scope as blocked",
+            "acquisition claimed a question that is unscoped or not fully unblocked",
             {"question_slugs": unauthorized_reopen_claims},
-            "Reopen only the blocked questions this work order named.",
+            "Reopen scoped blocked questions only after every page blocker has fulfilled evidence.",
         )
         question_transition_failures: list[dict[str, Any]] = []
-        for slug, before in blocked_questions_before.items():
-            linked_request_ids = list(before.get("blocking_request_ids", []))
-            linked_fulfilled = [
-                fulfilled_by_request_id.get(request_id) for request_id in linked_request_ids
-            ]
-            expected_source_ids = {
-                str(request.get("source_id"))
-                for request in linked_fulfilled
-                if isinstance(request, dict) and isinstance(request.get("source_id"), str)
-            }
+        for slug in sorted(fully_unblocked):
+            before = blocked_questions_before[slug]
             current_question = current_question_evidence.get(slug, {})
-            current_source_ids = set(current_question.get("source_ids", []))
-            current_blocking_ids = set(current_question.get("blocking_request_ids", []))
-            required_source_ids = set(before.get("source_ids_before", [])) | expected_source_ids
+            required_source_ids = set(question_outcomes[slug]["required_source_ids"])
             if (
-                any(not isinstance(request, dict) for request in linked_fulfilled)
-                or current_question.get("status") != "open"
-                or current_blocking_ids
-                or not required_source_ids <= current_source_ids
+                current_question.get("status") != "open"
+                or current_question.get("blocking_request_ids")
+                or not required_source_ids <= set(current_question.get("source_ids", []))
             ):
                 question_transition_failures.append(
                     {
@@ -8610,11 +8658,6 @@ def verify_action_postconditions(
                         "before": before,
                         "after": current_question or None,
                         "expected_source_ids": sorted(required_source_ids),
-                        "fulfilled_request_ids": sorted(
-                            request_id
-                            for request_id in linked_request_ids
-                            if isinstance(fulfilled_by_request_id.get(request_id), dict)
-                        ),
                     }
                 )
         require(
@@ -8625,19 +8668,6 @@ def verify_action_postconditions(
                 "Fulfill each scoped request, then use question_resolve.py reopen so every baseline-blocked "
                 "question is exactly open, has the fulfilled source id, and has no remaining blocking links."
             ),
-        )
-        # Read from the projection, not from workspace status: the pages are frozen, so
-        # status reports every scoped question still blocked whatever the acquirer claimed,
-        # and this check would refuse the work it is meant to confirm.
-        still_blocked = {
-            slug
-            for slug in linked_question_slugs
-            if current_question_evidence.get(slug, {}).get("status") == "blocked"
-        }
-        require(
-            not still_blocked,
-            "questions linked to fulfilled evidence remain blocked",
-            {"question_slugs": sorted(still_blocked)},
         )
         current_source_request_fingerprints = record_fingerprint_snapshot(
             all_requests,

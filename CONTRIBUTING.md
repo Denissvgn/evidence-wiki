@@ -101,8 +101,8 @@ candidate and stores the JSON beside the distributions. Each run calls
 `tools/scale_benchmark.py --profile <name> --require-budget --output <file>`,
 which exits `3` on a budget violation and records the commit, Python,
 platform, and runner beside the timings. The budgets in
-`tools/scale_benchmark.py` are calibrated for GitHub-hosted `ubuntu-latest`
-runners; cold `workspace_status` and warm `workspace_status_cached` are
+`tools/scale_benchmark.py` are configured thresholds; runner calibration must
+be established from the recorded measurements. Cold `workspace_status` and warm `workspace_status_cached` are
 measured separately. A violation is a measurement to read against the recorded
 environment, not a prompt to rerun until a sample passes: a slower runner or a
 regression both fail, and telling them apart is the reviewer's job. Run the

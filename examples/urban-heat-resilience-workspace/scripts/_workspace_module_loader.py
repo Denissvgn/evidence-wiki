@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.abc
+import importlib.machinery
 import importlib.util
 import re
 import sys
@@ -21,6 +23,26 @@ _MISSING = object()
 # content hash; the signature only decides whether that hash must be recomputed.
 _TREE_HASH_LOCK = threading.Lock()
 _TREE_HASH_MEMO: dict[Path, tuple[tuple[tuple[str, int, int, int, int], ...], str]] = {}
+
+
+class _SourceLoader(importlib.machinery.SourceFileLoader):
+    """Compile source bytes without consulting or altering timestamp-based bytecode."""
+
+    def get_code(self, fullname: str):
+        path = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(path), path)
+
+
+class _SiblingFinder(importlib.abc.MetaPathFinder):
+    def __init__(self, root: Path, names: set[str]) -> None:
+        self.root = root
+        self.names = names
+
+    def find_spec(self, fullname: str, path=None, target=None):
+        if path is not None or fullname not in self.names:
+            return None
+        source = self.root / f"{fullname}.py"
+        return importlib.util.spec_from_file_location(fullname, source, loader=_SourceLoader(fullname, str(source)))
 
 
 def _tree_signature(script_dir: Path) -> tuple[tuple[str, int, int, int, int], ...]:
@@ -118,18 +140,22 @@ def load_workspace_module(
 
     with _IMPORT_LOCK:
         original_path = list(sys.path)
+        finder = _SiblingFinder(root, sibling_names)
         saved_modules = {name: sys.modules.get(name, _MISSING) for name in names_to_restore}
         try:
             for name in names_to_restore:
                 sys.modules.pop(name, None)
             sys.path.insert(0, str(root))
-            spec = importlib.util.spec_from_file_location(unique_name, path)
+            sys.meta_path.insert(0, finder)
+            spec = importlib.util.spec_from_file_location(unique_name, path, loader=_SourceLoader(unique_name, str(path)))
             if spec is None or spec.loader is None:
                 raise SystemExit(f"Cannot load sibling workspace script: {path}")
             module = importlib.util.module_from_spec(spec)
             sys.modules[unique_name] = module
             spec.loader.exec_module(module)
         finally:
+            if finder in sys.meta_path:
+                sys.meta_path.remove(finder)
             for name in names_to_restore:
                 sys.modules.pop(name, None)
             for name, previous in saved_modules.items():
@@ -138,5 +164,11 @@ def load_workspace_module(
             sys.path[:] = original_path
 
     if cache is not None:
+        # Callers may retain old module objects, but our cache owns only the latest
+        # generation of a given target. Other roots and stems remain independent.
+        prefix = f"{root}\0{stem}\0"
+        for old_key in list(cache):
+            if old_key.startswith(prefix):
+                del cache[old_key]
         cache[cache_key] = module
     return module

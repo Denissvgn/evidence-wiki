@@ -107,9 +107,14 @@ def _load_workspace_loader(script_dir: Path) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
-        spec.loader.exec_module(module)
+        # Timestamp-based pyc validation is weaker than this loader's content
+        # identity. Compile the actual loader bytes even when an old pyc exists.
+        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # noqa: S102 -- trusted packaged code
     finally:
         sys.modules.pop(module_name, None)
+    for old_key in list(_LOADER_MODULE_CACHE):
+        if old_key.startswith(f"{root}\0"):
+            del _LOADER_MODULE_CACHE[old_key]
     _LOADER_MODULE_CACHE[key] = module
     return module
 

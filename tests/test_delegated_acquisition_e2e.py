@@ -370,16 +370,10 @@ class DelegatedWorkspace:
         )
 
     def build_backlog(self, root: Path) -> tuple[Path, dict[str, str]]:
-        """Two blocked questions over three requests, none of them satisfiable yet.
+        """Exercise independent progress and grouped retries on two questions.
 
-        The *second* question carries two of the requests. That grouping is deliberate:
-        a blocked question must have every one of its blocking requests still open —
-        `workspace_status` reports a fulfilled blocker as a missing open link and flips the
-        verdict to `attention_required`, which freezes the session. So the request that
-        gets fulfilled has to be the sole blocker of its question, and the two that fail
-        can share one. (That constraint predates delegation entirely: it reproduces with
-        no session and no `orchestration:` section. Batching just makes it easier to walk
-        into — see the follow-up in the backlog.)
+        One question has a delivered blocker; the other retains two failed blockers
+        so retry grouping and eventual exhaustion can be checked independently.
         """
         workspace = self.init_workspace(root, spare_question=False)
         self.configure(workspace, delegated=True)

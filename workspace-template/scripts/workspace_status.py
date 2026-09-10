@@ -737,7 +737,7 @@ def blocked_request_link_summary(
                     missing_request_ids.append(request_id)
                     errors.append({"slug": slug, "request_id": request_id, "problem": "missing"})
                     continue
-                if request.get("status") != "open":
+                if request.get("status") not in {"open", "fulfilled"}:
                     slug_has_error = True
                     errors.append(
                         {

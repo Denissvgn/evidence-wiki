@@ -50,12 +50,11 @@ research runs:
   the deterministic counterpart to ``block`` and the only verb that operates on a
   terminal status; it requires no claim because a blocked question is unclaimed.
   Whether that transition is written or only claimed turns on the order it runs
-  inside. Outside a pending delegated **acquisition** order it is written to the
-  page immediately: in a workspace that does not delegate acquisition, when no
-  live order is pending, and under a sanctioning order of any other kind — a
+  inside. Outside a pending **acquisition** order it is written to the
+  page immediately: when no live order is pending, and under a sanctioning order of any other kind — a
   **research** order legitimately scopes a question, and no acquisition
   submission will ever come along to commit what it reopens. Inside a pending
-  delegated acquisition order the transition is filed as a claim under
+  provider or delegated acquisition order the transition is filed as a claim under
   ``runs/order-claims/`` instead, and ``orchestration_controller.py`` applies it
   to the page when it accepts the submission; a refused or failed submission
   applies nothing, and until acceptance the page still reads ``blocked``, keeping
@@ -71,6 +70,10 @@ research runs:
   and fulfilment stays with ``source_requests.py fulfill`` — which, inside that
   same kind of order, likewise claims it rather than writing it, so the controller
   is what makes either durable.
+  Every request in the question's blocking links must be fulfilled first. A
+  contingent reopen combines this order's claims with unchanged, previously
+  fulfilled sibling requests, and attaches all their sources. A partial delivery
+  leaves the question blocked and retains its links for a later order.
 
 By default, the other verbs require the question to be claimed by the same agent
 id. ``--allow-unclaimed`` lets an orchestrator or single-agent workflow resolve
@@ -1670,17 +1673,25 @@ def require_in_order_question_mutation(
     )
 
 
-def apply_reopen_to_page(page_path: Path, text: str, merged: list[str], now: str) -> None:
-    """The one edit a reopen makes to a question page.
-
-    Extracted so the controller's commit of a claimed reopen applies exactly this, rather
-    than a second implementation that could drift from it.
-    """
+def render_reopen_page(text: str, source_ids: list[str], now: str) -> str:
+    """Render the complete authorized page, shared by commit and replay verification."""
     question_claim = load_sibling_module("question_claim")
+    parts = question_claim.split_frontmatter_lines(text)
+    if parts is None:
+        raise ResolveError(EXIT_INVALID, "PAGE_INVALID", "question page has no frontmatter block")
+    merged = existing_source_ids(question_claim.frontmatter_mapping(parts[0]))
+    for source_id in source_ids:
+        if source_id not in merged:
+            merged.append(source_id)
     fields: dict[str, Any] = {"status": "open", "source_ids": merged, "updated": now.split("T", 1)[0]}
     remove_fields = ("claimed_by", "claimed_at", "blocked_reason", "blocking_request_ids")
-    updated = apply_resolution_edits(text, fields, remove_fields, quoted_fields={"updated"})
-    question_claim.write_page_atomic(page_path, updated)
+    return apply_resolution_edits(text, fields, remove_fields, quoted_fields={"updated"})
+
+
+def apply_reopen_to_page(page_path: Path, text: str, merged: list[str], now: str) -> None:
+    """Write the same page projection the controller verifies on replay."""
+    question_claim = load_sibling_module("question_claim")
+    question_claim.write_page_atomic(page_path, render_reopen_page(text, merged, now))
 
 
 def commit_reopen_claim(
@@ -1712,6 +1723,54 @@ def commit_reopen_claim(
                 merged.append(source_id)
         apply_reopen_to_page(page_path, text, merged, now)
         return True
+
+
+def cumulative_reopen_sources(
+    project_root: Path,
+    config: dict[str, Any],
+    slug: str,
+    frontmatter: dict[str, Any],
+    contingent: dict[str, Any] | None,
+) -> list[str]:
+    """Require all blockers, including verified deliveries from earlier orders."""
+    controller = load_sibling_module("orchestration_controller")
+    source_requests = load_sibling_module("source_requests")
+    records = source_requests.load_requests(source_requests.requests_path(project_root, config))
+    scoped_fulfilled: dict[str, Any] = {}
+    if contingent is not None:
+        try:
+            order = controller.hydrate_integrity_baselines(project_root, contingent["work_order"])
+            controller.require_acquisition_evidence_baselines(order)
+            guards = {item["check"]: item for item in order["required_postconditions"]}
+            before = guards["linked_blocked_questions_reopened"]["blocked_questions_before"].get(slug)
+            if before is None:
+                raise ResolveError(EXIT_INVALID, "QUESTION_REOPEN_DELEGATED", "order has no blocked-question baseline")
+            fingerprints = guards["manifest_records_increased"]["source_request_record_fingerprints_before"]
+            claims = load_claims(claims_path(project_root, contingent["orchestration_id"], contingent["action_id"]))
+            for record in records:
+                request_id = record["request_id"]
+                claim = claims.get("fulfilments", {}).get(request_id)
+                if request_id in before["blocking_request_ids"] and isinstance(claim, dict):
+                    scoped_fulfilled[request_id] = {**record, "status": "fulfilled", "source_id": claim["source_id"]}
+        except controller.OrchestrationControllerError as exc:
+            raise ResolveError(EXIT_INVALID, exc.error_code, str(exc), details=exc.details) from exc
+        except OrderClaimError as exc:
+            raise ResolveError(EXIT_INVALID, "ORCHESTRATION_STATE_UNREADABLE", exc.message) from exc
+    else:
+        blockers = frontmatter.get("blocking_request_ids", [])
+        if not controller.valid_scope_id_list(blockers):
+            raise ResolveError(EXIT_INVALID, "PAGE_INVALID", "question has an invalid blocking request list")
+        before = {"blocking_request_ids": [], "page_blocking_request_ids": blockers, "source_ids_before": []}
+        fingerprints = controller.record_fingerprint_snapshot(records, id_field="request_id", label="source requests")
+    outcome = controller.acquisition_question_outcomes({slug: before}, scoped_fulfilled, records, fingerprints)[slug]
+    if not outcome["fully_unblocked"]:
+        raise ResolveError(
+            EXIT_INVALID,
+            "QUESTION_BLOCKERS_UNFULFILLED",
+            f"question {slug} still has unfulfilled or untrusted blocking requests",
+            details={"question_slug": slug, **outcome},
+        )
+    return outcome["required_source_ids"]
 
 
 def transition_reopen(
@@ -1786,6 +1845,12 @@ def transition_reopen(
         # page write, so a refusal leaves the question blocked.
         if getattr(args, "require_decisive_scope", False):
             require_decisive_pairing(pairs, pairing_warnings)
+        required_sources = cumulative_reopen_sources(project_root, config, slug, frontmatter, contingent)
+        for source_id in validate_source_ids(project_root, config, required_sources):
+            if not has_normalized_record(project_root, config, source_id):
+                raise ResolveError(EXIT_INVALID, "SOURCE_NOT_NORMALIZED", f"source {source_id} has no normalized record yet")
+            if source_id not in source_ids:
+                source_ids.append(source_id)
         merged = existing_source_ids(frontmatter)
         for source_id in source_ids:
             if source_id not in merged:

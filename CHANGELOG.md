@@ -2,48 +2,28 @@
 
 ## Unreleased
 
-- **Scale budgets and branch coverage are now measured by automation.** The frozen
-  `standard` and `near-partition` profiles have carried release budgets for time, memory,
-  and output size, and nothing ran them: the default suite measures a tiny case and no
-  workflow invoked a large profile. A new `Scale and coverage evidence` workflow measures
-  the profiles weekly, on demand, and for pull requests labelled `performance`, and the
-  release gate measures `standard` for every candidate and stores the result with the
-  distributions. `tools/scale_benchmark.py --require-budget` exits `3` on a violation, and
-  every result now records the commit, Python, platform, and runner it was measured on, so
-  a slow machine and a regression are told apart by reading rather than by retrying. The
-  same workflow publishes branch coverage of the default suite with workspace-script
-  subprocesses measured and copied workspace scripts folded back onto their template
-  sources, which the previous coverage configuration silently left out.
+- **Acquisition progress now survives partial deliveries across orders.** Provider and
+  delegated acquisition retain fulfilled requests while other blockers remain. A
+  question reopens only after every blocker is fulfilled, with earlier evidence
+  included and earlier request records verified against the issued baseline.
+  Interrupted reopen commits are accepted only when the complete question page
+  matches the expected change; edits to its body or unrelated metadata are refused.
 
-- **CI and the release gate validate built distributions through one tool, and the sdist is
-  now installed too.** The two workflows carried separate copies of the installed-wheel
-  smoke, and they had drifted: only the release copy probed the round-trip YAML dependency,
-  and neither installed anything built from the sdist. `tools/validate_installed_artifacts.py`
-  is the single gate both now run. It checks every archive member against the packaging
-  policy -- required assets present, internal documents, reports, caches, environments, and
-  build output absent -- installs the wheel into a fresh environment and exercises it from
-  outside the checkout, then unpacks the sdist, builds a wheel from it, requires that wheel to
-  carry the same members as the direct one, and repeats the installed checks on it. The
-  summary it prints records each artifact's SHA-256 digest and the version it verified, and
-  the release workflow stores that summary beside the distributions it uploads.
+- **Scale measurements run weekly and accompany release candidates.** The frozen
+  `standard` and `near-partition` profiles enforce time, memory, and output budgets.
+  Reports identify the commit and execution environment; exceeding a configured
+  budget returns exit code `3`.
 
-  The sdist path found a real defect on its first run. `.gitignore` ignores `AGENTS.md`
-  everywhere and re-admits the three tracked copies with `!` rules; the sdist builder
-  honoured the ignore and not the re-admission, so every sdist shipped without
-  `workspace-template/AGENTS.md`, a required starter asset, and a wheel built from an sdist
-  could not locate its own assets root. The wheel built directly from a checkout was never
-  affected. The sdist now force-includes the tracked copies, and the gate requires every
-  contract-named asset in both archives.
+- **Built distributions include the required starter assets.** The source archive
+  now includes the tracked `AGENTS.md` files needed by workspace initialization.
+  Distribution validation checks archive membership and exercises fresh wheel and
+  source-archive installations from outside the checkout.
 
-- **Warm script loads no longer reread the whole script tree.** Every in-process load of a
-  packaged workspace script rehashed all of its siblings -- fifty-odd files, over three
-  megabytes -- to prove the cache key still held. The content hash is now remembered
-  behind the tree's stat signature (name, size, modification time, change time, inode)
-  and recomputed only when that signature moves, observed before and after hashing so a
-  tree edited mid-hash is never remembered under a signature it does not match. A warm
-  load now reads no script bytes; an edited sibling still invalidates the cached module.
-  The signature is metadata: an edit that preserves all four fields is not seen, which is
-  the same stated limit as any stat-based check.
+- **Warm script loads reuse content fingerprints and execute current source bytes.**
+  Unchanged script trees avoid repeated content reads. Changed trees invalidate
+  cached modules, including sibling imports whose size and modification time are
+  preserved and whose old bytecode cache still exists. Cache generations are
+  bounded per workspace and module.
 
 - **Public guidance points only at published files, and a refused companion declaration
   says why.** The README linked an architecture index and a release process that are not
@@ -438,9 +418,7 @@
   alongside a mismatched `additional_provenance` entry, which an exported citation reports as
   the record's verification status. Every consumer other than `--reject-mismatch` — lint, the
   evidence gates, export — still reads the primary `provenance` alone; that boundary is now
-  stated where it is relied upon rather than assumed away. Verified by reverting only the
-  production change and confirming the refusal tests fail while both `--require-checksum`
-  controls still pass.
+  stated where it is relied upon rather than assumed away.
 - **Fix: a file delivered under a dot path inside a bundle was admitted by the record that
   owns it and counted by nothing.** An arXiv or LaTeX bundle record declares one `raw_paths`
   entry — the bundle directory — and no member list anywhere, so the whole subtree beneath
@@ -794,8 +772,7 @@
   meant. That code's registry remediation was written for `record-attempt-failure` alone and
   now answers both commands that reach it, since a fulfilled request accepts neither a
   recorded attempt failure nor a relink. Re-fulfilling a request with the *same* source id
-  is unchanged and still succeeds idempotently. The tests now assert `error_code` and
-  `recoverable` rather than a stderr substring, which is what let the mismatch ship.
+  is unchanged and still succeeds idempotently.
 
 - **Fix: the reuse and reconciliation refusals stopped advising commands that refuse.**
   Every escape those refusals printed was unfollowable in the only state that could print
@@ -808,8 +785,7 @@
   An operator who followed the printed advice reached a second refusal for having followed
   it.
 
-  Both doors were walked in tests rather than reasoned about, and neither is named now.
-  What the refusals state instead is the fact underneath all of them — a fulfilled request
+  The refusals state that a fulfilled request
   has no second route — and, where the per-source repair cannot be performed, that this
   order has none either. Two more escapes were found the same way and removed: the provider
   arms' "acquire it through another selected candidate" bottoms out at that same relink
@@ -1922,8 +1898,8 @@
   any record declaring a lower ratio emits LOW `normalized_low_rendered_coverage`,
   counted in the `normalized_low_rendered_coverage` stat. It is unset by default and
   LOW when it fires, because capping a long series is a legitimate rendering choice
-  rather than a defect — this is a visibility tool, and CR-7's structured grounding
-  anchors are the actual fix for un-quotable content. Unlike the contract check, it
+  rather than a defect — this is a visibility tool, and structured grounding
+  anchors address content that cannot be quoted from rendered text. Unlike the contract check, it
   applies to native and foreign records alike; a threshold that is not a number in
   `[0, 1]` disables the notice instead of failing the run.
 - Cover the structured-evidence path end to end.

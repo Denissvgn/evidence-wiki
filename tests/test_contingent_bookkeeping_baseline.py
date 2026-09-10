@@ -769,7 +769,7 @@ class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase)
             )
 
             self.assertNotEqual(0, code, envelope)
-            self.assertIn("did not scope as blocked", envelope["message"], envelope)
+            self.assertIn("unscoped or not fully unblocked", envelope["message"], envelope)
             self.assertEqual([unscoped_slug], envelope["details"]["question_slugs"], envelope)
 
             # Refused, so nothing was committed: the unscoped page never took the source on,
@@ -780,16 +780,8 @@ class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase)
             self.assertEqual("blocked", question_fields(workspace)["status"], "the scoped page must not move")
             self.assertEqual("open", stored_request(workspace, request_id)["status"])
 
-    def test_a_fulfilment_leaving_another_question_the_request_names_blocked_is_refused(self):
-        """Without it an order closes over a question its own fulfilled request never unblocked.
-
-        The transition guard above walks the baseline only -- the scoped questions this
-        order holds the blockers for. A request may name a second question that some other
-        request blocks; that question is in no baseline, and no reopen for it would be
-        authorized, so this check is the only thing that reads it at all. Delete it and the
-        submission is accepted, the fulfilment commits, and the request goes to `fulfilled`
-        declaring it unblocked a question the workspace still reports as blocked.
-        """
+    def test_fulfilment_preserves_a_question_blocked_only_by_another_request(self):
+        """A request's question references do not override the page's actual blockers."""
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.init_workspace(Path(tmpdir))
             self.enable_providers(workspace)
@@ -871,32 +863,22 @@ class ProviderAcquisitionBookkeepingTests(DelegatedWorkspace, unittest.TestCase)
                 ],
             )
 
-            code, refused = self.submit(
+            code, result = self.submit(
                 workspace,
                 order["action_id"],
                 artifacts=[PAPER, f"{PAPER}.provenance.yml", "sources/manifest.jsonl"],
             )
 
-            self.assertNotEqual(
-                0, code, msg=f"a question the fulfilled request names must not stay blocked: {refused}"
-            )
-            self.assertIn(
-                "questions linked to fulfilled evidence remain blocked",
-                refused["message"],
-                refused,
-            )
-            self.assertEqual([self.SECOND_SLUG], refused["details"]["question_slugs"], refused)
-
-            # Refused, so nothing committed: both pages still hold what issuance captured,
-            # and the scoped request is still open for another attempt.
+            self.assertEqual(0, code, result)
             scoped = question_fields(workspace)
-            self.assertEqual("blocked", scoped["status"], scoped)
+            self.assertEqual("open", scoped["status"], scoped)
+            self.assertIn(source_id, scoped["source_ids"])
             second = question_fields(workspace, self.SECOND_SLUG)
             self.assertEqual("blocked", second["status"], second)
             self.assertEqual([other_request_id], second["blocking_request_ids"], second)
             record = stored_request(workspace, request_id)
-            self.assertEqual("open", record["status"], record)
-            self.assertIsNone(record["source_id"], record)
+            self.assertEqual("fulfilled", record["status"], record)
+            self.assertEqual(source_id, record["source_id"], record)
 
     def test_a_provider_claim_pairing_a_contradicting_source_scope_is_refused(self):
         """Writing this arm's ledger by hand must not get past the check `fulfill` applies.
