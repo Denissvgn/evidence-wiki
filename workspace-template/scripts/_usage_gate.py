@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Shared consumer decisions for explicit permissions and host-owned revisions."""
 
 from __future__ import annotations

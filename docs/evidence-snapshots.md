@@ -86,9 +86,29 @@ attempts together and enforce split separation; labels alone do not do so.
 Excluded payloads are absent, so their exclusion reasons are host-attested
 selection decisions rather than independently recomputed evidence claims.
 
-This contract exports current-state execution evidence. Historical-cutoff
-execution is refused. Temporal source metadata alone does not establish past
-availability. Retention is host-managed; the package does not delete old
+The v1 selection exports current-state execution evidence. A v2 selection can
+qualify that captured evidence and every ancestor at a historical cutoff. It
+adds exactly one field to the v1 selection:
+
+```json
+{"temporal":{"mode":"historical-audit","cutoff":"2026-09-10T01:00:00Z","checkpoint":"sha256:<accepted-event-digest>"}}
+```
+
+Set `schema_version` to `evidence-snapshot-selection/v2`. Use
+`historical-audit` for bytes the host actually observed by the cutoff or
+`historical-available` for public availability supported by an independent
+receipt. The checkpoint must have been accepted by the host before preparation.
+Every included source and ancestor must exist at that checkpoint and qualify
+at the cutoff; later deposits cannot enter the closure. Public mode includes
+the exact availability receipt and proof artifacts for every source. The
+independent verifier rechecks all temporal claims, signatures, and proof
+bindings. Checkpoint membership and host observation times are host-attested
+facts; the bundle does not carry the full external event store.
+
+An execution record's authenticated history must also exist by the cutoff.
+Records that themselves declare historical simulation remain unsupported by
+this exporter. The replay contract is described in
+[Temporal evidence](temporal-evidence.md). Retention is host-managed; the package does not delete old
 exports, train models, construct dataset formats, or guarantee model-weight
 reproducibility.
 
@@ -96,7 +116,11 @@ reproducibility.
 
 `evidence-snapshot/v1` contains exactly `schema_version`, `snapshot_id`,
 `manifest`, `registration`, and `blobs`. The manifest uses
-`evidence-snapshot-manifest/v1` and `evidence-snapshot-contract/v1`. Serialization
+`evidence-snapshot-manifest/v1` and `evidence-snapshot-contract/v1`. Historical
+selections produce `evidence-snapshot/v2`, with corresponding v2 manifest and
+contract versions. The v2 manifest also carries `temporal`, containing
+`checkpoint_observed_at` and an `availability` map over the exact source closure
+(null entries for audit mode). Both encodings retain the same bounds. Serialization
 is UTF-8 JSON with sorted keys, compact separators, preserved Unicode, no
 non-finite numbers, and one trailing newline. Duplicate keys and noncanonical
 bundle encodings refuse. Blobs are canonical base64 keyed by the SHA-256 of

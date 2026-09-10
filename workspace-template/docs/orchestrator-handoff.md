@@ -412,6 +412,10 @@ errors that prevent the report from being built.
 
 | Script | JSON mode | Fatal envelope codes |
 |--------|-----------|----------------------|
+| `evidence_snapshots.py` | `python3 scripts/evidence_snapshots.py prepare\|export\|check\|verify --format json` with a JSON request on stdin and explicit trust for offline verification | `EVIDENCE_SNAPSHOT_REFUSED` |
+| `evidence_temporal.py` | `python3 scripts/evidence_temporal.py evaluate --format json` with a bounded JSON request on stdin | `EVIDENCE_TEMPORAL_REFUSED` |
+| `evidence_usage.py` | `python3 scripts/evidence_usage.py transact\|status\|check\|lineage\|materialize --format json` | `EVIDENCE_USAGE_REFUSED` |
+| `qualified_packet.py` | `python3 scripts/qualified_packet.py profiles\|packet\|execution --format json` | `SOURCE_UNKNOWN`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID` |
 | `coverage_manifest.py` | `python3 scripts/coverage_manifest.py init\|show\|validate\|set-facet\|evaluate --format json` | `DEPENDENCY_MISSING`, `TOOLING_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `COVERAGE_MANIFEST_INVALID`, `COVERAGE_MANIFEST_EXISTS`, `COVERAGE_CLAIM_PROBE_INVALID`, `COVERAGE_FACET_UNKNOWN`, `COVERAGE_POLICY_UNKNOWN`, `COVERAGE_TEMPLATE_INVALID`, `SOURCE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_LINKED`, `FACET_SCOPE_CONFLICT`, `VALUE_INVALID`, `SLUG_INVALID`, `SLUG_UNKNOWN`, `WORKSPACE_UNREADABLE` |
 | `discover_sources.py` | `python3 scripts/discover_sources.py --format json <command>` | `DEPENDENCY_MISSING`, `CONFIG_MISSING`, `CONFIG_INVALID`, `VALUE_INVALID`, `DISCOVERY_DISABLED`, `DISCOVERY_PROVIDER_DISABLED`, `NOT_IMPLEMENTED`, `DISCOVERY_NETWORK_ERROR`, `DISCOVERY_RESPONSE_INVALID`, `ARXIV_RATE_LIMITED`, `OPENALEX_AUTH_REQUIRED`, `OPENALEX_RATE_LIMITED`, `SEARCH_PROVIDER_DISABLED`, `SEARCH_PROVIDER_FAILED`, `GITHUB_AUTH_REQUIRED`, `GITHUB_RATE_LIMITED`, `CANDIDATE_UNKNOWN`, `REQUEST_UNKNOWN`, `REQUEST_NOT_OPEN`, `QUESTION_UNKNOWN`, `DISCOVERY_RUN_STATE_INVALID`, `DISCOVERY_RUN_RECOVERY_REQUIRED`, `DISCOVERY_RUN_ID_INVALID`, `DISCOVERY_RUN_UNKNOWN`, `DISCOVERY_RUN_TERMINAL`, `DISCOVERY_RUN_ID_REQUIRED`, `ACADEMIC_PROVIDER_REQUEST_LEDGER_INVALID`, `ACADEMIC_PROVIDER_REQUEST_BUDGET_EXCEEDED`, `ACADEMIC_PROVIDER_REQUEST_LEDGER_WRITE_FAILED`, `PROVIDER_NOT_REGISTERED`, `PROVIDER_REGISTRATION_INVALID`, `PROVIDER_REQUEST_INVALID`, `PROVIDER_PLAN_INVALID`, `ACQUISITION_DOMAIN_NOT_DECLARED`, `ACQUISITION_PROVIDER_RATE_LIMITED`, `WORKSPACE_UNREADABLE` |
 | `doctor.py` | `python3 scripts/doctor.py --format json` | `WORKSPACE_UNREADABLE` for fatal setup exceptions; missing capabilities are normal report checks. Registered-provider problems are report findings carrying `PROVIDER_NOT_REGISTERED` (authorized but not installed) and `PROVIDER_REGISTRATION_INVALID` (installed but refused), never fatal envelopes. |
@@ -455,6 +459,20 @@ Stable error codes:
 
 | Code | Meaning | Typical remediation |
 |------|---------|---------------------|
+| `EVIDENCE_REVISION_CHANGED` | Workspace content or the publication implementation changed during capture or evaluation, or differs from the expected revision. | Retry with the current revision after active writers finish. |
+| `EVIDENCE_REVISION_INVALID` | The expected revision is not a canonical SHA-256 identity. | Supply the revision identifier returned by a successful capture. |
+| `EVIDENCE_REVISION_LIMIT` | Capture exceeds the file, byte, entry, nesting, or retry bound. | Reduce the captured workspace or use the documented retry limit. |
+| `EVIDENCE_REVISION_UNSAFE` | A capture path is linked, nonportable, nonregular, or cannot be read safely. | Restore ordinary local files and safe paths before recapturing. |
+| `EVIDENCE_REVISION_UNSUPPORTED` | The platform cannot provide the required anchored, no-follow file reads. | Capture on a platform supporting the required filesystem operations. |
+| `EVIDENCE_SNAPSHOT_REFUSED` | Snapshot selection, authorization, registration, content, or offline verification failed; `details.reason` identifies the boundary. | Check the declared selection, independent authority and host registration; preserve rejected bytes for inspection. |
+| `EVIDENCE_TEMPORAL_REFUSED` | The temporal request, immutable clocks, checkpoint, or authority failed validation; `details.reason` identifies the boundary. | Correct the bounded request or supply valid immutable evidence and independent authority. |
+| `EVIDENCE_USAGE_REFUSED` | The host rejected a revision, usage event, rights check, lineage query, or materialization; `details.reason` identifies the boundary. | Provide current authorization for the exact sanitized revision and requested use. |
+| `PUBLICATION_CONFIG_INVALID` | Selected publication configuration is malformed, excessively nested, or names an unsafe local path. | Correct the configuration and use workspace-relative paths. |
+| `PUBLICATION_OUTPUT_INVALID` | Selected publication output would be written inside the workspace being evaluated. | Choose an output destination outside that workspace. |
+| `PUBLICATION_QUESTION_UNKNOWN` | A selected question slug does not exist in the captured workspace. | Choose existing question slugs from the current workspace. |
+| `PUBLICATION_SAFETY_REFUSED` | Retained content matches the publication secret guard. | Remove or sanitize the reported sensitive content before evaluating again. |
+| `PUBLICATION_SELECTION_INVALID` | Question selection is empty, oversized, or contains an invalid slug. | Supply one to 1000 portable question slugs. |
+| `QUESTION_BLOCKERS_UNFULFILLED` | Reopening a question found unfulfilled or untrusted blocking requests. | Fulfil every blocker with normalized evidence through its owning acquisition flow, retaining request and claim audit records. |
 | `DEPENDENCY_MISSING` | Required runtime dependency is unavailable. | Install the dependency and rerun. |
 | `CONFIG_MISSING` | `research.yml` is missing. | Run from an initialized workspace or pass `--project-root`. |
 | `CONFIG_INVALID` | `research.yml` or contract metadata is malformed. | Fix the workspace config. |

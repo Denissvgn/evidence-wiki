@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Evaluate selected questions against one immutable local workspace capture."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-import importlib.util
 import os
 import py_compile
 import shutil
@@ -9,6 +8,8 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 from unittest import mock
+
+from tests._script_loader import load_module_uncached
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -146,10 +147,7 @@ class TreeHashMemoTests(unittest.TestCase):
     """The remembered tree hash is bound to the signature it was computed under."""
 
     def load_loader(self):
-        spec = importlib.util.spec_from_file_location("tree_hash_memo_loader_under_test", LOADER_SOURCE)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+        return load_module_uncached("tree_hash_memo_loader_under_test", LOADER_SOURCE)
 
     def test_hash_is_remembered_and_reused_only_while_the_signature_holds(self):
         loader = self.load_loader()

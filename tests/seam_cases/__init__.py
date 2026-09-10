@@ -38,6 +38,9 @@ class SeamCase:
     Each path must be present on both sides and is then blanked before the two
     documents are compared, so a field the seam drops entirely is still caught.
     Declare a path only when it genuinely cannot agree between two invocations.
+
+    ``stdin`` and ``environment`` provide equivalent transport and host authority
+    settings to the subprocess and in-process call without leaking between cases.
     """
 
     name: str
@@ -46,3 +49,5 @@ class SeamCase:
     expect: str = SUCCESS
     volatile: tuple[str, ...] = field(default=())
     note: str = ""
+    stdin: str = ""
+    environment: dict[str, str] = field(default_factory=dict)

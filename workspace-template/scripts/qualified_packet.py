@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Read-only discovery and validation of inert evidence intake profiles."""
 
 from __future__ import annotations

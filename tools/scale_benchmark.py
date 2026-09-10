@@ -149,6 +149,7 @@ def current_commit() -> str | None:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(REPO_ROOT),
             timeout=10,
         )
@@ -717,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     if args.format == "json":
         print(json.dumps(result, indent=2, sort_keys=True))
     else:

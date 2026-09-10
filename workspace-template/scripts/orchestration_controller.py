@@ -9991,7 +9991,6 @@ def repair_last_completion_events(project_root: Path, session: dict[str, Any]) -
 
 
 def submit_result(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
-    load_sibling_module("_usage_gate").require_host_intake(load_config(project_root))
     orchestration_id = require_safe_id(args.orchestration_id, "orchestration_id")
     action_id = require_safe_id(args.action_id, "action_id")
     result = load_result(Path(args.result_file).expanduser().resolve(), action_id, project_root)
@@ -10020,6 +10019,7 @@ def submit_result(project_root: Path, args: argparse.Namespace) -> dict[str, Any
         )
         require_action_baselines(order, project_root)
         verify_runtime_guards(project_root, session, order)
+        load_sibling_module("_usage_gate").require_host_intake(load_config(project_root))
         pending_submission = session.get("pending_submission")
         if pending_submission is not None:
             if pending_submission.get("action_id") != action_id or pending_submission.get("result") != result:

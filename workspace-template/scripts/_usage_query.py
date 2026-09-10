@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """In-memory retrieval from currently permitted, exact normalized revisions."""
 
 from __future__ import annotations

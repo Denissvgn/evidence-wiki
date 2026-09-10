@@ -60,7 +60,7 @@ importantly, what it does not.
 
 ## The Surface
 
-Thirty-nine operations. Most hang off an open handle, in namespaces; the
+Forty operations. Most hang off an open handle, in namespaces; the
 exceptions are `Workspace.open` itself and the three module-level functions that
 belong to no single workspace.
 
@@ -111,6 +111,17 @@ exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
 These operations use separately provisioned host authority and state. See
 [Evidence usage](evidence-usage.md) for the signing, sanitization, revocation,
 retention, and legacy compatibility contracts.
+
+**`ws.temporal`** — bounded source evaluation at one cutoff:
+
+| Operation | Signature |
+| --- | --- |
+| `temporal.evaluate` | `ws.temporal.evaluate(request: dict) -> dict` |
+
+See [Temporal evidence](temporal-evidence.md) for explicit source clocks,
+accepted checkpoints, independent public-availability receipts, and replay
+limits. Selection, lexical retrieval, declarative facets, and scalar grounding
+share the same cutoff. Current retrieval permission remains mandatory.
 
 **`ws.snapshots`** and `evidence_wiki.verify_snapshot` — frozen evidence:
 
@@ -199,7 +210,7 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "6"
+assert library_api["version"] == "7"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -223,6 +234,11 @@ invalid operations raise `SourceError` with `EVIDENCE_USAGE_REFUSED`.
 Version `"6"` adds snapshot preparation, publication, current-use reconciliation,
 and workspace-independent verification. Snapshot operations refuse invalid
 inputs with `EVIDENCE_SNAPSHOT_REFUSED`; verification returns a validity verdict.
+Version `"7"` adds read-only `temporal.evaluate`, availability attestations in
+the usage command contract, and historical snapshot selection with the v2
+snapshot schemas. Invalid temporal requests raise `SourceError` with
+`EVIDENCE_TEMPORAL_REFUSED`. A completed evaluation can contain source gaps,
+failed grounding, or unresolved review; inspect the returned outcomes.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;

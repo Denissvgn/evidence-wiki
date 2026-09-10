@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Materialize exact host-approved normalized bytes through anchored directories."""
 
 from __future__ import annotations

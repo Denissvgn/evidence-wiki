@@ -606,6 +606,10 @@ def _run_snapshot(args: list[str]) -> int:
     return int(_packaged_script("evidence_snapshots").main(_forward_target(args, prog="evidence-wiki snapshot")))
 
 
+def _run_temporal(args: list[str]) -> int:
+    return int(_packaged_script("evidence_temporal").main(_forward_target(args, prog="evidence-wiki temporal")))
+
+
 def _print_pack_help() -> None:
     print(
         "evidence-wiki pack: domain pack utilities\n\n"
@@ -657,6 +661,7 @@ def _print_help() -> None:
         "  evidence-wiki status [--target PATH] [--format text|json]\n"
         "  evidence-wiki export [--target PATH] [--format json]\n"
         "  evidence-wiki usage status|transact|check|lineage|materialize [--target PATH] [options]\n"
+        "  evidence-wiki temporal evaluate [--target PATH] [--format json]\n"
         "  evidence-wiki snapshot prepare|export|check [--target PATH] [options]\n"
         "  evidence-wiki snapshot verify --trust-policy PATH\n"
         "  evidence-wiki publication [--target PATH] --question SLUG [--question SLUG ...]\n"
@@ -758,6 +763,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_usage(args)
     if command == "snapshot":
         return _run_snapshot(args)
+    if command == "temporal":
+        return _run_temporal(args)
     if command == "serve-mcp":
         return _run_serve_mcp(args)
     if command == "orchestrate":

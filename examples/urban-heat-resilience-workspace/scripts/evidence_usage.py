@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Host-authenticated permissions, sanitized revisions, and revocation lineage."""
 
 from __future__ import annotations

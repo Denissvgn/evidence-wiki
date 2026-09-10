@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Prepare and publish host-authorized snapshots; verify frozen evidence offline."""
 
 from __future__ import annotations

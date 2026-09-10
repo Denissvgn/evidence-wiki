@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Historical evidence evaluation uses one explicit cutoff.** Library API
+  contract version 7 adds bounded revision selection, lexical retrieval,
+  declarative facet evaluation, and scalar grounding through `Workspace.temporal`
+  and the matching CLI. Host-observed audit replay and independently attested
+  public availability have separate requirements. Unknown dates, unfinished
+  measurements, future corrections, and unqualified ancestors remain gaps.
+  Historical snapshot bundles retain those time and proof bindings for offline
+  verification. Current permissions and revocations still govern each use.
+
 - **Evidence snapshots freeze a complete authorized artifact closure.** Library
   API contract version 6 adds preparation, host-registered atomic publication,
   current-use reconciliation, and independent offline verification, with matching

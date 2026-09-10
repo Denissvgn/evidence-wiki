@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Whole-payload authority checks against a separately configured host trust file.
 
 Workspace records and bundled policy material are inert claims. Only the host's

@@ -331,6 +331,19 @@ _REMEDIATIONS = {
         "outside it, or replace a symlinked or mounted workspace subtree with a real directory."
     ),
     "SOURCE_UNKNOWN": "Run scripts/source_inventory.py --report and choose a source id present in the manifest.",
+    "QUESTION_BLOCKERS_UNFULFILLED": (
+        "Fulfil every blocking request with normalized evidence through its owning acquisition flow, "
+        "then retry reopening the question. Preserve existing request and claim audit records."
+    ),
+    "EVIDENCE_USAGE_REFUSED": (
+        "Provide current host authorization for the exact sanitized revision and requested use."
+    ),
+    "EVIDENCE_SNAPSHOT_REFUSED": (
+        "Check the declared selection, independent authority and current host registration before retrying."
+    ),
+    "EVIDENCE_TEMPORAL_REFUSED": (
+        "Check the bounded request, immutable source clocks, host checkpoint and independent authority."
+    ),
     "SOURCE_NOT_NORMALIZABLE": (
         "The manifest holds this source but no extractor in this package handles it. Check its kind and "
         "raw_paths with scripts/source_inventory.py --report, or write the record by hand to the contract "

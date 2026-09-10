@@ -293,6 +293,7 @@ class NoAdapterBackwardCompatTests(unittest.TestCase):
             "source_id", "source_kind", "standards", "status", "structured_view",
             "title", "title_confidence", "title_source", "type",
             "unusable_evidence_reasons", "updated", "url", "venue",
+            "qualified_context", "execution_evidence",
         }
     )
 

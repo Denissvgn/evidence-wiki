@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Private host-owned atomic evidence state, independent of workspace rollback.
 
 The host provisions the state directory. Reads never create files. Protected

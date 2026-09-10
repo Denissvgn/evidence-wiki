@@ -233,7 +233,10 @@ class EmittedCodeFamilyTests(unittest.TestCase):
         "O_NOFOLLOW": "os.open flag",
         "EVIDENCE_WIKI_HANDOFF_SECRET": "environment variable name",
         "EVIDENCE_WIKI_SINGLE_WRITER": "environment variable name",
+        "EVIDENCE_WIKI_AUTHORITY_FILE": "environment variable naming independent host authority",
+        "EVIDENCE_WIKI_STATE_DIR": "environment variable naming private host storage",
         "QUERY_INDEX_FALLBACK": "retrieval mode name, not a refusal",
+        "QUERY_AUTHORIZED_REVISIONS_ONLY": "retrieval scope warning, not a refusal",
     }
 
     CODE_SHAPED = re.compile(r'"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,})"')

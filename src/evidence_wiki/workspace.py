@@ -23,6 +23,7 @@ from ._facades.normalize import NormalizeNamespace
 from ._facades.orchestrate import OrchestrateNamespace
 from ._facades.questions import QuestionsNamespace
 from ._facades.snapshots import SnapshotsNamespace
+from ._facades.temporal import TemporalNamespace
 from ._facades.usage import UsageNamespace
 from .errors import ConfigError
 
@@ -79,6 +80,7 @@ class Workspace:
         "normalize",
         "usage",
         "snapshots",
+        "temporal",
         "orchestrate",
         "diagnostics",
     )
@@ -92,6 +94,7 @@ class Workspace:
         self.normalize = NormalizeNamespace(self)
         self.usage = UsageNamespace(self)
         self.snapshots = SnapshotsNamespace(self)
+        self.temporal = TemporalNamespace(self)
         self.orchestrate = OrchestrateNamespace(self)
         self.diagnostics = DiagnosticsNamespace(self)
 

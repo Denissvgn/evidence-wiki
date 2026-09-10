@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Validate inert execution records separately from authenticated evaluation claims.
 
 An observation, proposed hypothesis, and evaluator receipt retain separate content

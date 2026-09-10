@@ -31,7 +31,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "6"
+LIBRARY_API_VERSION = "7"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -75,6 +75,7 @@ LIBRARY_API_SURFACE = (
     "snapshots.prepare",
     "snapshots.export",
     "snapshots.check",
+    "temporal.evaluate",
     "verify_snapshot",
     "questions.claim",
     "questions.release",
@@ -350,7 +351,7 @@ def contract() -> dict:
             "state_environment": "EVIDENCE_WIKI_STATE_DIR",
             "authority_environment": "EVIDENCE_WIKI_AUTHORITY_FILE",
             "platform": "POSIX with no-follow directory descriptors and advisory file locking",
-            "actions": ["initialize", "deposit", "authorize", "revoke", "register"],
+            "actions": ["initialize", "deposit", "authorize", "attest-availability", "revoke", "register"],
             "uses": ["retrieval", "training", "export"],
             "retention": ["host-managed"],
             "limits": {"state_bytes": 67108864, "events": 10000, "nodes": 4096,
@@ -363,6 +364,9 @@ def contract() -> dict:
         "evidence_snapshots": {
             "contract": "evidence-snapshot-contract/v1",
             "temporal_mode": "current",
+            "supported_contracts": ["evidence-snapshot-contract/v1", "evidence-snapshot-contract/v2"],
+            "historical_selection": "evidence-snapshot-selection/v2",
+            "temporal_modes": ["current", "historical-audit", "historical-available"],
             "registration": "host-signed usage command with expected checkpoint and stable request ID",
             "required_uses": ["training", "export"],
             "retention": "host-managed",
@@ -372,6 +376,17 @@ def contract() -> dict:
             "offline_verification": "explicit independent trust bytes; historical bindings only",
             "current_use": "current host authority, registry and transitive revocations",
             "contract_document": "docs/evidence-snapshots.md",
+        },
+        "evidence_temporal": {
+            "modes": ["current", "historical-audit", "historical-available"],
+            "current_clock": "host-owned; no supplied cutoff or checkpoint",
+            "historical_basis": "explicit cutoff and accepted immutable host checkpoint",
+            "public_availability": "independently controlled host-selected availability attester and exact proof artifacts",
+            "current_use": "current retrieval authority is mandatory; analysis never grants current-use approval",
+            "limits": {"sources": 32, "revisions": 64, "lineage": 128, "artifact_bytes": 8388608,
+                       "request_bytes": 262144, "facets": 32, "grounding": 128, "query_characters": 1024},
+            "retrieval": "pure lexical ranking of qualified revisions; no persistent index or wiki reads",
+            "contract_document": "docs/temporal-evidence.md",
         },
         "source_providers": {
             "discovery": list(provider_registry_module.DISCOVERY_PROVIDER_IDS),
@@ -410,8 +425,15 @@ def contract() -> dict:
             "evidence_snapshot": "evidence-snapshot/v1",
             "evidence_snapshot_manifest": "evidence-snapshot-manifest/v1",
             "evidence_snapshot_selection": "evidence-snapshot-selection/v1",
+            "evidence_temporal_snapshot": "evidence-snapshot/v2",
+            "evidence_temporal_snapshot_manifest": "evidence-snapshot-manifest/v2",
+            "evidence_temporal_snapshot_selection": "evidence-snapshot-selection/v2",
             "evidence_scrub_receipt": "evidence-scrub-receipt/v1",
             "evidence_source_revision": "evidence-source-revision/v1",
+            "evidence_temporal_source": "evidence-temporal-source/v1",
+            "evidence_availability_receipt": "evidence-availability-receipt/v1",
+            "evidence_temporal_request": "evidence-temporal-request/v1",
+            "evidence_temporal_result": "evidence-temporal-result/v1",
             "fleet_status": fleet_status_module.SCHEMA_VERSION,
             "error_envelope": script_errors_module.SCHEMA_VERSION,
         },

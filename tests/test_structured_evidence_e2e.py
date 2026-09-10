@@ -438,7 +438,9 @@ class StructuredEvidenceChainTests(StructuredEvidenceWorkspace, unittest.TestCas
             self.assertEqual("external", entry["origin"])
             self.assertEqual(1.0, entry["rendered_coverage"]["ratio"])
 
-            # 5. The gate now opens.
+            # Fulfilment records the delivered evidence before the question reopens.
+            code, fulfilled = self.run_fulfill(workspace, request_id, source_id)
+            self.assertEqual(0, code, fulfilled)
             code, payload = self.run_reopen(workspace, source_id, request_id)
             self.assertEqual(0, code, payload)
             self.assertEqual("open", payload["status"])
@@ -661,7 +663,8 @@ class ForeignRecordChainTests(StructuredEvidenceWorkspace, unittest.TestCase):
             self.assertEqual("external", entry["origin"])
             self.assertEqual({"name": FOREIGN_NORMALIZER_NAME, "version": 1}, entry["normalizer"])
 
-            # The reopen gate reads "a record exists", not "we wrote it".
+            code, fulfilled = self.run_fulfill(workspace, request_id, source_id)
+            self.assertEqual(0, code, fulfilled)
             code, payload = self.run_reopen(workspace, source_id, request_id)
             self.assertEqual(0, code, payload)
             self.assertEqual("open", payload["status"])
@@ -1688,6 +1691,8 @@ class AnchorGroundedWorkspaceShipsTests(AnchorGroundingWorkspace, unittest.TestC
             encoding="utf-8",
         )
 
+        code, fulfilled = self.run_fulfill(workspace, request_id, source_id)
+        self.assertEqual(0, code, fulfilled)
         code, reopened = self.run_reopen(workspace, source_id, request_id)
         self.assertEqual(0, code, reopened)
 

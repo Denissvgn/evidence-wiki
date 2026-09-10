@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Pinned offline packet qualifications carried without authority promotion."""
 
 from __future__ import annotations

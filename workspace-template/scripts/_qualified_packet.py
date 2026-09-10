@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Opt-in, offline intake of original qualified-context packet bytes.
 
 Delivery hashes bind deposited files. Native validation checks the producer's

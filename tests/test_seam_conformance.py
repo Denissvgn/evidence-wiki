@@ -94,6 +94,7 @@ import copy
 import importlib
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -103,6 +104,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from unittest.mock import patch
 
 from tests._script_loader import load_module
 from tests.seam_cases import REFUSAL, SUCCESS, SeamCase
@@ -112,9 +114,11 @@ SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 CASES_DIR = Path(__file__).resolve().parent / "seam_cases"
 CASES_PACKAGE = "tests.seam_cases"
 
-# Defines ScriptRefusal for every script to raise; it is a shared helper, not a
-# command, so it has no seam of its own and no case module.
-NOT_A_SEAM = {"_script_errors.py"}
+NOT_A_SEAM = {
+    "_script_errors.py": "Shared error helper, with no command or operation of its own.",
+    "normalize_sources.py": "run_normalization is a printing command engine returning an exit code; run_* extractor helpers are not library seams.",
+    "fetch_sources.py": "run_provider_command is the provider dispatch engine with argparse inputs and its own FetchSourcesError contract; ScriptRefusal is passed through by main for the host intake guard.",
+}
 
 #: A seam is a top-level ``def run_<op>`` in a script that also speaks the shared
 #: refusal. Both halves are needed: plenty of scripts have had top-level helpers
@@ -292,9 +296,15 @@ class SeamConformanceTests(unittest.TestCase):
             [sys.executable, str(SCRIPTS / enrollment.script), *case.argv],
             capture_output=True,
             text=True,
+            input=case.stdin,
+            env={**os.environ, **case.environment},
             check=False,
             cwd=str(enrollment.scratch),
         )
+
+    def call_seam(self, enrollment: Enrollment, case: SeamCase) -> Any:
+        with patch.dict(os.environ, case.environment):
+            return case.call(self.script_module(enrollment.script))
 
     # -- assertions --------------------------------------------------------------
 
@@ -306,7 +316,7 @@ class SeamConformanceTests(unittest.TestCase):
             self.fail(f"{context}: stdout is not one JSON document ({exc}); stderr: {result.stderr[:400]!r}")
 
         try:
-            returned = case.call(self.script_module(enrollment.script))
+            returned = self.call_seam(enrollment, case)
         except Exception as exc:
             refusal = as_refusal(exc)
             if refusal is None:
@@ -326,7 +336,7 @@ class SeamConformanceTests(unittest.TestCase):
     def check_refusal(self, enrollment: Enrollment, case: SeamCase, context: str) -> None:
         result = self.run_cli(enrollment, case)
         try:
-            returned = case.call(self.script_module(enrollment.script))
+            returned = self.call_seam(enrollment, case)
         except Exception as exc:
             refusal = as_refusal(exc)
             if refusal is None:

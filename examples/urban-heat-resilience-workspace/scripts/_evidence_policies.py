@@ -2269,6 +2269,7 @@ def evaluate_facet_policies(
 
 
 def evaluate_coverage_manifest_policies(manifest: dict[str, Any], inputs: PolicyInputs) -> dict[str, Any]:
+    moment = datetime.now(timezone.utc)
     slug = manifest.get("question_slug")
     question_slug = slug.strip() if isinstance(slug, str) and slug.strip() else None
     facets: list[dict[str, Any]] = []
@@ -2286,7 +2287,7 @@ def evaluate_coverage_manifest_policies(manifest: dict[str, Any], inputs: Policy
                     "evidence_path": facet.get("evidence_path"),
                     "policy_results": [
                         policy_result.to_dict()
-                        for policy_result in evaluate_facet_policies(facet, inputs, question_slug=question_slug)
+                        for policy_result in evaluate_facet_policies(facet, inputs, question_slug=question_slug, now=moment)
                     ],
                 }
             )

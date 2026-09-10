@@ -650,6 +650,72 @@ SNAPSHOT_PROBE = textwrap.dedent(
 )
 
 
+TEMPORAL_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import contract, verify_snapshot
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"evidence_temporal": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("temporal_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+        def setitem(self, mapping, key, value):
+            mapping[key] = value
+    host = data.TemporalFixture(directory, Environment())
+    first, _ = host.captured()
+    request = host.request()
+    original = host.evaluate(request)
+    assert original["result"]["selected"][0]["source_revision"] == first["source_revision"]
+    result = subprocess.run([str(cli), "temporal", "evaluate", "--target", str(host.root)],
+                            input=json.dumps(request).encode(), capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["result_id"] == original["result_id"]
+    host.set_time("2026-09-10T02:00:00Z")
+    host.captured(value="later correction", available="2026-09-10T01:30:00Z", supersedes=first["source_revision"])
+    assert host.evaluate(request)["result_id"] == original["result_id"]
+    body, _, selection = host.execution_source(mode="historical-available")
+    assert not host.evaluate(host.request(body["source_id"]))["result"]["complete"]
+    assert host.evaluate(host.request(body["source_id"], mode="historical-available"))["result"]["complete"]
+    raw, _, registration, exported = host.export(selection)
+    assert json.loads(raw)["schema_version"] == "evidence-snapshot/v2"
+    repeated = host.workspace.snapshots.export(selection, registration_request_id=registration["payload"]["request_id"])
+    assert not repeated["created"] and repeated["content_hash"] == exported["content_hash"]
+    result = subprocess.run([str(cli), "snapshot", "verify", "--trust-policy", str(host.policy_path)],
+                            input=raw, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["valid"]
+    host.revoke(host.module, host.parent)
+    assert host.workspace.snapshots.check(raw)["current_use"] == "denied"
+    policy = host.policy_path.read_bytes()
+    host.workspace.close()
+    host.root.rename(host.root.with_name("origin-moved"))
+    host.host.rename(host.host.with_name("host-moved"))
+    del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
+    del os.environ["EVIDENCE_WIKI_STATE_DIR"]
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert "temporal.evaluate" in contract()["library_api"]["surface"]
+    print(json.dumps({"evidence_temporal": "validated", "temporal_cli_api": "same_revision",
+                      "temporal_snapshot": "independent_offline_verification"}))
+    '''
+)
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -663,7 +729,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     # resolved from the source tree instead of the install would be a failure here.
     run([str(cli), "--version"], cwd=outside)
     contract_path = scratch / "contract.json"
-    contract_path.write_text(run([str(cli), "contract"], cwd=outside), encoding="utf-8")
+    contract_path.write_text(run([str(cli), "contract"], cwd=outside), encoding="utf-8", newline="\n")
     run(
         [
             str(cli),
@@ -690,6 +756,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
             cwd=outside,
         ),
         encoding="utf-8",
+        newline="\n",
     )
     session = ["--target", str(workspace), "--orchestration-id", "wheel-smoke", "--agent-id", "artifact-smoke"]
     run([str(cli), "orchestrate", "start", *session, "--format", "json"], cwd=outside)
@@ -732,8 +799,12 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(python), "-c", SNAPSHOT_PROBE, str(cli), str(REPO_ROOT / "tests/_snapshot_fixture.py"),
         str(scratch / "snapshot-evidence"),
     ], cwd=outside)
+    temporal = run([
+        str(python), "-c", TEMPORAL_PROBE, str(cli), str(REPO_ROOT / "tests/_temporal_fixture.py"),
+        str(scratch / "temporal-evidence"),
+    ], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
-            **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots)}
+            **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots), **json.loads(temporal)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

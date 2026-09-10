@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Bounded, byte-addressed workspace captures for local evidence operations.
 
 Readers evaluate a private materialization of one validated capture. No script

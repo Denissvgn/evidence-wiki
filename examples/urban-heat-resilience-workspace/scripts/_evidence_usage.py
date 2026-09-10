@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Current use authority and immutable, sanitized revisions in host-owned state."""
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from _evidence_authority import (
 from _evidence_revision import canonical_bytes, content_id
 from _host_evidence_store import STATE_ENV, locked_state, read_state, write_state
 from _record_artifacts import artifact_path, closure_identity, json_document, validate_file_bounds
+from _temporal_contract import authenticate_availability, availability_receipt
 
 STATE_SCHEMA = "evidence-usage-state/v1"
 COMMAND_SCHEMA = "evidence-usage-command/v1"
@@ -173,6 +175,7 @@ class UsageState:
         self.requests: dict[str, dict[str, Any]] = {}
         self.nodes: dict[str, dict[str, Any]] = {}
         self.revisions: dict[str, dict[str, Any]] = {}
+        self.availability: dict[str, dict[str, Any]] = {}
         self.revoked_sources: set[str] = set()
         self.revoked_revisions: set[str] = set()
         self.last_observed: datetime | None = None
@@ -221,6 +224,14 @@ class UsageState:
             grant = validate_grant(body["grant"], body["source_id"], revision)
             validate_scrub(body["scrub"], revision, grant)
             self.revisions[revision].update(grant=body["grant"], scrub=body["scrub"], authorization_event_id=identity)
+        elif action == "attest-availability":
+            revision = body["source_revision"]
+            if revision not in self.revisions or self.revisions[revision]["source_id"] != body["source_id"]:
+                raise EvidenceInvalid("source_revision_unknown")
+            if revision in self.availability:
+                raise EvidenceInvalid("availability_receipt_already_recorded")
+            availability_receipt(body, self.revisions[revision])
+            self.availability[revision] = {"body": body, "event_id": identity, "observed_at": event["accepted_at"]}
         elif action == "revoke":
             source_id = body["source_id"]
             if not any(record["source_id"] == source_id for record in self.revisions.values()):
@@ -283,6 +294,10 @@ def validate_command(envelope: Any, state_id: str, binding: str) -> dict[str, An
             raise EvidenceInvalid("invalid_initial_checkpoint")
     elif action in {"deposit", "authorize"}:
         body = exact_object(command["body"], {"source_id", "source_revision", "grant", "scrub"})
+        name(body["source_id"])
+        digest(body["source_revision"])
+    elif action == "attest-availability":
+        body = exact_object(command["body"], {"source_id", "source_revision", "receipt"})
         name(body["source_id"])
         digest(body["source_revision"])
     elif action == "revoke":
@@ -353,6 +368,11 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
             raise EvidenceInvalid("usage_checkpoint_changed")
         if command["action"] == "authorize":
             qualify_revision(command["body"], command["body"]["source_revision"], trust, now)
+        if command["action"] == "attest-availability":
+            revision = command["body"]["source_revision"]
+            if revision not in state.revisions:
+                raise EvidenceInvalid("source_revision_unknown")
+            authenticate_availability(command["body"], state.revisions[revision], trust, now)
         receipt = state.append(envelope, artifacts, trust, now)
         # A host policy change during validation cannot authorize the commit.
         committed_at = datetime.now(timezone.utc)
@@ -363,6 +383,8 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
         authenticated(envelope, "revocation" if command["action"] == "revoke" else "usage", trust, committed_at)
         if command["action"] in {"deposit", "authorize"}:
             qualify_revision(command["body"], command["body"]["source_revision"], trust, committed_at)
+        if command["action"] == "attest-availability":
+            authenticate_availability(command["body"], state.revisions[command["body"]["source_revision"]], trust, committed_at)
         write_state(directory, canonical_bytes(state.document))
         return receipt
 

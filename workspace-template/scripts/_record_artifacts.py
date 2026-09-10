@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Coherent, bounded original-byte closures for inert evidence records."""
 
 from __future__ import annotations

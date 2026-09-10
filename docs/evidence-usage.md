@@ -58,7 +58,7 @@ payload has exactly these fields:
 | `workspace_binding` | Content identity of the resolved workspace root |
 | `request_id` | Unique host request identity; reuse only for exact retries |
 | `expected_checkpoint` | Current event identity, or null for initialization |
-| `action` | `initialize`, `deposit`, `authorize`, `revoke`, or `register` |
+| `action` | `initialize`, `deposit`, `authorize`, `attest-availability`, `revoke`, or `register` |
 | `body` | Action-specific fields below |
 
 Content identities hash the UTF-8 domain, a NUL byte, and canonical JSON with
@@ -83,6 +83,11 @@ adding another event. Reusing its identity with different input refuses.
 `normalized_path` (an included Markdown file or null), `evidence_root` (an
 included artifact directory prefix or null), and `temporal` (a mapping of
 temporal claims). Temporal claims alone do not establish historical availability.
+An optional `attest-availability` command binds an independently authenticated
+public-availability receipt to exact existing proof artifacts and one source
+revision. Its outer command needs `usage` authority and its inner receipt needs
+an independently controlled `availability` principal. See
+[Temporal evidence](temporal-evidence.md) for both schemas and clock semantics.
 Paths cannot traverse directories, collide by case, or refer outside the supplied
 closure. The bounds are 256 files, 16 MiB per file, and 64 MiB per closure.
 The state and CLI transport have their own 64 MiB encoded limits, so usable

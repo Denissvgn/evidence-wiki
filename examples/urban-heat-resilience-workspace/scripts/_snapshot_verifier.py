@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Offline snapshot verification using explicit, independently supplied authority.
 
 Evidence artifacts are data. Verification never imports an originating
@@ -15,11 +16,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 import yaml
+from _evidence_authority import EvidenceInvalid
+from _temporal_contract import availability_receipt, qualify_time, source_times
 
 SCHEMA = "evidence-snapshot/v1"
 MANIFEST_SCHEMA = "evidence-snapshot-manifest/v1"
 SELECTION_SCHEMA = "evidence-snapshot-selection/v1"
 CONTRACT = "evidence-snapshot-contract/v1"
+TEMPORAL_SCHEMA = "evidence-snapshot/v2"
+TEMPORAL_MANIFEST_SCHEMA = "evidence-snapshot-manifest/v2"
+TEMPORAL_SELECTION_SCHEMA = "evidence-snapshot-selection/v2"
+TEMPORAL_CONTRACT = "evidence-snapshot-contract/v2"
 BOUNDS = {"selected_revisions": 32, "source_revisions": 64, "lineage_nodes": 128,
           "artifact_blobs": 512, "decoded_bytes": 8 * 1024 * 1024, "bundle_bytes": 16 * 1024 * 1024}
 OUTCOMES = {"passed", "failed", "skipped", "inconclusive"}
@@ -128,13 +135,46 @@ def unique(value: Any, validator=name, maximum: int = 256, minimum: int = 0) -> 
 
 
 def selection(value: Any) -> dict[str, Any]:
-    fields(value, {"schema_version", "source_revisions", "include_negative_examples", "purpose", "consumer"})
-    require(value["schema_version"] == SELECTION_SCHEMA and type(value["include_negative_examples"]) is bool,
+    temporal = isinstance(value, dict) and value.get("schema_version") == TEMPORAL_SELECTION_SCHEMA
+    fields(value, {"schema_version", "source_revisions", "include_negative_examples", "purpose", "consumer"}
+           | ({"temporal"} if temporal else set()))
+    require(value["schema_version"] in {SELECTION_SCHEMA, TEMPORAL_SELECTION_SCHEMA} and type(value["include_negative_examples"]) is bool,
             "snapshot_selection_unsupported")
+    if temporal:
+        settings = fields(value["temporal"], {"mode", "cutoff", "checkpoint"})
+        require(settings["mode"] in {"historical-audit", "historical-available"}, "snapshot_temporal_mode_unsupported")
+        instant(settings["cutoff"])
+        digest(settings["checkpoint"])
     revisions = unique(value["source_revisions"], digest, BOUNDS["selected_revisions"], 1)
     name(value["purpose"])
     name(value["consumer"])
     return {**value, "source_revisions": sorted(revisions)}
+
+
+def temporal_source(source: dict[str, Any], files: dict[str, bytes], proof: Any, policy: dict[str, Any],
+                    settings: dict[str, Any], checkpoint_time: datetime) -> None:
+    """Recheck captured clocks and independently signed publication evidence without an origin workspace."""
+    cutoff = instant(settings["cutoff"])
+    require(instant(source["observed_at"]) <= checkpoint_time, "snapshot_temporal_source_after_checkpoint")
+    record = {**source, "files": files}
+    try:
+        times = source_times(record)
+        qualify_time(record, times, cutoff, settings["mode"])
+        if settings["mode"] == "historical-available":
+            fields(proof, {"body", "event_id", "observed_at"})
+            digest(proof["event_id"])
+            observed = instant(proof["observed_at"])
+            require(instant(source["observed_at"]) <= observed <= checkpoint_time, "snapshot_availability_observation_invalid")
+            payload = availability_receipt(proof["body"], record)
+            require(proof["body"]["source_revision"] == source["source_revision"], "snapshot_availability_revision_mismatch")
+            auth = authenticate(proof["body"]["receipt"], "availability", policy, observed)
+            supplier = policy["principals"].get(payload["asserting_principal"])
+            require(supplier is not None and supplier["controller"] != auth["controller"], "snapshot_availability_not_independent")
+            require(instant(payload["available_at"]) <= instant(auth["issued_at"]), "snapshot_availability_receipt_precedes_publication")
+        else:
+            require(proof is None, "snapshot_unexpected_availability_proof")
+    except EvidenceInvalid as exc:
+        raise SnapshotInvalid(str(exc)) from exc
 
 
 def public_policy(policy: dict[str, Any]) -> dict[str, Any]:
@@ -463,23 +503,35 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
                       qualify_source=None) -> dict[str, Any]:
     """Verify independent bindings; current_time is reserved for host reconciliation."""
     bundle = fields(document(data), {"schema_version", "snapshot_id", "manifest", "registration", "blobs"})
-    require(bundle["schema_version"] == SCHEMA and canonical(bundle) == data, "snapshot_encoding_unsupported")
+    temporal = bundle["schema_version"] == TEMPORAL_SCHEMA
+    contract = TEMPORAL_CONTRACT if temporal else CONTRACT
+    manifest_schema = TEMPORAL_MANIFEST_SCHEMA if temporal else MANIFEST_SCHEMA
+    require(bundle["schema_version"] in {SCHEMA, TEMPORAL_SCHEMA} and canonical(bundle) == data, "snapshot_encoding_unsupported")
     manifest = fields(bundle["manifest"], {"schema_version", "contract", "exporter", "selection", "captured_state", "policy",
-                                          "sources", "lineage", "examples", "exclusions", "qualifications", "coverage", "bounds"})
-    require(manifest["schema_version"] == MANIFEST_SCHEMA and manifest["contract"] == CONTRACT and manifest["bounds"] == BOUNDS,
+                                          "sources", "lineage", "examples", "exclusions", "qualifications", "coverage", "bounds"}
+                      | ({"temporal"} if temporal else set()))
+    require(manifest["schema_version"] == manifest_schema and manifest["contract"] == contract and manifest["bounds"] == BOUNDS,
             "snapshot_contract_unsupported")
-    require(digest(bundle["snapshot_id"]) == identifier(MANIFEST_SCHEMA, manifest), "snapshot_manifest_digest_mismatch")
+    require(digest(bundle["snapshot_id"]) == identifier(manifest_schema, manifest), "snapshot_manifest_digest_mismatch")
     fields(manifest["exporter"], {"name", "version", "implementation"})
-    require(manifest["exporter"]["name"] == "evidence-wiki" and manifest["exporter"]["version"] == CONTRACT,
+    require(manifest["exporter"]["name"] == "evidence-wiki" and manifest["exporter"]["version"] == contract,
             "snapshot_exporter_contract_unsupported")
     digest(manifest["exporter"]["implementation"])
     request = selection(manifest["selection"])
     require(request == manifest["selection"], "snapshot_selection_order_invalid")
+    require(("temporal" in request) is temporal, "snapshot_temporal_contract_mismatch")
     state = fields(manifest["captured_state"], {"state_id", "workspace_binding", "checkpoint", "observed_at"})
     name(state["state_id"])
     digest(state["workspace_binding"])
     digest(state["checkpoint"])
     captured = instant(state["observed_at"])
+    temporal_time, proofs = None, {}
+    if temporal:
+        declared = fields(manifest["temporal"], {"checkpoint_observed_at", "availability"})
+        temporal_time = instant(declared["checkpoint_observed_at"])
+        require(temporal_time <= captured and instant(request["temporal"]["cutoff"]) <= captured, "snapshot_temporal_clock_invalid")
+        proofs = declared["availability"]
+        require(isinstance(proofs, dict), "snapshot_temporal_proofs_invalid")
     clock = current_time or captured
     require(clock.tzinfo is not None and clock >= captured, "snapshot_clock_invalid")
     policy = trust_policy(trust_raw)
@@ -526,9 +578,13 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
         if evidence_root is not None:
             require(any(path.startswith(path_name(evidence_root) + "/") for path in files), "snapshot_evidence_root_missing")
         validate_use(source, policy, clock, request)
+        if temporal:
+            require(revision in proofs, "snapshot_temporal_source_missing")
+            temporal_source(source, files, proofs[revision], policy, request["temporal"], temporal_time)
         referenced.update(value["content_hash"] for value in source["files"].values())
         sources[revision], files_by_revision[revision] = source, files
     require(list(sources) == sorted(sources) and referenced == set(blobs), "snapshot_artifact_closure_incomplete")
+    require(not temporal or set(proofs) == set(sources), "snapshot_temporal_closure_incomplete")
     nodes = {}
     for node in items(manifest["lineage"], BOUNDS["lineage_nodes"], 1):
         fields(node, {"node_id", "kind", "parents", "source_id", "depth"})
@@ -540,6 +596,7 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
             require(node_id in sources and node["source_id"] == sources[node_id]["source_id"]
                     and node["parents"] == sources[node_id]["descriptor"]["parents"], "snapshot_lineage_source_mismatch")
         else:
+            require(not temporal, "snapshot_temporal_non_source_lineage_unsupported")
             require(node["source_id"] is None and node["parents"], "snapshot_lineage_node_invalid")
         nodes[node_id] = node
     require(list(nodes) == sorted(nodes) and set(sources) == {key for key, value in nodes.items() if value["kind"] == "source"},
@@ -573,6 +630,8 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
         require(prefix is not None, "snapshot_execution_record_missing")
         originals = {path[len(prefix) + 1:]: raw for path, raw in files_by_revision[revision].items() if path.startswith(prefix + "/")}
         result = execution(originals, source["source_id"], policy, clock)
+        if temporal:
+            execution(originals, source["source_id"], policy, instant(request["temporal"]["cutoff"]))
         require(example == {"source_revision": revision, **result["example"]}, "snapshot_example_binding_mismatch")
         require(example["label"] != "negative" or request["include_negative_examples"], "snapshot_negative_not_requested")
         for item in result["inputs"]:
@@ -590,6 +649,8 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
                      if prefix is not None and path.startswith(prefix + "/")}
         if "execution-record.json" in originals:
             result = execution(originals, source["source_id"], policy, clock)
+            if temporal:
+                execution(originals, source["source_id"], policy, instant(request["temporal"]["cutoff"]))
             for item in result["inputs"]:
                 parent = item["source_revision"]
                 require(parent in ancestors(revision, set()) - {revision} and parent in sources

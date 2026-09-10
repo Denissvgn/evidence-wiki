@@ -17,7 +17,7 @@ PARSER.add_argument("--check", action="store_true")
 ARGS = PARSER.parse_args()
 SOURCE = ARGS.producer_root.resolve()
 DEST = ARGS.destination
-PIN = json.loads(Path(__file__).with_name("packet-validator-spec.json").read_text())
+PIN = json.loads(Path(__file__).with_name("packet-validator-spec.json").read_text(encoding="utf-8"))
 for item in PIN["modules"]:
     candidate = SOURCE.joinpath(*item["module"].split(".")[1:]).with_suffix(".py")
     if hashlib.sha256(candidate.read_bytes()).hexdigest() != item["sha256"]:
@@ -39,7 +39,7 @@ def read(module):
     if module in CACHE:
         return CACHE[module]
     path = path_for(module)
-    data = path.read_text()
+    data = path.read_text(encoding="utf-8")
     tree = ast.parse(data)
     names = {}
     imports = {}
@@ -130,7 +130,7 @@ inventory = []
 for module in sorted(SELECTED):
     data, tree, names, imports = read(module)
     source_id = hashlib.sha256(data.encode()).hexdigest()
-    preface = f'# ruff: noqa: I001, S101, UP007, UP035, UP045\n# Preserve the pinned upstream validation implementation.\n"""Offline packet validation from agent-wiki-cli 1.8.0: {module}.\n\nOriginal source SHA-256: {source_id}\nOnly the validation dependency closure is included; source discovery, producer\nexecution, persistence, plugins and live reconciliation are excluded.\n\n{license_text}\n"""\n\nfrom __future__ import annotations\n\n'
+    preface = f'#!/usr/bin/env python3\n# ruff: noqa: I001, S101, UP007, UP035, UP045\n# Preserve the pinned upstream validation implementation.\n"""Offline packet validation from agent-wiki-cli 1.8.0: {module}.\n\nOriginal source SHA-256: {source_id}\nOnly the validation dependency closure is included; source discovery, producer\nexecution, persistence, plugins and live reconciliation are excluded.\n\n{license_text}\n"""\n\nfrom __future__ import annotations\n\n'
     imported = []
     for name in sorted(IMPORTS.get(module, ())):
         node, alias, origin, symbol = imports[name]
@@ -152,10 +152,10 @@ for module in sorted(SELECTED):
     rendered = preface + '\n'.join(imported) + '\n\n\n' + '\n\n\n'.join(pieces) + '\n'
     destination = DEST / (local(module) + '.py')
     if ARGS.check:
-        if not destination.is_file() or destination.read_text() != rendered:
+        if not destination.is_file() or destination.read_text(encoding="utf-8") != rendered:
             raise SystemExit('Vendored validator differs: ' + destination.name)
     else:
-        destination.write_text(rendered)
+        destination.write_text(rendered, encoding="utf-8", newline="\n")
     inventory.append({'module': module, 'sha256': source_id, 'symbols': sorted(SELECTED[module]), 'lines': len(rendered.splitlines())})
 if [{key: row[key] for key in ("module", "sha256", "symbols")} for row in inventory] != PIN["modules"]:
     raise SystemExit("Validation dependency closure differs from the reviewed pin")

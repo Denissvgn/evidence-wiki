@@ -81,6 +81,9 @@ WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
         ),
     ),
     "doctor.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
+    "evidence_snapshots.py": (Case((*ROOT, "prepare", "--format", "json"), EMPTY),),
+    "evidence_temporal.py": (Case((*ROOT, "evaluate", "--format", "json"), EMPTY),),
+    "evidence_usage.py": (Case((*ROOT, "status", "--format", "json"), EMPTY),),
     "export_answers.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
     "fetch_sources.py": (
         Case(
@@ -109,6 +112,7 @@ WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
         Case((*ROOT, "status", "--orchestration-id", "{orchestration}", "--format", "json"), DOCUMENT),
     ),
     "publication_readiness.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
+    "qualified_packet.py": (Case((*ROOT, "profiles", "--format", "json"), DOCUMENT),),
     "query_index.py": (Case((*ROOT, "retrieval", "--format", "json"), DOCUMENT),),
     "question_claim.py": (
         Case((*ROOT, "claim", "--slug", "{slug}", "--agent-id", "purity", "--format", "json"), DOCUMENT),
@@ -160,6 +164,7 @@ REPORTS_ON_A_BROKEN_WORKSPACE = {
     "doctor.py",
     "lint.py",
     "publication_readiness.py",
+    "qualified_packet.py",
     "smoke_validate_workspace.py",
     "workspace_gc.py",
     "workspace_status.py",
@@ -342,6 +347,7 @@ class JsonStdoutPurityTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(SCRIPTS / script), *self.resolve(case.argv, project_root)],
             capture_output=True,
+            input="",
             text=True,
             check=False,
             cwd=str(project_root),

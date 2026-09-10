@@ -22,6 +22,7 @@ from .normalize import NormalizeNamespace
 from .orchestrate import OrchestrateNamespace, OrchestrationSession
 from .questions import QuestionsNamespace
 from .snapshots import SnapshotsNamespace
+from .temporal import TemporalNamespace
 from .usage import UsageNamespace
 
 __all__ = [
@@ -34,5 +35,6 @@ __all__ = [
     "OrchestrationSession",
     "QuestionsNamespace",
     "SnapshotsNamespace",
+    "TemporalNamespace",
     "UsageNamespace",
 ]

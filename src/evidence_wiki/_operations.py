@@ -30,6 +30,7 @@ _ROWS = (
     ("snapshots.prepare", "evidence-wiki snapshot prepare", "none", "shared host state lock and current external authority", "none"),
     ("snapshots.export", "evidence-wiki snapshot export", "immutable canonical snapshot; unique temporary file and atomic publication", "exclusive host state lock; prior host registration; current authority rechecked", "none"),
     ("snapshots.check", "evidence-wiki snapshot check", "none", "shared host state lock and current external authority", "none"),
+    ("temporal.evaluate", "evidence-wiki temporal evaluate", "none", "shared host state lock; one cutoff and immutable checkpoint; current retrieval authority", "none"),
     ("verify_snapshot", "evidence-wiki snapshot verify", "none", "no workspace; explicit independent trust bytes", "none"),
     ("questions.claim", "scripts/question_claim.py claim", "question claim and activity log", "per-question lock; separate log append lock", "none"),
     ("questions.release", "scripts/question_claim.py release", "question claim and activity log", "per-question lock; separate log append lock", "none"),

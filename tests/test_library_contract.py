@@ -137,7 +137,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
 
     def test_the_block_is_version_gated_rather_than_introspected(self):
         self.assertEqual({"version", "surface", "matrix_version", "operations", "cli_only", "timeout_policy"}, set(self.block))
-        self.assertEqual("6", self.block["version"])
+        self.assertEqual("7", self.block["version"])
         self.assertEqual(contract_module.LIBRARY_API_VERSION, self.block["version"])
         # A JSON payload cannot carry the declaration tuple, so the surface has to
         # arrive as a list on both sides of the CLI boundary.
@@ -175,6 +175,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "snapshots.prepare",
             "snapshots.export",
             "snapshots.check",
+            "temporal.evaluate",
             "verify_snapshot",
             "orchestrate.start",
             "orchestrate.session.next",
@@ -219,6 +220,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "orchestrate.session": _facades.OrchestrationSession,
             "usage": _facades.UsageNamespace,
             "snapshots": _facades.SnapshotsNamespace,
+            "temporal": _facades.TemporalNamespace,
         }
         boundaries = self.block["operations"]
         self.assertEqual(len(self.block["surface"]), len(boundaries))
