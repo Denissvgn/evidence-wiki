@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Evidence snapshots freeze a complete authorized artifact closure.** Library
+  API contract version 6 adds preparation, host-registered atomic publication,
+  current-use reconciliation, and independent offline verification, with matching
+  CLI operations. Canonical bundles retain exact inputs, execution history,
+  authenticated evaluator receipts, packet qualifications, permissions, and
+  lineage. Historical integrity stays separate from current permission after
+  revocation. Explicit negative examples preserve authenticated failed outcomes.
+
 - **Host-owned evidence revisions carry separate retrieval, training, and export permissions.**
   Authenticated grants and scrub receipts bind exact sanitized bytes before storage.
   A locked external event log preserves revocations and downstream lineage across

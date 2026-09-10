@@ -22,6 +22,7 @@ from ._facades.grounding import GroundingNamespace
 from ._facades.normalize import NormalizeNamespace
 from ._facades.orchestrate import OrchestrateNamespace
 from ._facades.questions import QuestionsNamespace
+from ._facades.snapshots import SnapshotsNamespace
 from ._facades.usage import UsageNamespace
 from .errors import ConfigError
 
@@ -77,6 +78,7 @@ class Workspace:
         "questions",
         "normalize",
         "usage",
+        "snapshots",
         "orchestrate",
         "diagnostics",
     )
@@ -89,6 +91,7 @@ class Workspace:
         self.questions = QuestionsNamespace(self)
         self.normalize = NormalizeNamespace(self)
         self.usage = UsageNamespace(self)
+        self.snapshots = SnapshotsNamespace(self)
         self.orchestrate = OrchestrateNamespace(self)
         self.diagnostics = DiagnosticsNamespace(self)
 

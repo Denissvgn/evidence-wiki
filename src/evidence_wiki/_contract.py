@@ -31,7 +31,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "5"
+LIBRARY_API_VERSION = "6"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -72,6 +72,10 @@ LIBRARY_API_SURFACE = (
     "usage.check",
     "usage.lineage",
     "usage.materialize",
+    "snapshots.prepare",
+    "snapshots.export",
+    "snapshots.check",
+    "verify_snapshot",
     "questions.claim",
     "questions.release",
     "questions.answer",
@@ -356,6 +360,19 @@ def contract() -> dict:
             "protected_legacy_publication": "refused; requires approved artifact closure",
             "contract_document": "docs/evidence-usage.md",
         },
+        "evidence_snapshots": {
+            "contract": "evidence-snapshot-contract/v1",
+            "temporal_mode": "current",
+            "registration": "host-signed usage command with expected checkpoint and stable request ID",
+            "required_uses": ["training", "export"],
+            "retention": "host-managed",
+            "limits": {"selected_revisions": 32, "source_revisions": 64, "lineage_nodes": 128,
+                       "artifact_blobs": 512, "decoded_bytes": 8388608, "bundle_bytes": 16777216},
+            "encoding": "canonical UTF-8 JSON with content-addressed base64 blobs",
+            "offline_verification": "explicit independent trust bytes; historical bindings only",
+            "current_use": "current host authority, registry and transitive revocations",
+            "contract_document": "docs/evidence-snapshots.md",
+        },
         "source_providers": {
             "discovery": list(provider_registry_module.DISCOVERY_PROVIDER_IDS),
             "acquisition": list(provider_registry_module.ACQUISITION_PROVIDER_IDS),
@@ -390,6 +407,9 @@ def contract() -> dict:
             "evidence_usage_state": "evidence-usage-state/v1",
             "evidence_usage_command": "evidence-usage-command/v1",
             "evidence_usage_grant": "evidence-usage-grant/v1",
+            "evidence_snapshot": "evidence-snapshot/v1",
+            "evidence_snapshot_manifest": "evidence-snapshot-manifest/v1",
+            "evidence_snapshot_selection": "evidence-snapshot-selection/v1",
             "evidence_scrub_receipt": "evidence-scrub-receipt/v1",
             "evidence_source_revision": "evidence-source-revision/v1",
             "fleet_status": fleet_status_module.SCHEMA_VERSION,

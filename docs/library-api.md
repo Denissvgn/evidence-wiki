@@ -60,8 +60,8 @@ importantly, what it does not.
 
 ## The Surface
 
-Thirty-five operations. Most hang off an open handle, in namespaces; the
-exceptions are `Workspace.open` itself and the two module-level functions that
+Thirty-nine operations. Most hang off an open handle, in namespaces; the
+exceptions are `Workspace.open` itself and the three module-level functions that
 belong to no single workspace.
 
 **`Workspace`** — the handle itself:
@@ -111,6 +111,19 @@ exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
 These operations use separately provisioned host authority and state. See
 [Evidence usage](evidence-usage.md) for the signing, sanitization, revocation,
 retention, and legacy compatibility contracts.
+
+**`ws.snapshots`** and `evidence_wiki.verify_snapshot` — frozen evidence:
+
+| Operation | Signature |
+| --- | --- |
+| `snapshots.prepare` | `ws.snapshots.prepare(selection: dict) -> dict` |
+| `snapshots.export` | `ws.snapshots.export(selection: dict, *, registration_request_id: str) -> dict` |
+| `snapshots.check` | `ws.snapshots.check(data: bytes) -> dict` |
+| `verify_snapshot` | `verify_snapshot(data: bytes, *, trust_policy_bytes: bytes) -> dict` |
+
+See [Evidence snapshots](evidence-snapshots.md) for the selection, host signing,
+canonical bundle, offline verification, and current-use contracts. Offline
+verification opens no workspace and requires explicit independent trust bytes.
 
 **`ws.questions`** — the question lifecycle. Every keyword mirrors the CLI flag
 of the same name, and every mutating call writes its `log.md` entry and its page
@@ -186,7 +199,7 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "5"
+assert library_api["version"] == "6"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -207,6 +220,9 @@ callers must inspect `verification.eligible` when a passing evaluation is requir
 Version `"5"` adds the five `usage` operations and the `evidence_usage`
 capability description. A usage check returns ineligibility as a verdict;
 invalid operations raise `SourceError` with `EVIDENCE_USAGE_REFUSED`.
+Version `"6"` adds snapshot preparation, publication, current-use reconciliation,
+and workspace-independent verification. Snapshot operations refuse invalid
+inputs with `EVIDENCE_SNAPSHOT_REFUSED`; verification returns a validity verdict.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;

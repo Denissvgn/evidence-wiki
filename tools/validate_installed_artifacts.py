@@ -591,6 +591,65 @@ USAGE_PROBE = textwrap.dedent(
 )
 
 
+SNAPSHOT_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import contract, verify_snapshot
+    from evidence_wiki.errors import SourceError
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"evidence_snapshots": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("snapshot_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+    host = data.SnapshotFixture(directory, Environment())
+    body, _ = host.add_execution()
+    selection = host.selection(body)
+    raw, preparation, registration, exported = host.export(selection)
+    policy = host.policy_path.read_bytes()
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert host.workspace.snapshots.check(raw)["current_use"] == "authorized"
+    result = subprocess.run([str(cli), "snapshot", "verify", "--trust-policy", str(host.policy_path)],
+                            input=raw, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["valid"]
+    repeated = host.workspace.snapshots.export(selection, registration_request_id=registration["payload"]["request_id"])
+    assert not repeated["created"] and repeated["content_hash"] == exported["content_hash"]
+    host.revoke(host.module, host.parent)
+    assert host.workspace.snapshots.check(raw)["current_use"] == "denied"
+    try:
+        host.workspace.snapshots.export(selection, registration_request_id=registration["payload"]["request_id"])
+    except SourceError as exc:
+        assert exc.error_code == "EVIDENCE_SNAPSHOT_REFUSED"
+    else:
+        raise AssertionError("Revoked snapshot was published")
+    host.workspace.close()
+    host.root.rename(host.root.with_name("origin-moved"))
+    host.policy_path.unlink()
+    del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
+    del os.environ["EVIDENCE_WIKI_STATE_DIR"]
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert "verify_snapshot" in contract()["library_api"]["surface"]
+    print(json.dumps({"evidence_snapshots": "validated", "offline_origin": "absent", "snapshot_current_use": "revocation_denied"}))
+    '''
+)
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -669,8 +728,12 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(python), "-c", USAGE_PROBE, str(cli), str(REPO_ROOT / "tests/_usage_fixture.py"),
         str(scratch / "usage-evidence"),
     ], cwd=outside)
+    snapshots = run([
+        str(python), "-c", SNAPSHOT_PROBE, str(cli), str(REPO_ROOT / "tests/_snapshot_fixture.py"),
+        str(scratch / "snapshot-evidence"),
+    ], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
-            **json.loads(packets), **json.loads(execution), **json.loads(usage)}
+            **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:
