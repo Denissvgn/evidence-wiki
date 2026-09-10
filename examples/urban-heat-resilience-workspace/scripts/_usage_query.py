@@ -10,7 +10,16 @@ from typing import Any
 from _evidence_authority import EvidenceInvalid
 from _evidence_usage import current_view
 from _script_errors import ScriptRefusal
-from _usage_gate import normalized_relative, read_workspace_file, refusal, source_decision
+from _snapshot_qualifications import qualify_source
+from _snapshot_verifier import SnapshotInvalid
+from _usage_gate import (
+    normalized_relative,
+    read_workspace_file,
+    refusal,
+    requires_authority,
+    resolve_revision,
+    source_decision,
+)
 
 
 def query_authorized(root: Path, config: dict[str, Any], scope: str, query: str,
@@ -30,7 +39,10 @@ def query_authorized(root: Path, config: dict[str, Any], scope: str, query: str,
                         if not decision["eligible"] or frontmatter.get("source_id") != source_id:
                             denied += 1
                             continue
-                    except (EvidenceInvalid, ScriptRefusal, UnicodeDecodeError):
+                        if requires_authority([frontmatter]):
+                            _revision, source = resolve_revision(view, source_id, normalized=data)
+                            qualify_source(source, source["files"])
+                    except (EvidenceInvalid, SnapshotInvalid, ScriptRefusal, UnicodeDecodeError):
                         denied += 1
                         continue
                     document = engine.Document(path=relative, scope="normalized",

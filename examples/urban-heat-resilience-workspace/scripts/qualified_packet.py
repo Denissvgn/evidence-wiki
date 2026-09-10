@@ -19,6 +19,8 @@ def profiles() -> dict[str, Any]:
     report = packet_profiles()
     execution = load_workspace_module(Path(__file__).resolve().parent, "_execution_evidence")
     report["profiles"].append(execution.profile_description())
+    market = load_workspace_module(Path(__file__).resolve().parent, "_market_evidence")
+    report["profiles"].append(market.profile_description())
     return report
 
 
@@ -50,9 +52,16 @@ def validate_execution(project_root: Path, source_id: str) -> dict[str, Any]:
     return {**report, "verification": execution.assess_verification(report, project_root, config)}
 
 
+def validate_market(project_root: Path, source_id: str) -> dict[str, Any]:
+    """Validate delegated market bytes without authenticating provider claims."""
+    config, record = selected_source(project_root, source_id)
+    market = load_workspace_module(Path(__file__).resolve().parent, "_market_evidence")
+    return market.inspect_market(project_root, config, record)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("profiles", "packet", "execution"))
+    parser.add_argument("operation", choices=("profiles", "packet", "execution", "market"))
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--source-id")
     parser.add_argument("--format", choices=("json",), default="json")
@@ -66,7 +75,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    operation = {"packet": validate_source, "execution": validate_execution}
+    operation = {"packet": validate_source, "execution": validate_execution, "market": validate_market}
     report = profiles() if args.operation == "profiles" else operation[args.operation](Path(args.project_root).resolve(), args.source_id)
     print(json.dumps(report, indent=2, sort_keys=True))
     return int(args.operation != "profiles" and (not report["valid"] or args.operation == "packet" and not report.get("policy_satisfied")))

@@ -22,6 +22,7 @@ _ROWS = (
     ("normalize.profiles", "evidence-wiki normalize profiles", "none", "none", "none"),
     ("normalize.validate_packet", "evidence-wiki normalize packet", "none", "bounded optimistic delivery capture; at most three attempts", "none"),
     ("normalize.validate_execution", "evidence-wiki normalize execution", "none", "bounded original closure capture; external host authority checked at one current clock", "none"),
+    ("normalize.validate_market", "evidence-wiki normalize market", "none", "bounded inert original closure capture; no provider authority promotion", "none"),
     ("usage.status", "evidence-wiki usage status", "none", "shared host state lock", "none"),
     ("usage.transact", "evidence-wiki usage transact", "authenticated events and sanitized revision bytes in private host state", "exclusive host state lock; expected checkpoint and idempotent request ID", "none"),
     ("usage.check", "evidence-wiki usage check", "none", "shared host state lock and current external authority", "none"),

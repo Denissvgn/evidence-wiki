@@ -1,0 +1,10 @@
+coverage_profile: contradictory-risk
+required_facets:
+  - facet_id: disconfirming-evidence
+    description: Review negative results and contradictions, including liquidity, availability, selection, and model limitations.
+    evidence_path: pack:capital-markets/contradictory-risk
+    source_policy: pack:capital-markets/review-contradictions
+    freshness_policy: pack:capital-markets/review-validity
+    identity_policy: pack:capital-markets/scope-review
+    min_sources: 1
+optional_facets: []

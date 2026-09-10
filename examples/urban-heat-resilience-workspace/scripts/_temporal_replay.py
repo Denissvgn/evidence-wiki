@@ -12,6 +12,7 @@ from _evidence_authority import EvidenceInvalid, authority_basis, timestamp
 from _evidence_policies import domain_matches, host_from_url, rule_provider_ids
 from _evidence_revision import canonical_bytes, content_id
 from _evidence_usage import UsageState, UsageView, current_view
+from _market_evidence import qualify_cutoff as qualify_market_cutoff
 from _policy_primitives import PolicyRuleError, RuleContext, evaluate_rule, pack_policy_rules
 from _snapshot_qualifications import qualify_source
 from _snapshot_verifier import ClaimLoader, SnapshotInvalid, binding, document, execution
@@ -34,7 +35,7 @@ def implementation_identity() -> str:
     stems = ("evidence_temporal", "_temporal_contract", "_temporal_replay", "_evidence_usage", "_evidence_authority",
              "_host_evidence_store", "_evidence_revision", "_record_artifacts", "_usage_gate", "_policy_primitives",
              "_evidence_policies", "_structured_view", "_normalized_contract", "_workspace_module_loader",
-             "query_index", "_snapshot_verifier", "_snapshot_qualifications", "_qualified_packet")
+             "query_index", "_snapshot_verifier", "_snapshot_qualifications", "_market_evidence", "_qualified_packet")
     paths = [directory / (stem + ".py") for stem in stems]
     paths.extend(sorted(directory.glob("_packet_vendor_*.py")))
     return content_id("evidence-temporal-implementation/v1", {path.name: binding(path.read_bytes()) for path in paths})
@@ -128,6 +129,9 @@ class Selection:
             selected = self.inspect(parent)
             ancestors.update({parent, *selected["ancestors"]})
         qualifications = qualify_source(record, record["files"])
+        for qualification in qualifications:
+            if qualification["validator"] == "market_evidence/v1":
+                qualify_market_cutoff(qualification["qualifications"], times, self.cutoff, timestamp(record["observed_at"]))
         execution_result = None
         prefix = record["descriptor"]["evidence_root"]
         evidence = {} if prefix is None else {path[len(prefix) + 1:]: data for path, data in record["files"].items()

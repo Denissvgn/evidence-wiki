@@ -626,6 +626,8 @@ def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> li
     reasons.extend(packet.normalized_issues(inputs.project_root, inputs.config, record, normalized))
     execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence")
     reasons.extend(execution.normalized_issues(inputs.project_root, inputs.config, record, normalized))
+    market = load_workspace_module(_SCRIPT_DIR, "_market_evidence")
+    reasons.extend(market.consumer_issues(inputs.project_root, inputs.config, record, normalized))
     for document in candidate_values(normalized, metadata, provenance, record):
         reasons.extend(explicit_unusable_reasons(document))
     return unique_strings(reasons)

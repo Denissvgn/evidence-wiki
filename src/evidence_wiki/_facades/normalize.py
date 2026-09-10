@@ -23,6 +23,10 @@ class NormalizeNamespace(Namespace):
         """Validate the original run closure and assess independent authority at the current clock."""
         return self._call("qualified_packet", "validate_execution", self._root, source_id)
 
+    def validate_market(self, source_id: str) -> dict[str, Any]:
+        """Check bounded delegated filings/prices and retain all completeness gaps."""
+        return self._call("qualified_packet", "validate_market", self._root, source_id)
+
     def verify(self, source_ids: Sequence[str] | None = None) -> dict[str, Any]:
         """Check normalized records against the published record contract.
 

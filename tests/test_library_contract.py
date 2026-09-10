@@ -137,7 +137,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
 
     def test_the_block_is_version_gated_rather_than_introspected(self):
         self.assertEqual({"version", "surface", "matrix_version", "operations", "cli_only", "timeout_policy"}, set(self.block))
-        self.assertEqual("7", self.block["version"])
+        self.assertEqual("8", self.block["version"])
         self.assertEqual(contract_module.LIBRARY_API_VERSION, self.block["version"])
         # A JSON payload cannot carry the declaration tuple, so the surface has to
         # arrive as a list on both sides of the CLI boundary.
@@ -167,6 +167,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "normalize.profiles",
             "normalize.validate_packet",
             "normalize.validate_execution",
+            "normalize.validate_market",
             "usage.status",
             "usage.transact",
             "usage.check",
@@ -459,12 +460,12 @@ class PackPolicyRulesTests(unittest.TestCase):
         self.assertEqual({}, result)
 
     def test_the_block_is_reachable_through_the_full_contract_payload(self):
-        # End-to-end through `evidence_wiki.contract()` itself, not just the helper:
-        # on a stock checkout no shipped pack declares rules, so the key exists and
-        # is empty -- additive, and distinguishable from the key being absent.
         payload = evidence_wiki.contract()
         self.assertIn("policy_rules", payload)
-        self.assertEqual({}, payload["policy_rules"])
+        rules = payload["policy_rules"]["capital-markets"]
+        self.assertEqual(6, len(rules))
+        self.assertTrue(all(key.startswith("pack:capital-markets/") for key in rules))
+        self.assertTrue(rules["pack:capital-markets/listing-review"]["manual_review_required"])
 
 
 if __name__ == "__main__":

@@ -189,6 +189,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 # The contract module owns the record format this script writes, so the version stamped
 # into output and the path a source id resolves to are defined in exactly one place.
 import _execution_evidence
+import _market_evidence
 import _qualified_packet
 from _normalization_config import NormalizationConfigError, adapter_for_kind, normalization_config
 from _normalized_contract import (
@@ -862,6 +863,12 @@ def normalization_method(
         execution_profile = True
     if execution_profile:
         return "execution"
+    try:
+        market_profile = _market_evidence.profile_for(record)
+    except _market_evidence.EvidenceInvalid:
+        market_profile = True
+    if market_profile:
+        return "market"
     if is_codebase_record(record):
         return "codebase"
     if is_latex_record(record):
@@ -1010,6 +1017,8 @@ def normalize_selected_record(
         return normalize_codebase_record(project_root, config, item.record)
     if item.method == "execution":
         return normalize_execution_record(project_root, config, item.record)
+    if item.method == "market":
+        return normalize_market_record(project_root, config, item.record)
     if item.method == ADAPTER_METHOD:
         return normalize_adapter_record(project_root, config, item.record)
     raise RuntimeError(f"Unsupported normalization method: {item.method}")
@@ -3439,6 +3448,30 @@ def normalize_execution_record(project_root: Path, config: dict[str, Any], recor
     )
 
 
+def normalize_market_record(project_root: Path, config: dict[str, Any], record: dict[str, Any]) -> NormalizedSource:
+    """Keep exact scalar observations and the delegated slice's completeness limits."""
+    report = _market_evidence.inspect_market(project_root, config, record)
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        record["metadata"] = metadata
+    metadata["market_evidence"] = report
+    warnings = manifest_warnings(record)
+    if not report["valid"]:
+        warnings.append("Market evidence refused: " + report["reason"])
+    else:
+        warnings.extend("Market coverage gap: " + gap for gap in report["completeness"]["gaps"])
+    warnings.append("Provider identity, completeness and feed claims are unverified; host usage authority and temporal availability are evaluated separately.")
+    return NormalizedSource(
+        record=record, extraction_method="market_evidence" if report["valid"] else "market_stub",
+        title=record.get("title") or record_id(record), authors=[], abstract="Delegated filings and price observations with explicit scope and coverage gaps.",
+        outline=[(2, "Market Observations")], extracted_text=json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False),
+        media=[], links=[], bibliography_files=[], warnings=unique_values(warnings),
+        included_paths=[f"sources/evidence/{safe_source_id(record_id(record))}/{path}" for path in report.get("originals", {})],
+        structured=report.get("data") if report["valid"] else None,
+    )
+
+
 def normalize_qualified_packet(project_root: Path, config: dict[str, Any], record: dict[str, Any]) -> NormalizedSource:
     """Render only after original-byte validation, retaining loss-explicit qualifications."""
     report = _qualified_packet.inspect_packet(project_root, config, record)
@@ -3582,9 +3615,9 @@ def status_for(source: NormalizedSource) -> str:
         # else, but a rendering that capped or dropped payload content looks complete
         # from the outside — only the adapter knows it is `partial`.
         return source.adapter_status
-    if source.extraction_method in {"link_stub", "web_stub", "codebase_stub", "execution_stub"}:
+    if source.extraction_method in {"link_stub", "web_stub", "codebase_stub", "execution_stub", "market_stub"}:
         return "stubbed"
-    if source.extraction_method in {"codebase_context", "execution_evidence"}:
+    if source.extraction_method in {"codebase_context", "execution_evidence", "market_evidence"}:
         return "content_extracted" if source.extracted_text and source.extracted_text != "None extracted." else "partial"
     if not source.extracted_text or source.extracted_text == "None extracted.":
         # A scanned/image-only PDF still produced a usable (degraded) record
@@ -3602,9 +3635,9 @@ def confidence_for(source: NormalizedSource) -> str:
     status = status_for(source)
     if source.needs_ocr:
         return "low"
-    if source.extraction_method in {"codebase_context", "execution_evidence"}:
+    if source.extraction_method in {"codebase_context", "execution_evidence", "market_evidence"}:
         return "medium"
-    if source.extraction_method in {"codebase_stub", "execution_stub"}:
+    if source.extraction_method in {"codebase_stub", "execution_stub", "market_stub"}:
         return "low"
     if source.extraction_method == "link_stub":
         return "high"
@@ -3751,6 +3784,7 @@ def frontmatter_for(
         "codebase_artifact_paths": metadata.get("codebase_artifact_paths") if isinstance(metadata.get("codebase_artifact_paths"), list) else None,
         "qualified_context": metadata.get("qualified_context") if isinstance(metadata.get("qualified_context"), dict) else None,
         "execution_evidence": metadata.get("execution_evidence") if isinstance(metadata.get("execution_evidence"), dict) else None,
+        **({"market_evidence": metadata["market_evidence"]} if "market_evidence" in metadata else {}),
         "codebase_intake_status": metadata.get("codebase_intake_status")
         if isinstance(metadata.get("codebase_intake_status"), str)
         else None,
@@ -4191,6 +4225,8 @@ def print_summary(summary: dict[str, int | str]) -> None:
 
 def normalization_report_summary(summary: dict[str, int | str]) -> dict[str, Any]:
     method_keys = ("latex", "pdf", "links", "html", "tables", "codebase", "adapter", "execution")
+    if "market" in summary:
+        method_keys += ("market",)
     skipped_existing = int(summary["skipped_existing"])
     skipped_unsupported = int(summary["skipped_unsupported"])
     return {
@@ -4335,7 +4371,8 @@ def run_normalization(args: argparse.Namespace) -> int:
 
     actionable: list[tuple[EligibleRecord, Path, bool, bool]] = []
     for item in selected:
-        summary[method_count_key(item.method)] += 1
+        method_key = method_count_key(item.method)
+        summary[method_key] = int(summary.get(method_key, 0)) + 1
         output_path = normalized_output_path_for_record(item.record, normalized_root)
         existed = output_path.exists()
         desired_pdf_extractor = selected_pdf_extractor_name if item.method == "pdf" else None

@@ -59,6 +59,7 @@ REQUIRED_STARTER_ASSETS = (
     "skills/research-verify.md",
 )
 REQUIRED_DOMAIN_PACKS = (
+    "capital-markets",
     "general-science",
     "legal-regulatory",
     "llm-research",

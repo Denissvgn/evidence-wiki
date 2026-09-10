@@ -60,6 +60,12 @@ def claims(documents: list[dict[str, Any]], uses: list[str]) -> tuple[list[str],
     return sorted(set(reasons)), next(iter(revisions)) if len(revisions) == 1 else None, present
 
 
+def requires_authority(documents: list[dict[str, Any]]) -> bool:
+    """An opted-in market profile cannot acquire permissive legacy consumer defaults."""
+    return any(value.get("kind") == "market_evidence" or "market_profile" in value or "market_evidence" in value
+               for value in documents_with_metadata(documents))
+
+
 def normalized_relative(config: dict[str, Any], source_id: str) -> str:
     sources = config.get("sources") if isinstance(config.get("sources"), dict) else {}
     directory = artifact_path(sources.get("normalized_dir", "sources/normalized"))
@@ -109,7 +115,7 @@ def source_decision(root: Path, config: dict[str, Any], source_id: str,
     if reasons:
         return {"eligible": False, "reasons": reasons}
     if not configured(config):
-        allowed = not present and "training" not in uses
+        allowed = not present and not requires_authority(documents) and "training" not in uses
         return {"eligible": allowed, "reasons": [] if allowed else ["usage_authority_required"],
                 "compatibility": "legacy-research" if allowed else None}
     try:
@@ -128,7 +134,7 @@ def normalized_issues(root: Path | None, config: dict[str, Any], record: dict[st
                       normalized: dict[str, Any]) -> list[str]:
     if root is None:
         reasons, _revision, present = claims([record, normalized], ["retrieval"])
-        return reasons or (["usage_original_context_required"] if configured(config) or present else [])
+        return reasons or (["usage_original_context_required"] if configured(config) or present or requires_authority([record, normalized]) else [])
     source_id = record.get("id") or normalized.get("source_id")
     if not isinstance(source_id, str):
         return ["usage_source_identity_required"] if configured(config) else []
@@ -153,6 +159,7 @@ def bytes_have_claims(relative: str, data: bytes, config: dict[str, Any]) -> boo
     normalized = sources.get("normalized_dir", "sources/normalized")
     if relative != manifest and not (relative.startswith(str(normalized).rstrip("/") + "/") and relative.endswith(".md")):
         return False
+    markers = CLAIM_KEYS | {"market_evidence", "market_profile"}
     try:
         if relative == manifest:
             documents = []
@@ -161,14 +168,14 @@ def bytes_have_claims(relative: str, data: bytes, config: dict[str, Any]) -> boo
                     try:
                         documents.append(json.loads(line))
                     except (ValueError, RecursionError):
-                        if any(key.encode() in line for key in CLAIM_KEYS):
+                        if any(key.encode() in line for key in markers):
                             raise EvidenceInvalid("usage_declarations_unreadable") from None
         else:
             pieces = data.decode("utf-8").split("---", 2)
             documents = [yaml.safe_load(pieces[1])] if len(pieces) == 3 and not pieces[0] else []
-        return claims(documents, ["retrieval", "export"])[2]
+        return claims(documents, ["retrieval", "export"])[2] or requires_authority(documents)
     except (ValueError, yaml.YAMLError, RecursionError) as exc:
-        if any(key.encode() in data for key in CLAIM_KEYS):
+        if any(key.encode() in data for key in markers):
             raise refusal("usage_declarations_unreadable") from exc
         # Existing structural validation still owns malformed legacy records.
         return False

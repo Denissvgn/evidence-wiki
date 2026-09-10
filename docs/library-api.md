@@ -93,6 +93,7 @@ CLI flag of the same name one for one, plus `no_cache` and `run_id`.
 | `normalize.profiles` | `ws.normalize.profiles() -> dict` |
 | `normalize.validate_packet` | `ws.normalize.validate_packet(source_id: str) -> dict` |
 | `normalize.validate_execution` | `ws.normalize.validate_execution(source_id: str) -> dict` |
+| `normalize.validate_market` | `ws.normalize.validate_market(source_id: str) -> dict` |
 
 `coverage.evaluate` is not a read: the recomputed facet verdicts, coverage
 verdict and `updated_at` are written back to `sources/coverage/<slug>.yml`,
@@ -210,7 +211,7 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "7"
+assert library_api["version"] == "8"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -239,6 +240,12 @@ the usage command contract, and historical snapshot selection with the v2
 snapshot schemas. Invalid temporal requests raise `SourceError` with
 `EVIDENCE_TEMPORAL_REFUSED`. A completed evaluation can contain source gaps,
 failed grounding, or unresolved review; inspect the returned outcomes.
+Version `"8"` adds read-only `normalize.validate_market(source_id)` and
+`evidence-wiki normalize market --target PATH --source-id ID --format json`.
+The optional `market_evidence/v1` profile validates inert, bounded filing and
+price deliveries. Inspect `valid`, `completeness`, and current usage eligibility
+separately. A valid structure can contain gaps; the operation grants no rights.
+Other source kinds and existing provider selections do not acquire market requirements.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;

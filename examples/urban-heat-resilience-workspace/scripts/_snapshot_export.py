@@ -40,7 +40,7 @@ from _usage_materialization import publish_file
 
 def implementation_identity() -> str:
     directory = Path(__file__).resolve().parent
-    stems = ("_snapshot_export", "_snapshot_verifier", "_snapshot_qualifications", "_evidence_usage",
+    stems = ("_snapshot_export", "_snapshot_verifier", "_snapshot_qualifications", "_market_evidence", "_evidence_usage",
              "_host_evidence_store", "_evidence_authority", "_record_artifacts", "_qualified_packet",
              "_usage_materialization", "_temporal_contract", "_evidence_revision")
     paths = [directory / (stem + ".py") for stem in stems]

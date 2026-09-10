@@ -75,6 +75,7 @@ RENDERED_COVERAGE_INVALID = "NORMALIZED_CONTRACT_RENDERED_COVERAGE_INVALID"
 STRUCTURED_VIEW_INVALID = "NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID"
 QUALIFIED_PACKET_INVALID = "NORMALIZED_CONTRACT_QUALIFIED_PACKET_INVALID"
 EXECUTION_EVIDENCE_INVALID = "NORMALIZED_CONTRACT_EXECUTION_EVIDENCE_INVALID"
+MARKET_EVIDENCE_INVALID = "NORMALIZED_CONTRACT_MARKET_EVIDENCE_INVALID"
 USAGE_EVIDENCE_INVALID = "NORMALIZED_CONTRACT_USAGE_EVIDENCE_INVALID"
 
 VIOLATION_CODES = (
@@ -88,6 +89,7 @@ VIOLATION_CODES = (
     STRUCTURED_VIEW_INVALID,
     QUALIFIED_PACKET_INVALID,
     EXECUTION_EVIDENCE_INVALID,
+    MARKET_EVIDENCE_INVALID,
     USAGE_EVIDENCE_INVALID,
 )
 
@@ -1208,6 +1210,7 @@ def validate_document(
     violations = check_frontmatter(frontmatter)
     violations.extend(check_qualified_packet(project_root, config or {}, manifest_by_id, frontmatter))
     violations.extend(check_execution_evidence(project_root, config or {}, manifest_by_id, frontmatter))
+    violations.extend(check_market_evidence(project_root, config or {}, manifest_by_id, frontmatter))
     violations.extend(check_usage_evidence(project_root, config or {}, manifest_by_id, frontmatter))
     violations.extend(check_format_version(frontmatter))
     violations.extend(check_sections(body))
@@ -1308,6 +1311,22 @@ def check_execution_evidence(
     return [Violation(EXECUTION_EVIDENCE_INVALID, reason, field="execution_evidence",
                       remediation="Restore the complete original execution closure and normalize it again.")
             for reason in execution.normalized_issues(project_root, config, record, frontmatter)]
+
+
+def check_market_evidence(
+    project_root: Path | None, config: dict[str, Any], manifest_by_id: dict[str, dict[str, Any]], frontmatter: dict[str, Any],
+) -> list[Violation]:
+    """Bind native or external scalar views to the original delegated slice."""
+    source_id = frontmatter.get("source_id")
+    record = manifest_by_id.get(source_id, {}) if isinstance(source_id, str) else {}
+    metadata = record.get("metadata") or {}
+    if not (frontmatter.get("market_evidence") is not None or record.get("kind") == "market_evidence"
+            or isinstance(metadata, dict) and "market_profile" in metadata):
+        return []
+    market = load_workspace_module(_SCRIPT_DIR, "_market_evidence")
+    return [Violation(MARKET_EVIDENCE_INVALID, reason, field="market_evidence",
+                      remediation="Restore the original bounded market delivery and regenerate its scalar view.")
+            for reason in market.normalized_issues(project_root, config, record, frontmatter)]
 
 
 def check_usage_evidence(

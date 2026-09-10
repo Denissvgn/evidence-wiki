@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 from _evidence_authority import EvidenceInvalid
+from _market_evidence import qualify_cutoff as qualify_market_cutoff
+from _market_evidence import validate_closure as validate_market
 from _temporal_contract import availability_receipt, qualify_time, source_times
 
 SCHEMA = "evidence-snapshot/v1"
@@ -160,6 +162,13 @@ def temporal_source(source: dict[str, Any], files: dict[str, bytes], proof: Any,
     try:
         times = source_times(record)
         qualify_time(record, times, cutoff, settings["mode"])
+        prefix = source["descriptor"]["evidence_root"]
+        originals = {} if prefix is None else {
+            path[len(prefix) + 1:]: data for path, data in files.items() if path.startswith(prefix + "/")
+        }
+        if "market-record.json" in originals:
+            qualify_market_cutoff(validate_market(source["source_id"], originals), times, cutoff,
+                                  instant(source["observed_at"]))
         if settings["mode"] == "historical-available":
             fields(proof, {"body", "event_id", "observed_at"})
             digest(proof["event_id"])

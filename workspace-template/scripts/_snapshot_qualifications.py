@@ -5,9 +5,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import yaml
+from _evidence_authority import EvidenceInvalid
+from _market_evidence import validate_captured
+from _market_evidence import validate_closure as validate_market
 from _packet_vendor_services_context_packet import ContextPacketError, validate_context_packet
 from _qualified_packet import IntakeInvalid, validate_delivery
-from _snapshot_verifier import SnapshotInvalid, binding, document, fields, items, require
+from _snapshot_verifier import ClaimLoader, SnapshotInvalid, binding, document, fields, items, require
+from _usage_gate import requires_authority
 
 VALIDATOR = "agent-wiki-cli/1.8.0:offline-validation-closure/v1"
 
@@ -31,9 +36,18 @@ def packet_qualification(path: str, data: bytes) -> dict[str, Any]:
 def qualify_source(source: dict[str, Any], files: dict[str, bytes]) -> list[dict[str, Any]]:
     """Inspect captured bytes only; no originating paths or tools are opened."""
     prefix = source["descriptor"]["evidence_root"]
-    if prefix is None:
-        return []
-    originals = {path[len(prefix) + 1:]: data for path, data in files.items() if path.startswith(prefix + "/")}
+    originals = {} if prefix is None else {path[len(prefix) + 1:]: data for path, data in files.items() if path.startswith(prefix + "/")}
+    normalized = files.get(source["descriptor"]["normalized_path"], b"")
+    metadata = {}
+    try:
+        lines = normalized.decode("utf-8").splitlines()
+        if lines and lines[0] == "---" and "---" in lines[1:4098]:
+            end = lines.index("---", 1)
+            parsed = yaml.load("\n".join(lines[1:end]), Loader=ClaimLoader)  # noqa: S506 -- restricted SafeLoader subclass
+            metadata = parsed if isinstance(parsed, dict) else {}
+    except (UnicodeError, yaml.YAMLError, RecursionError) as exc:
+        raise SnapshotInvalid("snapshot_normalized_metadata_invalid") from exc
+    market_required = "market-record.json" in originals or requires_authority([metadata])
     paths = set()
     if "artifact-manifest.json" in originals:
         try:
@@ -53,4 +67,14 @@ def qualify_source(source: dict[str, Any], files: dict[str, bytes]) -> list[dict
             packet = document(originals[path]) if required or path.endswith(".json") else {}
             if required or str(packet.get("schema_version", "")).startswith("llm-wiki-qualified-context-packet/"):
                 paths.add(path)
-    return [packet_qualification(prefix + "/" + path, originals[path]) for path in sorted(paths)]
+    qualifications = [packet_qualification(prefix + "/" + path, originals[path]) for path in sorted(paths)]
+    if market_required:
+        try:
+            market = validate_market(source["source_id"], originals)
+            temporal = source["descriptor"]["temporal"]
+            validate_captured(market, metadata, files, temporal.get("record_path"))
+        except (EvidenceInvalid, ValueError, TypeError, KeyError, AttributeError, yaml.YAMLError, RecursionError) as exc:
+            raise SnapshotInvalid("snapshot_market_delivery_invalid") from exc
+        qualifications.append({"path": prefix + "/market-record.json", "validator": "market_evidence/v1",
+                               "qualifications": market, "provider_authentication": "not_established"})
+    return qualifications

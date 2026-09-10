@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Optional market evidence retains exact values and qualifications.** The
+  `capital-markets` guidance pack supplies namespaced questions, coverage rules,
+  and explicit review requirements. Library API contract version 8 adds
+  `normalize.validate_market` for delegated SEC company-concept and Alpaca
+  stock-bars slices. Bounded pagination, listing identity, filing revisions,
+  units, adjustments, completeness, and original artifact bindings remain
+  explicit. Shared temporal and usage checks govern consumption. The pack
+  enables no providers and introduces no SDK dependencies or market metadata
+  requirements for other workspaces.
+
 - **Historical evidence evaluation uses one explicit cutoff.** Library API
   contract version 7 adds bounded revision selection, lexical retrieval,
   declarative facet evaluation, and scalar grounding through `Workspace.temporal`

@@ -1,0 +1,10 @@
+coverage_profile: issuer-facts
+required_facets:
+  - facet_id: qualified-filing
+    description: Ground the exact value, unit, fiscal period, and accession revision for metadata.issuer_id.
+    evidence_path: pack:capital-markets/issuer-facts
+    source_policy: pack:capital-markets/complete-filings
+    freshness_policy: pack:capital-markets/filing-48h
+    identity_policy: pack:capital-markets/issuer-match
+    min_sources: 1
+optional_facets: []

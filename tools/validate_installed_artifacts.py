@@ -516,6 +516,60 @@ EXECUTION_PROBE = textwrap.dedent(
 )
 
 
+MARKET_PROBE = textwrap.dedent(
+    '''
+    import json
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    import yaml
+    from evidence_wiki import Workspace, contract
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    from tests._market_fixture import SOURCE_ID, example, workspace
+    checked = []
+    for route in ("sec-company-concept", "alpaca-stock-bars"):
+        root = directory / route
+        _config, _record, originals = workspace(root, example(route)[0])
+        with Workspace.open(root) as evidence:
+            report = evidence.normalize.validate_market(SOURCE_ID)
+            assert report["valid"] and report["completeness"]["complete"], report
+            assert report["authority"] == "not_evaluated"
+            values = report["data"]["observations"]
+            if route == "sec-company-concept":
+                assert values[0]["value"] == "1234567890123456789"
+            else:
+                assert values[0]["close"] == "10.1234567890123456789"
+            command = [str(cli), "normalize", "market", "--target", str(root), "--source-id", SOURCE_ID, "--format", "json"]
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            assert json.loads(result.stdout) == report
+            (originals / "page.json").write_bytes(b"{}")
+            assert not evidence.normalize.validate_market(SOURCE_ID)["valid"]
+            result = subprocess.run(command, capture_output=True, text=True)
+            assert result.returncode == 1 and not json.loads(result.stdout)["valid"]
+            checked.append(route)
+    assert "normalize.validate_market" in contract()["library_api"]["surface"]
+    target = directory / "optional-pack"
+    subprocess.run([str(cli), "init", "--target", str(target), "--project-name", "Market evidence",
+                    "--project-description", "Bounded observations", "--owner-goal", "Review evidence",
+                    "--domain-pack", "capital-markets"], capture_output=True, text=True, check=True)
+    config = yaml.safe_load((target / "research.yml").read_text())
+    for kind in ("acquisition", "discovery"):
+        assert not config["integrations"][kind]["enabled"]
+        assert not config["integrations"][kind]["providers"]
+    result = subprocess.run([str(cli), "pack", "refresh", "--target", str(target), "--path", "capital-markets",
+                             "--dry-run", "--format", "json"], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout)["status"] == "no_changes"
+    print(json.dumps({"market_evidence": "passed", "market_routes": checked, "optional_market_pack": "passed"}))
+    '''
+)
+
+
 USAGE_PROBE = textwrap.dedent(
     '''
     import base64
@@ -803,8 +857,13 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(python), "-c", TEMPORAL_PROBE, str(cli), str(REPO_ROOT / "tests/_temporal_fixture.py"),
         str(scratch / "temporal-evidence"),
     ], cwd=outside)
+    market = run([
+        str(python), "-c", MARKET_PROBE, str(cli), str(REPO_ROOT / "tests/_market_fixture.py"),
+        str(scratch / "market-evidence"),
+    ], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
-            **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots), **json.loads(temporal)}
+            **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
+            **json.loads(temporal), **json.loads(market)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

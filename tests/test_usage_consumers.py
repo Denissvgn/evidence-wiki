@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import io
 import json
 from pathlib import Path
@@ -232,7 +233,7 @@ def test_explicit_legacy_restriction_cannot_enter_export_or_cache(tmp_path, monk
 
 
 @pytest.mark.parametrize("operation", ["publication", "start", "next", "submit"])
-def test_protected_publication_and_orchestration_refuse_before_writes(host, operation):
+def test_protected_publication_and_orchestration_refuse_before_writes(host, operation, monkeypatch):
     fixture, _module = host
     before = {path.relative_to(fixture.root): path.read_bytes() for path in fixture.root.rglob("*") if path.is_file()}
     if operation == "publication":
@@ -240,11 +241,28 @@ def test_protected_publication_and_orchestration_refuse_before_writes(host, oper
         invoke = lambda: script.build_bundle(fixture.root, "missing-run")
     else:
         script = load_isolated_module("protected_orchestration", SCRIPTS / "orchestration_controller.py")
+        args = argparse.Namespace()
+        guards = []
+        if operation == "submit":
+            # Isolate intake after successful read-only runtime guards. Their
+            # real locking and refusal paths are covered by controller checks.
+            args = argparse.Namespace(orchestration_id="existing-session", action_id="pending-action",
+                                      result_file=str(fixture.root / "result.json"), agent_id=None)
+            monkeypatch.setattr(script, "load_result", lambda *_: {})
+            monkeypatch.setattr(script, "driver_session_lock", lambda *_, **__: contextlib.nullcontext())
+            monkeypatch.setattr(script, "load_session", lambda *_: {})
+            monkeypatch.setattr(script, "enforce_control_repair_gate", lambda *_: guards.append("repair"))
+            monkeypatch.setattr(script, "retained_result", lambda *_: None)
+            monkeypatch.setattr(script, "load_json_object", lambda *_, **__: {})
+            monkeypatch.setattr(script, "require_action_baselines", lambda *_: guards.append("baseline"))
+            monkeypatch.setattr(script, "verify_runtime_guards", lambda *_: guards.append("runtime"))
         invoke = lambda: getattr(script, {"start": "start_session", "next": "next_work", "submit": "submit_result"}[operation])(
-            fixture.root, argparse.Namespace())
+            fixture.root, args)
     with pytest.raises(SystemExit) as caught:
         invoke()
     assert caught.value.error_code == "EVIDENCE_USAGE_REFUSED"
+    if operation == "submit":
+        assert guards == ["repair", "baseline", "runtime"]
     assert {path.relative_to(fixture.root): path.read_bytes() for path in fixture.root.rglob("*") if path.is_file()} == before
 
 

@@ -967,6 +967,7 @@ Violation codes:
 | `NORMALIZED_CONTRACT_FRONTMATTER_INVALID` | A required frontmatter field is absent or has the wrong type or value. |
 | `NORMALIZED_CONTRACT_FORMAT_VERSION_UNSUPPORTED` | `normalized_format` is absent from an externally written record, or declares a version this package does not accept. |
 | `NORMALIZED_CONTRACT_QUALIFIED_PACKET_INVALID` | An opted-in record lacks a supported original packet, changes its recorded qualifications, or fails the current intake policy. The report preserves the specific refusal reason. |
+| `NORMALIZED_CONTRACT_MARKET_EVIDENCE_INVALID` | An opted-in market record fails original delivery validation or no longer binds the normalized qualifications and exact structured values to the captured slice. See [market evidence](market-evidence.md). |
 | `NORMALIZED_CONTRACT_SECTIONS_INVALID` | A required section is missing, or the required sections are out of order. |
 | `NORMALIZED_CONTRACT_MANIFEST_MISMATCH` | The record disagrees with the manifest about its path, source id, raw paths, or raw fingerprint. |
 | `NORMALIZED_CONTRACT_WARNINGS_INCONSISTENT` | A `parse_warnings` entry is not restated in the `Parse Warnings` section. |
