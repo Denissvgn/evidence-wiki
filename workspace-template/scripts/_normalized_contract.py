@@ -24,10 +24,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from _workspace_module_loader import load_workspace_module
 
 try:
     import yaml
@@ -67,6 +73,7 @@ MANIFEST_MISMATCH = "NORMALIZED_CONTRACT_MANIFEST_MISMATCH"
 WARNINGS_INCONSISTENT = "NORMALIZED_CONTRACT_WARNINGS_INCONSISTENT"
 RENDERED_COVERAGE_INVALID = "NORMALIZED_CONTRACT_RENDERED_COVERAGE_INVALID"
 STRUCTURED_VIEW_INVALID = "NORMALIZED_CONTRACT_STRUCTURED_VIEW_INVALID"
+QUALIFIED_PACKET_INVALID = "NORMALIZED_CONTRACT_QUALIFIED_PACKET_INVALID"
 
 VIOLATION_CODES = (
     FRONTMATTER_MISSING,
@@ -77,6 +84,7 @@ VIOLATION_CODES = (
     WARNINGS_INCONSISTENT,
     RENDERED_COVERAGE_INVALID,
     STRUCTURED_VIEW_INVALID,
+    QUALIFIED_PACKET_INVALID,
 )
 
 # A rendering that caps content is honest only if it says so. `extraction_method:
@@ -1189,9 +1197,12 @@ def validate_document(
     *,
     manifest_by_id: dict[str, dict[str, Any]],
     normalized_root: Path,
+    project_root: Path | None = None,
+    config: dict[str, Any] | None = None,
 ) -> list[Violation]:
     """Validate an already-parsed record, for callers that read it themselves."""
     violations = check_frontmatter(frontmatter)
+    violations.extend(check_qualified_packet(project_root, config or {}, manifest_by_id, frontmatter))
     violations.extend(check_format_version(frontmatter))
     violations.extend(check_sections(body))
     violations.extend(check_parse_warnings(frontmatter, body))
@@ -1213,6 +1224,8 @@ def validate_record(
     *,
     manifest_by_id: dict[str, dict[str, Any]],
     normalized_root: Path,
+    project_root: Path | None = None,
+    config: dict[str, Any] | None = None,
 ) -> list[Violation]:
     """Validate one normalized record file against the contract."""
     try:
@@ -1251,4 +1264,25 @@ def validate_record(
         body,
         manifest_by_id=manifest_by_id,
         normalized_root=normalized_root,
+        project_root=project_root,
+        config=config,
     )
+
+
+def check_qualified_packet(
+    project_root: Path | None, config: dict[str, Any], manifest_by_id: dict[str, dict[str, Any]], frontmatter: dict[str, Any],
+) -> list[Violation]:
+    """A producer name or cached validation flag never waives original-byte checks."""
+    source_id = frontmatter.get("source_id")
+    record = manifest_by_id.get(source_id, {}) if isinstance(source_id, str) else {}
+    metadata = record.get("metadata") or {}
+    integrations = config.get("integrations") or {}
+    settings = integrations.get("codebase_analysis") or {} if isinstance(integrations, dict) else {}
+    if not (frontmatter.get("qualified_context") is not None
+            or isinstance(metadata, dict) and "codebase_intake_profile" in metadata
+            or record.get("kind") == "codebase_architecture" and isinstance(settings, dict) and "intake_profile" in settings):
+        return []
+    normalized_issues = load_workspace_module(_SCRIPT_DIR, "_qualified_packet").normalized_issues
+    return [Violation(QUALIFIED_PACKET_INVALID, reason, field="qualified_context",
+                      remediation="Redeliver an intact supported packet and re-normalize it under the current intake policy.")
+            for reason in normalized_issues(project_root, config, record, frontmatter)]

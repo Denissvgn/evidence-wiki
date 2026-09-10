@@ -19,6 +19,8 @@ _ROWS = (
     ("coverage.evaluate", "scripts/coverage_manifest.py evaluate", "rewrites the selected coverage manifest", "none; host must serialize coverage writers", "none"),
     ("grounding.verify", "evidence-wiki grounding verify", "question grounding verification only with write=True", "per-question lock when writing", "none"),
     ("normalize.verify", "evidence-wiki normalize verify", "none", "none", "none"),
+    ("normalize.profiles", "evidence-wiki normalize profiles", "none", "none", "none"),
+    ("normalize.validate_packet", "evidence-wiki normalize packet", "none", "bounded optimistic delivery capture; at most three attempts", "none"),
     ("questions.claim", "scripts/question_claim.py claim", "question claim and activity log", "per-question lock; separate log append lock", "none"),
     ("questions.release", "scripts/question_claim.py release", "question claim and activity log", "per-question lock; separate log append lock", "none"),
     ("questions.answer", "scripts/question_resolve.py answer", "question resolution and activity log", "per-question lock; separate log append lock", "none"),

@@ -188,6 +188,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 # The contract module owns the record format this script writes, so the version stamped
 # into output and the path a source id resolves to are defined in exactly one place.
+import _qualified_packet
 from _normalization_config import NormalizationConfigError, adapter_for_kind, normalization_config
 from _normalized_contract import (
     NORMALIZED_FORMAT_VERSION,
@@ -693,6 +694,9 @@ def complete_evidence_usability_override(provenance: dict[str, Any]) -> dict[str
 
 def record_unusable_evidence_reasons(record: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
+    qualified = record_metadata(record).get("qualified_context")
+    if isinstance(qualified, dict) and (qualified.get("valid") is not True or qualified.get("policy_satisfied") is not True):
+        reasons.append("qualified_packet_policy_not_satisfied")
     explicit = record.get("unusable_evidence_reasons")
     if isinstance(explicit, list):
         reasons.extend(reason for reason in explicit if isinstance(reason, str) and reason.strip())
@@ -3397,7 +3401,46 @@ def read_codebase_artifact(project_root: Path, artifact_path: Path) -> tuple[str
     return normalized or "None extracted.", summary, extract_pdf_outline(normalized), extract_links(normalized), []
 
 
+def normalize_qualified_packet(project_root: Path, config: dict[str, Any], record: dict[str, Any]) -> NormalizedSource:
+    """Render only after original-byte validation, retaining loss-explicit qualifications."""
+    report = _qualified_packet.inspect_packet(project_root, config, record)
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        record["metadata"] = metadata
+    metadata["qualified_context"] = report
+    metadata["codebase_intake_status"] = "validated" if report["valid"] else "invalid"
+    metadata["codebase_execution_scope"] = "external_worker_only"
+    original = report.get("original") or {}
+    delivery = report.get("delivery_manifest") or {}
+    manifest = delivery.get("provenance") or {}
+    paths = [original["path"]] if "path" in original else []
+    metadata["codebase_artifact_paths"] = paths
+    metadata["codebase_artifact_manifest"] = delivery.get("path")
+    metadata["codebase_artifact_checksums"] = [{"path": original["path"], "sha256": original["sha256"], "size_bytes": original["bytes"]}] if original else []
+    metadata["codebase_artifact_provenance"] = {"trust": "self_asserted_external_worker", **{key: manifest.get(key) for key in ("producer", "generated_at", "invocation")}} if manifest else None
+    warnings = manifest_warnings(record)
+    if not report["valid"] or not report.get("policy_satisfied"):
+        warnings.append("Qualified packet refused: " + report.get("reason", report.get("policy_reason", "invalid")))
+    warnings.append("Packet validation is structural; worker authentication and host live reconciliation are not established.")
+    if report.get("omitted_fields"):
+        warnings.append("Opaque selected-file content is omitted from this rendering; original bytes remain referenced with their digest and omitted JSON pointers.")
+    return NormalizedSource(
+        record=record, extraction_method="codebase_context" if report["valid"] else "codebase_stub",
+        title=codebase_title(record), authors=[], abstract="Qualified codebase context with explicit producer qualifications and host validation limits.",
+        outline=[(2, "Qualified Context")], extracted_text=json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False),
+        media=[], links=[record_url(record)] if record_url(record) else [], bibliography_files=[],
+        included_paths=paths, warnings=unique_values(warnings),
+    )
+
+
 def normalize_codebase_record(project_root: Path, config: dict[str, Any], record: dict[str, Any]) -> NormalizedSource:
+    try:
+        profiled = _qualified_packet.profile_for(config, record) is not None
+    except _qualified_packet.IntakeInvalid:
+        profiled = True
+    if profiled:
+        return normalize_qualified_packet(project_root, config, record)
     source_id = record_id(record)
     metadata = record.setdefault("metadata", {})
     if not isinstance(metadata, dict):
@@ -3668,6 +3711,7 @@ def frontmatter_for(
         "codebase_revision": metadata.get("codebase_revision") if isinstance(metadata.get("codebase_revision"), str) else None,
         "codebase_tool": metadata.get("codebase_tool") if isinstance(metadata.get("codebase_tool"), str) else None,
         "codebase_artifact_paths": metadata.get("codebase_artifact_paths") if isinstance(metadata.get("codebase_artifact_paths"), list) else None,
+        "qualified_context": metadata.get("qualified_context") if isinstance(metadata.get("qualified_context"), dict) else None,
         "codebase_intake_status": metadata.get("codebase_intake_status")
         if isinstance(metadata.get("codebase_intake_status"), str)
         else None,
@@ -4161,6 +4205,8 @@ def verify_adapter_output(
     output_path: Path,
     records: list[dict[str, Any]],
     normalized_root: Path,
+    *,
+    config: dict[str, Any] | None = None,
 ) -> None:
     """Hold this script's own adapter rendering to the published record contract.
 
@@ -4181,6 +4227,8 @@ def verify_adapter_output(
         output_path,
         manifest_by_id=records_by_source_id(records),
         normalized_root=normalized_root,
+        project_root=project_root,
+        config=config,
     )
     if not violations:
         return
@@ -4357,7 +4405,7 @@ def run_normalization(args: argparse.Namespace) -> int:
                 force=True,
             )
             if item.method == ADAPTER_METHOD:
-                verify_adapter_output(project_root, output_path, records, normalized_root)
+                verify_adapter_output(project_root, output_path, records, normalized_root, config=config)
         except Exception as exc:
             summary["failed"] += 1
             output_text = relative_output_path(project_root, output_path)

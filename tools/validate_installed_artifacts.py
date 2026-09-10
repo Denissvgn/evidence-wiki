@@ -387,6 +387,87 @@ PUBLICATION_PROBE = textwrap.dedent(
 )
 
 
+PACKET_PROBE = textwrap.dedent(
+    '''
+    import hashlib
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    import yaml
+    from evidence_wiki import Workspace, contract
+
+    cli, fixtures, root = map(Path, sys.argv[1:])
+    profile = "qualified_context_packet/v1"
+    record = {"id": "codebase:sample", "kind": "codebase_architecture", "raw_paths": [],
+        "raw_fingerprint": "sha256:synthetic", "metadata": {}}
+    folder = root / "sources/code_wikis/codebase--sample"
+    folder.mkdir(parents=True)
+    config = {"sources": {"manifest_path": "sources/manifest.jsonl"}, "integrations": {"codebase_analysis": {"intake_profile": profile}}}
+    (root / "research.yml").write_text(yaml.safe_dump(config))
+    (root / "sources/manifest.jsonl").write_text(json.dumps(record) + "\\n")
+    normalized = root / "sources/normalized/codebase--sample.md"
+    normalized.parent.mkdir()
+    headings = ["Citation Metadata", "Abstract", "Outline", "Extracted Text", "Figures and Tables",
+        "Links", "Raw Source Paths", "Parse Warnings"]
+    body = "\\n".join("\\n## " + heading + "\\n\\n- None recorded.\\n" for heading in headings)
+
+    def write_record(report, producer):
+        frontmatter = {"type": "normalized_source", "normalized_format": 1, "source_id": record["id"],
+            "source_kind": record["kind"], "status": "content_extracted", "evidence_usable": True,
+            "created": "2026-09-10", "updated": "2026-09-10", "raw_paths": [],
+            "manifest_path": "sources/manifest.jsonl", "raw_fingerprint": record["raw_fingerprint"],
+            "normalizer": {"name": producer, "version": "1"}, "parse_warnings": []}
+        if report is not None:
+            frontmatter["qualified_context"] = report
+        normalized.write_text("---\\n" + yaml.safe_dump(frontmatter) + "---\\n" + body)
+
+    cases = []
+    with Workspace.open(root) as workspace:
+        assert workspace.normalize.profiles() == contract()["intake_profiles"]
+        for fixture in sorted(fixtures.glob("*.json")):
+            packet = fixture.read_bytes()
+            manifest = {"schema_version": "1", "artifact_kind": "codebase_evidence", "source_id": record["id"],
+                "intake_profile": profile, "packet_path": "packet.json", "generated_at": "2026-09-10T00:00:00Z",
+                "producer": {"name": "agent-wiki-cli", "version": "1.8.0"},
+                "invocation": {"executed_by": "external_worker", "argv": ["llm-wiki", "context"],
+                    "plugins_enabled": False, "hooks_enabled": False, "network_access": False},
+                "files": [{"path": "packet.json", "size_bytes": len(packet), "sha256": hashlib.sha256(packet).hexdigest()}]}
+            (folder / "packet.json").write_bytes(packet)
+            (folder / "artifact-manifest.json").write_text(json.dumps(manifest))
+            report = workspace.normalize.validate_packet(record["id"])
+            result = subprocess.run([str(cli), "normalize", "packet", "--target", str(root), "--source-id", record["id"]],
+                capture_output=True, text=True, timeout=60)
+            assert json.loads(result.stdout) == report, result.stderr
+            if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+                assert not report["valid"] and report["reason"] == "delivery_capture_unsupported"
+                assert result.returncode == 1
+            else:
+                assert report["valid"] and report["policy_satisfied"] and result.returncode == 0, report
+                assert report["packet_id"] == json.loads(packet)["packet_id"]
+                assert report["worker_authentication"] == "not_established"
+                for producer in ["normalize_sources.py", "external-tool"]:
+                    write_record(report, producer)
+                    verification = workspace.normalize.verify()
+                    assert verification["overall_result"] == "verified", verification
+                    checked = subprocess.run([str(cli), "normalize", "verify", "--target", str(root), "--format", "json"],
+                        capture_output=True, text=True, timeout=60)
+                    assert checked.returncode == 0 and json.loads(checked.stdout)["overall_result"] == "verified", checked.stderr
+                    write_record(None, producer)
+                    assert workspace.normalize.verify()["overall_result"] == "not_verified"
+                write_record(report, "external-tool")
+            cases.append(fixture.stem)
+        config["integrations"]["codebase_analysis"]["require_live_reconciliation"] = True
+        (root / "research.yml").write_text(yaml.safe_dump(config))
+        report = workspace.normalize.validate_packet(record["id"])
+        assert not report.get("policy_satisfied")
+    assert cases, "native packet corpus is absent"
+    print(json.dumps({"qualified_packet_intake": cases, "required_live_policy": "refused"}))
+    '''
+)
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -452,7 +533,12 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(REPO_ROOT / "tests/fixtures/workspace-init-profile.yml"),
         str(scratch / "publication-workspace"),
     ], cwd=outside)
-    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication)}
+    packets = run([
+        str(python), "-c", PACKET_PROBE, str(cli),
+        str(REPO_ROOT / "tests/fixtures/codebase-intake/native-packets"),
+        str(scratch / "packet-workspace"),
+    ], cwd=outside)
+    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication), **json.loads(packets)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

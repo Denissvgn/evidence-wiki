@@ -90,6 +90,8 @@ CLI flag of the same name one for one, plus `no_cache` and `run_id`.
 | `coverage.evaluate` | `ws.coverage.evaluate(slug: str) -> dict` |
 | `grounding.verify` | `ws.grounding.verify(slugs: Sequence[str], *, write=False, verified_by=None) -> dict` |
 | `normalize.verify` | `ws.normalize.verify(source_ids: Sequence[str] \| None = None) -> dict` |
+| `normalize.profiles` | `ws.normalize.profiles() -> dict` |
+| `normalize.validate_packet` | `ws.normalize.validate_packet(source_id: str) -> dict` |
 
 `coverage.evaluate` is not a read: the recomputed facet verdicts, coverage
 verdict and `updated_at` are written back to `sources/coverage/<slug>.yml`,
@@ -169,7 +171,7 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "2"
+assert library_api["version"] == "3"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -179,7 +181,12 @@ from live objects — walking the classes at call time would make the published
 contract depend on import order and would silently widen or narrow the API every
 time an internal helper was renamed. The version advances when the declared surface changes. Version `"2"` adds
 selected publication and a versioned operation matrix; callers that only understand
-version `"1"` must negotiate before using the expanded contract.
+version `"1"` must negotiate before using the expanded contract. Version `"3"`
+adds offline qualified packet profile discovery and original-byte validation.
+`contract()["intake_profiles"]` advertises the supported native schemas,
+validator pin, bounds, and reconciliation limits. Validation returns a report
+with separate delivery, native consistency, and host reconciliation results;
+the CLI returns exit 1 when validity or the selected policy is unsatisfied.
 
 One public method is intentionally absent from that list:
 `ws.orchestrate.session(orchestration_id)` returns a driver for an existing

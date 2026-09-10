@@ -31,7 +31,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "2"
+LIBRARY_API_VERSION = "3"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -64,6 +64,8 @@ LIBRARY_API_SURFACE = (
     "coverage.evaluate",
     "grounding.verify",
     "normalize.verify",
+    "normalize.profiles",
+    "normalize.validate_packet",
     "questions.claim",
     "questions.release",
     "questions.answer",
@@ -280,6 +282,7 @@ def contract() -> dict:
     discover_sources_module = load_packaged_script(root, "discover_sources")
     normalized_contract_module = load_packaged_script(root, "_normalized_contract")
     normalize_sources_module = load_packaged_script(root, "normalize_sources")
+    qualified_packet_module = load_packaged_script(root, "qualified_packet")
     mcp_module = load_packaged_script(root, "serve_mcp")
     script_errors_module = load_packaged_script(root, "_script_errors")
     provider_registry_module = load_packaged_script(root, "_provider_registry")
@@ -332,6 +335,7 @@ def contract() -> dict:
             "surface": list(LIBRARY_API_SURFACE),
         },
         "required_asset_manifest": required_asset_manifest(),
+        "intake_profiles": qualified_packet_module.profiles(),
         "source_providers": {
             "discovery": list(provider_registry_module.DISCOVERY_PROVIDER_IDS),
             "acquisition": list(provider_registry_module.ACQUISITION_PROVIDER_IDS),

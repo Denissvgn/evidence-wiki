@@ -1,9 +1,4 @@
-"""``ws.normalize`` -- source normalization and intake shaping.
-
-Add methods here rather than in a shared module: parallel work units fill
-sibling namespaces, and one shared module would put them all in each other's
-diff.
-"""
+"""``ws.normalize`` -- source normalization and intake shaping."""
 
 from __future__ import annotations
 
@@ -15,6 +10,14 @@ from ._base import Namespace
 
 class NormalizeNamespace(Namespace):
     """Normalization operations for the owning workspace."""
+
+    def profiles(self) -> dict[str, Any]:
+        """Discover supported inert intake profiles and their validation limits."""
+        return self._call("qualified_packet", "profiles")
+
+    def validate_packet(self, source_id: str) -> dict[str, Any]:
+        """Validate original delivery bytes; invalid packets are report verdicts."""
+        return self._call("qualified_packet", "validate_source", self._root, source_id)
 
     def verify(self, source_ids: Sequence[str] | None = None) -> dict[str, Any]:
         """Check normalized records against the published record contract.

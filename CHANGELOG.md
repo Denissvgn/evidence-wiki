@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Qualified codebase packets retain their original qualifications.** Opt in to
+  `qualified_context_packet/v1` to check bounded delivery bytes and the pinned
+  producer's native packet contract offline. Normalization, verification, lint,
+  and coverage recheck the same original delivery. Stale or incomplete packets
+  keep those labels; integrity does not establish worker identity or live source
+  freshness. Library API contract version 3 adds intake-profile discovery and
+  `Workspace.normalize.validate_packet`, with matching CLI operations.
+
 - **Publish selected questions from one captured workspace revision.**
   `Workspace.publish_selected` and `evidence-wiki publication --question SLUG`
   return scoped readiness and answers with a content identity, explicit global
