@@ -10,7 +10,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -332,12 +332,25 @@ def test_original_references_and_historical_authority_are_mandatory(host, corrup
 
 @pytest.mark.parametrize("boundary", ["before-rename", "after-rename", "policy-change", "receipt-expiry"])
 def test_publication_failure_is_atomic_and_retry_reconciles_existing_bytes(host, monkeypatch, boundary):
+    exporter = host.workspace._script("evidence_snapshots").export.__globals__
+
+    class Clock:
+        value = datetime.now(timezone.utc)
+
+        @classmethod
+        def now(cls, zone):
+            return cls.value
+
+    deadline = Clock.value + timedelta(hours=1)
+    if boundary == "receipt-expiry":
+        monkeypatch.setitem(exporter["UsageView"].revalidate.__globals__, "datetime", Clock)
+        monkeypatch.setitem(host.workspace._script("evidence_usage").transact.__globals__, "datetime", Clock)
     body, files = host.add_execution()
     if boundary == "receipt-expiry":
         path = json.loads(files["source-record.json"])["evidence_root"] + "/execution-record.json"
         record = json.loads(files[path])
         envelope = record["receipts"][-1]
-        envelope["authentication"]["expires_at"] = "2026-09-11T00:00:00Z"
+        envelope["authentication"]["expires_at"] = deadline.isoformat()
         auth = {key: value for key, value in envelope["authentication"].items() if key != "signature"}
         envelope["authentication"]["signature"] = hmac.new(bytes.fromhex(KEYS["evaluator"]),
             b"evidence-attestation/v1\0" + canonical({"payload": envelope["payload"], "authentication": auth}), hashlib.sha256).hexdigest()
@@ -346,16 +359,8 @@ def test_publication_failure_is_atomic_and_retry_reconciles_existing_bytes(host,
     request = host.selection(body)
     preparation, registration = host.register(request)
     output = host.root / "exports/evidence-snapshots" / (preparation["snapshot_id"][7:] + ".json")
-    exporter = host.workspace._script("evidence_snapshots").export.__globals__
     original = exporter["publish_file"]
     original_policy = host.policy_path.read_bytes()
-
-    class Clock:
-        value = datetime(2026, 9, 10, 23, 59, 59, tzinfo=timezone.utc)
-
-        @classmethod
-        def now(cls, zone):
-            return cls.value
 
     def interrupted(root, relative, data, expected, *, before_publish):
         if boundary == "before-rename":
@@ -371,12 +376,10 @@ def test_publication_failure_is_atomic_and_retry_reconciles_existing_bytes(host,
                 host.policy["revoked_keys"].append("evaluator-key")
                 host.save_policy()
             else:
-                Clock.value = datetime(2026, 9, 11, tzinfo=timezone.utc)
+                Clock.value = deadline
             before_publish()
         return original(root, relative, data, expected, before_publish=changed)
 
-    if boundary == "receipt-expiry":
-        monkeypatch.setitem(exporter["UsageView"].revalidate.__globals__, "datetime", Clock)
     monkeypatch.setitem(exporter, "publish_file", interrupted)
     with pytest.raises(SourceError):
         host.workspace.snapshots.export(request, registration_request_id=registration["payload"]["request_id"])

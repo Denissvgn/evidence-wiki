@@ -821,8 +821,64 @@ HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
     del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
     del os.environ["EVIDENCE_WIKI_STATE_DIR"]
     assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
-    assert contract()["library_api"]["version"] == "9"
+    assert contract()["library_api"]["version"] == "10"
     print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
+    '''
+)
+
+
+SIMULATION_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import contract, verify_snapshot
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"market_simulation": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("simulation_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+        def setitem(self, mapping, key, value):
+            mapping[key] = value
+    host = data.SimulationFixture(directory, Environment())
+    body, files = host.simulation(mode="historical-available")
+    report, assessment = host.assessment(body, files)
+    assert assessment["eligible"], assessment
+    simulation = report["records"][0]["market_simulation"]
+    assert simulation["calculation"]["passed"]
+    assert simulation["simulated_performance"]["net_profit"] == "-68.81"
+    raw, _, _, _ = host.export(host.selection(body))
+    assert json.loads(raw)["schema_version"] == "evidence-snapshot/v4"
+    assert json.loads(raw)["manifest"]["execution_profiles"] == ["market-simulation/v1"]
+    policy = host.policy_path.read_bytes()
+    result = subprocess.run([str(cli), "snapshot", "verify", "--trust-policy", str(host.policy_path)],
+                            input=raw, capture_output=True, timeout=60)
+    assert result.returncode == 0 and json.loads(result.stdout)["valid"], result.stderr
+    corrupt = json.loads(raw)
+    corrupt["schema_version"] = "evidence-snapshot/v3"
+    assert not verify_snapshot(data.canonical(corrupt), trust_policy_bytes=policy)["valid"]
+    host.workspace.close()
+    host.root.rename(host.root.with_name("origin-moved"))
+    host.host.rename(host.host.with_name("host-moved"))
+    del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
+    del os.environ["EVIDENCE_WIKI_STATE_DIR"]
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert contract()["evidence_snapshots"]["optional_execution_profiles"] == ["market-simulation/v1"]
+    print(json.dumps({"market_simulation": "independently_recalculated", "profiled_snapshot": "independent_offline_verification"}))
     '''
 )
 
@@ -922,9 +978,13 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(python), "-c", HISTORICAL_EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_historical_fixture.py"),
         str(scratch / "historical-execution"),
     ], cwd=outside)
+    simulation = run([
+        str(python), "-c", SIMULATION_PROBE, str(cli), str(REPO_ROOT / "tests/_simulation_fixture.py"),
+        str(scratch / "market-simulation"),
+    ], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
-            **json.loads(temporal), **json.loads(market), **json.loads(historical)}
+            **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

@@ -135,6 +135,16 @@ The independent verifier repeats input binding, transitive timing, availability
 authentication, and nested execution checks. It never executes a recorded tool.
 The v1 and v2 contracts continue to refuse historical input generations.
 
+An optional execution profile anywhere in the included ancestry requires
+`evidence-snapshot/v4`, with corresponding v4 manifest and contract versions.
+It adds `execution_profiles`, currently `["market-simulation/v1"]`, to the v3
+manifest. Profiled examples preserve their independently recomputed
+qualifications. The verifier checks the declared profile set against every
+included generation and refuses unsupported profiles, omitted qualifications,
+and format downgrades. Generic historical executions continue to use v3.
+See [Historical simulation evidence](market-simulation.md) for the optional
+portfolio arithmetic and selection assumptions.
+
 Serialization
 is UTF-8 JSON with sorted keys, compact separators, preserved Unicode, no
 non-finite numbers, and one trailing newline. Duplicate keys and noncanonical

@@ -109,3 +109,16 @@ available; normalization explicitly omits the response body from the frontmatter
 copy. Packet integrity adds no evaluator authority and does not establish live
 freshness. Plain text context remains plain text. See
 [Codebase analysis](codebase-analysis.md#qualified-context-packet-intake).
+
+An observation may opt into `parameters.market_simulation` with schema
+`market-simulation/v1` and hash-bound `plan`, `prices`, and `result` artifacts.
+The plan binds the strategy, historical universe, evaluation intervals,
+selection history, complete run configuration, costs, fills, adjustments, and
+metric definitions before the held-out interval. All decision inputs qualify
+at the selection cutoff; the price history qualifies at the later run cutoff.
+Reports separate evidence completeness, recomputed arithmetic, simulated
+performance, and uncertainty. An independently evaluated loss can be a valid
+calculation. A signed passing label cannot override incorrect arithmetic or
+unavailable inputs. Explicit negative snapshot selections preserve authenticated
+failed calculations. This optional profile requires historical input authority
+and snapshot contract v4; ordinary execution records need no market metadata.

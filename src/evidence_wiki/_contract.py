@@ -31,7 +31,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "9"
+LIBRARY_API_VERSION = "10"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -365,7 +365,8 @@ def contract() -> dict:
         "evidence_snapshots": {
             "contract": "evidence-snapshot-contract/v1",
             "temporal_mode": "current",
-            "supported_contracts": ["evidence-snapshot-contract/v1", "evidence-snapshot-contract/v2", "evidence-snapshot-contract/v3"],
+            "supported_contracts": ["evidence-snapshot-contract/v1", "evidence-snapshot-contract/v2", "evidence-snapshot-contract/v3", "evidence-snapshot-contract/v4"],
+            "optional_execution_profiles": ["market-simulation/v1"],
             "historical_inputs": "per-generation cutoff over complete authorized ancestry; contract/v3",
             "historical_selection": "evidence-snapshot-selection/v2",
             "temporal_modes": ["current", "historical-audit", "historical-available"],
@@ -432,6 +433,8 @@ def contract() -> dict:
             "evidence_temporal_snapshot_manifest": "evidence-snapshot-manifest/v2",
             "evidence_execution_snapshot": "evidence-snapshot/v3",
             "evidence_execution_snapshot_manifest": "evidence-snapshot-manifest/v3",
+            "evidence_profiled_snapshot": "evidence-snapshot/v4",
+            "evidence_profiled_snapshot_manifest": "evidence-snapshot-manifest/v4",
             "evidence_temporal_snapshot_selection": "evidence-snapshot-selection/v2",
             "evidence_scrub_receipt": "evidence-scrub-receipt/v1",
             "evidence_source_revision": "evidence-source-revision/v1",

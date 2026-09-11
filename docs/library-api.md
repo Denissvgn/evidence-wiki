@@ -211,7 +211,7 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "9"
+assert library_api["version"] == "10"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -251,6 +251,11 @@ Every historical generation binds its inputs and their complete ancestry at its
 own cutoff; the result and its independent evaluation can occur later. Inspect
 `historical_inputs` separately from the structural execution report. Historical
 input qualification does not establish a model's training cutoff.
+Version `"10"` adds optional `market-simulation/v1` execution qualifications and
+snapshot v4 with explicitly declared execution profiles. Existing generic
+execution records retain their contract. The [simulation profile](market-simulation.md)
+recalculates bounded portfolio results and qualifies preselected configuration
+without starting a runner or adding a feed dependency.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;

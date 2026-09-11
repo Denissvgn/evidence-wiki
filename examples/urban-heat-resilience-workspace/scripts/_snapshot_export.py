@@ -17,6 +17,9 @@ from _snapshot_verifier import (
     EXECUTION_MANIFEST_SCHEMA,
     EXECUTION_SCHEMA,
     MANIFEST_SCHEMA,
+    PROFILE_CONTRACT,
+    PROFILE_MANIFEST_SCHEMA,
+    PROFILE_SCHEMA,
     SCHEMA,
     TEMPORAL_CONTRACT,
     TEMPORAL_MANIFEST_SCHEMA,
@@ -46,7 +49,7 @@ def implementation_identity() -> str:
     directory = Path(__file__).resolve().parent
     stems = ("_snapshot_export", "_snapshot_verifier", "_snapshot_qualifications", "_market_evidence", "_evidence_usage",
              "_host_evidence_store", "_evidence_authority", "_record_artifacts", "_qualified_packet",
-             "_usage_materialization", "_temporal_contract", "_evidence_revision")
+             "_usage_materialization", "_temporal_contract", "_evidence_revision", "_market_simulation")
     paths = [directory / (stem + ".py") for stem in stems]
     paths.extend(sorted(directory.glob("_packet_vendor_*.py")))
     return identifier("evidence-snapshot-implementation/v1", {path.name: binding(path.read_bytes()) for path in paths})
@@ -85,6 +88,7 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
         temporal_state = UsageState(state.root, state.state_id, canonical({**state.document, "events": state.events[:event["sequence"]]}))
     examples, exclusions, all_nodes, all_files = [], [], set(), {}
     historical_inputs = False
+    execution_profiles = set()
     for revision in request["source_revisions"]:
         try:
             require(revision in state.revisions, "snapshot_source_revision_unknown")
@@ -143,6 +147,7 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
                                                      {key: state.nodes[key] for key in closure}, state.availability,
                                                      policy, view.now, state.last_observed)
             historical_inputs |= input_context["historical"]
+            execution_profiles.update(input_context["execution_profiles"])
             examples.append({"source_revision": revision, **result["example"]})
             all_nodes.update(closure)
             all_files.update(files)
@@ -153,8 +158,8 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
     require(len(blobs) <= BOUNDS["artifact_blobs"] and sum(map(len, blobs.values())) <= BOUNDS["decoded_bytes"],
             "snapshot_blob_bound_exceeded")
     sources = [frozen_source(revision, state.revisions[revision]) for revision in sorted(all_files)]
-    contract = EXECUTION_CONTRACT if historical_inputs else TEMPORAL_CONTRACT if temporal is not None else CONTRACT
-    schema = EXECUTION_MANIFEST_SCHEMA if historical_inputs else TEMPORAL_MANIFEST_SCHEMA if temporal is not None else MANIFEST_SCHEMA
+    contract = PROFILE_CONTRACT if execution_profiles else EXECUTION_CONTRACT if historical_inputs else TEMPORAL_CONTRACT if temporal is not None else CONTRACT
+    schema = PROFILE_MANIFEST_SCHEMA if execution_profiles else EXECUTION_MANIFEST_SCHEMA if historical_inputs else TEMPORAL_MANIFEST_SCHEMA if temporal is not None else MANIFEST_SCHEMA
     manifest = {"schema_version": schema, "contract": contract,
                 "exporter": {"name": "evidence-wiki", "version": contract, "implementation": implementation_identity()},
                 "selection": request,
@@ -173,6 +178,8 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
                 "bounds": dict(BOUNDS)}
     if historical_inputs:
         manifest["execution_inputs"] = {"availability": {revision: state.availability.get(revision) for revision in sorted(all_files)}}
+    if execution_profiles:
+        manifest["execution_profiles"] = sorted(execution_profiles)
     if temporal_state is not None:
         require(all(state.nodes[node]["kind"] == "source" for node in all_nodes), "snapshot_temporal_non_source_lineage_unsupported")
         manifest["temporal"] = {"checkpoint_observed_at": temporal_state.last_observed.isoformat(),
@@ -207,7 +214,7 @@ def registered_bundle(root: Path, view: UsageView, request: dict[str, Any], requ
     base = UsageState(root, view.state.state_id, canonical({**view.state.document, "events": view.state.events[:event["sequence"] - 1]}))
     historical = UsageView(base, view.trust, base.last_observed)
     manifest, blobs = candidate(historical, request)
-    schema = EXECUTION_SCHEMA if "execution_inputs" in manifest else TEMPORAL_SCHEMA if "temporal" in request else SCHEMA
+    schema = PROFILE_SCHEMA if "execution_profiles" in manifest else EXECUTION_SCHEMA if "execution_inputs" in manifest else TEMPORAL_SCHEMA if "temporal" in request else SCHEMA
     bundle = {"schema_version": schema,
               "snapshot_id": identifier(manifest["schema_version"], manifest), "manifest": manifest,
               "registration": event["command"], "blobs": {key: base64.b64encode(raw).decode("ascii") for key, raw in sorted(blobs.items())}}

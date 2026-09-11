@@ -23,6 +23,7 @@ from _evidence_authority import (
     verify_attestation,
 )
 from _evidence_revision import content_id
+from _market_simulation import inspect as inspect_market_simulation
 from _normalized_contract import safe_source_id
 from _packet_vendor_services_context_packet import ContextPacketError, validate_context_packet
 from _record_artifacts import (
@@ -51,6 +52,7 @@ def profile_description() -> dict[str, Any]:
             "historical_inputs": "accepted immutable ancestry at each generation cutoff",
             "historical_input_bounds": {"source_revisions": 64, "lineage_nodes": 128, "source_cutoffs": 4096},
             "model_training_cutoff": "not_established",
+            "optional_parameters": {"market_simulation": "market-simulation/v1"},
             "authority": "evaluated_separately_from_structure", "max_files": MAX_FILES,
             "max_entries": MAX_ENTRIES, "max_bytes": MAX_BYTES}
 
@@ -202,11 +204,12 @@ def validate_generation(payload: Any, members: dict[str, dict[str, Any]], files:
                 qualifications[path] = {"packet_id": validated.packet_id, "native_validation": validated.to_payload(),
                                         "qualifications": qualified, "omitted_fields": omitted,
                                         "original": file_binding(files[path]), "authority": "not_established"}
+    simulation = inspect_market_simulation(payload, files)
     return {"record_id": content_id("evidence-execution-record/v1", payload), "record_type": payload["record_type"],
             "episode_id": payload["episode_id"], "task_id": payload["task_id"], "run_id": payload["run_id"],
             "problem_id": payload["problem_id"], "input_group_id": payload["input_group_id"], "held_out_role": payload["held_out_role"],
             "outcome": payload["outcome"], "referenced_artifacts": sorted(referenced), "qualified_context": qualifications,
-            "temporal": temporal, "payload": payload}
+            "temporal": temporal, "payload": payload, **({"market_simulation": simulation} if simulation is not None else {})}
 
 
 def validate_receipt(payload: Any, records: dict[str, dict[str, Any]], members: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -371,6 +374,10 @@ def assess_verification(report: dict[str, Any], root: Path, config: dict[str, An
         independent = reason == "independent_evaluation_authenticated"
         target = next(record for record in report["records"] if record["record_id"] == receipt["target_record_id"])
         eligible = independent and receipt["outcome"] == "passed" and receipt["scope_complete"] and target["outcome"] == "passed"
+        simulation = target.get("market_simulation")
+        if eligible and simulation is not None and not simulation["eligible"]:
+            eligible = False
+            reason = (simulation["evidence"]["gaps"] or [simulation["calculation"]["reason"]])[0]
         result["receipts"].append({"receipt_id": receipt["receipt_id"], "target_record_id": receipt["target_record_id"],
                                    "outcome": receipt["outcome"], "independent": independent, "positive_eligible": eligible,
                                    "reason": reason, "authentication": auth, "generator_authentication": generator})

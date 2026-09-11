@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Optional historical simulations separate arithmetic from performance.**
+  Library API contract version 10 exposes `market-simulation/v1` qualifications
+  within generic execution evidence. Bound portfolio arithmetic, costs,
+  historical universe, preselected configuration, and input availability are
+  checked independently. Losing results and failed observations retain their
+  meaning. Snapshot contract v4 declares required execution profiles and
+  rechecks them offline. No feed, broker, model, or simulator SDK is required.
+
 - **Historical execution qualifies inputs at each generation's cutoff.** Library
   API contract version 9 exposes bounded input qualification across accepted
   immutable ancestry, independently attested availability, and nested execution

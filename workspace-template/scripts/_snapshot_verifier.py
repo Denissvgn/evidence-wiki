@@ -19,6 +19,7 @@ import yaml
 from _evidence_authority import EvidenceInvalid
 from _market_evidence import qualify_cutoff as qualify_market_cutoff
 from _market_evidence import validate_closure as validate_market
+from _market_simulation import inspect as inspect_market_simulation
 from _temporal_contract import availability_receipt, qualify_time, source_times
 
 SCHEMA = "evidence-snapshot/v1"
@@ -32,6 +33,10 @@ TEMPORAL_CONTRACT = "evidence-snapshot-contract/v2"
 EXECUTION_SCHEMA = "evidence-snapshot/v3"
 EXECUTION_MANIFEST_SCHEMA = "evidence-snapshot-manifest/v3"
 EXECUTION_CONTRACT = "evidence-snapshot-contract/v3"
+PROFILE_SCHEMA = "evidence-snapshot/v4"
+PROFILE_MANIFEST_SCHEMA = "evidence-snapshot-manifest/v4"
+PROFILE_CONTRACT = "evidence-snapshot-contract/v4"
+EXECUTION_PROFILES = ["market-simulation/v1"]
 BOUNDS = {"selected_revisions": 32, "source_revisions": 64, "lineage_nodes": 128,
           "artifact_blobs": 512, "decoded_bytes": 8 * 1024 * 1024, "bundle_bytes": 16 * 1024 * 1024}
 OUTCOMES = {"passed", "failed", "skipped", "inconclusive"}
@@ -342,7 +347,7 @@ def execution(files: dict[str, bytes], source_id: str, policy: dict[str, Any], c
                 "snapshot_execution_member_mismatch")
         members[path] = member
     require(set(files) == {"execution-record.json", *members}, "snapshot_execution_closure_incomplete")
-    records, authentication, used = {}, {}, set()
+    records, authentication, simulations, used = {}, {}, {}, set()
     input_revisions, qualified_packets = [], []
     for envelope in items(record["records"], 128, 1):
         payload = fields(envelope.get("payload"), {
@@ -430,6 +435,12 @@ def execution(files: dict[str, bytes], source_id: str, policy: dict[str, Any], c
                     qualified_packets.append({"path": path, "bytes": files[path]})
         used.update(references)
         records[rid], authentication[rid] = payload, auth
+        try:
+            simulation = inspect_market_simulation(payload, files)
+        except EvidenceInvalid as exc:
+            raise SnapshotInvalid(str(exc)) from exc
+        if simulation is not None:
+            simulations[rid] = simulation
     receipts = {}
     for envelope in items(record["receipts"], 128):
         payload = fields(envelope.get("payload"), {"record_type", "target_record_id", "episode_id", "task_id", "run_id", "evaluator",
@@ -474,11 +485,15 @@ def execution(files: dict[str, bytes], source_id: str, policy: dict[str, Any], c
     require(target is not None and target["record_type"] == "observation" and receipt is not None
             and receipt["target_record_id"] == record["selected_record_id"], "snapshot_selected_receipt_missing")
     require(target["outcome"] == receipt["outcome"] and target["outcome"] in {"passed", "failed"}, "snapshot_example_outcome_unsupported")
+    simulation = simulations.get(record["selected_record_id"])
+    if target["outcome"] == "passed" and simulation is not None:
+        require(simulation["eligible"], (simulation["evidence"]["gaps"] or [simulation["calculation"]["reason"]])[0])
     return {"example": {"record_id": record["selected_record_id"], "receipt_id": record["selected_receipt_id"],
                          "label": "positive" if target["outcome"] == "passed" else "negative",
                          "outcome": target["outcome"], **{key: target[key] for key in (
-                             "episode_id", "task_id", "run_id", "problem_id", "input_group_id", "held_out_role")}},
-            "inputs": input_revisions, "packets": qualified_packets, "generations": list(records.values())}
+                             "episode_id", "task_id", "run_id", "problem_id", "input_group_id", "held_out_role")},
+                         **({"market_simulation": simulation} if simulation is not None else {})},
+            "inputs": input_revisions, "packets": qualified_packets, "generations": list(records.values()), "simulations": simulations}
 
 
 def execution_input_context(sources: dict[str, dict[str, Any]], files: dict[str, dict[str, bytes]],
@@ -531,22 +546,29 @@ def execution_input_context(sources: dict[str, dict[str, Any]], files: dict[str,
             if settings["mode"] == "current":
                 continue
             historical = True
-            cutoff = instant(settings["cutoff"])
-            for item in generation["inputs"]:
-                for parent in ancestors(item["revision_id"], set()):
-                    key = (parent, settings["mode"], cutoff)
+            checks = [(settings, [item["revision_id"] for item in generation["inputs"]])]
+            simulation = result["simulations"].get(identifier("evidence-execution-record/v1", generation))
+            if simulation is not None:
+                prior = simulation["preselection"]
+                checks.append(({key: prior[key] for key in ("mode", "cutoff")}, prior["input_revisions"]))
+            for input_settings, revisions in checks:
+                cutoff = instant(input_settings["cutoff"])
+                for parent in sorted({parent for revision in revisions for parent in ancestors(revision, set())}):
+                    key = (parent, input_settings["mode"], cutoff)
                     if key in checked:
                         continue
                     require(len(checked) < 4096, "execution_temporal_check_bound_exceeded")
                     require(parent in sources, "execution_historical_non_source_ancestor_unsupported")
-                    proof = proofs.get(parent) if settings["mode"] == "historical-available" else None
-                    require(settings["mode"] != "historical-available" or proof is not None,
+                    proof = proofs.get(parent) if input_settings["mode"] == "historical-available" else None
+                    require(input_settings["mode"] != "historical-available" or proof is not None,
                             "execution_independent_availability_missing")
-                    temporal_source(sources[parent], files[parent], proof, policy, settings, checkpoint_time)
+                    temporal_source(sources[parent], files[parent], proof, policy, input_settings, checkpoint_time)
                     if parent in runs:
                         execution(originals[parent], sources[parent]["source_id"], policy, cutoff, historical=True)
                     checked.add(key)
     return {"historical": historical, "complete": True, "qualified_source_cutoffs": len(checked),
+            "execution_profiles": sorted({profile["schema_version"] for result in runs.values()
+                                           for profile in result["simulations"].values()}),
             "bound": 4096, "model_training_cutoff": "not_established", "valid_until": min(deadlines).isoformat()}
 
 
@@ -592,14 +614,19 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
                       qualify_source=None) -> dict[str, Any]:
     """Verify independent bindings; current_time is reserved for host reconciliation."""
     bundle = fields(document(data), {"schema_version", "snapshot_id", "manifest", "registration", "blobs"})
-    historical_inputs = bundle["schema_version"] == EXECUTION_SCHEMA
+    profiled = bundle["schema_version"] == PROFILE_SCHEMA
+    historical_inputs = bundle["schema_version"] in {EXECUTION_SCHEMA, PROFILE_SCHEMA}
     temporal = bundle["schema_version"] == TEMPORAL_SCHEMA or historical_inputs and "temporal" in bundle["manifest"]
-    contract = EXECUTION_CONTRACT if historical_inputs else TEMPORAL_CONTRACT if temporal else CONTRACT
-    manifest_schema = EXECUTION_MANIFEST_SCHEMA if historical_inputs else TEMPORAL_MANIFEST_SCHEMA if temporal else MANIFEST_SCHEMA
-    require(bundle["schema_version"] in {SCHEMA, TEMPORAL_SCHEMA, EXECUTION_SCHEMA} and canonical(bundle) == data, "snapshot_encoding_unsupported")
+    contract = PROFILE_CONTRACT if profiled else EXECUTION_CONTRACT if historical_inputs else TEMPORAL_CONTRACT if temporal else CONTRACT
+    manifest_schema = PROFILE_MANIFEST_SCHEMA if profiled else EXECUTION_MANIFEST_SCHEMA if historical_inputs else TEMPORAL_MANIFEST_SCHEMA if temporal else MANIFEST_SCHEMA
+    require(bundle["schema_version"] in {SCHEMA, TEMPORAL_SCHEMA, EXECUTION_SCHEMA, PROFILE_SCHEMA}
+            and canonical(bundle) == data, "snapshot_encoding_unsupported")
     manifest = fields(bundle["manifest"], {"schema_version", "contract", "exporter", "selection", "captured_state", "policy",
                                           "sources", "lineage", "examples", "exclusions", "qualifications", "coverage", "bounds"}
-                      | ({"temporal"} if temporal else set()) | ({"execution_inputs"} if historical_inputs else set()))
+                      | ({"temporal"} if temporal else set()) | ({"execution_inputs"} if historical_inputs else set())
+                      | ({"execution_profiles"} if profiled else set()))
+    if profiled:
+        require(manifest["execution_profiles"] == EXECUTION_PROFILES, "snapshot_execution_profiles_unsupported")
     require(manifest["schema_version"] == manifest_schema and manifest["contract"] == contract and manifest["bounds"] == BOUNDS,
             "snapshot_contract_unsupported")
     require(digest(bundle["snapshot_id"]) == identifier(manifest_schema, manifest), "snapshot_manifest_digest_mismatch")
@@ -712,7 +739,8 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
     selected, included = [], set()
     for example in items(manifest["examples"], BOUNDS["selected_revisions"], 1):
         fields(example, {"source_revision", "record_id", "receipt_id", "label", "outcome", "episode_id", "task_id", "run_id",
-                         "problem_id", "input_group_id", "held_out_role"})
+                         "problem_id", "input_group_id", "held_out_role"}
+               | ({"market_simulation"} if profiled and "market_simulation" in example else set()))
         revision = digest(example["source_revision"])
         require(revision in sources and revision in request["source_revisions"] and revision not in selected, "snapshot_example_revision_invalid")
         selected.append(revision)
@@ -753,6 +781,8 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
     if historical_inputs:
         result = execution_input_context(sources, files_by_revision, nodes, input_proofs, policy, clock, captured)
         require(result["historical"], "snapshot_execution_contract_unnecessary")
+        require(not result["execution_profiles"] or profiled, "snapshot_execution_profile_contract_required")
+        require(result["execution_profiles"] == manifest.get("execution_profiles", []), "snapshot_execution_profiles_mismatch")
     excluded = []
     for item in items(manifest["exclusions"], BOUNDS["selected_revisions"]):
         fields(item, {"source_revision", "reason"})
