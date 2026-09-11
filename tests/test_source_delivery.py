@@ -56,7 +56,7 @@ def load_frontmatter(path: Path) -> dict:
 
 
 class SourceDeliveryTests(unittest.TestCase):
-    """E17-T01/T02: delivery idempotency and provenance sidecar handling."""
+    """Delivery idempotency and provenance sidecar handling."""
 
     def copy_workspace(self, root: Path) -> Path:
         workspace = root / "workspace"

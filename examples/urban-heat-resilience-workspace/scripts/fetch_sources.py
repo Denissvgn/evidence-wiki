@@ -88,7 +88,7 @@ OPENALEX_CLOCK = time.monotonic
 OPENALEX_LAST_REQUEST_AT: float | None = None
 DOI_TIMEOUT_SECONDS = 10.0
 DOI_TRANSPORT = None
-# --- GitHub bounded acquisition (E32-T03) ------------------------------------
+# --- GitHub bounded acquisition ------------------------------------
 # Acquisition captures explicitly selected repositories as evidence: a repository
 # metadata snapshot, release asset metadata, or a source archive for a chosen ref.
 # It never clones, never executes repository code, and never auto-selects a repo
@@ -259,9 +259,9 @@ PROVIDER_REGISTRY: dict[str, dict[str, Any]] = {
             "https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api",
             "https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository",
         ],
-        # Bounded acquisition (E32-T03): capture an explicitly selected repository
+        # Bounded acquisition: capture an explicitly selected repository
         # as evidence without cloning or executing code. Repository discovery lives
-        # in discover_sources.py github (E32-T02).
+        # in discover_sources.py github.
         "supported_commands": ["repo-metadata", "release-metadata", "download-archive"],
         "license_inference": "partial",
     },

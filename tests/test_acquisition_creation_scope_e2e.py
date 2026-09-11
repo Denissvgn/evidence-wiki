@@ -1,30 +1,12 @@
-"""EW-BUG-005: a completed acquisition may create no evidence its fulfilments do not cite.
+"""Completed acquisitions may create only evidence cited by their fulfilments.
 
-A delegated acquirer that answers one scoped request in two steps -- a discovery
-snapshot plus the quote it led to -- and then delivers *both*, inventories both, and
-fulfils with only the quote has created a manifest record this order never authorised.
-The constraint is enforced three guards deep (manifest scope, then exact accounting,
-then raw scope), and the contract an acquirer actually sees is the **first** refusal:
-the manifest-scope guard, naming the record it did not fulfil with.
+A discovery capture and the quote it led to are two manifest records. Fulfilling a
+request with only the quote does not authorize the extra capture, even if both sidecars
+name the same request. Manifest scope must refuse that extra record before raw scope.
 
-This is a **tripwire, not a target**. It pins current, correct behaviour and must keep
-passing after the CR-19 attribution-predicate fix lands. That fix rewrites how
-`allowed_new_raw_paths` is derived (from each fulfilled record's declared `raw_paths`
-to what `source_inventory.build_records` attributes to the fulfilled records), which is
-raw-path logic sitting *below* the manifest-scope guard. If any of these cases starts
-reporting a raw-path message instead of the manifest-scope one, the fix has reordered
-the chain and moved the diagnosis an acquirer gets further from its actual mistake.
-
-The stamp state of the extra delivery's sidecar is varied deliberately. Stamping it for
-the very same scoped request is the most sympathetic case an acquirer can construct --
-"this file *is* part of answering that request" -- and it must still be refused, because
-correlation is not fulfilment. Stamping it for another request, or leaving it unstamped,
-must reach the same refusal by the same guard rather than a differently-shaped one.
-
-The closing case covers the other half of the advice in the acquisition runbook -- hold
-captures outside the raw roots until you mean to inventory them. A delivery that is
-never inventoried has no manifest record to be refused by scope, so it falls through to
-the raw-scope guard instead, which names the payload *and* its sidecar.
+The cases vary same-request, other-request and absent correlation stamps. A capture
+that was never inventoried instead reaches the raw-scope guard, which names both its
+payload and its sidecar. Correlation alone is never fulfilment authority.
 """
 
 import hashlib

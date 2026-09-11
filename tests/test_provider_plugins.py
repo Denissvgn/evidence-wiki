@@ -1,4 +1,4 @@
-"""Unit tests for entry-point provider registration (CR-5 registry loader).
+"""Unit tests for entry-point provider registration.
 
 Registration is packaging metadata, so these tests build **real** path-based
 distributions — a temp directory holding ``<name>-<version>.dist-info`` next to the
@@ -502,7 +502,7 @@ class CapabilityRuleTests(FixtureDistributionCase):
             ("terms_urls http", {"terms_urls": '("http://keepa.com/terms",)'}, (), "https:// URLs"),
             ("terms_urls bare scheme", {"terms_urls": '("https://",)'}, (), "https:// URLs"),
             # Checked like allowed_domains and credentials: request_kinds is the declared
-            # seam for CR-4 kind routing, where a repeated id becomes a real ambiguity.
+            # seam for request-kind routing, where a repeated id becomes a real ambiguity.
             (
                 "request_kinds duplicated",
                 {"request_kinds": '("market-data/price_history", "market-data/price_history")'},

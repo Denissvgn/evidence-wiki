@@ -1,13 +1,13 @@
 """A third-party provider distribution, authored the way a real plugin author would.
 
-This module is the reference implementation of the CR-5 provider contract, and it is
+This module is the reference implementation of the provider contract, and it is
 deliberately written **without** ``evidence_wiki`` installed: it declares its own frozen
 dataclasses for every shape the contract names and never imports the package. That is the
 point of the fixture. ``_provider_plugins.py`` validates registrations *structurally*, so
 a plugin that matches the shape is valid even though it shares no types with the package;
 importing ``evidence_wiki`` here would quietly turn that property into an untested claim.
 
-The provider is a planner and an interpreter, never a fetcher (CR-5 §2.1). It declares the
+The provider is a planner and an interpreter, never a fetcher. It declares the
 hosts it may reach and the environment variable holding its key; it never reads that
 variable. Header values carry the ``{{credential:NAME}}`` placeholder, and the package's
 own pinned transport resolves it at execution time, so no secret is ever in reach of this
@@ -59,7 +59,7 @@ DISCOVERY_REQUEST_FIELDS = ("query", "max_results")
 # --- Contract shapes ---------------------------------------------------------
 #
 # Duck-typed equivalents of evidence_wiki.providers. Same attribute names, same value
-# shapes, no shared types: matching the shape is the contract (CR-5 §2.2).
+# shapes, no shared types: matching the shape is the contract.
 
 
 @dataclass(frozen=True)

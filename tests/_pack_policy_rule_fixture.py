@@ -1,6 +1,6 @@
 """One declarative-policy domain pack, and the delivered evidence its rules decide.
 
-CR-9 lets a domain pack declare deterministic rules the package evaluates itself, so
+A domain pack can declare deterministic rules the package evaluates itself, so
 every suite that exercises them needs the same three artifacts in agreement: a
 ``research.yml`` carrying both ``policy_vocabularies`` and ``policy_rules``, a delivered
 source whose provenance sidecar and hash-bound structured view the rules resolve

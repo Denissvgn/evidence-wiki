@@ -1,4 +1,4 @@
-"""Unit tests for structured request-scope parsing and matching (CR-4 foundation)."""
+"""Unit tests for structured request-scope parsing and matching."""
 
 from __future__ import annotations
 

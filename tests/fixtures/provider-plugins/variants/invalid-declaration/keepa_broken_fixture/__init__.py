@@ -1,6 +1,6 @@
 """A registration that imports cleanly and then violates every declaration rule at once.
 
-Deliberately a kitchen sink: CR-5 §2.3/§2.4 require the invalid-registration reason to
+Deliberately a kitchen sink: provider registration requires the invalid-registration reason to
 name *every* violation, not the first one found, so the fixture that pins that behaviour
 has to carry more than one. The methods are all present and callable — nothing here fails
 for a missing attribute; each failure is a value rule.

@@ -588,16 +588,21 @@ compatibility checks.
 Skew therefore surfaces where it already surfaced: as a script's own typed
 refusal, at the call that actually depends on the incompatible piece.
 
-What the API adds is *visibility*. `ws.versions()` reports what is installed
-beside what is deployed:
+`ws.versions()` reports the installed package version beside the workspace's
+recorded metadata:
 
 ```python
 ws.versions()
-# {'package': '0.4.0',
+# {'package': '0.6.0',
 #  'workspace': {'starter_version': '0.7.0',
 #                'schema_version': '0.1',
 #                'compatible_research_yml_contract': '0.1'}}
 ```
+
+`starter_version` identifies reusable starter content; `schema_version` identifies
+the metadata shape. Neither the package version nor these recorded values prove
+that deployed script bytes match a release. Hosts that need that identity must
+compare the files or use their own content digests.
 
 This is a pure read and never refuses *on the basis of what it reads*. Every
 workspace key degrades to `None` when `workspace-system.yml` is absent,
@@ -802,8 +807,9 @@ Notes on the shape:
   workspace artifacts it names and refuses a result whose postconditions the
   workspace does not actually satisfy, so a well-formed document is not a way to
   make a session progress.
-- If the host process holds handles across a workspace upgrade, drop and reopen
-  them; `versions()` is the cheap way to notice.
+- After upgrading a workspace, drop and reopen any handles the host process
+  retained. `versions()` can reveal changed metadata, but an unchanged result
+  does not prove that scripts are unchanged.
 
 ## What The API Deliberately Omits
 

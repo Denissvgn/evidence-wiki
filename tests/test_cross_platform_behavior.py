@@ -302,7 +302,7 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
 
     # -- the library API path ------------------------------------------
     #
-    # Everything above drives the workspace scripts. Since CR-6 a host can drive
+    # Everything above drives the workspace scripts. Since the library API a host can drive
     # the same operations in-process through ``evidence_wiki.Workspace``, and the
     # platform differences that lane meets are not the same ones: it resolves
     # paths through ``pathlib`` rather than argparse, and it arbitrates a claim

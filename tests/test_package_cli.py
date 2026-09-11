@@ -154,6 +154,10 @@ class PackageCliTests(unittest.TestCase):
                     "github_implementation",
                     "legal_current_figure",
                     "official_guidance",
+                    "pack:capital-markets/contradictory-risk",
+                    "pack:capital-markets/issuer-facts",
+                    "pack:capital-markets/market-observations",
+                    "pack:capital-markets/strategy-hypotheses",
                     "product_requirement_profile",
                     "standards_registry_reference",
                     "vendor_product_spec",
@@ -168,6 +172,10 @@ class PackageCliTests(unittest.TestCase):
                     "official_standards_registry",
                     "official_vendor",
                     "openalex_or_arxiv",
+                    "pack:capital-markets/complete-filings",
+                    "pack:capital-markets/complete-prices",
+                    "pack:capital-markets/review-contradictions",
+                    "pack:capital-markets/review-evaluation",
                     "primary_or_official",
                     "standards_body_primary",
                 ],
@@ -178,6 +186,9 @@ class PackageCliTests(unittest.TestCase):
                     "current_standard_reference",
                     "manual_review",
                     "no_staleness_check",
+                    "pack:capital-markets/filing-48h",
+                    "pack:capital-markets/price-48h",
+                    "pack:capital-markets/review-validity",
                     "pack:general-science/study-recency",
                     "publication_identity",
                     "release_snapshot",
@@ -187,6 +198,9 @@ class PackageCliTests(unittest.TestCase):
                     "none",
                     "official_domain_match",
                     "origin_url_matches_candidate",
+                    "pack:capital-markets/issuer-match",
+                    "pack:capital-markets/listing-review",
+                    "pack:capital-markets/scope-review",
                     "registry_entry_matches_product_requirement",
                     "repo_ref_resolves",
                     "standard_designation_matches_registry",
@@ -200,7 +214,7 @@ class PackageCliTests(unittest.TestCase):
             payload["policy_vocabularies"],
         )
         definitions = payload["policy_vocabulary_definitions"]
-        # CR-9 T6 adds `policy_rules` beside this block without touching it: pin the
+        # `policy_rules` coexists with this block without changing it: pin the
         # existing key set exactly so a future change to either surface is visible here.
         self.assertEqual({"base", "installed_domain_packs", "merged"}, set(definitions))
         self.assertIn(
@@ -211,11 +225,31 @@ class PackageCliTests(unittest.TestCase):
             "Require a reviewer",
             definitions["merged"]["freshness_policy"]["pack:general-science/study-recency"],
         )
-        # No shipped pack declares a deterministic `policy_rules` block today, so the
-        # new additive surface is present and empty on a stock checkout -- both facts
-        # matter: the key existing at all, and it not yet carrying anything.
+        # Bundled rules remain namespaced to the optional pack. Pin their public
+        # summaries, including the listing rule's required human review.
         self.assertIn("policy_rules", payload)
-        self.assertEqual({}, payload["policy_rules"])
+        self.assertEqual(
+            {
+                "capital-markets": {
+                    f"pack:capital-markets/{name}": {
+                        "primitives": ["all_of", primitive],
+                        "manual_review_required": review,
+                        "manual_review_on_absence": False,
+                        "record_fields_that_may_traverse_arrays": [],
+                        "section": section,
+                    }
+                    for name, primitive, review, section in (
+                        ("complete-filings", "equals", False, "source_policy"),
+                        ("complete-prices", "equals", False, "source_policy"),
+                        ("filing-48h", "max_age", False, "freshness_policy"),
+                        ("price-48h", "max_age", False, "freshness_policy"),
+                        ("issuer-match", "equals", False, "identity_policy"),
+                        ("listing-review", "equals", True, "identity_policy"),
+                    )
+                }
+            },
+            payload["policy_rules"],
+        )
 
         with resources.assets_root() as root:
             metadata = yaml.safe_load((root / "workspace-template" / "workspace-system.yml").read_text())
@@ -234,7 +268,7 @@ class PackageCliTests(unittest.TestCase):
         payload = json.loads(self.run_cli("contract"))
 
         library_api = payload["library_api"]
-        self.assertEqual("7", library_api["version"])
+        self.assertEqual("11", library_api["version"])
         surface = library_api["surface"]
         self.assertIsInstance(surface, list)
         for operation in (
@@ -247,6 +281,13 @@ class PackageCliTests(unittest.TestCase):
             "coverage.evaluate",
             "grounding.verify",
             "normalize.verify",
+            "normalize.validate_market",
+            "temporal.evaluate",
+            "assessments.prepare",
+            "assessments.issue",
+            "assessments.check",
+            "assessments.plan_refresh",
+            "assessments.apply_refresh",
             "questions.claim",
             "questions.add_batch",
             "orchestrate.start",

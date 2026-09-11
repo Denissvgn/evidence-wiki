@@ -1,12 +1,12 @@
-"""Contract tests for the source-discovery schema documentation (E31-T01) and
-the trust-tier reasoning policy (E31-T02).
+"""Contract tests for the source-discovery schema documentation and
+the trust-tier reasoning policy.
 
 These tests assert that `docs/source-discovery.md` describes every required
 `source_candidate` field, names the durable candidate store, states that
 candidates are not evidence until fetched into `raw/` with provenance, and is
 cross-linked from the acquisition, delivery, and orchestrator-handoff docs.
 
-The E31-T02 tests additionally assert that the doc defines the five trust tiers,
+The tests additionally assert that the doc defines the five trust tiers,
 the four ranking rules, and the five reasoning fields, and they validate the
 machine-readable tier-example fixtures against that policy — including that an
 official legal source outranks a higher-provider-ranked generic result.
@@ -24,8 +24,7 @@ SOURCE_DELIVERY_DOC = DOCS / "source-delivery.md"
 HANDOFF_DOC = DOCS / "orchestrator-handoff.md"
 README = REPO_ROOT / "README.md"
 
-# The required `source_candidate` fields from E31-T01 plus the E31/E32 origin
-# clarification. `request_id`, `seed_source_id`, and `discovery_run_id` are the
+# Required `source_candidate` fields and origin links. `request_id`, `seed_source_id`, and `discovery_run_id` are the
 # three origin links; exactly one must be populated.
 REQUIRED_CANDIDATE_FIELDS = (
     "schema_version",
@@ -137,7 +136,7 @@ class SourceDiscoverySchemaDocTests(unittest.TestCase):
         )
 
 
-# --- E31-T02: trust-tier and reasoning policy ----------------------------
+# --- Trust-tier and reasoning policy ----------------------------
 
 # Trust tiers, ordered best (rank 1) to worst (rank 5). The ordering is the
 # policy authority for "outranks": a lower rank number is more trustworthy.
@@ -274,7 +273,7 @@ def policy_sort_key(candidate):
 
 
 class TrustTierPolicyDocTests(unittest.TestCase):
-    """E31-T02: the doc must define the trust-tier and reasoning policy."""
+    """The doc must define the trust-tier and reasoning policy."""
 
     def setUp(self):
         self.doc = SOURCE_DISCOVERY_DOC.read_text()
@@ -321,7 +320,7 @@ class TrustTierPolicyDocTests(unittest.TestCase):
 
 
 class TierExampleFixtureTests(unittest.TestCase):
-    """E31-T02: validate the tier-example fixtures against the policy."""
+    """Validate the tier-example fixtures against the policy."""
 
     @classmethod
     def setUpClass(cls):
@@ -461,7 +460,7 @@ class TierExampleFixtureTests(unittest.TestCase):
 
 
 class CandidateSchemaExampleFixtureTests(unittest.TestCase):
-    """E42-T01: validate examples for the unified candidate schema."""
+    """Validate examples for the unified candidate schema."""
 
     @classmethod
     def setUpClass(cls):

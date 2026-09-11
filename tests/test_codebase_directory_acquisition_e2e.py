@@ -1,65 +1,15 @@
-"""CR-19, U1c: the codebase-record blast radius, established by running it.
+"""Directory-shaped codebase evidence can fulfil a delegated acquisition order.
 
-CR-19 records that a **directory-shaped** ``raw_paths`` entry cannot be delivered inside
-an acquisition order: ``raw_tree_snapshot`` records one entry per regular *file*, while
-each arm's ``allowed_new_raw_paths`` builder adds the literal ``raw_paths`` string with no
-prefix expansion, so the guard admits zero of what the record declares and every member
-file lands in ``unexpected_new_raw_paths``. That was reproduced for arXiv ``--format
-source`` bundles. The backlog then listed ``build_local_codebase_record`` -- which emits a
-directory ``raw_paths`` for a local repository under ``raw/code/<repo>/`` -- as the same
-shape, explicitly marked **"read, not run"**.
+Reachability requires a configured codebase integration and its output directory.
+Inventory describes the local repository as one directory-shaped raw_paths entry;
+its per-record file bound includes the hidden regular files the raw snapshot sees.
+The snapshot's aggregate bound across all roots remains a separate constraint.
 
-This file runs it. What execution established, none of which was inferable from reading:
-
-1. **Reachability is gated on more than one flag.** ``codebase_analysis_enabled(config)``
-   must be true, but turning it on alone makes the workspace *unshippable*: smoke
-   validation raises two HIGH issues -- an enabled integration with no ``provider``, and a
-   missing ``sources/code_wikis`` -- and ``choose_route`` sends the session straight to
-   ``no_ship`` before any acquisition order is ever issued. A codebase record cannot be
-   delivered into an order in a workspace that merely flipped ``enabled``.
-   (``test_enabling_codebase_analysis_alone_never_reaches_an_acquisition_order``)
-
-2. **Inventory does produce the directory shape.** One record, kind
-   ``codebase_architecture``, ``raw_paths == ["raw/code/<repo>"]``, no member file named
-   anywhere in the record. (``test_inventory_records_a_local_repository_as_one_directory``)
-
-3. **CR-19 is NOT the first refusal on the naive path.** A local repository with no
-   external-worker artifact normalizes to ``status: stubbed``, and the delegated
-   postcondition's usable-evidence guard refuses that several checks *before* the raw-scope
-   guard is consulted. Fixing CR-19 alone therefore does not make the plain local-repo flow
-   work. (``test_a_codebase_record_without_a_worker_artifact_is_refused_before_raw_scope``)
-
-4. **Past that guard, CR-19 reproduces exactly.** With a validated external-worker artifact
-   deposited under ``sources/code_wikis/<id>/`` the record normalizes to
-   ``codebase_context`` / ``content_extracted``, and submit then refuses with
-   ``delegated acquisition changed raw evidence outside newly fulfilled manifest source
-   scope``, naming every file in the repository. So the backlog's read-only claim is
-   confirmed -- but only for the configuration this file builds, which is a narrower
-   reachability story than the backlog implied.
-   (``test_a_local_codebase_repository_delivered_inside_an_order_can_fulfil_it``, RED)
-
-5. **The record's own bound was measured over a different tree than the one that gets
-   refused.** ``codebase_intake.bounded`` was decided by `local_repo_file_count`, which
-   filtered members through `should_skip` and so counted no dot-prefixed path, while
-   `raw_tree_snapshot` fingerprints every regular file and refuses past
-   ``MAX_RAW_TREE_SNAPSHOT_ENTRIES``. Two 10,000 caps over two different sets: a checkout
-   whose ``.git`` carried the difference was stamped ``bounded: true`` and then refused as
-   unbounded. Fixed by counting the tree the snapshot walks; the ``.git`` pair in the
-   fixture is what makes the two counts diverge at a scale of five files. The caps are still
-   not aggregated the same way -- the snapshot totals across all raw roots, inventory counts
-   one repository -- so ``bounded`` stays a per-record statement.
-   (`CodebaseIntakeBoundTests`)
-
-The RED test asserts the success CR-19 owes. It was verified to be genuinely red rather
-than red-for-another-reason: against a scratch copy of ``orchestration_controller.py``
-whose delegated builder prefix-expands a directory entry, the identical walk returns exit 0
-and routes back to ``research``. Nothing downstream of the raw guard refuses this delivery.
-
-Only the delegated arm is exercised. The provider arm has no route to acquisition in this
-harness (see ``ClosedGateTests`` in ``test_delegated_acquisition_e2e``), and a local code
-repository is not a shape any acquisition provider produces; the provider builder is
-byte-identical to the delegated one, but that is a reading, not a run, and is deliberately
-not asserted here.
+Without a validated external-worker artifact, normalization produces a stub and
+submission refuses at the usable-evidence guard. With that artifact, inventory-derived
+attribution admits the repository members, submission completes, and routing returns
+to research. These cases exercise delegated acquisition only; this harness has no
+provider route that delivers local repositories.
 """
 
 import hashlib
@@ -291,23 +241,13 @@ class CodebaseWorkspace(DelegatedWorkspace):
 
 
 class CodebaseReachabilityTests(CodebaseWorkspace, unittest.TestCase):
-    """Whether a codebase record can be delivered into an order at all.
-
-    CR-19 scoped this kind from a reading of `build_local_codebase_record` alone. Reaching
-    it takes three configuration edits and one deposited artifact, and getting any of them
-    wrong refuses the flow somewhere other than CR-19 -- which is the difference between
-    "the defect covers this kind" and "an operator following the docs hits the defect".
-    """
+    """Codebase intake requires complete integration configuration and a usable worker artifact."""
 
     def test_enabling_codebase_analysis_alone_never_reaches_an_acquisition_order(self):
-        """Flipping ``enabled`` makes the workspace unshippable, not codebase-capable.
+        """An enabled but incomplete codebase integration is unshippable.
 
-        `smoke_validate_workspace` raises two HIGH issues for a half-configured
-        integration, `readiness_section` turns that into ``attention_required``, and
-        `choose_route` refuses to issue *any* order -- the session terminates ``no_ship``
-        with no pending action at all. Pinned because it is the state a reader who tried
-        this defect from the backlog description would land in, and its refusal names
-        nothing about raw paths, directories or acquisition scope.
+        Smoke validation reports the missing provider and output directory. Routing must
+        end with no_ship before any acquisition order can be issued.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace, _ = self.make_workspace(Path(tmpdir))
@@ -340,17 +280,10 @@ class CodebaseReachabilityTests(CodebaseWorkspace, unittest.TestCase):
             self.assertIsNone(session["pending_action_id"], session)
 
     def test_inventory_records_a_local_repository_as_one_directory(self):
-        """The attribution fact the whole CR-19 fix keys on, measured rather than read.
+        """One directory-shaped record accounts for every regular repository member.
 
-        One record for the tree, ``raw_paths`` holding the *directory*, and not one member
-        file named anywhere in the record -- while all five are on disk. That gap is the
-        defect in one assertion: the raw snapshot enumerates the members, the record
-        declares only their parent, and the guard subtracts one set from the other.
-
-        ``file_count`` is asserted against every regular file the fixture wrote, the
-        ``.git`` pair included. That equality is what `CodebaseIntakeBoundTests` explains:
-        the count is the measurement the record's ``bounded`` promise is made from, so it
-        has to cover the same tree the snapshot will walk.
+        file_count includes the hidden .git files that the raw snapshot will enumerate.
+        The normalized record declares their parent directory, not individual members.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace, request_id = self.make_workspace(Path(tmpdir))
@@ -607,15 +540,10 @@ class CodebaseDirectoryAcquisitionTests(CodebaseWorkspace, unittest.TestCase):
     """A local code repository delivered inside a pending delegated acquisition order."""
 
     def test_a_codebase_record_without_a_worker_artifact_is_refused_before_raw_scope(self):
-        """The naive local-repo delivery never reaches CR-19's guard, and this pins why.
+        """A codebase stub cannot satisfy an acquisition order.
 
-        `normalize_codebase_record` has no artifact to read, so it writes a
-        ``codebase_stub`` record, and `status_for` makes that ``stubbed`` -- which
-        `normalized_source_quality_failure` refuses outright. The refusal fires several
-        checks *ahead* of the raw-scope guard, so the CR-19 fix on its own would leave this
-        exact walk still refusing, with a message that has nothing to do with directories.
-        A backlog entry that says "codebase records hit CR-19" without this caveat sends
-        the next reader to the wrong guard.
+        Without a worker artifact, normalization yields codebase_stub / stubbed. The
+        usable-evidence guard refuses before inventory-derived raw attribution is checked.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace, source_id, order, _ = self.arrive_at_a_codebase_delivery(
@@ -655,20 +583,11 @@ class CodebaseDirectoryAcquisitionTests(CodebaseWorkspace, unittest.TestCase):
             self.assertNotIn("unexpected_new_raw_paths", envelope["details"], envelope)
 
     def test_a_local_codebase_repository_delivered_inside_an_order_can_fulfil_it(self):
-        """RED (CR-19): a directory-shaped ``raw_paths`` entry cannot be delivered in-order.
+        """A usable directory-shaped codebase delivery completes its scoped order.
 
-        Everything the order asked for is done and correct: one repository delivered under
-        a declared raw source root, one manifest record inventory built for it, a validated
-        external-worker artifact, a ``content_extracted`` normalized record, the scoped
-        request fulfilled and the question reopened. Submit nevertheless refuses, naming
-        every file in the repository as raw evidence outside scope -- because the record
-        declares the directory and the raw snapshot enumerates the files, and the guard
-        subtracts one from the other.
-
-        The remediation is unactionable for the same reason it is on the arXiv arm: the
-        files it says to remove *are* the fulfilled source. Verified to be red for CR-19's
-        reason alone -- against a scratch build whose delegated builder prefix-expands a
-        directory entry, this identical walk returns exit 0 and routes back to ``research``.
+        Inventory supplies the record, a validated worker artifact supplies extracted
+        context, and fulfilment/reopen claims bind the request and question. Submission
+        must admit the repository members and route back to research.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace, source_id, order, _ = self.arrive_at_a_codebase_delivery(

@@ -1,55 +1,14 @@
-"""CR-2 end to end: a structured payload becomes citable, quotable evidence.
+"""Structured payloads become citable evidence through the supported workspace commands.
 
-Every other CR-2 suite tests one leg. This one walks the whole chain a host actually
-depends on, in a workspace built the way an operator builds one:
+The chains cover delivery, inventory, normalization, contract verification, scoped
+fulfilment, reopening, grounding and publication readiness. Configured adapters and
+external record writers satisfy the same normalized-record contract.
 
-    deliver JSON + sidecar -> inventory -> a normalized record exists
-      -> verify against the contract -> reopen the blocked question
-      -> ground a claim in a facet value -> lint
-
-The legs are load-bearing in sequence, not individually: a record is what opens the
-reopen gate, and the facet headings are what make a value quotable at all. A regression
-in any one of them shows up here as a broken chain rather than as a passing unit test
-about a stage nobody can reach.
-
-Two ways to get that record, and CR-2 promises both work on identical terms:
-
-- `StructuredEvidenceChainTests` — this package runs a configured adapter (AC1).
-- `ForeignRecordChainTests` — an external tool wrote the record by hand and no adapter
-  exists anywhere (AC2), plus one mutation per contract violation family showing verify
-  and lint each name it (AC3).
-
-CR-4 then names the request that starts the chain. Before it, a workspace whose evidence
-is JSON had to file every request as `kind: other` — the request said nothing about what
-was wanted and nothing about what would satisfy it:
-
-- `StructuredDataRequestKindTests` — the same chain opened with the built-in
-  `structured_data` kind and a `--scope facet_id=…` mapping, delivered with a sidecar
-  stating the same scope, and closed through `fulfill` and `reopen`. Plus the refusal
-  that gives the scope its meaning: a delivery scoped to a different facet cannot fulfil
-  the request.
-
-CR-7 then fixes what all of the above still could not say. Every chain here ends in a
-*quote*, and a quote against structured evidence is checked by substring containment: it
-proves the cited record contains a sentence, not that the claim's value is the one the
-record states. CR-7 adds anchor form — an RFC 6901 pointer into a hash-bound
-structured-view sidecar, checked by canonical equality — plus the write path that stops
-hosts hand-editing question frontmatter:
-
-- `AnchorGroundingChainTests` — the whole CR-7 loop against an adapter that emits
-  `structured`: sidecar written and bound, `grounding set`, `answer --require-grounding
-  --grounding-file`, `verify_quotes --write`, and the reporting surfaces (lint counts,
-  `export_answers`, the controller's answered-slug filter) agreeing about what happened.
-- `NativeTableAnchorTests` — the same loop with no adapter anywhere. A plain CSV
-  delivery, anchored past the 20-row body sample and past the 80-character cell cap:
-  content that was citable but permanently unquotable before CR-7, which is the gap
-  `normalized-source-format.md` documents. Plus the fail-closed half — a table that
-  cannot be addressed faithfully emits no sidecar and says why.
-- `AnchorGroundedWorkspaceShipsTests` — the cross-unit proof that anchor form is a
-  first-class way to ground a *publishable* answer, not merely a verifiable one.
-- `AnchorFailurePathTests` — the refusals, because fail-closed is the whole point of
-  replacing containment with equality.
-- `CrSevenAcceptanceCriteriaTests` — one named test per CR-7 acceptance criterion.
+Quote form checks containment in rendered text. Anchor form resolves an RFC 6901
+pointer against a hash-bound structured view and checks canonical equality. Native
+tables exercise anchors beyond the body sample and cell-rendering cap; unfaithful
+tables must refuse sidecar emission. Invalid records, mismatched request scopes,
+claim ownership and failed grounding must refuse before terminal state is written.
 """
 
 import contextlib
@@ -169,7 +128,7 @@ class StructuredEvidenceWorkspace:
     def deliver_payload(self, workspace: Path, *, scope: dict[str, str] | None = None) -> None:
         """A delivery per docs/source-delivery.md: the artifact plus its sidecar.
 
-        `scope` is CR-4's addition to that contract: the deliverer states what the
+        `scope` is structured request routing's addition to that contract: the deliverer states what the
         artifact answers, so fulfilment compares it instead of pairing by position. It
         is appended to the fixture's own sidecar text rather than re-serialized, which
         keeps `origin_url`/`retrieved_at`/`license` byte-identical to the unscoped
@@ -342,7 +301,7 @@ class StructuredEvidenceWorkspace:
         *,
         quote: str,
         # The facet heading the adapter emitted, not a page title: this is the anchor
-        # CR-2 promises a structured source can carry.
+        # structured normalization promises a structured source can carry.
         location_hint: str = "supplier_quote",
     ) -> None:
         """Anchor a claim to a facet section of the rendered record."""
@@ -396,10 +355,10 @@ class StructuredEvidenceWorkspace:
 
 
 class StructuredEvidenceChainTests(StructuredEvidenceWorkspace, unittest.TestCase):
-    """The CR-2 AC1 path, run once per test against a freshly built workspace."""
+    """The structured normalization path, run once per test against a freshly built workspace."""
 
     def test_delivered_payload_becomes_quotable_evidence_end_to_end(self):
-        """CR-2 AC1 verbatim, one stage at a time, each asserted before the next runs."""
+        """Structured normalization verbatim, one stage at a time, each asserted before the next runs."""
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.make_workspace(Path(tmpdir))
             request_id = self.block_the_question(workspace)
@@ -416,7 +375,7 @@ class StructuredEvidenceChainTests(StructuredEvidenceWorkspace, unittest.TestCas
             )
 
             # 2. The reopen gate is shut until the source is normalized. This is the
-            #    failure CR-2 exists to remove, so the chain must show it closed first.
+            #    failure structured normalization exists to remove, so the chain must show it closed first.
             code, payload = self.run_reopen(workspace, source_id, request_id)
             self.assertEqual(2, code)
             self.assertEqual("SOURCE_NOT_NORMALIZED", payload["error_code"])
@@ -481,7 +440,7 @@ class StructuredEvidenceChainTests(StructuredEvidenceWorkspace, unittest.TestCas
     # -- the same delivery without an adapter ------------------------------------
 
     def test_without_an_adapter_the_payload_is_classified_but_never_normalized(self):
-        """The backward-compatibility half of AC1: configuring nothing changes nothing.
+        """Configuring no adapter preserves the no-adapter behavior.
 
         The kind is still recognised — that is a better manifest, not new behaviour —
         but no command runs, no record appears, and the reopen gate stays shut.
@@ -507,7 +466,7 @@ class StructuredEvidenceChainTests(StructuredEvidenceWorkspace, unittest.TestCas
     def test_a_capped_rendering_still_grounds_what_it_did_render(self):
         """Coverage below 1.0 is a reporting fact, not a broken chain.
 
-        The dropped facets are citable but not quotable — exactly the loss D1's
+        The dropped facets are citable but not quotable — exactly the loss
         `rendered_coverage` exists to make visible — while a facet that *was* rendered
         grounds a claim as normally.
         """
@@ -551,7 +510,7 @@ FOREIGN_NORMALIZER_NAME = "external-tool"
 def hand_written_record(source_id: str, fingerprint: str) -> str:
     """A record an external tool wrote by hand, targeting the published contract.
 
-    This is the CR's originating shape: the host renders the payload itself and writes
+    The host renders the payload itself and writes
     the record directly, with no adapter configured and nothing of this package in the
     loop except the format. `normalized_format` is what makes that legible — without
     it a foreign record is indistinguishable from a legacy native one.
@@ -627,7 +586,7 @@ Supplier price snapshot for B0ABC12345.
 
 
 class ForeignRecordChainTests(StructuredEvidenceWorkspace, unittest.TestCase):
-    """CR-2 AC2/AC3: a hand-written record is evidence on the same terms, or named.
+    """A hand-written record is evidence on the same terms, or named.
 
     No adapter is configured anywhere in this class. Everything here is reachable by a
     host that only targets the format document — which is the point of versioning it.
@@ -645,7 +604,7 @@ class ForeignRecordChainTests(StructuredEvidenceWorkspace, unittest.TestCase):
         )
         return workspace, source_id, record_path
 
-    # -- AC2: same terms as a native record --------------------------------------
+    # -- Same terms as a native record --------------------------------------
 
     def test_hand_written_record_is_evidence_on_the_same_terms(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -703,7 +662,7 @@ class ForeignRecordChainTests(StructuredEvidenceWorkspace, unittest.TestCase):
         self.assertEqual(0, code, stderr)
         self.assertEqual(before, after)
 
-    # -- AC3: every violation family is named ------------------------------------
+    # -- Every violation family is named ------------------------------------
 
     # One mutation per violation family in `_normalized_contract`, each expressed as a
     # plausible mistake rather than a synthetic one: a writer that forgot the version
@@ -788,7 +747,7 @@ class ForeignRecordChainTests(StructuredEvidenceWorkspace, unittest.TestCase):
                     # A record with no frontmatter names no producing tool, so lint
                     # cannot tell a foreign record from a stray Markdown file and does
                     # not police it. `normalize_verify.py` still refuses it, which is
-                    # where the AC3 guarantee lives. Asserted rather than skipped: the
+                    # where this contract is enforced. Asserted rather than skipped: the
                     # asymmetry is a decision, and it should break if it changes.
                     self.assertEqual([], findings)
                     continue
@@ -822,19 +781,11 @@ class ForeignRecordChainTests(StructuredEvidenceWorkspace, unittest.TestCase):
 
 
 class StructuredDataRequestKindTests(StructuredEvidenceWorkspace, unittest.TestCase):
-    """CR-4: the request that starts the chain finally names what it wants.
+    """Structured requests and deliveries must agree on facet scope.
 
-    CR-2 made a JSON payload citable. What it could not fix is the request that asks for
-    one: with `paper`/`dataset`/`web`/`code`/`other` as the whole vocabulary, a workspace
-    whose evidence is JSON filed `kind: other` — a bucket that says nothing — and paired
-    the delivery back to the request by position afterwards. CR-4 supplies both halves,
-    and this walks the loop with both stated: a `structured_data` request carrying
-    `scope: {facet_id: …}`, and a delivery whose sidecar declares a facet of its own.
-
-    The scope is only worth carrying if it can refuse something, so the refusal is here
-    too — with both facets drawn from the payload's own keys, making the delivery a
-    source that genuinely answers *something*, recorded against the wrong request. That
-    is the mis-pairing the change request reports; a malformed sidecar would not be.
+    A structured_data request carries scope: {facet_id: ...}; the sidecar declares the
+    delivered facet. Both mismatched facets are valid payload keys, so the refusal
+    demonstrates request correlation rather than malformed provenance.
     """
 
     def scoped_workspace(self, root: Path, *, delivered_facet: str) -> tuple[Path, str, str]:
@@ -899,7 +850,7 @@ class StructuredDataRequestKindTests(StructuredEvidenceWorkspace, unittest.TestC
 
             # 2. Inventory files the payload under the same string the request used, and
             #    round-trips the sidecar scope onto the manifest record. Both matter: the
-            #    shared kind string is what lets a CR-2 adapter declaring
+            #    shared kind string is what lets a structured normalization adapter declaring
             #    `kinds: [structured_data]` cover a `structured_data` request at all, and
             #    the manifest is where fulfilment reads the delivery's side of the scope.
             manifest_record = self.structured_record(workspace)
@@ -965,7 +916,7 @@ class StructuredDataRequestKindTests(StructuredEvidenceWorkspace, unittest.TestC
         self.assertEqual([], absences)
 
     def test_a_delivery_scoped_to_another_facet_is_refused_at_fulfill(self):
-        """CR-4 acceptance: a `facet_id=X` request cannot be closed by a `facet_id=Y` source.
+        """Structured request routing acceptance: a `facet_id=X` request cannot be closed by a `facet_id=Y` source.
 
         Normalization is deliberately absent — fulfilment gates on manifest membership,
         so leaving it out proves the refusal is the scope check and not a missing record.
@@ -986,7 +937,7 @@ class StructuredDataRequestKindTests(StructuredEvidenceWorkspace, unittest.TestC
 
 
 # --------------------------------------------------------------------------------------
-# CR-7: structured grounding anchors, and the supported write path for grounding
+# structured grounding anchors, and the supported write path for grounding
 # --------------------------------------------------------------------------------------
 
 STRUCTURED_ADAPTER_NAME = "stub-normalize-structured"
@@ -997,7 +948,7 @@ STRUCTURED_ADAPTER_NAME = "stub-normalize-structured"
 # use anchor form" testable at all. A second adapter is the honest way to add a second
 # behaviour.
 STRUCTURED_ADAPTER_SOURCE = r'''#!/usr/bin/env python3
-"""A conforming adapter that also emits `structured` — the CR-7 half of the protocol.
+"""A conforming adapter that also emits `structured` — the structured grounding half of the protocol.
 
 Renders the same facet body the reference stub renders, and beside it the complete
 facet-shaped structured view an anchor resolves pointers against.
@@ -1070,7 +1021,7 @@ if __name__ == "__main__":
 ANSWER_AGENT = "answer-agent"
 VERIFIER_AGENT = "verifier-agent"
 
-# The CR's own worked example, carried verbatim through every CR-7 case here.
+# One exact scalar is carried through the structured-grounding cases.
 ANCHOR_CLAIM = "Current supplier price is 23.99 EUR"
 ANCHOR_POINTER = "supplier_quote/price"
 ANCHOR_EXPECTED = "23.99 EUR"
@@ -1100,7 +1051,7 @@ def canonical_grounding_block(source_id: str) -> str:
 
 
 class AnchorGroundingWorkspace(StructuredEvidenceWorkspace):
-    """CR-7 drivers layered on the CR-2 ones: an emitting adapter and the write path.
+    """Structured grounding drivers layered on the structured normalization ones: an emitting adapter and the write path.
 
     Same reason as the parent for not being a TestCase, and same in-process discipline:
     every stage is a `MODULE.main([...])` call under redirected streams, so a refusal is
@@ -1286,7 +1237,7 @@ class AnchorGroundingWorkspace(StructuredEvidenceWorkspace):
 
 
 class AnchorGroundingChainTests(AnchorGroundingWorkspace, unittest.TestCase):
-    """The whole CR-7 loop, one stage at a time, each asserted before the next runs."""
+    """The whole structured grounding loop, one stage at a time, each asserted before the next runs."""
 
     def test_structured_delivery_becomes_anchor_grounded_evidence_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1335,7 +1286,7 @@ class AnchorGroundingChainTests(AnchorGroundingWorkspace, unittest.TestCase):
             # 4. Answering with the same file verifies the file's own entries and lands
             #    grounding and status in one write, reporting the split it recorded.
             #    (That the verification comes *first* is what `AnchorFailurePathTests`
-            #    and criterion 1 below pin, where there is a refusal to observe.)
+            #    and the contract checks below pin, where there is a refusal to observe.)
             code, answered, stderr = self.run_answer(workspace, source_id, grounding_file=grounding_file)
             self.assertEqual(0, code, stderr)
             self.assertEqual("answered", answered["status"])
@@ -1442,7 +1393,7 @@ class NativeTableAnchorTests(AnchorGroundingWorkspace, unittest.TestCase):
 
     `normalize_table_record` already streams every row of a CSV, then renders 20 of them
     with cells ellipsized at 80 characters. Everything past those caps has been citable
-    and permanently unquotable — the gap `normalized-source-format.md` names and CR-7 was
+    and permanently unquotable — the gap `normalized-source-format.md` names and structured grounding was
     filed to close. These tests are that closure stated as a workspace fact rather than a
     documentation promise, in both directions: what the caps drop is anchorable, and a
     table that cannot be addressed faithfully is not anchorable at all.
@@ -1524,7 +1475,7 @@ class NativeTableAnchorTests(AnchorGroundingWorkspace, unittest.TestCase):
             results = self.grounding_results(report)
 
             # The same two values in quote form, which is all the workspace had before
-            # CR-7: both refuse, because the rendered body is where a quote is looked for
+            # both refuse, because the rendered body is where a quote is looked for
             # and neither value survived the rendering.
             unquotable_code, unquotable, unquotable_stderr = self.ground_and_verify(
                 workspace,
@@ -1555,7 +1506,7 @@ class NativeTableAnchorTests(AnchorGroundingWorkspace, unittest.TestCase):
         every row index a guess, so neither table earns a structured view. What that
         costs is exactly nothing a reader had: the record still renders, still verifies
         against the contract, and still grounds a quote from its sample — the behaviour
-        every tabular source had before CR-7.
+        every tabular source had before structured grounding.
         """
         cases = {
             "duplicate header": (
@@ -1636,17 +1587,11 @@ class NativeTableAnchorTests(AnchorGroundingWorkspace, unittest.TestCase):
 
 
 class AnchorGroundedWorkspaceShipsTests(AnchorGroundingWorkspace, unittest.TestCase):
-    """An anchor-grounded answer is publishable, not merely verifiable.
+    """Anchor-grounded answers satisfy lint and publication readiness.
 
-    Lint (CR-7 T9) and the readiness gate (T10) landed on separate branches, and until
-    both were merged an anchor-grounded question tripped lint's HIGH
-    `question_grounding_missing` — which readiness reads as `no_ship`. So no workspace
-    grounded by anchor could reach `ship`, and neither branch could hold the test that
-    said so. This is that test: the two halves connected, in a real workspace.
-
-    `coverage_required: true` is load-bearing rather than decoration — it is the only
-    condition under which lint raises that HIGH finding at all, so a workspace without it
-    would pass this test even with the defect present.
+    coverage_required is true so a missing grounding form raises the HIGH finding
+    question_grounding_missing and prevents publication. The chain must reach ship
+    with independently verified anchors and no quote-form entries.
     """
 
     def publishable_workspace(self, root: Path) -> tuple[Path, str]:
@@ -1906,16 +1851,10 @@ class AnchorFailurePathTests(AnchorGroundingWorkspace, unittest.TestCase):
         )
 
 
-class CrSevenAcceptanceCriteriaTests(AnchorGroundingWorkspace, unittest.TestCase):
-    """One named test per CR-7 acceptance criterion, so criterion and test read as one.
+class StructuredGroundingContractTests(AnchorGroundingWorkspace, unittest.TestCase):
+    """Grounding validity, ownership, reporting and quote compatibility through public commands."""
 
-    The chain tests above walk the loop; these state the promises the CR was accepted on,
-    each in a name a reader can match to the change request without cross-referencing a
-    backlog. Overlap with the chain is deliberate — a criterion nobody can point at a test
-    for is a criterion nobody checked.
-    """
-
-    def test_criterion_1_an_anchor_that_resolves_and_matches_verifies_and_a_failing_one_names_the_entry_before_terminal_state(self):
+    def test_an_anchor_that_resolves_and_matches_verifies_and_a_failing_one_names_the_entry_before_terminal_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace, source_id = self.make_anchor_workspace(root)
@@ -1969,7 +1908,7 @@ class CrSevenAcceptanceCriteriaTests(AnchorGroundingWorkspace, unittest.TestCase
             {label: refusal["failure"]["result"] for label, refusal in refusals.items()},
         )
 
-    def test_criterion_2_the_grounding_file_writes_the_canonical_block_and_refuses_a_different_claim_holder(self):
+    def test_the_grounding_file_writes_the_canonical_block_and_refuses_a_different_claim_holder(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace, source_id = self.make_anchor_workspace(root)
@@ -2015,7 +1954,7 @@ class CrSevenAcceptanceCriteriaTests(AnchorGroundingWorkspace, unittest.TestCase
         self.assertEqual([self.anchor_entry(source_id)], reloaded)
         self.assertEqual({"quote": 0, "anchor": 1}, written["by_form"])
 
-    def test_criterion_3_lint_counts_grounding_by_anchor_apart_from_grounding_by_quote(self):
+    def test_lint_counts_grounding_by_anchor_apart_from_grounding_by_quote(self):
         mixtures = {
             "quote only": (0, 1),
             "anchor only": (1, 0),
@@ -2042,17 +1981,17 @@ class CrSevenAcceptanceCriteriaTests(AnchorGroundingWorkspace, unittest.TestCase
                 # line lint writes to log.md has to name both forms, never one total.
                 self.assertEqual(f"quote={quotes} anchor={anchors}", summary)
 
-    def test_criterion_4_quote_form_is_verified_exactly_as_it_was_before_anchors_existed(self):
+    def test_quote_form_is_verified_exactly_as_it_was_before_anchors_existed(self):
         """Backward compatibility, including which code a quote failure still raises.
 
-        A host that switched on `GROUNDING_QUOTE_INVALID` before CR-7 must keep seeing it
+        A host that switched on `GROUNDING_QUOTE_INVALID` before structured grounding must keep seeing it
         for a quote failure; `GROUNDING_ANCHOR_INVALID` is additive, never a rename.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace, source_id = self.make_anchor_workspace(root)
 
-            # The pre-CR-7 shape, hand-written onto the page exactly as a host wrote it
+            # The legacy shape, hand-written onto the page exactly as a host wrote it
             # then — no anchor key anywhere near it.
             self.ground_the_question(workspace, source_id, quote=QUOTE_TEXT, location_hint=QUOTE_HINT)
             code, report, stderr = self.run_quote_verify(workspace)

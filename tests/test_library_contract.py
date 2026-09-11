@@ -248,7 +248,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
 
 
 class PackPolicyRulesTests(unittest.TestCase):
-    """`_pack_policy_rules` (CR-9 T6): the `policy_rules` block published beside
+    """`_pack_policy_rules`: the `policy_rules` block published beside
     `policy_vocabulary_definitions`.
 
     Exercised directly against the injected-parameter helper rather than through a

@@ -194,7 +194,7 @@ class FacadeSessionTests(WorkspaceBuilder, unittest.TestCase):
         self.tmp = Path(self._tmp.name)
 
     def test_a_full_session_runs_start_next_submit_and_status_in_process(self):
-        """The hot path the change request was filed about, end to end.
+        """The embedded orchestration path, end to end.
 
         Every call here spawns the workspace's deployed controller; what the
         facade removes is the CLI process around it, not the controller.
@@ -365,7 +365,7 @@ class FacadeErrorTranslationTests(WorkspaceBuilder, unittest.TestCase):
         calls is what concurrent drivers look like from inside the first one's
         window.
 
-        CR-8 made that refusal specific. It used to arrive as the generic
+        driver locking made that refusal specific. It used to arrive as the generic
         ``LOCK_UNAVAILABLE`` -- the same code a workspace with no usable lock
         backend at all reports -- so a host could not tell "retry in a moment"
         from "this filesystem will never support locking". ``ORCHESTRATION_DRIVER_BUSY``
@@ -416,7 +416,7 @@ class FacadeErrorTranslationTests(WorkspaceBuilder, unittest.TestCase):
     def test_a_waiting_driver_outlasts_the_holder_instead_of_being_refused(self):
         """``driver_wait_seconds`` restores queueing for a library host too.
 
-        The refusal default is what makes interleaving loud, but CR-8's own
+        The refusal default is what makes interleaving loud, but driver locking's own
         premise is that *the host* decides whether to wait or fail. That was
         true only for shell callers until this parameter existed: the facade
         passed no wait and every embedding host got the immediate refusal

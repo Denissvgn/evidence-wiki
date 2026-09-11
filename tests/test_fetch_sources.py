@@ -2666,7 +2666,7 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertEqual("github", entry["provider_id"])
         for url in entry["terms_urls"]:
             self.assertTrue(url.startswith("https://docs.github.com/"), url)
-        # E32-T03 registers bounded acquisition commands for selected repos.
+        # Registers bounded acquisition commands for selected repos.
         self.assertEqual(
             ["repo-metadata", "release-metadata", "download-archive"],
             entry["supported_commands"],

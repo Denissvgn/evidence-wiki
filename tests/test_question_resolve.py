@@ -34,6 +34,7 @@ class _DoorBinding(NamedTuple):
     seam_module: object
     seam_name: str
     accepted: frozenset[str]
+    supplied_keywords: frozenset[str]
     forwarded: frozenset[str]
 
 
@@ -61,8 +62,8 @@ def _door_seam_bindings() -> list[_DoorBinding]:
     - the ``Workspace`` handle: ``call_seam(self._script, "stem", "run_x", root, ...)``
 
     Returns one binding per method, carrying the parameters the method *accepts*
-    (positional-or-keyword and keyword-only, minus ``self``) and the keyword names it
-    *forwards* in any call it makes.
+    (positional-or-keyword and keyword-only, minus ``self``), the seam keywords it
+    supplies, and the caller parameters it forwards to that seam.
     """
     sources = sorted((REPO_ROOT / "src" / "evidence_wiki" / "_facades").glob("*.py"))
     sources = [p for p in sources if p.name not in {"__init__.py", "_base.py"}]
@@ -116,7 +117,13 @@ def _door_seam_bindings() -> list[_DoorBinding]:
             #
             # Both calling conventions count, because `grounding.verify` hands `slugs` to
             # the seam positionally; reading only `keywords` reported that as dropped.
-            forwarded = {kw.arg for kw in seam_call.keywords if kw.arg} | {
+            # A facade may bind an operation name or rename an envelope parameter.
+            # Track destinations separately from caller values: `request=command`
+            # supplies `request` and forwards `command`; `request={}` drops it.
+            supplied_keywords = {kw.arg for kw in seam_call.keywords if kw.arg}
+            forwarded = {
+                kw.value.id for kw in seam_call.keywords if isinstance(kw.value, ast.Name)
+            } | {
                 arg.id for arg in seam_call.args if isinstance(arg, ast.Name)
             }
             bindings.append(
@@ -125,6 +132,7 @@ def _door_seam_bindings() -> list[_DoorBinding]:
                     seam_module=module,
                     seam_name=seam_name,
                     accepted=frozenset(accepted),
+                    supplied_keywords=frozenset(supplied_keywords),
                     forwarded=frozenset(forwarded),
                 )
             )
@@ -1812,7 +1820,7 @@ class QuestionResolveTests(unittest.TestCase):
                 if parameter.kind is inspect.Parameter.KEYWORD_ONLY
             }
             missing = sorted(
-                name for name in seam_kwargs - b.accepted if (b.label, name) not in deliberate
+                name for name in seam_kwargs - b.supplied_keywords if (b.label, name) not in deliberate
             )
             if missing:
                 unreachable.append(f"{b.label} cannot reach {b.seam_name} keywords: {missing}")
@@ -1826,6 +1834,29 @@ class QuestionResolveTests(unittest.TestCase):
                 dropped.append(f"{b.label} accepts these and never passes them on: {lost}")
         self.assertEqual([], unreachable)
         self.assertEqual([], dropped)
+
+        # Check both sides of a renamed argument without exempting the namespace.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            facades = root / "src" / "evidence_wiki" / "_facades"
+            facades.mkdir(parents=True)
+            (facades.parent / "workspace.py").write_text("", encoding="utf-8")
+            for keywords, missing, lost in (
+                ('operation="prepare", request=command', set(), set()),
+                ('request=command', {"operation"}, set()),
+                ('operation="prepare", request={}', set(), {"command"}),
+            ):
+                with self.subTest(keywords=keywords):
+                    (facades / "probe.py").write_text(
+                        "class Probe:\n    def prepare(self, command):\n"
+                        '        return self._call("evidence_assessments", "run_operation", '
+                        f"self._root, {keywords})\n",
+                        encoding="utf-8",
+                    )
+                    with mock.patch(f"{__name__}.REPO_ROOT", root):
+                        binding, = _door_seam_bindings()
+                    self.assertEqual(missing, {"operation", "request"} - binding.supplied_keywords)
+                    self.assertEqual(lost, binding.accepted - binding.forwarded)
 
     def test_require_decisive_scope_refuses_an_undecided_pairing(self):
         """The opt-in gate: a pairing scope did not make is refused, not reported."""
@@ -2241,7 +2272,7 @@ class QuestionResolveTests(unittest.TestCase):
 
 
 class QuestionResolveSeamTests(unittest.TestCase):
-    """CR-6 T9: the library seam and the CLI are one operation, audit entry included.
+    """The library seam and the CLI are one operation, audit entry included.
 
     ``tests/test_seam_conformance.py`` holds the two paths to the same *document*.
     It cannot see ``log.md``, which for a resolution is the record that a question

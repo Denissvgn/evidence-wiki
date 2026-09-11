@@ -237,7 +237,7 @@ class ClaimTestBase(unittest.TestCase):
 
 
 class QuestionClaimTests(ClaimTestBase):
-    """E20-T01: claim/release transitions and refusals."""
+    """Claim/release transitions and refusals."""
 
     def test_claim_transitions_open_to_in_progress_with_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -467,7 +467,7 @@ class QuestionClaimTests(ClaimTestBase):
 
 
 class ClaimLintTests(ClaimTestBase):
-    """E20-T01: lint coverage for claim hygiene."""
+    """Lint coverage for claim hygiene."""
 
     def run_lint(self, target: Path) -> dict:
         return LINT.run_checks(target, LINT.load_config(target))
@@ -521,7 +521,7 @@ class ClaimLintTests(ClaimTestBase):
 
 
 class RunBudgetTests(ClaimTestBase):
-    """E20-T02: run budgets in config, profile, and status output."""
+    """Run budgets in config, profile, and status output."""
 
     def status_json(self, target: Path) -> dict:
         stdout = io.StringIO()
@@ -700,7 +700,7 @@ class RunBudgetTests(ClaimTestBase):
 
 
 class VerificationFieldTests(ClaimTestBase):
-    """E20-T05: confidence/evidence_strength schema and export propagation."""
+    """Confidence/evidence_strength schema and export propagation."""
 
     def resolve_answered(self, target: Path, slug: str, extra_fields: dict) -> None:
         answer_dir = target / "wiki" / "synthesis"
@@ -769,7 +769,7 @@ class VerificationFieldTests(ClaimTestBase):
 
 
 class ClaimSeamTests(ClaimTestBase):
-    """CR-6 T9: the library seam and the CLI are one operation, audit entry included.
+    """The library seam and the CLI are one operation, audit entry included.
 
     ``tests/test_seam_conformance.py`` already holds the two paths to the same
     *document*. It cannot see ``log.md``, and that is the half of this command that

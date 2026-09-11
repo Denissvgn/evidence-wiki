@@ -906,10 +906,10 @@ def plan_warnings(acquisition: dict[str, Any], routes: list[dict[str, Any]]) -> 
     return warnings
 
 
-# --- Selected-candidate routes (E36-T02) -------------------------------------
+# --- Selected-candidate routes -------------------------------------
 # `plan-fetch` includes acquisition guidance for discovery candidates that were
-# explicitly selected for the request (discover_sources.py candidates select,
-# E36-T01). A selected candidate carries status "selected" and
+# explicitly selected for the request (discover_sources.py candidates select).
+# A selected candidate carries status "selected" and
 # selected_for_request_id == the request id (legacy selected_request_id is still
 # accepted). Planning stays read-only: it suggests
 # the exact provider command (or manual-delivery target) for each candidate type
@@ -2300,7 +2300,7 @@ def run_plan_fetch(args: argparse.Namespace) -> dict[str, Any]:
     acquisition = acquisition_plan_context(config)
     plan_status, routes, warnings = plan_routes_for_request(target, acquisition)
 
-    # Fold in explicitly selected discovery candidates (E36-T02). These are
+    # Fold in explicitly selected discovery candidates. These are
     # authoritative — a reviewer picked them — so when present they supersede the
     # heuristic query routing for an unsupported/ambiguous request.
     selected = load_selected_candidates(project_root, config, request_id, args.candidate_id)

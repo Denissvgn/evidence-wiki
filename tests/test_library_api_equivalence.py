@@ -1,4 +1,4 @@
-"""AC-1: a session driven through the library API leaves the workspace the CLI would have left.
+"""A session driven through the library API leaves the workspace the CLI would have left.
 
 One full session -- ``start -> next -> (satisfy the order) -> submit -> status``
 -- is driven twice over two identically built copies of the same workspace
@@ -13,7 +13,7 @@ Nothing in this package injects a clock: the controller and the workspace
 scripts call ``datetime.now(timezone.utc)`` directly. Two *separate executions*
 therefore cannot be literally byte-identical wherever a timestamp is written --
 the criterion as literally worded is unsatisfiable rather than merely hard. What
-is asserted here instead, and what the change request decided:
+is asserted here:
 
     **Byte-identical after masking timestamp values only, keyed by an explicit
     allowlist of timestamp field names. Any difference outside that allowlist
@@ -605,7 +605,7 @@ def driver_pid_tokens(root: Path) -> list[bytes]:
     """Return the exact serialized ``pid`` tokens this drive's own driver blocks hold.
 
     The second identifier a drive mints that its twin cannot reproduce, and
-    handled exactly like the request id rather than by widening a mask. CR-8's
+    handled exactly like the request id rather than by widening a mask. driver locking's
     driver audit block records *which OS process* appended the work-order-issued
     and result-accepted events, so that an interleaving which slipped past the
     per-invocation session lock stays legible afterwards. Two separate drives are
@@ -659,7 +659,7 @@ class Snapshot:
 
 
 class SessionEquivalenceTests(unittest.TestCase):
-    """AC-1 itself: both drives, both whole trees, compared.
+    """Compare the complete workspace trees produced by API and CLI sessions.
 
     Both drives run in the *same* directory, one after the other, each
     snapshotted before the next begins. That costs a copy and buys byte-for-byte

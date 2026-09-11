@@ -18,7 +18,7 @@ def load_module():
 
 QSTATUS = load_module()
 
-# CR-4: a domain pack may namespace its own request kinds. question_status reports on
+# a domain pack may namespace its own request kinds. question_status reports on
 # question frontmatter and links to requests only by id, so the kind vocabulary is
 # inert here — these tests hold that independence.
 PACK_REQUEST_KIND = "pack:market-data/supplier_quote"
@@ -262,7 +262,7 @@ class QuestionStatusTests(unittest.TestCase):
         return code, json.loads(stdout.getvalue())
 
     def test_blocked_question_carries_request_ids_for_pack_namespaced_kinds(self):
-        """CR-4: the detail view links to requests by id, so any kind flows through."""
+        """The detail view links to requests by id, so any kind flows through."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self.build_workspace(Path(tmpdir))
             self.write_extended_kind_requests(root)

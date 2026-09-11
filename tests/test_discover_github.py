@@ -1,4 +1,4 @@
-"""Tests for GitHub repository candidate discovery (E32-T02).
+"""Tests for GitHub repository candidate discovery.
 
 `discover_sources.py github --query TEXT` searches GitHub repository metadata
 through a transport-injected adapter and emits `source_candidate` records to

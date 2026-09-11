@@ -28,7 +28,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
-#: The CR-5 fixture provider distribution, discoverable by putting its parent on the
+#: The fixture provider distribution, discoverable by putting its parent on the
 #: child's import path. Registration is packaging metadata, so a subcommand that only
 #: exists for registered providers is unreachable until something is registered.
 PROVIDER_PLUGIN_ROOT = REPO_ROOT / "tests" / "fixtures" / "provider-plugins"
@@ -49,7 +49,7 @@ class Case:
     argv: tuple[str, ...]
     stdout: str
     note: str = ""
-    #: Put the CR-5 fixture provider distribution on the child's import path. Off by
+    #: Put the fixture provider distribution on the child's import path. Off by
     #: default so every pre-existing case runs in exactly the environment it always did.
     plugins_installed: bool = False
 

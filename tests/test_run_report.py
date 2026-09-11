@@ -21,13 +21,13 @@ QUESTION_STATUS = load_script_module("research_run_report_status", "question_sta
 REQUESTS = load_script_module("research_run_report_requests", "source_requests.py")
 RUN_CONTROLLER = load_script_module("research_run_report_controller", "run_controller.py")
 
-# CR-4: a domain pack may namespace its own request kinds. The run report carries the
+# a domain pack may namespace its own request kinds. The run report carries the
 # id through verbatim; it never interprets it.
 PACK_REQUEST_KIND = "pack:market-data/supplier_quote"
 
 
 class RunReportTests(unittest.TestCase):
-    """E20-T04: per-run report artifact."""
+    """Per-run report artifact."""
 
     def init_workspace(self, root: Path) -> Path:
         target = root / "report-workspace"
@@ -267,7 +267,7 @@ class RunReportTests(unittest.TestCase):
         return records
 
     def test_baseline_carries_pack_and_structured_data_kinds_verbatim(self):
-        """CR-4: the baseline snapshots whole request records, so kind and scope survive."""
+        """The baseline snapshots whole request records, so kind and scope survive."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root)
@@ -323,9 +323,9 @@ class RunReportTests(unittest.TestCase):
             for entry in document["official_source_evaluation"]["open_requests"]
         }
         self.assertEqual({"req-pack-quote", "req-structured"}, set(by_id))
-        # CR-4 names run reports as a surface that must carry the kind through: a report
+        # structured request routing names run reports as a surface that must carry the kind through: a report
         # that projects the request without it renders every non-documentary request
-        # indistinguishable, which is the "wall of other" the change request objected to.
+        # indistinguishable, which would hide the actual failure category.
         self.assertEqual(PACK_REQUEST_KIND, by_id["req-pack-quote"]["kind"])
         self.assertEqual("structured_data", by_id["req-structured"]["kind"])
         # Scope rides along when declared, and is absent when it is not.

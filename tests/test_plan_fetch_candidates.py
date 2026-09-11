@@ -1,7 +1,7 @@
-"""Tests for plan-fetch using explicitly selected discovery candidates (E36-T02).
+"""Tests for plan-fetch using explicitly selected discovery candidates.
 
 `source_requests.py plan-fetch` folds in discovery candidates that were selected
-for a request (discover_sources.py candidates select, E36-T01). For each selected
+for a request (discover_sources.py candidates select). For each selected
 candidate it emits an explicit acquisition route by candidate type — a provider
 fetch command for arXiv/OpenAlex/GitHub/web candidates, or a manual-delivery target
 for manual-only / dataset candidates — and warns when a candidate's trust
@@ -677,7 +677,7 @@ class PlanFetchCandidatesTests(unittest.TestCase):
         self.assertFalse(route["allowed_by_config"])
         self.assertTrue(any("not allow-listed" in w and "github" in w for w in report["warnings"]))
 
-    # --- linked coverage-facet policy context (E42-T02) ------------------------
+    # --- linked coverage-facet policy context ------------------------
 
     def test_policy_facets_attach_to_routes_for_each_evidence_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:

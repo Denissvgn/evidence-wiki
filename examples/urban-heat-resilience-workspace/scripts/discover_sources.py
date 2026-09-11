@@ -267,7 +267,7 @@ CANDIDATE_POLICY_DEFAULTS = {
 }
 DEFAULT_CANDIDATE_POLICY = CANDIDATE_POLICY_DEFAULTS["web_page"]
 
-# --- General search discovery provider (E33-T01) -----------------------------
+# --- General search discovery provider -----------------------------
 # A provider-neutral search interface: a configured backend (fixture, command, or
 # HTTP) returns raw results, which are normalized into source_candidate records.
 # No commercial API is hard-coded; an HTTP backend requires an explicit endpoint.
@@ -317,7 +317,7 @@ REGISTERED_PROVIDER_REQUEST_EVENT_TYPE = "registered_provider_request"
 REGISTERED_OPENER = None
 REGISTERED_RESOLVER = None
 
-# --- Reasoned search query planner (E33-T02) ---------------------------------
+# --- Reasoned search query planner ---------------------------------
 # A research need is expanded into a small, bounded set of explained queries
 # before any backend is contacted. Planning is the default (read-only, no
 # network); execution runs the planned queries only when the caller passes
@@ -347,8 +347,8 @@ SEARCH_INTENT_TEMPLATES: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("", "web_page", "Direct general web query for the research need."),
     ),
 }
-# Legal query terms (E33-T02). Each becomes an official-source-first query.
-# Profile-driven official domain enumeration is layered on by E34.
+# Legal query terms. Each becomes an official-source-first query.
+# Legal planning adds official domains from the matched jurisdiction profile.
 SEARCH_LEGAL_TEMPLATES: tuple[tuple[str, str], ...] = (
     ("statute", "Find the controlling statute or law text."),
     ("code", "Find the relevant legal code section."),
@@ -359,15 +359,15 @@ SEARCH_LEGAL_TEMPLATES: tuple[tuple[str, str], ...] = (
     ("official gazette", "Find the official gazette notice."),
 )
 
-# --- Legal discovery query planning (E34-T02) --------------------------------
+# --- Legal discovery query planning --------------------------------
 # `legal --jurisdiction --topic` expands a (jurisdiction, topic) into an
 # official-source-first query plan. Unlike the general `search` legal intent, it
-# is profile-driven: the matched jurisdiction profile (E34-T01) supplies the
+# is profile-driven: the matched jurisdiction profile supplies the
 # official_domains allowlist, blocked_domains, and the per-category entry-point
 # roots below. Each category is planned as one explained query so the plan
 # distinguishes statutes, regulations, agency guidance, court opinions, official
 # forms, and gazette/legislative-history notices. Planning is read-only and
-# contacts no backend; legal candidate ranking (E34-T03) layers on once a backend
+# contacts no backend; legal candidate ranking layers on once a backend
 # executes the plan.
 # (legal_category, query term, profile root field, rationale)
 LEGAL_QUERY_CATEGORIES: tuple[tuple[str, str, str, str], ...] = (
@@ -379,13 +379,13 @@ LEGAL_QUERY_CATEGORIES: tuple[tuple[str, str, str, str], ...] = (
     ("gazette_notice", "official gazette notice", "gazette_urls", "Find a legislative-history record or official gazette notice."),
 )
 
-# --- Search result trust ranking (E33-T03) -----------------------------------
+# --- Search result trust ranking -----------------------------------
 # Normalized search results are ranked by the documented trust-tier policy
 # (docs/source-discovery.md), never by the provider's own ordering. Provider rank
 # is a weak relevance input only. classify_search_result applies the per-result
 # policy; apply_search_trust_rejection runs the cross-result duplicate pass.
 # Conservative official-source TLD heuristic: a .gov/.mil host is treated as an
-# official_primary authority. Profile-driven official domains (E34) and the
+# official_primary authority. Profile-driven official domains and the
 # optional integrations.discovery.search.official_domains list layer on more.
 SEARCH_OFFICIAL_TLDS = (".gov", ".mil")
 # Direct-executable / installer / script downloads are suspicious for a generic
@@ -439,7 +439,7 @@ SEARCH_TIER_TRUST_BASE = {
     "unsafe_or_unusable": 0.05,
 }
 
-# --- Legal candidate ranking (E34-T03) ---------------------------------------
+# --- Legal candidate ranking ---------------------------------------
 # Recognized secondary legal databases and aggregators: reputable and widely
 # cited, but NOT the official primary authority for a jurisdiction. They are
 # retained as secondary_reputable (never silently dropped) and marked supplemental
@@ -463,11 +463,11 @@ LEGAL_RISK_SUPERSEDED = "superseded_or_historical"
 LEGAL_RISK_SECONDARY_WHEN_OFFICIAL = "secondary_when_official_available"
 LEGAL_DISCOVERED_BY = "discover_sources.py/legal"
 
-# --- Author extraction (E35-T01) ---------------------------------------------
+# --- Author extraction ---------------------------------------------
 # `authors --source-id` reads a normalized paper source (and any provider author
 # metadata captured on the manifest record) and emits a bounded author seed list
 # with provenance and confidence. It is the read-only preparation path for author
-# and publication expansion (E35-T02); it never infers personal data and uses only
+# and publication expansion; it never infers personal data and uses only
 # metadata already present in the source or provider response.
 AUTHORS_DISCOVERED_BY = "discover_sources.py/authors"
 AUTHOR_CONFIDENCE_TIERS = ("high", "medium", "low")
@@ -476,7 +476,7 @@ AUTHOR_CONFIDENCE_RANK = {tier: index for index, tier in enumerate(AUTHOR_CONFID
 # Matched anywhere so a bare id or an https://orcid.org/<id> URL both resolve.
 ORCID_RE = re.compile(r"(\d{4}-\d{4}-\d{4}-\d{3}[\dX])")
 
-# --- Author publication discovery (E35-T02) ----------------------------------
+# --- Author publication discovery ----------------------------------
 # `authors --discover-publications` resolves each extracted author to an OpenAlex
 # identity (by ORCID when present, otherwise by name plus context) and lists that
 # author's works as `source_candidate` records of source_type `paper`. It proposes
@@ -557,12 +557,12 @@ OPENALEX_WORK_ID_RE = re.compile(r"(W\d+)", re.IGNORECASE)
 OPENALEX_AUTHOR_ID_RE = re.compile(r"(A\d+)", re.IGNORECASE)
 DOI_RE = re.compile(r"^10\.\S+/.+", re.IGNORECASE)
 
-# --- Companion artifact discovery (E35-T03) ----------------------------------
+# --- Companion artifact discovery ----------------------------------
 # `companions --source-id` finds a paper's companion repositories, datasets,
 # project pages, supplemental material, and publisher pages. It prefers links
 # already present in the paper body/frontmatter or its provider metadata (highest
 # trust, because the paper itself cites them), then falls back to GitHub repository
-# discovery (E32-T02) and the configured general search provider (E33) for breadth.
+# discovery and the configured general search provider for breadth.
 # It proposes candidates for review and never fetches or executes anything; a
 # paper-centered composite of the other discovery providers.
 COMPANIONS_DISCOVERED_BY = "discover_sources.py/companions"
@@ -604,8 +604,7 @@ COMPANION_DATASET_HOSTS = (
 COMPANION_PUBLISHER_HOSTS = ("doi.org", "dx.doi.org")
 COMPANION_PREPRINT_HOSTS = ("arxiv.org", "biorxiv.org", "medrxiv.org", "chemrxiv.org")
 # Companion search is driven by a small, explainable query plan rather than the
-# title alone (E35-T03 instructions: title, author names, DOI/arXiv id, project
-# names). Bounds keep it from crawling: at most this many queries per network
+# title alone: title, author names, DOI/arXiv id, and project names. Bounds keep it from crawling: at most this many queries per network
 # phase, a few lead-author surnames, and a short pre-colon title segment as the
 # candidate project/system name (the common "SystemName: subtitle" convention).
 COMPANION_MAX_QUERIES_PER_PHASE = 3
@@ -614,11 +613,11 @@ COMPANION_MAX_AUTHOR_SURNAMES = 2
 COMPANION_PROJECT_NAME_MAX_WORDS = 4
 COMPANION_PROJECT_NAME_MAX_LEN = 40
 
-# --- Jurisdiction profiles (E34-T01) -----------------------------------------
+# --- Jurisdiction profiles -----------------------------------------
 # A workspace-local, user-editable file (default sources/jurisdictions.yml) lists
 # jurisdiction profiles: the official domains and legislature/regulator/court/
 # gazette roots for a country or state. Profiles drive official-source-first
-# legal discovery (E34-T02/T03). They are NOT a shipped universal legal database;
+# legal discovery. They are NOT a shipped universal legal database;
 # each workspace curates its own, validated by the `jurisdictions` subcommand.
 JURISDICTION_PROFILE_SCHEMA_VERSION = "1.0"
 JURISDICTIONS_DEFAULT_RELATIVE = ("sources", "jurisdictions.yml")
@@ -639,7 +638,7 @@ JURISDICTION_URL_FIELDS = JURISDICTION_OFFICIAL_ROOT_FIELDS[1:]
 JURISDICTION_DOMAIN_FIELDS = ("official_domains", "blocked_domains")
 JURISDICTION_DISCOVERED_BY = "discover_sources.py/jurisdictions"
 
-# --- GitHub discovery provider (E32-T02) -------------------------------------
+# --- GitHub discovery provider -------------------------------------
 # Discovery searches GitHub repository metadata through a transport-injected
 # adapter. It never clones a repository, downloads an archive, or reads file
 # contents (see docs/source-discovery.md and docs/acquisition.md). GITHUB_TOKEN
@@ -3713,7 +3712,7 @@ def build_github_candidate(
             "pushed_at": pushed_at,
             "api_url": repo.get("url") if isinstance(repo.get("url"), str) else None,
             # Canonical latest-release pointer for review only. Existence is not
-            # verified during discovery; acquisition (E32-T03) confirms it.
+            # verified during discovery; acquisition confirms it.
             "latest_release_url": f"{html_url.rstrip('/')}/releases/latest",
         },
     }
@@ -3791,7 +3790,7 @@ def run_github_discovery(project_root: Path, config: dict[str, Any], args: argpa
     }
 
 
-# --- General search discovery (E33-T01) --------------------------------------
+# --- General search discovery --------------------------------------
 
 
 def http_url(value: Any) -> str | None:
@@ -3865,11 +3864,11 @@ def selected_search_provider(search_cfg: dict[str, Any]) -> str | None:
 
 
 def search_official_domains(search_cfg: dict[str, Any]) -> list[str]:
-    """Read the optional official_domains list (E33-T03).
+    """Read the optional official_domains list.
 
     Workspace-curated official domains raise a result to official_primary,
-    complementing the conservative TLD heuristic. Forward-compatible with E34
-    jurisdiction profiles, which will populate official domains from a profile.
+    complementing the conservative TLD heuristic and the official domains supplied
+    by jurisdiction profiles.
     """
     raw = search_cfg.get("official_domains")
     if raw is None:
@@ -4187,7 +4186,7 @@ def classify_search_result(
     overlap = (len([term for term in terms if term in text_tokens]) / len(terms)) if terms else 0.0
     relevance = clamp_unit(0.78 - 0.04 * position + 0.10 * overlap + (0.12 if exact_phrase else 0.0))
 
-    # --- Official detection (combination; E34 jurisdiction profiles layer on) ---
+    # --- Official detection from host suffixes and configured domains ---
     official: bool | None = None
     official_signal: str | None = None
     if official_domains and domain_matches(host, official_domains):
@@ -4230,7 +4229,7 @@ def classify_search_result(
         trust_tier = "official_primary"
         authority_reason = (
             f"{host} is recognized as an official authority via {official_signal}; treated as "
-            "official_primary for this topic. A jurisdiction profile (E34) refines official-domain matching."
+            "official_primary for this topic. A jurisdiction profile refines official-domain matching."
         )
     elif result_hint_tier in TIER_RANK and result_hint_tier != "official_primary":
         trust_tier = result_hint_tier
@@ -4354,7 +4353,7 @@ def apply_search_trust_rejection(candidates: list[dict[str, Any]]) -> list[dict[
     return candidates
 
 
-# --- Legal candidate ranking (E34-T03) ---------------------------------------
+# --- Legal candidate ranking ---------------------------------------
 
 
 def is_legal_secondary_db(host: str) -> bool:
@@ -4374,7 +4373,7 @@ def refine_legal_candidates(
     official_domains: list[str],
     jurisdiction: str | None,
 ) -> list[dict[str, Any]]:
-    """Apply the E34-T03 legal ranking rules on top of the E33-T03 classification.
+    """Apply jurisdiction ranking rules to the search trust classification.
 
     The profile's official domains were already passed to the classifier as the
     major trust signal, so a host match is `official_primary`. This pass then:
@@ -4521,7 +4520,7 @@ def build_search_candidate(
     result_hint_tier = result.get("trust_tier") if isinstance(result.get("trust_tier"), str) else None
     result_hint_source_type = result.get("source_type") if isinstance(result.get("source_type"), str) else None
 
-    # Rank with the trust-tier policy (E33-T03), not the provider's ordering.
+    # Rank with the trust-tier policy, not the provider's ordering.
     classification = classify_search_result(
         host=host,
         url=url,
@@ -4648,7 +4647,7 @@ def normalize_search_candidates(
     return candidates
 
 
-# --- Query planning (E33-T02) ------------------------------------------------
+# --- Query planning ------------------------------------------------
 
 
 def lookup_request_kind(project_root: Path, config: dict[str, Any], request_id: str) -> str | None:
@@ -4761,7 +4760,7 @@ def execute_query_plan(
     queries is not authoritative.
 
     By default a cross-result pass rejects non-official mirrors and lower-trust
-    duplicates of an official source in the same run. Legal discovery (E34-T03)
+    duplicates of an official source in the same run. Legal discovery
     overrides two things: it sets ``use_query_allowlist=False`` so a profile's
     official domains act as a major trust *signal* (raising matches to
     official_primary) rather than a hard filter that would drop the secondary
@@ -4784,7 +4783,7 @@ def execute_query_plan(
             "domain_allowlist": planned["domain_allowlist"] if use_query_allowlist else [],
             "domain_blocklist": planned["domain_blocklist"],
             "max_results": base_request["max_results"],
-            # Thread trust-ranking signals (E33-T03) into normalization.
+            # Thread trust-ranking signals into normalization.
             "prefer_official": bool(planned.get("prefer_official", False)),
             "expected_source_type": planned.get("expected_source_type"),
             "official_domains": official_domains or [],
@@ -5478,7 +5477,7 @@ def run_jurisdictions_command(project_root: Path, config: dict[str, Any], args: 
     )
 
 
-# --- Jurisdiction profile schema, loader, and validation (E34-T01) ------------
+# --- Jurisdiction profile schema, loader, and validation ------------
 
 
 def _jurisdiction_invalid(message: str, *, remediation: str | None = None) -> DiscoverSourcesError:
@@ -5676,8 +5675,7 @@ def require_jurisdiction(profiles: list[dict[str, Any]], jurisdiction_id: str) -
 
 
 def profile_official_domains(profile: dict[str, Any]) -> list[str]:
-    """Flatten a profile's official_domains list (the canonical input E34-T02/T03
-    feed into official-source-first legal discovery and the search ranker)."""
+    """Return official domains used by legal discovery and search ranking."""
     return list(profile.get("official_domains", []))
 
 
@@ -5737,7 +5735,7 @@ def run_jurisdictions_show(project_root: Path, config: dict[str, Any], args: arg
     }
 
 
-# --- Legal discovery query planning (E34-T02) --------------------------------
+# --- Legal discovery query planning --------------------------------
 
 
 def find_jurisdiction_by_id_or_name(
@@ -5795,9 +5793,9 @@ def run_legal_discovery(
 ) -> dict[str, Any]:
     """Plan official-source-first legal/regulatory queries for a jurisdiction and
     topic, and with --execute run them through the search backend and rank the
-    results by officialness (E34-T03).
+    results by officialness.
 
-    Planning loads the jurisdiction profile (E34-T01) and emits an explained plan
+    Planning loads the jurisdiction profile and emits an explained plan
     without contacting a backend. A missing profile or a profile without official
     domains is a warning, not an error — the plan is still produced, just without
     official-domain prioritization. Execution threads the profile's official
@@ -5871,7 +5869,7 @@ def run_legal_discovery(
     }
     if not execute:
         # Planning is read-only and contacts no backend, so the official-source
-        # plan is explainable before any provider is configured (E34-T02).
+        # plan is explainable before any provider is configured.
         report["network_io_executed"] = False
         return report
 
@@ -5901,7 +5899,7 @@ def run_legal_discovery(
     return report
 
 
-# --- Author extraction (E35-T01) ---------------------------------------------
+# --- Author extraction ---------------------------------------------
 
 
 def clean_author_text(value: Any) -> str | None:
@@ -6102,7 +6100,7 @@ def load_manifest_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-# --- Author publication discovery (E35-T02) ----------------------------------
+# --- Author publication discovery ----------------------------------
 
 
 def openalex_api_key() -> str | None:
@@ -7496,9 +7494,9 @@ def discover_author_publications(
 
 
 def run_authors_discovery(project_root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    """Extract a bounded author seed list from a normalized paper source (E35-T01),
+    """Extract a bounded author seed list from a normalized paper source,
     and with ``--discover-publications`` propose that author's related works as
-    publication candidates (E35-T02).
+    publication candidates.
 
     The extraction path is read-only: it reads the manifest record and the
     normalized frontmatter for the source id, plus any provider author metadata
@@ -7544,7 +7542,7 @@ def run_authors_discovery(project_root: Path, config: dict[str, Any], args: argp
         )
 
     discover_publications = bool(getattr(args, "discover_publications", False))
-    # In extraction mode --max-results bounds the author list (E35-T01). In
+    # In extraction mode --max-results bounds the author list. In
     # discovery mode it bounds the final candidate list instead, so seeds are
     # extracted up to the author bound and publication candidates are capped later.
     seed_cap = OPENALEX_DISCOVERY_MAX_AUTHORS if discover_publications else args.max_results
@@ -7581,7 +7579,7 @@ def run_authors_discovery(project_root: Path, config: dict[str, Any], args: argp
     if not discover_publications:
         return report
 
-    # Publication discovery (E35-T02): resolve each author seed to an OpenAlex
+    # Publication discovery: resolve each author seed to an OpenAlex
     # identity and propose that author's works as related-publication candidates.
     # Discovery appends to the same `warnings` list surfaced in the report.
     budget_context = academic_provider_budget_context(
@@ -7607,7 +7605,7 @@ def run_authors_discovery(project_root: Path, config: dict[str, Any], args: argp
     return report
 
 
-# --- Companion artifact discovery (E35-T03) ----------------------------------
+# --- Companion artifact discovery ----------------------------------
 
 
 def classify_companion_host(host: str) -> tuple[str, str, bool | None]:
@@ -7899,7 +7897,7 @@ def is_paper_self_link(url: str, arxiv_id: str | None) -> bool:
 
 
 def companion_author_surnames(seeds: list[dict[str, Any]], *, limit: int) -> list[str]:
-    """Lead-author surnames from extracted author seeds (E35-T01), de-duplicated
+    """Lead-author surnames from extracted author seeds, de-duplicated
     and capped. Single-initial tokens are skipped (too weak to scope a query)."""
     surnames: list[str] = []
     seen: set[str] = set()
@@ -7945,7 +7943,7 @@ def companion_query_plan(
 ) -> dict[str, list[dict[str, str]]]:
     """Bounded, explainable companion query plan. Returns `{github: [...], search:
     [...]}` where each entry is `{query, reason}`. Drives recall beyond the title
-    alone (E35-T03) without crawling: queries are de-duplicated (case-insensitive)
+    alone without crawling: queries are de-duplicated (case-insensitive)
     and each phase is capped to `max_queries`."""
     github: list[dict[str, str]] = []
     search: list[dict[str, str]] = []
@@ -7982,7 +7980,7 @@ def companion_github_candidates(
     discovered_at: str,
     max_results: int,
 ) -> list[dict[str, Any]]:
-    """Run GitHub repository discovery (E32-T02 transport + build_github_candidate)
+    """Run GitHub transport and build_github_candidate
     for one query and return candidates *without* storing them. The companions
     orchestrator stores the merged, deduped list once."""
     per_page = min(max_results, GITHUB_MAX_RESULTS_CAP)
@@ -8041,7 +8039,7 @@ def companion_search_results_for_query(
     seed_title_tokens: set[str],
     max_results: int,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Run one bounded general-search query (E33 provider) and return companion
+    """Run one bounded general-search query and return companion
     candidates *without* storing them. Returns (candidates, network_executed); the
     network flag comes from the adapter (fixture/command-local backends do no
     network), so the companion report's per-phase accounting stays accurate."""
@@ -8097,7 +8095,7 @@ def run_companions_discovery(
     project_root: Path, config: dict[str, Any], discovery: dict[str, Any], args: argparse.Namespace
 ) -> dict[str, Any]:
     """Discover a paper's companion repositories, datasets, project pages,
-    supplemental material, and publisher pages (E35-T03).
+    supplemental material, and publisher pages.
 
     Three composed phases: (1) inline extraction from the normalized paper
     body/frontmatter `links` + provider-metadata locations (no network, highest
@@ -8163,10 +8161,10 @@ def run_companions_discovery(
     doi_value = (frontmatter or {}).get("doi") or (metadata or {}).get("doi")
     doi = doi_value.strip() if isinstance(doi_value, str) and doi_value.strip() else None
 
-    # Companion search is driven by a bounded query plan (E35-T03): the paper
+    # Companion search is driven by a bounded query plan: the paper
     # title, a short pre-colon project/system name, the lead-author surname, and
     # the arXiv/DOI identifier — not the title alone — to widen recall for repos
-    # and datasets whose names do not echo the title. Author seeds reuse E35-T01.
+    # and datasets whose names do not echo the title. Author seeds come from extract_author_seeds.
     author_seeds = extract_author_seeds(
         frontmatter=frontmatter, provider_metadata=metadata, max_results=COMPANION_MAX_AUTHOR_SEEDS
     )
@@ -8430,8 +8428,8 @@ def run_discovery_command(args: argparse.Namespace) -> dict[str, Any]:
         return run_search_discovery(project_root, config, discovery, args)
     if args.command == "legal":
         # Legal planning is read-only by default; --execute runs the plan through
-        # the configured search backend and ranks candidates by officialness
-        # (E34-T03). Either way official-source reasoning is recorded per candidate.
+        # the configured search backend and ranks candidates by officialness.
+        # Either way official-source reasoning is recorded per candidate.
         if args.execute:
             require_discovery_provider_allowed("legal", discovery, ("search",))
         return run_legal_discovery(project_root, config, discovery, args)
@@ -8441,9 +8439,9 @@ def run_discovery_command(args: argparse.Namespace) -> dict[str, Any]:
         # standards text.
         return run_standards_discovery(project_root, config, discovery, args)
     if args.command == "authors":
-        # Author extraction (E35-T01) is the read-only preparation path: it reads a
+        # Author extraction is the read-only preparation path: it reads a
         # normalized paper source and any provider author metadata and emits a
-        # bounded author seed list. With --discover-publications (E35-T02) it also
+        # bounded author seed list. With --discover-publications it also
         # resolves each author to an OpenAlex identity and proposes that author's
         # works as related-publication candidates.
         if args.discover_publications:
@@ -8457,7 +8455,7 @@ def run_discovery_command(args: argparse.Namespace) -> dict[str, Any]:
         # registration lookup, so the two refusals stay adjacent and ordered.
         return run_registered_discovery(project_root, config, discovery, args)
     if args.command == "companions":
-        # Companion artifact discovery (E35-T03): a paper-centered composite that
+        # Companion artifact discovery: a paper-centered composite that
         # prefers links already in the paper/provider metadata, then GitHub and the
         # configured search provider, to propose repositories, datasets, project
         # pages, supplemental material, and publisher pages for review.

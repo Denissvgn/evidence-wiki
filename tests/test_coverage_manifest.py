@@ -1452,7 +1452,7 @@ class CoverageManifestCliTests(unittest.TestCase):
 
 
 class PackPolicyRuleCoverageTests(unittest.TestCase):
-    """CR-9 T4: a rule-backed pack policy moves facet and coverage verdicts by itself.
+    """A rule-backed pack policy moves facet and coverage verdicts by itself.
 
     The rollup already blocks a required facet on a failing policy result, so these cases
     assert plumbing rather than new arithmetic: the slug reaches the evaluator, the rule

@@ -341,7 +341,7 @@ Vendor-controlled product specification.
 
 
 class SeamTests(unittest.TestCase):
-    """``run_verify`` is the same operation ``main`` runs, minus the printing (CR-6 T8).
+    """``run_verify`` is the same operation ``main`` runs, minus the printing.
 
     ``tests/test_seam_conformance.py`` holds the two renderings to each other
     permanently. What is pinned here is what a document comparison cannot see: that a

@@ -33,9 +33,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 
 
-RESOLVE = load_script_module("cr7_write_path_resolve", "question_resolve.py")
-CLAIM = load_script_module("cr7_write_path_claim", "question_claim.py")
-VERIFY = load_script_module("cr7_write_path_verify", "verify_quotes.py")
+RESOLVE = load_script_module("grounding_write_path_resolve", "question_resolve.py")
+CLAIM = load_script_module("grounding_write_path_claim", "question_claim.py")
+VERIFY = load_script_module("grounding_write_path_verify", "verify_quotes.py")
 # The record-naming rule, taken from the code that reads the records rather than restated
 # here, so the fixture cannot drift from where the verifier actually looks.
 safe_source_id = VERIFY.load_sibling_module("normalize_sources").safe_source_id

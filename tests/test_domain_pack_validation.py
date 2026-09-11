@@ -908,17 +908,17 @@ class DomainPackValidationTests(unittest.TestCase):
             failures,
         )
 
-    def test_coverage_templates_accept_e39_policy_vocabulary(self):
+    def test_coverage_templates_accept_generic_policy_vocabulary(self):
         source_pack = REPO_ROOT / "domain-packs" / "llm-research"
         with tempfile.TemporaryDirectory() as tmpdir:
-            pack_path = Path(tmpdir) / "e39-vocabulary-pack"
+            pack_path = Path(tmpdir) / "policy-vocabulary-pack"
             shutil.copytree(source_pack, pack_path)
-            template_path = pack_path / "coverage-templates" / "e39-vocabulary.yml"
+            template_path = pack_path / "coverage-templates" / "policy-vocabulary.yml"
             template_path.parent.mkdir(parents=True, exist_ok=True)
             template_path.write_text(
                 yaml.safe_dump(
                     {
-                        "coverage_profile": "e39-vocabulary",
+                        "coverage_profile": "policy-vocabulary",
                         "required_facets": [
                             {
                                 "facet_id": "indexed-record",
@@ -947,8 +947,8 @@ class DomainPackValidationTests(unittest.TestCase):
             )
             overlay_path = pack_path / "research.overlay.yml"
             overlay = yaml.safe_load(overlay_path.read_text())
-            overlay["domain_pack"]["name"] = "e39-vocabulary-pack"
-            overlay["domain_pack"]["coverage_templates"] = {"e39-vocabulary": "coverage-templates/e39-vocabulary.yml"}
+            overlay["domain_pack"]["name"] = "policy-vocabulary-pack"
+            overlay["domain_pack"]["coverage_templates"] = {"policy-vocabulary": "coverage-templates/policy-vocabulary.yml"}
             overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False))
 
             code, stdout, stderr = self.run_validator("--path", str(pack_path))
@@ -958,7 +958,7 @@ class DomainPackValidationTests(unittest.TestCase):
         self.assertEqual("", stderr)
         self.assertTrue(payload["ok"], payload)
         self.assertEqual(
-            {"e39-vocabulary": "coverage-templates/e39-vocabulary.yml"},
+            {"policy-vocabulary": "coverage-templates/policy-vocabulary.yml"},
             payload["domain_pack"]["coverage_templates"],
         )
 

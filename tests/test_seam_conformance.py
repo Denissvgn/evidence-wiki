@@ -1,7 +1,7 @@
 """Seam conformance: a script's CLI and its library seam must never disagree.
 
 `evidence-wiki` scripts are drivable two ways. A host can shell out to the script
-and parse the JSON document it prints, or -- since CR-6 -- call the script's
+and parse the JSON document it prints, or -- since the library API -- call the script's
 ``run_<op>(...) -> dict`` seam in-process. Those are two implementations of one
 operation, and two implementations of one operation drift. This suite is the
 permanent guard against that drift: for every enrolled script it runs the CLI and
@@ -123,7 +123,7 @@ NOT_A_SEAM = {
 #: A seam is a top-level ``def run_<op>`` in a script that also speaks the shared
 #: refusal. Both halves are needed: plenty of scripts have had top-level helpers
 #: named ``run_*`` (``run_checks``, ``run_controller_section``, ``run_add``) since
-#: long before CR-6, and naming alone would enroll all of them.
+#: long before the library API, and naming alone would enroll all of them.
 SEAM_DEFINITION = re.compile(r"^def run_\w+\(", re.MULTILINE)
 REFUSAL_TYPE = "ScriptRefusal"
 

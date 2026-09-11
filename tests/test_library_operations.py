@@ -1,6 +1,6 @@
 """The documented API operations, held to the CLI they exist beside.
 
-CR-6 adds an embeddable library API so a long-lived host can call workspace
+The embeddable library API lets a long-lived host call workspace
 operations in-process. The whole promise of that API is that it is *the same
 operation* the command line performs -- same document out, same workspace state
 and audit trail behind it, same refusal when it refuses. This suite is where that
@@ -641,7 +641,7 @@ class ApiDocumentEqualityTests(LibraryOperationFixture):
 
 
 class AuditTrailEqualityTests(LibraryOperationFixture):
-    """AC-1: the two doors must leave the same workspace state and the same log.
+    """API and CLI calls leave the same workspace state and the same log.
 
     Document equality is only half the promise. A host that blocks a question
     in-process and one that blocks it from a shell must leave a workspace an
@@ -693,7 +693,7 @@ class StructuralTranslationTests(unittest.TestCase):
     The module loader isolates every sibling stem on each load, ``_script_errors``
     included, so each loaded script owns its own ``ScriptRefusal`` class object. A
     package-side ``except SomeImportedScriptRefusal`` would compile, read as though
-    it handled the case, and catch nothing at runtime -- defeating AC-2, that every
+    it handled the case, and catch nothing at runtime -- violating the contract that every
     documented ``error_code`` is reachable as a typed exception. These cases fail
     if anyone reintroduces identity-based catching.
     """

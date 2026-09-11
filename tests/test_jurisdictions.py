@@ -1,8 +1,8 @@
-"""Tests for the jurisdiction profile schema, loader, validator, and CLI (E34-T01).
+"""Tests for the jurisdiction profile schema, loader, validator, and CLI.
 
 `discover_sources.py jurisdictions validate|list|show` reads a workspace-local
 `sources/jurisdictions.yml`, validates each profile against the schema, and
-exposes official-domain matching helpers that legal discovery (E34-T02/T03) and
+exposes official-domain matching helpers that legal discovery and
 the search ranker consume. The command is offline: it reads a YAML file and never
 contacts a provider, so it runs even when discovery is disabled.
 """

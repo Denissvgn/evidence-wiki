@@ -24,8 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 
 
-STRUCTURED_VIEW = load_script_module("cr7_structured_view_module", "_structured_view.py")
-CONTRACT = load_script_module("cr7_structured_view_normalized_contract", "_normalized_contract.py")
+STRUCTURED_VIEW = load_script_module("grounding_structured_view_module", "_structured_view.py")
+CONTRACT = load_script_module("grounding_structured_view_normalized_contract", "_normalized_contract.py")
 
 SOURCE_ID = "raw:raw-data-keepa-40efe41f3b"
 SIDECAR_NAME = "raw--raw-data-keepa-40efe41f3b.structured.json"

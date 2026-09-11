@@ -1,11 +1,11 @@
-"""Discovery-quality evaluation fixtures and harness (E36-T04).
+"""Discovery-quality evaluation fixtures and harness.
 
 A small, deterministic, network-free regression guard for discovery ranking.
 Each scenario under ``tests/fixtures/discovery/eval/`` is a declarative case: raw
 provider results plus the expected candidate outcomes. The harness runs the case
 through the *real* discovery pipeline (legal/search via the fixture search backend,
 GitHub and author-publication discovery via an injected transport) and scores three
-properties the epic must not regress:
+properties discovery must not regress:
 
 - candidate ranking (official sources outrank secondary; canonical repos outrank
   forks/mirrors; related author publications outrank out-of-scope ones), expressed
@@ -14,7 +14,7 @@ properties the epic must not regress:
 - rejection rationale (suspicious downloads, mirrors, lower-trust duplicates of an
   official source, and out-of-scope author publications are rejected with reasoning).
 
-Author-publication ranking quality (E35-T02) is guarded by the
+Author-publication ranking quality is guarded by the
 ``author-publications`` scenario, which proposes an ORCID-author's related work for
 review and rejects an unrelated work as out of scope.
 """
@@ -367,7 +367,7 @@ class DiscoveryQualityEvalHarness(unittest.TestCase):
                 self.assertIn("candidates", scenario["expected"])
 
     def test_official_preference_and_rejection_are_present_somewhere(self):
-        # Guard the epic-level invariants: at least one scenario proves official
+        # Guard the discovery invariants: at least one scenario proves official
         # preference, and at least one proves rejection with rationale.
         scenarios = load_scenarios()
         self.assertTrue(

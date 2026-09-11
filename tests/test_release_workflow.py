@@ -145,7 +145,7 @@ def test_archive_membership_accepts_a_policy_conformant_pair(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     "leak",
     [
-        "docs/CR/CR-23-backlog.md",
+        "docs/CR/internal-backlog.md",
         "docs/llm_wiki/index.md",
         "reports/codebase-review.txt",
         "RELEASING.md",

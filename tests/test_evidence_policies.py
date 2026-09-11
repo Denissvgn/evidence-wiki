@@ -1384,7 +1384,7 @@ QUESTION_SLUG = "needs-quote-evidence"
 
 
 class PackPolicyRuleTests(unittest.TestCase):
-    """CR-9 T3: a pack's declared rules decide its own policies instead of queueing them."""
+    """A pack's declared rules decide its own policies instead of queueing them."""
 
     def build_workspace(self, root: Path, *, rules: dict[str, Any] | None = None) -> Path:
         workspace = root / "pack-workspace"

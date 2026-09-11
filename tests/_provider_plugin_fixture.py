@@ -1,4 +1,4 @@
-"""Install and uninstall the CR-5 fixture provider distributions by ``sys.path`` alone.
+"""Install and uninstall the fixture provider distributions by ``sys.path`` alone.
 
 Registration is packaging metadata, so the only honest way to test it is to let real
 ``importlib.metadata`` discovery find a real ``.dist-info`` directory. This helper does

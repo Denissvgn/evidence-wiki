@@ -261,8 +261,10 @@ def test_api_cli_are_read_only_and_share_the_same_report(tmp_path):
         expected = workspace.normalize.validate_packet(SOURCE_ID)
         assert expected == INTAKE.inspect_packet(tmp_path, config, record)
         profiles = workspace.normalize.profiles()
-        assert {**profiles, "profiles": profiles["profiles"][:-1]} == INTAKE.profiles()
-        assert profiles["profiles"][-1]["name"] == "execution_evidence/v1"
+        assert {**profiles, "profiles": profiles["profiles"][:1]} == INTAKE.profiles()
+        assert [profile["name"] for profile in profiles["profiles"][1:]] == [
+            "execution_evidence/v1", "market_evidence/v1",
+        ]
         for command, report in [("profiles", profiles), ("packet", expected)]:
             args = ["normalize", command, "--target", str(tmp_path)]
             if command == "packet":

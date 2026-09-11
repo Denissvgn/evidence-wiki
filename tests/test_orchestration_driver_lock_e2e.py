@@ -1,46 +1,15 @@
-"""CR-8 sign-off: the driver lock, proved with real processes on a real workspace.
+"""Exercise driver locking with real processes and initialized workspaces.
 
-CR-8 asks for one thing in three sentences. Its acceptance criteria, in the
-filer's own words:
+A contending driver must report ORCHESTRATION_DRIVER_BUSY and the holder identity
+without issuing work. Native locks release after process death, and status remains
+readable while a driver holds the lock. Racing starts must create only one session;
+the loser may observe an existing session or a busy driver.
 
-    - Two processes calling `next` on one session concurrently: one proceeds,
-      one is refused with `ORCHESTRATION_DRIVER_BUSY` and the holder's identity.
-    - A driver killed mid-call leaves no stale lock: the next call proceeds.
-    - `status` never blocks on the driver lock.
-
-Everything here is arranged so that a reviewer can read one test per criterion
-and see the criterion discharged, rather than reconstruct it from a dozen unit
-assertions. The unit suite (`tests/test_orchestration_controller.py`, unit U3)
-already pins each of these behaviours against the controller module; several of
-those tests also spawn processes. What this file adds is the *deployment* shape:
-
-- the workspace is built by a real ``evidence-wiki init`` subprocess, so the
-  controller under test is the copy an operator actually runs, reached through
-  the installed package's asset-copy path rather than through the repository's
-  ``workspace-template/`` source tree;
-- every driver is a real OS process, so the pid in a refusal belongs to a
-  process the kernel knows about and the exit code is a real ``$?`` that a shell
-  host would dispatch on (decision D6: 6 is ``EXIT_DRIVER_BUSY``);
-- the exit codes are asserted as literals, not imported from the controller. A
-  test that imported them would keep passing if the numbers changed, and the
-  numbers *are* the contract for a host that can read nothing but ``$?``.
-
-A fourth test covers backlog item T8.4: two ``start`` calls racing on one
-explicit ``--orchestration-id``. It is a safety assertion rather than a proof of
-the new code path -- see its docstring and decision D13.
-
-What is deliberately *not* here: the exclusive-create fallback's stale recovery.
-That path has no owner-death notification and recovers on a timer
-(``DRIVER_LOCK_STALE_FALLBACK_SECONDS``, 120 s for this lock); asserting it here
-would mean a two-minute sleep in a sign-off suite. It is covered by
-`tests/test_workspace_lock_holder.py` against the lock module directly. The
-crash test below asserts the native-backend path and skips cleanly elsewhere.
-
-Timing discipline: every wait in this file is on an observable event -- a ready
-file appearing, a process exiting, a lock being released -- never on a sleep
-chosen to be "probably long enough". The one genuine time *budget* is criterion
-3's, where the assertion is itself about elapsed time; its margin is argued at
-the constant.
+Drivers use deployed scripts copied by the real initializer. Exit codes are literal
+assertions because shell hosts depend on their numeric values. Waits observe ready
+files, process exit and lock release; the status check has an explicit elapsed-time
+budget. Timer-based fallback stale recovery is covered in test_workspace_lock_holder;
+the process-death case here requires a native lock backend.
 """
 
 import json
@@ -61,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ORCHESTRATION_ID = "orch-driver-lock-e2e"
 QUESTION_SLUG = "driver-lock-e2e-question"
 
-#: The process contract CR-8 fixes, asserted as literals on purpose (D6).
+#: Process exit codes are asserted as literals because shell hosts depend on them.
 EXIT_OK = 0
 EXIT_INVALID = 2
 #: 6, not 5: ``evidence-wiki orchestrate run``/``resume`` already returns 5 for a
@@ -102,7 +71,7 @@ from pathlib import Path
 
 scripts, project_root, orchestration_id, ready, release, agent_id, command = sys.argv[1:8]
 spec = importlib.util.spec_from_file_location(
-    "cr8_e2e_held_controller", str(Path(scripts) / "orchestration_controller.py")
+    "driver_e2e_held_controller", str(Path(scripts) / "orchestration_controller.py")
 )
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -165,8 +134,8 @@ class DriverLockWorkspace:
             [
                 sys.executable, "-B", "-m", "evidence_wiki.cli", "init",
                 "--target", str(workspace),
-                "--project-name", "cr8-driver-lock-e2e",
-                "--project-description", "Workspace for CR-8 driver lock sign-off.",
+                "--project-name", "driver-lock-e2e",
+                "--project-description", "Workspace for concurrent driver checks.",
             ],
             cwd=str(REPO_ROOT),
             capture_output=True,
@@ -217,7 +186,7 @@ class DriverLockWorkspace:
         """
         DriverLockWorkspace._module_serial += 1
         return load_deployed_module(
-            f"cr8_e2e_deployed_locks_{DriverLockWorkspace._module_serial}",
+            f"driver_e2e_deployed_locks_{DriverLockWorkspace._module_serial}",
             workspace / "scripts" / "_workspace_locks.py",
         )
 
@@ -392,23 +361,14 @@ class DriverLockWorkspace:
 
 
 class ContendedDriverTests(DriverLockWorkspace, unittest.TestCase):
-    """CR-8 acceptance criterion 1, end to end.
-
-    "Two processes calling `next` on one session concurrently: one proceeds, one
-    is refused with `ORCHESTRATION_DRIVER_BUSY` and the holder's identity."
-
-    U3 proves this at the controller level. Proved here against an installed
-    workspace, with the refusal read off a real process's exit status and stderr,
-    because the exit code and the envelope -- not the Python exception -- are what
-    a host actually dispatches on.
-    """
+    """A second driver refuses with a parseable process status and holder identity."""
 
     def test_a_second_next_process_is_refused_and_the_session_issues_one_work_order(self):
         """One order, one refusal, and nothing written by the loser.
 
         The overlap is made certain rather than hoped for: the first driver parks
         inside the controller's own critical section until this test lets it go.
-        Before CR-8 the second process waited ten seconds and then *proceeded*,
+        Before driver locking the second process waited ten seconds and then *proceeded*,
         interleaving its writes with the first driver's; the corruption surfaced
         later, somewhere else, with nothing tying it back to the overlap.
 
@@ -479,10 +439,7 @@ class ContendedDriverTests(DriverLockWorkspace, unittest.TestCase):
 
 
 class CrashedDriverTests(DriverLockWorkspace, unittest.TestCase):
-    """CR-8 acceptance criterion 2, end to end.
-
-    "A driver killed mid-call leaves no stale lock: the next call proceeds."
-    """
+    """A native lock releases when its holder process dies."""
 
     def test_a_sigkilled_driver_leaves_no_lock_the_next_process_cannot_take(self):
         """SIGKILL is the crash the kernel can tell a successor about.
@@ -532,13 +489,7 @@ class CrashedDriverTests(DriverLockWorkspace, unittest.TestCase):
 
 
 class StatusIsLockFreeTests(DriverLockWorkspace, unittest.TestCase):
-    """CR-8 acceptance criterion 3, and backlog task T4 item 1.
-
-    "`status` never blocks on the driver lock." Decision D9 keeps `status`
-    lock-free; this pins that, it does not change it. A busy session that could
-    not be polled would be an unobservable one, and a host that cannot observe a
-    session cannot decide whether to retry the call it was just refused.
-    """
+    """Status remains readable while another process holds the driver lock."""
 
     def test_status_answers_promptly_while_another_driver_holds_the_session(self):
         """Held lock, real poll, real clock.
@@ -592,20 +543,11 @@ class StatusIsLockFreeTests(DriverLockWorkspace, unittest.TestCase):
 
 
 class RacingStartTests(DriverLockWorkspace, unittest.TestCase):
-    """Backlog task T8 item 4: two ``start`` calls racing on one explicit id.
+    """Concurrent starts create one session and return a structured refusal to the loser.
 
-    Not a criterion of the CR itself; it is the invariant CR-8's new refusal is
-    forbidden to break. Decision D13 settles the shape: a loser that arrives
-    after the winner committed sees ``ORCHESTRATION_EXISTS``, one that arrives
-    during sees ``ORCHESTRATION_DRIVER_BUSY``, both are truthful and final, and
-    both carry the same remediation. So this asserts membership in that pair --
-    pinning either single code would make the test flaky by construction, which
-    is the whole reason the decision exists.
-
-    Because both outcomes are legitimate, this test would also pass against the
-    pre-CR-8 controller. That is stated rather than hidden: it is here to prove
-    the new refusal never yields two sessions or an unparseable failure, and the
-    proof that the refusal *happens* lives in ``ContendedDriverTests``.
+    A loser arriving after commit sees ORCHESTRATION_EXISTS; one overlapping the lock
+    sees ORCHESTRATION_DRIVER_BUSY. Both are valid outcomes. ContendedDriverTests
+    separately establishes that lock contention actually reaches the busy refusal.
     """
 
     def test_racing_starts_leave_exactly_one_session_and_one_intelligible_loser(self):

@@ -235,7 +235,7 @@
   bundle: nothing named it, and the field's documented purpose -- "raw files whose bytes
   determine a record's normalized output" -- does not reach it. A declared companion the
   normalizer keys its structured view on is precisely a file of that description. The bundle
-  case is unchanged, and still pinned by its own test.
+  case is unchanged.
 
   Consequences to expect, and for a workspace this package wrote there are none. No record
   it wrote is rewritten and no such `raw_fingerprint` moves, verified byte-identical over
@@ -491,7 +491,7 @@
   target is a directory can never be verified at all, which is why the requirement would
   refuse every paired paper, whose primary capture is the bundle root. A record whose sole
   unverified checksum sits on a secondary capture is therefore still admitted under
-  `--require-checksum` alone, pinned end to end by its own test.
+  `--require-checksum` alone.
 
   Rated low, not a security fix, and the severity is stated here rather than left to
   inference. The mismatch was never silent: it always warned in the report and always marked
@@ -621,7 +621,7 @@
   standing advice — re-run `source_inventory.py --report` — does not repair a hand-edited
   record, so following it reached a second, honest refusal rather than the fix. The new
   field names the path to remove, and the advice is unchanged. It supplements the
-  pinned-order equality test and never replaces it, and it is one-sided on purpose: it
+  ordered equality check and never replaces it, and it is one-sided on purpose: it
   reports what a record declared that inventory accounts for nowhere, so it is empty
   whenever every declared path is accounted for. A reorder, a duplicate, and a declared
   list that omits a derived path are all still mismatches, each reporting an empty
@@ -635,11 +635,6 @@
   today, because the snapshot refuses such a file before the expansion is ever consulted;
   that agreement was incidental, and is now stated.
 
-  Both defects arrived with the derived-attribution predicate described in the entries below
-  and were caught before any release carried them, so there is no released version to
-  reproduce them on. Both were reproduced on this branch by reverting the repair and watching
-  the test fail: the mismatch payload missing its field, and a derivation across one `mkdir`
-  answered from the stale memo.
 
 - **Fix: a directory-shaped `raw_paths` entry could not be delivered inside any acquisition
   order.** A bundle record — an arXiv or LaTeX source archive, a local code repository —
@@ -734,8 +729,7 @@
   `origin_url`, `retrieved_at` and verified `checksum` with it. Nothing in the manifest
   said where the PDF had come from. The bytes were never unaccounted for — both sidecars
   already counted toward `raw_fingerprint`, so a correction to either still re-triggered
-  normalization — but the parsed fields were dropped, and no test exercised the path at
-  all. Every matching sidecar is merged now: the first still becomes `provenance`,
+  normalization — but the parsed fields were dropped. Every matching sidecar is merged now: the first still becomes `provenance`,
   unchanged in shape, selection and checksum handling, and each further one becomes an
   entry in a new record-level `additional_provenance` list that names the `path` it
   describes and is checksum-verified against that path's own bytes rather than the
@@ -893,9 +887,8 @@
   scope check runs. The fulfilment the acquirer already wrote stays in the request store with
   its `source_id`; `open_requests` selects on `status == "open"`, so no later order sees that
   request again; and evidence the controller had just declined to verify is accepted
-  permanently. The repair names that cost now instead of naming the command, and a test
-  performs the outcome and observes each part of it. The hole itself is unchanged and stays
-  open on purpose.
+  permanently. The remediation now describes that consequence. This limitation remains
+  unchanged.
 
 ## 0.5.2 - 2026-08-19
 
@@ -1174,35 +1167,6 @@
   parser, the dispatch and the `run_reopen` seam but not the published facade, which
   made `library-api.md`'s promise that an operation "does not change what it means"
   between doors false for it.
-- Three consistency rules that were previously conventions are now tests.
-  `test_no_shipped_surface_teaches_a_retired_scope_example` sweeps every tracked
-  surface for retired example *values* — the check that replaces the one-shot grep
-  which matched two syntaxes and missed the JSON form of the same value in
-  `mcp-server.md`. `test_dispatch_seam_forwards_every_cli_flag_to_its_seam` compares
-  each subparser's flags against the keywords `dispatch_seam` forwards, after
-  `--require-decisive-scope` was parsed by the CLI, dropped at the seam boundary,
-  and silently ignored while the library seam honoured it.
-  `test_library_facade_forwards_every_seam_keyword` pins the next boundary out —
-  every seam keyword reachable from the facade, and every accepted keyword actually
-  passed on — after the same flag was found missing there too. The repo had
-  `sync_vendored_scripts.py --check` for template↔mirror drift and `llm-wiki lint
-  --strict` for code↔wiki drift; these close the doc↔doc, CLI↔seam and seam↔facade
-  equivalents.
-- Each of those guards now derives its own coverage instead of listing it, after the
-  first versions were found to protect only the case that prompted them. The facade
-  guard walks 18 door→seam bindings across all seven namespaces and the `Workspace`
-  handle, in both call shapes, rather than eight hardcoded for one namespace; it also
-  reads positional-or-keyword parameters, not just keyword-only ones. The set of
-  scripts required to appear in the JSON Output Scripts table is derived from the
-  scripts directory rather than a hardcoded list that silently omitted eight
-  qualifying scripts, `orchestration_controller.py` — the largest error surface in
-  the package — among them; remaining exemptions are declared with a written reason.
-- Fix a Markdown table parser in the error-envelope checks that split rows on a bare
-  `|` and ignored `\|`. Rows whose JSON-mode column reads `next\|submit\|…` had a
-  fragment of the wrong column parsed as their error codes, so
-  `test_json_output_scripts_table_uses_stable_error_codes` was passing while
-  examining 85 of 131 codes and one orchestration code instead of 22. No shipped
-  behavior changes; the check simply now sees what it always claimed to.
 - Stop `reopen` from crediting declared scope for a pairing that argument order
   decided, and say which scope keys are worth declaring in the first place.
   Request scope narrows the sources that can answer each request, but it does not
@@ -1297,9 +1261,7 @@
   scripts, the library, and the repository tools now pass `encoding="utf-8"` and
   `newline="\n"`, and text-mode subprocess calls decode as UTF-8 with
   `errors="replace"`, matching the convention `_normalizer_adapter.py` already
-  used. A new contract test scans the shipped sources and fails on any
-  unqualified text read, write, or text-mode subprocess, so the class cannot
-  return; CI could not have caught it, because `PYTHONUTF8: "1"` masks it there.
+  used.
   Behavior on macOS and Linux is unchanged. Exception handling is deliberately
   untouched: readers that convert `OSError` into a diagnostic still do not catch
   `UnicodeDecodeError`, which remains a separate robustness question.
@@ -1359,12 +1321,8 @@
   The guard stays syntactic and conservative, and is not a proof of safety in either
   direction: it still refuses shapes that would have been safe (an optional lead is
   reported unknowable rather than resolved, so `(b?a|c)+` is refused too), and a
-  construct nobody has taught it to see would still pass. The shapes named above are
-  the ones it is known to catch, not the closure of what can backtrack. Beside the
-  per-spelling tests, the suite now asserts the complementary property on what actually
-  ships — every pattern the guard *accepts* must match adversarial input quickly —
-  because enumerating exponential spellings only ever catches the ones somebody
-  thought of.
+  construct nobody has taught it to see would still pass. The guard detects the shapes named above; it does not prove that every
+  accepted pattern is free of excessive backtracking.
 
 - Let a recorded review settle the coverage policy it was collected for. A policy
   that needs a person was a `safety` no-ship reason until the review was recorded
@@ -1552,9 +1510,6 @@
   Every workspace script grew a `run_<op>(...) -> dict` seam; the CLI prints what
   it returns or renders the refusal's envelope, and the API returns the same dict
   or raises the typed exception built from that same envelope.
-  `tests/test_seam_conformance.py` runs the CLI as a real subprocess against the
-  seam over identical inputs and requires agreement on the success document, the
-  refusal envelope, and the exit code, for every enrolled script.
 
   Refusals arrive as `evidence_wiki.errors.EvidenceWikiError` carrying
   `error_code`, `message`, `recoverable`, `remediation`, `details`, and
@@ -1986,43 +1941,12 @@
   anchors address content that cannot be quoted from rendered text. Unlike the contract check, it
   applies to native and foreign records alike; a threshold that is not a number in
   `[0, 1]` disables the notice instead of failing the run.
-- Cover the structured-evidence path end to end.
-  `tests/test_structured_evidence_e2e.py` walks a delivered JSON payload and its
-  sidecar through the whole chain in a workspace built by initialization — inventory,
-  adapter normalization, contract verification, reopening the blocked question,
-  grounding a claim in a facet value, lint, and the orchestration controller's own
-  workspace-safety postcondition. The legs are load-bearing in sequence rather than
-  individually: normalization is what opens the reopen gate, and the facet headings the
-  adapter emits are what make a value quotable at all, so a regression in any stage
-  surfaces as a broken chain instead of a passing unit test about a stage nothing can
-  reach. Two companion cases pin the boundaries — the same delivery with no adapter
-  configured is classified but never normalized and the gate stays shut, and a capped
-  rendering still grounds what it did render while a dropped facet fails closed with
-  `anchor_not_found`.
-- Hold the hand-written path to the same chain. The same suite now runs a record an
-  external tool wrote itself, with no adapter configured anywhere: it verifies against
-  the same validator, opens the reopen gate, grounds a quote from a facet section, and
-  leaves lint with nothing to say beyond the missing wiki source note — the same residue
-  the adapter path leaves. A full `--all` normalization run is asserted to leave that
-  record byte-identical, since a kind nothing here normalizes belongs to whoever wrote
-  it. One mutation per contract violation family then shows each is named: verify
-  reports exactly that family's code and nothing else, and lint reports it as MEDIUM
-  `normalized_record_contract_violation` with the same code. The one asymmetry is
-  asserted rather than glossed — a record with no frontmatter names no producing tool,
-  so lint cannot tell it from a stray Markdown file and leaves it alone, while
-  `normalize_verify.py` still refuses it.
-- Guard the "no adapters configured, no change in behavior" promise.
-  `tests/test_no_adapter_backward_compat.py` runs an existing fixture twice with one
-  variable changed — whether `research.yml` has a `normalization:` section at all — and
-  compares whole artifacts: the manifest, every normalized record byte for byte, the
-  normalization report, the verifier report, and the lint payload. The declared command
-  points at a path that cannot exist, so an adapter consulted for a kind it does not map
-  would surface as a failed action rather than a silent no-op. Three further cases cover
-  what the differential cannot see: a second normalization run rewrites nothing (the
-  bumped `NORMALIZER_VERSION` must not perma-stale the records it was added to); a
-  record written before the contract existed is still accepted, uncounted as foreign and
-  unflagged; and the native frontmatter shape is pinned key by key, so a field added to
-  every record has to be declared here rather than appearing quietly.
+- Apply the same normalized-record and grounding contracts to configured adapters
+  and external producers. A rendered facet can support a quote; a facet omitted by
+  rendering cannot. Use a structured anchor for values outside the rendered text.
+  Full normalization preserves external records whose kinds have no configured
+  normalizer. Unmapped kinds and workspaces without adapters retain their existing
+  normalization behavior.
 - Document the record fields that were being written but not published. Five
   codebase-record fields — `codebase_intake_status`, `codebase_execution_scope`,
   `codebase_artifact_manifest`, `codebase_artifact_checksums`, and
@@ -2049,17 +1973,9 @@
   from the version check only — a record written before a required field existed can
   still be reported by `normalize_verify.py`, which the first re-normalization repairs
   and which lint never escalates.
-- Make every normalized record in this repository pass its own contract, and keep it
-  that way. Four fixture records did not: three battery-workspace stubs that carried no
-  `type` at all, and a standards record missing half its required frontmatter and living
-  at a path its `source_id` did not resolve to. Fixtures are what a reader opens to learn
-  the format, so one that fails the verifier teaches the wrong shape and makes the
-  verifier look broken. They are now full records — quoted prose preserved verbatim under
-  `Extracted Text`, so grounding still verifies against them. A new conformance test walks
-  the repository for workspaces with committed records rather than naming them, so a new
-  fixture is enrolled by existing. Nothing caught this before: lint holds only externally
-  produced records to the contract, which is what leaves a native record missing a field
-  invisible.
+- Correct incomplete example normalized records, including missing type and
+  frontmatter fields and a source ID whose record path did not match. Their quoted
+  prose remains under `Extracted Text`.
 - State the machine-output contract for hosts: `docs/orchestrator-handoff.md` gains a
   "Machine Output On stdout" section — under `--format json`, stdout carries exactly
   one JSON document, diagnostics go to stderr, and a fatal error leaves stdout empty —
@@ -2070,16 +1986,6 @@
   section also names the two things not to mistake for violations — a non-zero exit
   still carries a report from the commands whose job is to assess a workspace, and
   `source_inventory.py --dry-run` without `--report` keeps its documented JSONL stream.
-- Enforce machine-output purity per script. `tests/test_json_stdout_purity.py` runs
-  every command that accepts `--format json` as a subprocess — in a real workspace and
-  against an unreadable one — and asserts stdout parses as exactly one JSON document
-  with nothing before or after it, by consuming the whole buffer rather than scanning
-  for the first `{`. Fatal paths must leave stdout empty and put the shared envelope on
-  stderr. Enrollment is automatic: a script that declares `--format` and is not listed
-  fails the suite, so a new command cannot skip the contract. Two surfaces are encoded
-  as the documented exceptions they are — `source_inventory.py --dry-run` without
-  `--report` keeps its JSONL stream contract, and `query_index.py build-index` accepts
-  no `--format` at all.
 - Send `scripts/workspace_gc.py` fatal errors to stderr instead of stdout. Under
   `--format json` it printed a hand-rolled error object on stdout, where a caller
   parsing stdout could not tell it from a report document, and the object omitted

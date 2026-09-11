@@ -336,6 +336,13 @@ subprocesses after upgrade completes. The upgrade refreshes scripts on disk, but
 already running Python processes keep their loaded server code, direct imports,
 and module-global caches until they are restarted.
 
+The reported `starter_version` identifies reusable starter content, while
+`schema_version` identifies the shape of `workspace-system.yml`. The installed
+package version is reported separately by `evidence-wiki --version` and
+`Workspace.versions()`. Matching version values do not prove deployed script
+identity; inspect the refreshed files or compare content digests when that
+identity matters.
+
 Run it from a clean version-control state so the refreshed files are easy to
 review.
 

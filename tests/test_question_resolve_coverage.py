@@ -352,7 +352,7 @@ class QuestionResolveCoverageTests(unittest.TestCase):
 
 
 class PackPolicyRuleResolveTests(unittest.TestCase):
-    """CR-9 T4: a fully primitive pack policy stops routing an answer to human review.
+    """A fully primitive pack policy stops routing an answer to human review.
 
     ``requires_human_review`` fires only on ``manual_review`` verdicts, so this needed no
     change in ``question_resolve.py`` at all — which is exactly why it is worth asserting

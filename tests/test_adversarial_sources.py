@@ -1,8 +1,7 @@
-"""Consolidated adversarial regression tests for security review §6.
+"""Untrusted-source handling at filesystem, provenance and rendering boundaries.
 
-This is the consolidated home the security review asked for (SEC-E8-T09).
-It covers SEC-E1-T05 symlink regressions, SEC-E5-T03 checksum/license strict
-provenance behavior, and SEC-E3-T06 injection-bypass/untrusted-rendering cases.
+Cases cover symlinks, checksum and license validation, prompt-injection bypasses,
+untrusted rendering, and containment of initializer and upgrade writes.
 """
 
 import contextlib
@@ -413,7 +412,7 @@ class CodebaseArtifactNonexecutionTests(unittest.TestCase):
 
 
 class ProvenanceStrictModeTests(unittest.TestCase):
-    """SEC-E5-T03: checksum strict modes and provenance license validation."""
+    """Checksum strict modes and provenance license validation."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -535,7 +534,7 @@ class ProvenanceStrictModeTests(unittest.TestCase):
 
 
 class PromptInjectionBypassRegressionTests(unittest.TestCase):
-    """SEC-E3-T06 / SEC-E8-T09: review §6 prompt-injection bypass regressions."""
+    """Prompt-injection detection covers encoded and structural bypass attempts."""
 
     def copy_fixture(self, fixture_name: str, workspace: Path) -> Path:
         source = FIXTURES / fixture_name
@@ -653,7 +652,7 @@ class PromptInjectionBypassRegressionTests(unittest.TestCase):
 
 
 class _WriterSymlinkBase(unittest.TestCase):
-    """Shared fixtures for the init/upgrade writer-path tests (SEC-E1-T04).
+    """Shared fixtures for the init/upgrade writer-path tests.
 
     ``root`` holds a trusted ``starter`` tree, the ``target`` workspace, and a
     sibling ``outside`` tree so a planted symlink can point out of the workspace

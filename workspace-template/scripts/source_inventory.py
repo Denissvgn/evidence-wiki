@@ -769,8 +769,8 @@ def is_contained_nonsymlink(path: Path, root_resolved: Path) -> bool:
 
     "Safe" means the entry is *not* a symlink and its real path stays inside the
     workspace. This is the single definition of filesystem containment shared by
-    the source readers (``iter_raw_files`` / ``iter_local_code_repos``, security
-    review SEC-E1-T01/T02) and the init/upgrade copy paths (SEC-E1-T04), so the
+    the source readers (``iter_raw_files`` / ``iter_local_code_repos``)
+    and the init/upgrade copy paths, so the
     two can never drift. ``raw/`` is the untrusted-input boundary the research
     wiki rests on: a symlink (pointing anywhere, inside or outside the workspace)
     is refused outright so its target bytes are never read, and the ``resolve()``
@@ -1082,7 +1082,7 @@ def iter_local_code_repos(
         # real path escapes the workspace, is refused outright before rglob can
         # descend into it. raw/ is the untrusted-input boundary the research
         # wiki rests on; extracted code trees are exactly where malicious
-        # symlinks land (review SEC-E1 / H1, cross-ref M-14). The symlink check
+        # symlinks land. The symlink check
         # stays explicit and before is_dir (a symlink to a directory passes
         # is_dir) to emit the root-specific wording; is_contained_nonsymlink then
         # supplies the shared containment guard for the escape case.

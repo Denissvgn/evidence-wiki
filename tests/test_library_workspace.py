@@ -192,7 +192,7 @@ class WorkspaceVersionsTests(unittest.TestCase):
         self.assertIsNone(ws.versions()["workspace"]["starter_version"])
 
     def test_open_does_not_gate_on_version_skew(self):
-        # AC-3: the API must serve every workspace the CLI serves. A wildly
+        # The API must serve every workspace the CLI serves. A wildly
         # incompatible starter_version is reported, never refused.
         ws = self.open_workspace(
             workspace_system='workspace_system:\n  starter_version: "999.0.0"\n  schema_version: "42"\n'

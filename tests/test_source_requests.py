@@ -806,7 +806,7 @@ class SourceRequestsTests(unittest.TestCase):
             envelope = json.loads(stderr)
             self.assertEqual("REQUEST_UNKNOWN", envelope["error_code"])
 
-    # --- CR-4: pack-declared request kinds ------------------------------------
+    # --- structured request routing: pack-declared request kinds ------------------------------------
 
     def test_add_accepts_declared_pack_kind_and_carries_it_verbatim(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -898,7 +898,7 @@ class SourceRequestsTests(unittest.TestCase):
                 [record["kind"] for record in self.artifact_lines(target)],
             )
 
-    # --- CR-4: structured request scope ---------------------------------------
+    # --- structured request routing: structured request scope ---------------------------------------
 
     def test_add_stores_scope_pairs_and_refuses_malformed_ones(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1099,7 +1099,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual("open", self.artifact_lines(target)[0]["status"])
 
             # Without --require-scope the same call still passes: absence stays
-            # tolerated by default, which is what keeps pre-CR-4 deliveries fulfillable.
+            # tolerated by default, which is what keeps legacy deliveries fulfillable.
             code, payload, stderr = self.requests_json(
                 target,
                 "fulfill",
@@ -1163,7 +1163,7 @@ class SourceRequestsTests(unittest.TestCase):
             self.assertEqual(0, code, stderr)
             self.assertEqual("fulfilled", payload["request"]["status"])
 
-    # --- CR-4: read-surface filters -------------------------------------------
+    # --- structured request routing: read-surface filters -------------------------------------------
 
     def test_list_filters_by_kind_and_by_scope(self):
         with tempfile.TemporaryDirectory() as tmpdir:

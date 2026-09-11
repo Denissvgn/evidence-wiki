@@ -1,4 +1,4 @@
-"""Unit tests for the shared source-request kind registry (CR-4 foundation)."""
+"""Unit tests for the shared source-request kind registry."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ class PackKindValidationTests(unittest.TestCase):
         self.assertEqual("REQUEST_KIND_UNDECLARED", ctx.exception.error_code)
 
     def test_bare_id_is_invalid_and_names_the_prefixed_id_it_meant(self):
-        """The change request's own examples omit the prefix, so the near-miss must self-heal."""
+        """Built-in request kinds accept the unambiguous prefix-free spelling."""
         config = config_with([declaration()])
         with self.assertRaises(KINDS.RequestKindError) as ctx:
             KINDS.validate_kind("market-data/supplier_quote", config)

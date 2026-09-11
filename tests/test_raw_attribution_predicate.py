@@ -1,19 +1,10 @@
-"""SHAPE 2 probe: one inventory-derived attribution predicate for all three raw-scope arms.
+"""Inventory-derived attribution controls every acquisition raw-scope branch.
 
-Evidence suite for the consolidated CR-18/CR-19 backlog. Under the unified predicate,
-``allowed_new_raw_paths`` is "the files inventory, re-run over the delivered tree,
-attributes to the admitted record set", and each NEW record's ``raw_paths`` must equal
-(pinned order) what inventory derives for its id.
-
-What each case asserts:
-- CR-19 bundle deliveries (delegated, provider, blocked-partial, documented arXiv
-  command) now complete;
-- the CR-18 §4 hand-append smuggle now refuses, naming the mismatch;
-- inventory-derived multi-raw_paths records (paper+PDF pairing, same-URL link merge)
-  still pass;
-- the planted-marker residue is still ADMITTED (measured honestly: an inventory
-  semantics question, not a controller one);
-- the EW-BUG-005 §2 control still refuses FIRST at the manifest-scope guard.
+Allowed files are those inventory attributes to admitted records in the delivered tree.
+Each new record's ordered raw_paths must equal inventory's derivation for its identity.
+Directory bundles and derived multi-path records complete; hand-appended raw paths
+refuse. A planted-marker case records the limits of inventory semantics. An extra
+unfulfilled manifest record still refuses first at the manifest-scope guard.
 """
 
 import hashlib
@@ -67,7 +58,7 @@ SOURCE_REQUESTS = _toc.SOURCE_REQUESTS
 load_script_module = _toc.load_script_module
 openalex_payload = _toc.openalex_payload
 
-FETCH = load_script_module("shape2_fetch_sources", SCRIPTS / "fetch_sources.py")
+FETCH = load_script_module("attribution_fetch_sources", SCRIPTS / "fetch_sources.py")
 
 MISMATCH_MESSAGE = "raw_paths do not match inventory-derived attribution"
 MANIFEST_GUARD_MESSAGE = (
@@ -102,7 +93,7 @@ MAIN_TEX = (
 )
 
 
-class DelegatedArmShape2(DelegatedWorkspace, unittest.TestCase):
+class DelegatedArmAttributionTests(DelegatedWorkspace, unittest.TestCase):
     """Delegated-arm cases, on the shipped e2e harness."""
 
     maxDiff = None
@@ -183,7 +174,7 @@ class DelegatedArmShape2(DelegatedWorkspace, unittest.TestCase):
             code, envelope = self.submit(workspace, order["action_id"])
             self.assertEqual(0, code, envelope)
 
-    # -- (v) EW-BUG-005 §2 control: manifest guard still fires FIRST -----------------
+    # -- (v) manifest-scope control: manifest guard still fires FIRST -----------------
 
     def test_extra_unfulfilled_record_still_refused_at_manifest_guard_first(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -198,7 +189,7 @@ class DelegatedArmShape2(DelegatedWorkspace, unittest.TestCase):
             self.assertIn(MANIFEST_GUARD_MESSAGE, envelope.get("message", ""), envelope)
             self.assertNotIn(MISMATCH_MESSAGE, envelope.get("message", ""), envelope)
 
-    # -- (ii) the CR-18 §4 hand-append smuggle must now refuse -----------------------
+    # -- (ii) the raw attribution hand-append smuggle must now refuse -----------------------
 
     def test_hand_appended_raw_path_now_refused_naming_the_mismatch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -239,7 +230,7 @@ class DelegatedArmShape2(DelegatedWorkspace, unittest.TestCase):
                 envelope,
             )
 
-    # -- (i) CR-19: a directory-shaped bundle delivered in-order now completes -------
+    # -- (i) directory attribution: a directory-shaped bundle delivered in-order now completes -------
 
     def test_delegated_bundle_in_order_now_passes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -259,7 +250,7 @@ class DelegatedArmShape2(DelegatedWorkspace, unittest.TestCase):
         Inventory attributes every file under a bundle prefix to the one record with no
         member enumeration, so 'the files inventory attributes to this record' and
         'anything under the prefix' remain the same set. Closing it needs an
-        inventory-level member manifest (CR-19 shape (b)), not a controller change.
+        inventory-level member manifest (directory attribution shape (b)), not a controller change.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace, request_id = self.make_workspace(Path(tmpdir))
@@ -401,7 +392,7 @@ class DelegatedArmShape2(DelegatedWorkspace, unittest.TestCase):
             )
 
 
-class ProviderArmShape2(unittest.TestCase):
+class ProviderArmAttributionTests(unittest.TestCase):
     """Provider and blocked-partial arms, on the shipped controller harness."""
 
     maxDiff = None
@@ -478,7 +469,7 @@ class ProviderArmShape2(unittest.TestCase):
         )
         request_id = request_report["request"]["request_id"]
         self.assert_json_script_ok(
-            load_script_module("shape2_question_claim", SCRIPTS / "question_claim.py"),
+            load_script_module("attribution_question_claim", SCRIPTS / "question_claim.py"),
             ["--project-root", str(target), "claim", "--slug", "test-question",
              "--agent-id", "answer-agent", "--format", "json"],
         )
@@ -769,18 +760,11 @@ class ProviderArmShape2(unittest.TestCase):
             self.assertEqual(0, code, (payload, stderr))  # accepted risk, asserted
 
 
-class AttributionInvariantsShape2(DelegatedWorkspace, unittest.TestCase):
-    """The properties the predicate's soundness and cost both rest on.
+class AttributionInvariantTests(DelegatedWorkspace, unittest.TestCase):
+    """Attribution must be deterministic and safely reusable within one submission.
 
-    Both were measured while the design was chosen but lived only in scratch probes.
-    They are tests because the backlog names them as the vehicles for two standing
-    claims: that derivation is deterministic (the controller now depends on it, so a
-    future non-deterministic inventory change becomes a submit-breaking bug), and that
-    one submit costs exactly one derivation pass despite verifying up to three times.
-
-    Saving that cost has a property of its own, the same mechanism read from the other
-    side: the key an answer is memoised under has to be sufficient for the tree that
-    answer describes, or the saving is a wrong answer returned quickly.
+    Repeated checks reuse one derivation only while the memo key still represents the
+    raw tree. Both ordered attribution and invalidation after tree changes are required.
     """
 
     maxDiff = None

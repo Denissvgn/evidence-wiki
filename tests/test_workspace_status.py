@@ -27,7 +27,7 @@ CLAIM = load_script_module("research_workspace_status_claim", CLAIM_SCRIPT_PATH)
 INIT = load_script_module("research_workspace_status_init", INIT_SCRIPT_PATH)
 RUN_CONTROLLER = load_script_module("research_workspace_status_run_controller", RUN_CONTROLLER_SCRIPT_PATH)
 
-# CR-4: a domain pack may namespace its own request kinds. Status reporting keys on
+# a domain pack may namespace its own request kinds. Status reporting keys on
 # request *status*, so the id is carried, never parsed — these tests hold that line.
 PACK_REQUEST_KIND = "pack:market-data/supplier_quote"
 
@@ -2114,7 +2114,7 @@ question: Does cache invalidation work?
             self.assertEqual(3, check_code)
 
     def test_pack_namespaced_kind_reaches_the_same_blocked_on_sources_verdict(self):
-        """CR-4: a namespaced kind id must count exactly like a built-in one.
+        """A namespaced kind id must count exactly like a built-in one.
 
         The verdict and every open-request count key on request status, so swapping
         ``paper`` for ``pack:market-data/supplier_quote`` may not move a single field.
@@ -2141,7 +2141,7 @@ question: Does cache invalidation work?
         self.assertEqual(["req-needs-evidence"], pack["questions"]["blocked_open_request_ids"])
 
     def test_structured_data_kind_reaches_the_same_blocked_on_sources_verdict(self):
-        """CR-4 added ``structured_data`` as a built-in; it is not a special case."""
+        """Structured request routing added ``structured_data`` as a built-in; it is not a special case."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             builtin = self.blocked_on_one_request(root, "paper-kind-workspace", {"kind": "paper"})

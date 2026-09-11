@@ -35,8 +35,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 
 
-SCALAR_SAFETY_RESOLVE = load_script_module("cr7_scalar_safety_resolve", "question_resolve.py")
-SCALAR_SAFETY_CLAIM = load_script_module("cr7_scalar_safety_claim", "question_claim.py")
+SCALAR_SAFETY_RESOLVE = load_script_module("grounding_scalar_safety_resolve", "question_resolve.py")
+SCALAR_SAFETY_CLAIM = load_script_module("grounding_scalar_safety_claim", "question_claim.py")
 
 
 # Values chosen because each one broke, or plausibly could break, the character-class rule:

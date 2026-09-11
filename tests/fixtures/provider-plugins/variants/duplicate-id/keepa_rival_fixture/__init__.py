@@ -1,6 +1,6 @@
 """A second, independently valid distribution that claims the base fixture's provider id.
 
-Installed beside ``keepa_fixture`` this is the CR-5 §2.4 collision case: two installed
+Installed beside ``keepa_fixture`` this is the provider registration collision case: two installed
 distributions claiming one id must make **both** registrations invalid, because first-wins
 would make provider behaviour depend on installation order. Everything about this
 declaration is well formed on its own — only the id is contested.

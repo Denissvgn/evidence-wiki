@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import posixpath
 import re
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
@@ -59,6 +61,98 @@ ORCHESTRATE_SKILL = REPO_ROOT / "orchestrator" / "skills" / "research-orchestrat
 DOMAIN_PACKS_README = REPO_ROOT / "domain-packs" / "README.md"
 TEMPLATE_README = REPO_ROOT / "workspace-template" / "README.md"
 PROFILE_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "workspace-init-profile.yml"
+
+
+def _tracked_repository_files() -> set[str]:
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+            capture_output=True, text=True, encoding="utf-8", check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise unittest.SkipTest(f"tracked-surface check needs a git checkout: {error}") from error
+    return set(listed.split("\0")) - {""}
+
+
+def _markdown_link_destinations(text: str):
+    """Read inline links and reference definitions outside fenced or inline code."""
+    lines = []
+    fence = None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if marker:
+            if fence is None:
+                fence = marker[1]
+            elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = None
+            lines.append("\n")
+            continue
+        lines.append("\n" if fence else re.sub(r"(`+).*?\1", "", line))
+    pattern = re.compile(
+        r'!?\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^\s()]+))'
+        r'(?:\s+(?:"[^"]*"|\x27[^\x27]*\x27))?\s*\)'
+        r'|^\s{0,3}\[[^]\n]+\]:\s*(?:<([^>\n]+)>|(\S+))',
+        re.MULTILINE,
+    )
+    for match in pattern.finditer("".join(lines)):
+        yield next(value for value in match.groups() if value is not None)
+
+
+def test_documentation_local_links_resolve_to_shipped_files():
+    tracked = _tracked_repository_files()
+    documents = [
+        name for name in sorted(tracked)
+        if name.endswith(".md") and not name.startswith("tests/")
+        and not {"raw", "sources", "wiki", ".obsidian"}.intersection(Path(name).parts)
+    ]
+    assert "README.md" in documents and "docs/library-api.md" in documents
+    missing = []
+    checked = 0
+    for name in documents:
+        for destination in _markdown_link_destinations((REPO_ROOT / name).read_text(encoding="utf-8")):
+            parsed = urlsplit(destination)
+            if not parsed.path:
+                continue
+            if parsed.scheme or parsed.netloc:
+                prefix = "/Denissvgn/evidence-wiki/"
+                if parsed.netloc.lower() != "github.com" or not parsed.path.startswith(prefix):
+                    continue
+                tail = parsed.path[len(prefix):].split("/", 2)
+                if len(tail) != 3 or tail[0] not in {"tree", "blob"} or tail[1] != "main":
+                    continue
+                target = unquote(tail[2])
+            else:
+                path = unquote(parsed.path)
+                target = posixpath.normpath(
+                    path.lstrip("/") if path.startswith("/")
+                    else posixpath.join(Path(name).parent.as_posix(), path)
+                )
+            checked += 1
+            if target not in tracked and not any(
+                entry.startswith(target.rstrip("/") + "/") for entry in tracked
+            ):
+                missing.append(f"{name}: {destination} resolves to unshipped {target}")
+    assert checked > 100, "local-link check collected suspiciously few destinations"
+    assert not missing, "\n".join(missing)
+
+
+def test_code_surfaces_do_not_embed_planning_identifiers():
+    # Task-shaped annotations are distinct from product terms, scientific symbols,
+    # linter codes, timestamps, and ordinary algorithm stages.
+    pattern = re.compile(
+        r"(?i)(?<![A-Za-z0-9])(?:CR[-_]?(?:EW[-_])?\d+(?:[a-z](?![a-z]))?"
+        r"|EW[-_]BUG[-_]\d+|SRSE[-_]\d+|SEC[-_][A-Z]\d+(?:[-_/]T?\d+)*"
+        r"|E\d{1,2}[-_/]T?\d+)(?![A-Za-z0-9])"
+    )
+    paths = [name for name in sorted(_tracked_repository_files()) if name.endswith(".py")]
+    assert "tests/test_documented_workflows.py" in paths
+    offenders = [
+        f"{name}:{number}: {line.strip()}"
+        for name in paths
+        for number, line in enumerate((REPO_ROOT / name).read_text(encoding="utf-8").splitlines(), 1)
+        if pattern.search(line)
+    ]
+    assert not offenders, "\n".join(offenders)
 
 
 def test_upgrade_documentation_agrees_on_locks_conditional_log_and_dry_run():
@@ -396,7 +490,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
             "fail-closed",
         ):
             self.assertIn(expected, record_format)
-        # CR-7 adds no configuration; say so where an operator would go looking for a knob.
+        # structured grounding adds no configuration; say so where an operator would go looking for a knob.
         self.assertIn("Structured-view sidecars need no configuration.", research_yml)
 
     def test_documented_grounding_write_path_produces_the_documented_bytes(self):
@@ -529,23 +623,13 @@ class DocumentedWorkflowTests(unittest.TestCase):
         self.assertIn("coverage_manifest", research_yml)
 
     def test_no_shipped_surface_teaches_a_retired_scope_example(self):
-        """Retired scope exemplars must not survive anywhere a consumer copies from.
+        """Retired scope examples must not survive in tracked consumer-facing surfaces.
 
-        CR-12 retired `candidate=acme-widget` because it paired `facet_id` with a
-        per-question key, teaching a key set `fulfill --require-scope` cannot satisfy.
-        Five surfaces were updated and a sixth — the JSON form in mcp-server.md — was
-        missed, because the acceptance check grepped the two *syntaxes* its author had
-        just edited (`candidate=`, `candidate: `) rather than the *value*. Independent
-        review caught it.
-
-        So this greps values across every shipped surface, and is the reason a retired
-        example cannot come back: retiring one means adding it here, and no one has to
-        remember which spellings exist. The repo has `sync_vendored_scripts.py --check`
-        for template↔mirror drift and `llm-wiki lint --strict` for code↔wiki drift; this
-        is the doc↔doc equivalent, which is the gap that let the sixth surface go stale.
+        Scan values across Markdown, code and structured configuration so alternate
+        spellings of the same example cannot evade the check.
         """
         retired = {
-            "acme-widget": "CR-12: paired facet_id with a per-question candidate key",
+            "acme-widget": "paired facet_id with a per-question candidate key",
         }
         # Shipped means tracked. Deriving the sweep from the index rather than from a path
         # list is what keeps it honest: gitignored working areas (`docs/CR/`,

@@ -1,13 +1,8 @@
-"""End-to-end acceptance for scoped `human_review` escalation (CR-1).
+"""Scoped human review through initialized workspace commands.
 
-Each test method is one phase of the change request's acceptance criteria, driven through
-the shipped commands against a real initialized workspace rather than through unit seams:
-
-1. Scoped escalation keeps the rest of the workspace moving.
-2. A review recorded from a host approval queue satisfies the publication gate.
-3. A rejected review returns the question to ordinary open work.
-4. A review queue nobody works re-escalates and re-freezes the workspace.
-5. The default configuration reproduces the previous workspace-wide behavior.
+Scoped escalation keeps unrelated work moving. Recorded approval satisfies the
+publication gate, rejection returns the question to open work, and an unattended
+review queue eventually re-escalates. The default remains workspace-wide escalation.
 """
 
 import contextlib
@@ -52,8 +47,8 @@ class ReviewEscalationAcceptanceTests(unittest.TestCase):
     def build_workspace(self, root: Path, *, scoped: bool) -> Path:
         """A workspace with one question parked behind two manual-review policies.
 
-        ``scoped`` selects the CR-1 configuration; without it the workspace keeps the
-        previous behavior, which is what phase 5 asserts.
+        ``scoped`` selects the scoped review configuration; without it the workspace keeps the
+        default workspace-wide escalation behavior.
         """
         root.mkdir(parents=True, exist_ok=True)
         target = root / "review-workspace"
@@ -297,9 +292,9 @@ class ReviewEscalationAcceptanceTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    # ----- phase 1 -------------------------------------------------------------------
+    # ----- scoped review -------------------------------------------------------------------
 
-    def test_phase_1_scoped_review_keeps_the_rest_of_the_workspace_moving(self):
+    def test_scoped_review_keeps_the_rest_of_the_workspace_moving(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.build_workspace(Path(tmpdir), scoped=True)
 
@@ -323,16 +318,16 @@ class ReviewEscalationAcceptanceTests(unittest.TestCase):
             self.assertEqual(1, mcp_payload["readiness"]["questions_awaiting_review"])
 
             # `orchestrate next` issues research work for the unparked question.
-            self.controller(target, "start", "--orchestration-id", "orch-cr1", "--agent-id", "agent-pm")
-            code, order = self.controller(target, "next", "--orchestration-id", "orch-cr1")
+            self.controller(target, "start", "--orchestration-id", "orch-scoped-review", "--agent-id", "agent-pm")
+            code, order = self.controller(target, "next", "--orchestration-id", "orch-scoped-review")
 
             self.assertEqual(0, code)
             self.assertEqual("orchestration_work_order", order["artifact_type"])
             self.assertEqual("research", order["phase"])
             self.assertEqual([OPEN_SLUG], order["scope"]["question_slugs"])
 
-    def test_phase_1b_workspace_with_only_pending_reviews_is_never_complete(self):
-        """The `complete` fall-through the backlog names as this CR's most dangerous mistake."""
+    def test_scoped_workspace_with_only_pending_reviews_is_never_complete(self):
+        """Pending reviews must never fall through to complete."""
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.build_workspace(Path(tmpdir), scoped=True)
             self.park_remaining_question(target)
@@ -376,9 +371,9 @@ class ReviewEscalationAcceptanceTests(unittest.TestCase):
                 sorted(finished_event["data"]["question_slugs"]),
             )
 
-    # ----- phase 2 -------------------------------------------------------------------
+    # ----- recorded review -------------------------------------------------------------------
 
-    def test_phase_2_recorded_external_review_answers_and_clears_the_safety_gate(self):
+    def test_recorded_external_review_answers_and_clears_the_safety_gate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.build_workspace(Path(tmpdir), scoped=True)
 
@@ -424,9 +419,9 @@ class ReviewEscalationAcceptanceTests(unittest.TestCase):
             _, reviewed_readiness = self.readiness_document(target)
             self.assertEqual([], reviewed_readiness["reasons"]["safety"])
 
-    # ----- phase 3 -------------------------------------------------------------------
+    # ----- rejected review -------------------------------------------------------------------
 
-    def test_phase_3_rejected_review_returns_the_question_to_open_work(self):
+    def test_rejected_review_returns_the_question_to_open_work(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.build_workspace(Path(tmpdir), scoped=True)
 
@@ -475,9 +470,9 @@ class ReviewEscalationAcceptanceTests(unittest.TestCase):
             _, publication = self.readiness_document(target)
             self.assertEqual([], publication["reasons"]["safety"])
 
-    # ----- phase 4 -------------------------------------------------------------------
+    # ----- stale queue -------------------------------------------------------------------
 
-    def test_phase_4_stale_review_queue_re_escalates_and_refuses_orchestration(self):
+    def test_stale_review_queue_re_escalates_and_refuses_orchestration(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.build_workspace(Path(tmpdir), scoped=True)
             self.write_config(target, scoped=True, max_pending_review_hours=24)
@@ -517,9 +512,9 @@ class ReviewEscalationAcceptanceTests(unittest.TestCase):
             self.assertEqual("in_progress", recovered["readiness"]["verdict"])
             self.assertEqual(0, recovered["readiness"]["questions_awaiting_review"])
 
-    # ----- phase 5 -------------------------------------------------------------------
+    # ----- workspace-wide default -------------------------------------------------------------------
 
-    def test_phase_5_default_configuration_reproduces_workspace_wide_escalation(self):
+    def test_default_configuration_reproduces_workspace_wide_escalation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.build_workspace(Path(tmpdir), scoped=False)
 
@@ -559,7 +554,7 @@ class ReviewEscalationAcceptanceTests(unittest.TestCase):
     # ----- cross-phase invariant -----------------------------------------------------
 
     def test_scope_never_changes_whether_review_happens(self):
-        """The gate the CR must not weaken: an unreviewed answer never ships, either way."""
+        """An answer requiring review cannot ship before that review, under either escalation scope."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             scoped = self.build_workspace(root / "scoped", scoped=True)

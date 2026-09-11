@@ -1,6 +1,6 @@
 """`normalize_verify.py` — the entry point that makes the record format checkable.
 
-The acceptance these tests encode is CR-2's: a record written by an external normalizer
+The acceptance these tests encode is structured normalization's: a record written by an external normalizer
 is accepted on exactly the same terms as one this package wrote, and a malformed one is
 refused with a stable code naming what is wrong.
 """
@@ -452,7 +452,7 @@ class NormalizeVerifyTests(unittest.TestCase):
         self.assertEqual(1, payload["counts"]["with_structured_view"])
 
     def test_foreign_record_with_a_hand_written_sidecar_verifies_on_the_same_terms(self):
-        # The CR-2 promise applied to the sidecar: an external normalizer that writes a
+        # The structured normalization promise applied to the sidecar: an external normalizer that writes a
         # conforming sidecar and binds it correctly is first-class evidence, with no
         # adapter involved and no native provenance claimed.
         with tempfile.TemporaryDirectory() as tmpdir:

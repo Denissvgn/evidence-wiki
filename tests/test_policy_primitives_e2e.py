@@ -1,8 +1,8 @@
-"""CR-9 end to end: a domain pack's own declarations decide its own evidence policies.
+"""A domain pack's own declarations decide its own evidence policies.
 
-Before CR-9 every ``pack:<pack-name>/<policy-id>`` policy evaluated to ``manual_review``,
-including checks that were entirely deterministic over data the workspace already held.
-The other CR-9 suites test one leg each — the primitives in isolation, the evaluator seam,
+A ``pack:<pack-name>/<policy-id>`` policy without rules evaluates to ``manual_review``.
+Declared rules can decide deterministic checks over data the workspace already holds.
+The focused suites test one leg each — the primitives in isolation, the evaluator seam,
 ``pack validate``, the capability contract. This one walks what a host actually depends on,
 in a workspace built the way an operator builds one:
 
@@ -13,7 +13,7 @@ in a workspace built the way an operator builds one:
 The legs are load-bearing in sequence rather than individually. A rule verdict that never
 reaches the facet rollup changes no coverage verdict; a coverage verdict that never reaches
 ``answer`` still parks the question with a person; and a question parked with a person is
-exactly the outcome CR-9 exists to stop producing for checks a subtraction can settle.
+unnecessary when a declared deterministic rule settles every required check.
 
 Three shapes of pack policy live in the one fixture workspace, because the difference
 between them has to be the declaration and nothing else:
@@ -22,7 +22,7 @@ between them has to be the declaration and nothing else:
   human in the loop and its workspace reaches ``ship``.
 - ``supplier-is-approved`` — one policy whose rules all pass but which sets
   ``manual_review_required``, beside one the pack never gave a rule at all. Both park the
-  question, and both are cleared by CR-1's recorded-review path.
+  question, and both are cleared by scoped review's recorded-review path.
 - ``archived-quote-is-current`` — the same rules over a 50-hour-old delivery, which the
   pack's ``max_age: 48h`` bound refuses until the quote is redelivered.
 
@@ -91,7 +91,7 @@ FRESHNESS_POLICY = f"pack:{PACK_NAME}/quote-48h"
 IDENTITY_POLICY = f"pack:{PACK_NAME}/sku-matches-candidate"
 #: Rule-backed *and* flagged: every declared check passes and a person is still asked.
 REVIEWED_POLICY = f"pack:{PACK_NAME}/reviewed-quote-provider"
-#: Declared in the vocabulary with no rule at all — the pre-CR-9 outcome, kept reachable.
+#: Declared in the vocabulary with no rule at all — the legacy outcome, kept reachable.
 DEFINITION_ONLY_POLICY = f"pack:{PACK_NAME}/supplier-contract-in-force"
 ALL_PACK_POLICIES = (
     PROVIDER_POLICY,
@@ -124,7 +124,7 @@ REVIEWER = "ops-principal"
 REVIEW_REF = "approval-queue-9"
 VERIFIER = "verifier-agent"
 
-#: The result envelope CR-9 promised not to widen: a rule verdict is an ordinary policy
+#: Rule evaluation preserves the result envelope: its verdict is an ordinary policy
 #: result, so a host that reads one reads the other with no new branch.
 POLICY_RESULT_KEYS = {"policy", "verdict", "source_ids", "reasons", "remediation"}
 
@@ -728,7 +728,7 @@ class AnsweringChainTests(PolicyPrimitivesWorkspace, unittest.TestCase):
             self.assertIn("human_review_requested_at", frontmatter)
 
     def test_recording_both_reviews_answers_the_question_and_clears_the_safety_gate(self):
-        """CR-9 composed with CR-1: the reviews the pack still asks for close normally.
+        """Pack policy rules composed with scoped review: the reviews the pack still asks for close normally.
 
         Every policy here needs a person, and once each has one the workspace ships. That
         is the whole point of recording a review: export re-evaluates policies live, so an
@@ -796,11 +796,11 @@ class AnsweringChainTests(PolicyPrimitivesWorkspace, unittest.TestCase):
             )
 
     def test_a_workspace_decided_entirely_by_rules_reaches_a_shippable_verdict(self):
-        """The outcome CR-9 was filed for, stated as a publication verdict.
+        """Passing deterministic policies permit publication without unnecessary review.
 
-        Every policy on this workspace's one facet is a pack policy, and before CR-9 each
-        of them evaluated to `manual_review` — which `classify_export` reads as attention,
-        so this workspace could not have reached `ship` at all.
+        Every policy on this workspace's one facet has a passing rule.
+        A `manual_review` result would make `classify_export` report attention;
+        the resolved rule results let the workspace reach `ship`.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.stage_workspace(Path(tmpdir), slugs=(RULE_SLUG,))
@@ -825,10 +825,10 @@ class AnsweringChainTests(PolicyPrimitivesWorkspace, unittest.TestCase):
 
 
 class ScopedReviewPairingTests(PolicyPrimitivesWorkspace, unittest.TestCase):
-    """CR-1's `review.escalation_scope: question` paired with CR-9's rule verdicts.
+    """Question-scoped review combines with independently resolved policy rules.
 
     Under the default workspace scope one parked question freezes everything, so the
-    automation CR-9 adds would be invisible from the workspace verdict. Under question
+    passing rule results would be invisible from the workspace verdict. Under question
     scope the parked question is counted rather than fatal, and the rule-backed question
     resolves beside it — which is the combination `workspace-status.md` documents.
     """
@@ -912,14 +912,10 @@ class McpSurfaceTests(PolicyPrimitivesWorkspace, unittest.TestCase):
         self.assertEqual(1, status["readiness"]["questions_awaiting_review"])
 
 
-class CrNineAcceptanceCriteriaTests(PolicyPrimitivesWorkspace, unittest.TestCase):
-    """One named test per CR-9 acceptance criterion, so criterion and test read as one.
+class PackPolicyContractTests(PolicyPrimitivesWorkspace, unittest.TestCase):
+    """Pack declarations govern evidence verdicts without changing their result envelope."""
 
-    Overlap with the chains above is deliberate: a criterion nobody can point at a test for
-    is a criterion nobody checked.
-    """
-
-    def test_criterion_1_a_max_age_48h_policy_fails_a_fifty_hour_source_and_passes_a_fresh_one(self):
+    def test_a_max_age_48h_policy_fails_a_fifty_hour_source_and_passes_a_fresh_one(self):
         """Same rule, same manifest shape, same workspace — only the delivery's age differs.
 
         And no human is involved on either side: neither evaluation names a review, and
@@ -971,7 +967,7 @@ class CrNineAcceptanceCriteriaTests(PolicyPrimitivesWorkspace, unittest.TestCase
             observed["2 hours old"]["reasons"],
         )
 
-    def test_criterion_2_a_policy_mixing_primitives_and_manual_review_required_needs_both(self):
+    def test_a_policy_mixing_primitives_and_manual_review_required_needs_both(self):
         """Neither half alone decides it: the rules must pass *and* a review be recorded.
 
         The failing half is produced by taking the registration away, which is the one
@@ -1016,13 +1012,8 @@ class CrNineAcceptanceCriteriaTests(PolicyPrimitivesWorkspace, unittest.TestCase
         self.assertNotIn("requires a recorded domain review", json.dumps(flagged))
         self.assertIn(f"domain_pack.policy_rules[{REVIEWED_POLICY}]", flagged["remediation"])
 
-    def test_criterion_3_require_coverage_no_longer_routes_a_fully_primitive_question_to_review(self):
-        """The regression this criterion protects, shown against the pre-CR-9 behaviour.
-
-        The comparison workspace is the same question with the same evidence and the same
-        policy ids; only the `policy_rules` block is removed. That is the workspace CR-9
-        inherited, and it routes to `human_review` on all three policies.
-        """
+    def test_require_coverage_no_longer_routes_a_fully_primitive_question_to_review(self):
+        """Removing policy_rules restores manual review for the same evidence and policies."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
 
@@ -1052,9 +1043,9 @@ class CrNineAcceptanceCriteriaTests(PolicyPrimitivesWorkspace, unittest.TestCase
 
 
 class WritableMetadataAbsenceReviewE2ETests(PolicyPrimitivesWorkspace, unittest.TestCase):
-    """CR-10 and CR-11 meet at the supported question and answer lifecycle."""
+    """Intake metadata and evidence absence review remain consistent through answering."""
 
-    def prepare_cross_cr_workspace(
+    def prepare_metadata_review_workspace(
         self,
         root: Path,
         *,
@@ -1088,7 +1079,7 @@ class WritableMetadataAbsenceReviewE2ETests(PolicyPrimitivesWorkspace, unittest.
 
     def test_supported_intake_metadata_match_passes_and_answers(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = self.prepare_cross_cr_workspace(Path(tmpdir))
+            workspace = self.prepare_metadata_review_workspace(Path(tmpdir))
             self.assert_candidate_metadata(workspace)
 
             code, evaluated, stderr = self.run_evaluate(workspace, RULE_SLUG)
@@ -1120,7 +1111,7 @@ class WritableMetadataAbsenceReviewE2ETests(PolicyPrimitivesWorkspace, unittest.
 
     def test_metadata_mismatch_blocks_coverage_and_answer_without_status_transition(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = self.prepare_cross_cr_workspace(Path(tmpdir))
+            workspace = self.prepare_metadata_review_workspace(Path(tmpdir))
             self.rewrite_quote_sku(
                 workspace,
                 FRESH_SOURCE,
@@ -1153,7 +1144,7 @@ class WritableMetadataAbsenceReviewE2ETests(PolicyPrimitivesWorkspace, unittest.
 
     def test_absent_terminal_sku_parks_for_review_and_accepted_review_resolves(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = self.prepare_cross_cr_workspace(Path(tmpdir))
+            workspace = self.prepare_metadata_review_workspace(Path(tmpdir))
             self.rewrite_quote_sku(
                 workspace,
                 FRESH_SOURCE,
@@ -1208,7 +1199,7 @@ class WritableMetadataAbsenceReviewE2ETests(PolicyPrimitivesWorkspace, unittest.
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
 
-            corrupt = self.prepare_cross_cr_workspace(root / "corrupt")
+            corrupt = self.prepare_metadata_review_workspace(root / "corrupt")
             self.rewrite_quote_sku(
                 corrupt,
                 FRESH_SOURCE,

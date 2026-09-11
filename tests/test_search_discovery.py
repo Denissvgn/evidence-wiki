@@ -1,5 +1,5 @@
-"""Tests for the general search discovery provider (E33-T01) and the reasoned
-query planner (E33-T02).
+"""Tests for the general search discovery provider and the reasoned
+query planner.
 
 `discover_sources.py search --query TEXT` plans a small, bounded set of explained
 queries from a research need (read-only, no network). With `--execute` it runs the
@@ -40,7 +40,7 @@ REQUIRED_CANDIDATE_FIELDS = (
     "selected_for_request_id", "selected_at",
 )
 
-# Fields the planner must record for every planned query (E33-T02).
+# Fields the planner must record for every planned query.
 PLANNED_QUERY_FIELDS = ("query", "expected_source_type", "domain_allowlist", "domain_blocklist", "rationale")
 
 
@@ -131,7 +131,7 @@ class SearchTestBase(unittest.TestCase):
 
 
 class SearchQueryPlannerTests(SearchTestBase):
-    """E33-T02: planning is the read-only default; --execute runs the plan."""
+    """Planning is the read-only default; --execute runs the plan."""
 
     def test_default_plan_is_single_general_web_query(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -293,7 +293,7 @@ class SearchQueryPlannerTests(SearchTestBase):
 
 
 class SearchExecutionTests(SearchTestBase):
-    """E33-T01 backend behavior, reached through `--execute`."""
+    """Backend behavior, reached through `--execute`."""
 
     def test_fixture_results_normalize_to_candidates_and_write_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -320,7 +320,7 @@ class SearchExecutionTests(SearchTestBase):
             self.assertIn(field, candidate)
         self.assertEqual("search", candidate["provider"])
         self.assertEqual("web_page", candidate["source_type"])
-        # E33-T03: govinfo.gov is recognized as an official source via the .gov
+        # govinfo.gov is recognized as an official source via the .gov
         # top-level domain, so it is classified official_primary with an exact
         # phrase match and recommended for fetch (clean official, no risk flags).
         self.assertEqual("official_primary", candidate["trust_tier"])
@@ -630,7 +630,7 @@ class SearchExecutionTests(SearchTestBase):
 
 
 class SearchTrustRankingTests(SearchTestBase):
-    """E33-T03: search results are ranked by the trust-tier policy, not the
+    """Search results are ranked by the trust-tier policy, not the
     provider's ordering. Official sources outrank generic SEO results; mirrors,
     scraped copies, suspicious downloads, and lower-trust duplicates of an
     official source are rejected with rationale; unknown provenance is reviewed.
