@@ -137,8 +137,11 @@ the canonical actual scalar and comparison outcome. Lexical retrieval uses
 only qualified normalized records; cached indexes, current wiki answers,
 semantic providers, and unresolved source payloads are absent. Derived
 execution evidence requires a passing independently authenticated result whose
-exact inputs are qualified ancestors. Generic non-source lineage nodes and
-records declaring historical simulation are currently unsupported.
+exact inputs are qualified ancestors. Historical generations additionally
+qualify every input ancestor at their own input cutoff. Their computation and
+evaluator history must still exist by the enclosing evaluation cutoff. This
+keeps an earlier input corpus separate from the later result it produced.
+Generic non-source lineage nodes remain unsupported.
 
 The result binds request, analysis, implementation, authority, checkpoint,
 source revisions, lineage, cutoff, exclusions, and gaps. Repeating a request

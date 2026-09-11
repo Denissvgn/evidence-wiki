@@ -105,9 +105,11 @@ independent verifier rechecks all temporal claims, signatures, and proof
 bindings. Checkpoint membership and host observation times are host-attested
 facts; the bundle does not carry the full external event store.
 
-An execution record's authenticated history must also exist by the cutoff.
-Records that themselves declare historical simulation remain unsupported by
-this exporter. The replay contract is described in
+An execution record's authenticated history must also exist by the selection
+cutoff. Generations that declare their own historical input cutoff use the v3
+bundle contract. Their results may be computed later than their inputs, but
+every input and ancestor must qualify at the generation's declared cutoff.
+The replay contract is described in
 [Temporal evidence](temporal-evidence.md). Retention is host-managed; the package does not delete old
 exports, train models, construct dataset formats, or guarantee model-weight
 reproducibility.
@@ -120,7 +122,20 @@ reproducibility.
 selections produce `evidence-snapshot/v2`, with corresponding v2 manifest and
 contract versions. The v2 manifest also carries `temporal`, containing
 `checkpoint_observed_at` and an `availability` map over the exact source closure
-(null entries for audit mode). Both encodings retain the same bounds. Serialization
+(null entries for audit mode).
+
+Historical input generations produce `evidence-snapshot/v3`, with corresponding
+v3 manifest and contract versions. Its `execution_inputs.availability` map has
+one entry per included source revision. Receipts are checked for ancestors used
+by historical-available generations; unused entries make no availability claim.
+A v3 bundle may also have a v2 historical selection and its `temporal` map.
+Current-state selections omit `temporal`. All encodings retain the same bounds,
+with at most 4,096 distinct source/mode/cutoff checks for historical inputs.
+The independent verifier repeats input binding, transitive timing, availability
+authentication, and nested execution checks. It never executes a recorded tool.
+The v1 and v2 contracts continue to refuse historical input generations.
+
+Serialization
 is UTF-8 JSON with sorted keys, compact separators, preserved Unicode, no
 non-finite numbers, and one trailing newline. Duplicate keys and noncanonical
 bundle encodings refuse. Blobs are canonical base64 keyed by the SHA-256 of

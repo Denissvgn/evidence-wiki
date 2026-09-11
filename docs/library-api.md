@@ -211,7 +211,7 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "8"
+assert library_api["version"] == "9"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -246,6 +246,11 @@ The optional `market_evidence/v1` profile validates inert, bounded filing and
 price deliveries. Inspect `valid`, `completeness`, and current usage eligibility
 separately. A valid structure can contain gaps; the operation grants no rights.
 Other source kinds and existing provider selections do not acquire market requirements.
+Version `"9"` adds accepted historical execution inputs and snapshot v3.
+Every historical generation binds its inputs and their complete ancestry at its
+own cutoff; the result and its independent evaluation can occur later. Inspect
+`historical_inputs` separately from the structural execution report. Historical
+input qualification does not establish a model's training cutoff.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;

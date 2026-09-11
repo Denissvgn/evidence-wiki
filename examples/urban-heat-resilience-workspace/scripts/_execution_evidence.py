@@ -48,6 +48,9 @@ OUTCOMES = frozenset({"passed", "failed", "skipped", "inconclusive"})
 def profile_description() -> dict[str, Any]:
     return {"name": PROFILE, "record_schema": SCHEMA, "network_io_executed": False, "producer_execution": False,
             "evaluator_authentication": "external-host-policy/hmac-sha256",
+            "historical_inputs": "accepted immutable ancestry at each generation cutoff",
+            "historical_input_bounds": {"source_revisions": 64, "lineage_nodes": 128, "source_cutoffs": 4096},
+            "model_training_cutoff": "not_established",
             "authority": "evaluated_separately_from_structure", "max_files": MAX_FILES,
             "max_entries": MAX_ENTRIES, "max_bytes": MAX_BYTES}
 
@@ -174,6 +177,12 @@ def validate_generation(payload: Any, members: dict[str, dict[str, Any]], files:
         timestamp(temporal["cutoff"])
     if (temporal["mode"] == "current") != (temporal["cutoff"] is None):
         raise EvidenceInvalid("temporal_cutoff_required")
+    if temporal["mode"] != "current":
+        if timestamp(temporal["cutoff"]) > timestamp(payload["started_at"]):
+            raise EvidenceInvalid("execution_input_cutoff_after_start")
+        input_paths = {item["artifact"]["path"] for item in inputs}
+        if any(isinstance(model[field], dict) and model[field]["path"] not in input_paths for field in ("prompt", "context")):
+            raise EvidenceInvalid("execution_historical_context_input_required")
     text_list(temporal["limitations"])
     qualifications = {}
     for path in sorted(referenced):
@@ -325,7 +334,8 @@ def inspect_execution(root: Path, config: dict[str, Any], record: dict[str, Any]
             "valid": False, "reason": reason, "authority": "not_evaluated"}
 
 
-def assess_verification(report: dict[str, Any], root: Path, config: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+def assess_verification(report: dict[str, Any], root: Path, config: dict[str, Any], now: datetime | None = None,
+                        *, source_record: dict[str, Any] | None = None) -> dict[str, Any]:
     """Evaluate one live clock and external authority; never persist it as structural truth."""
     now = now or datetime.now(timezone.utc)
     result: dict[str, Any] = {"eligible": False, "reason": "execution_structure_invalid", "evaluated_at": now.isoformat(), "receipts": []}
@@ -367,6 +377,13 @@ def assess_verification(report: dict[str, Any], root: Path, config: dict[str, An
     result["eligible"] = any(receipt["positive_eligible"] and receipt["receipt_id"] == report["selected_receipt_id"]
                              for receipt in result["receipts"])
     result["reason"] = "independent_pass" if result["eligible"] else ("no_independent_pass" if result["receipts"] else "verification_receipt_missing")
+    if any(record["temporal"]["mode"] != "current" for record in report["records"]):
+        temporal = load_workspace_module(Path(__file__).resolve().parent, "_execution_temporal")
+        result["historical_inputs"] = temporal.assess_inputs(root, config, report, trust, now, source_record)
+        if not result["historical_inputs"]["eligible"]:
+            result.update(eligible=False, reason=result["historical_inputs"]["reason"])
+            for receipt in result["receipts"]:
+                receipt["positive_eligible"] = False
     return result
 
 

@@ -23,6 +23,23 @@ verification scope. Explicit `unknown` and `not-applicable` values preserve
 missing reproducibility information. The declared input workspace digest covers
 only the listed input artifacts. It does not attest to an entire repository.
 
+Historical generations declare `historical-audit` or `historical-available`
+and a cutoff no later than their start time. A later computation or evaluator
+receipt may analyze earlier inputs. A positive verification requires the exact
+input revisions and their complete ancestry in accepted host storage, with
+current retrieval permissions. Each ancestor must qualify at that generation's
+cutoff, including completed measurements and market intervals where applicable.
+Public-availability mode requires independently authenticated proof bound to
+each input revision. Missing accepted context or ambiguous revisions refuse.
+Explicit model prompt and context artifacts must also be declared inputs.
+Nested execution inputs require their own authenticated history to exist by
+the consuming generation's cutoff. Input clocks and result clocks are evaluated separately.
+
+Historical input qualification does not establish a model's training cutoff or
+promise regeneration of external model output. Keep unknown model information
+explicit and use prospective observations when training-data leakage cannot be
+excluded. Laboratory computations and market simulations share this contract.
+
 Observations, hypotheses, and evaluator receipts have different content IDs.
 History links must point to earlier records in the same episode and task.
 A hypothesis records a proposal with an inconclusive outcome. A receipt binds

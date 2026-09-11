@@ -26,7 +26,7 @@ class SnapshotFixture(UsageFixture):
         return self.workspace.usage.transact(command, artifacts=artifacts)
 
     def add_execution(self, *, source_id="execution:lab", outcome="passed", history=True, training=True,
-                      export=True, normalized=None, edit=None, extra_parents=None):
+                      export=True, normalized=None, edit=None, extra_parents=None, sign=authenticate):
         files, record = example(history=history, outcome=outcome)
         original_records = [identifier("evidence-execution-record/v1", value["payload"]) for value in record["records"]]
         original_receipts = [identifier("evidence-verification-receipt/v1", value["payload"]) for value in record["receipts"]]
@@ -41,12 +41,12 @@ class SnapshotFixture(UsageFixture):
                 if payload[key] is not None:
                     payload[key] = ids[payload[key]]
             ids[previous_id] = identifier("evidence-execution-record/v1", payload)
-            records.append(authenticate(payload, "runner", "generator"))
+            records.append(sign(payload, "runner", "generator"))
         selected_receipt = None
         for old_id, envelope in zip(original_receipts, record["receipts"], strict=True):
             payload = copy.deepcopy(envelope["payload"])
             payload["target_record_id"] = ids[payload["target_record_id"]]
-            receipts.append(authenticate(payload, "evaluator", "evaluator"))
+            receipts.append(sign(payload, "evaluator", "evaluator"))
             if old_id == record["selected_receipt_id"]:
                 selected_receipt = identifier("evidence-verification-receipt/v1", payload)
         record.update(records=records, receipts=receipts, selected_record_id=ids[record["selected_record_id"]],

@@ -770,6 +770,63 @@ TEMPORAL_PROBE = textwrap.dedent(
 )
 
 
+HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import contract, verify_snapshot
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"historical_execution": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("historical_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+        def setitem(self, mapping, key, value):
+            mapping[key] = value
+    host = data.HistoricalFixture(directory, Environment())
+    body, files = host.history(mode="historical-available")
+    report, assessment = host.assessment(body, files)
+    assert assessment["eligible"], assessment
+    assert assessment["historical_inputs"]["qualified_source_cutoffs"] == 1
+    assert [item["outcome"] for item in report["records"]] == ["failed", "inconclusive", "passed"]
+    raw, _, registration, exported = host.export(host.selection(body))
+    assert json.loads(raw)["schema_version"] == "evidence-snapshot/v3"
+    policy = host.policy_path.read_bytes()
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    result = subprocess.run([str(cli), "snapshot", "verify", "--trust-policy", str(host.policy_path)],
+                            input=raw, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["valid"]
+    repeated = host.workspace.snapshots.export(host.selection(body), registration_request_id=registration["payload"]["request_id"])
+    assert not repeated["created"] and repeated["content_hash"] == exported["content_hash"]
+    host.revoke(host.module, host.parent)
+    assert host.workspace.snapshots.check(raw)["current_use"] == "denied"
+    host.workspace.close()
+    host.root.rename(host.root.with_name("origin-moved"))
+    host.host.rename(host.host.with_name("host-moved"))
+    del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
+    del os.environ["EVIDENCE_WIKI_STATE_DIR"]
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert contract()["library_api"]["version"] == "9"
+    print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
+    '''
+)
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -861,9 +918,13 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(python), "-c", MARKET_PROBE, str(cli), str(REPO_ROOT / "tests/_market_fixture.py"),
         str(scratch / "market-evidence"),
     ], cwd=outside)
+    historical = run([
+        str(python), "-c", HISTORICAL_EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_historical_fixture.py"),
+        str(scratch / "historical-execution"),
+    ], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
-            **json.loads(temporal), **json.loads(market)}
+            **json.loads(temporal), **json.loads(market), **json.loads(historical)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

@@ -15,7 +15,7 @@ from _evidence_usage import UsageState, UsageView, current_view
 from _market_evidence import qualify_cutoff as qualify_market_cutoff
 from _policy_primitives import PolicyRuleError, RuleContext, evaluate_rule, pack_policy_rules
 from _snapshot_qualifications import qualify_source
-from _snapshot_verifier import ClaimLoader, SnapshotInvalid, binding, document, execution
+from _snapshot_verifier import ClaimLoader, SnapshotInvalid, binding, document, execution, execution_input_context
 from _structured_view import canonical_scalar, expected_matches, resolve_pointer
 from _temporal_contract import (
     BOUNDS,
@@ -137,13 +137,18 @@ class Selection:
         evidence = {} if prefix is None else {path[len(prefix) + 1:]: data for path, data in record["files"].items()
                                              if path.startswith(prefix + "/")}
         if "execution-record.json" in evidence or normalized["metadata"].get("evidence_profile") == "execution_evidence/v1":
-            execution_result = execution(evidence, record["source_id"], self.view.trust["policy"], self.cutoff)
+            execution_result = execution(evidence, record["source_id"], self.view.trust["policy"], self.cutoff, historical=True)
             require(execution_result["example"]["outcome"] == "passed", "temporal_execution_verification_failed")
             for item in execution_result["inputs"]:
                 source = self.state.revisions.get(item["source_revision"])
                 require(item["source_revision"] in ancestors and source is not None and source["source_id"] == item["source_id"]
                         and {key: item[key] for key in ("content_hash", "size_bytes")} in [binding(data) for data in source["files"].values()],
                         "temporal_execution_input_outside_qualified_lineage")
+            closure = {revision, *ancestors}
+            sources = {key: {**self.state.revisions[key], "source_revision": key} for key in closure}
+            execution_input_context(sources, {key: source["files"] for key, source in sources.items()},
+                                    {key: self.state.nodes[key] for key in closure}, self.state.availability,
+                                    self.view.trust["policy"], self.view.now, self.state.last_observed)
         return {**normalized, "times": times, "ancestors": sorted(ancestors), "qualifications": qualifications,
                 "execution": None if execution_result is None else execution_result["example"],
                 "identity": {"source_id": record["source_id"], "source_revision": revision, "host_observed_at": record["observed_at"],

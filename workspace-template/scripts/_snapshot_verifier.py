@@ -29,6 +29,9 @@ TEMPORAL_SCHEMA = "evidence-snapshot/v2"
 TEMPORAL_MANIFEST_SCHEMA = "evidence-snapshot-manifest/v2"
 TEMPORAL_SELECTION_SCHEMA = "evidence-snapshot-selection/v2"
 TEMPORAL_CONTRACT = "evidence-snapshot-contract/v2"
+EXECUTION_SCHEMA = "evidence-snapshot/v3"
+EXECUTION_MANIFEST_SCHEMA = "evidence-snapshot-manifest/v3"
+EXECUTION_CONTRACT = "evidence-snapshot-contract/v3"
 BOUNDS = {"selected_revisions": 32, "source_revisions": 64, "lineage_nodes": 128,
           "artifact_blobs": 512, "decoded_bytes": 8 * 1024 * 1024, "bundle_bytes": 16 * 1024 * 1024}
 OUTCOMES = {"passed", "failed", "skipped", "inconclusive"}
@@ -321,7 +324,8 @@ def artifact(reference: Any, members: dict[str, Any], allowed: set[str]) -> str:
     return path
 
 
-def execution(files: dict[str, bytes], source_id: str, policy: dict[str, Any], clock: datetime) -> dict[str, Any]:
+def execution(files: dict[str, bytes], source_id: str, policy: dict[str, Any], clock: datetime,
+              *, historical: bool = False) -> dict[str, Any]:
     """Recalculate execution membership, record IDs, receipt scope, and authority."""
     require("execution-record.json" in files, "snapshot_execution_record_missing")
     record = fields(document(files["execution-record.json"]), {"schema_version", "profile", "source_id", "selected_record_id",
@@ -378,6 +382,7 @@ def execution(files: dict[str, bytes], source_id: str, policy: dict[str, Any], c
             input_revisions.append({"source_id": item["source_id"], "source_revision": item["revision_id"], **binding(files[path])})
         require(payload["workspace"] == {"scope": "declared-input-artifacts", "content_hash": identifier(
             "evidence-artifact-closure/v1", {path: binding(files[path]) for path in references})}, "snapshot_workspace_binding_invalid")
+        input_paths = set(references)
         for field, allowed in (("patch", {"patch"}), ("environment", {"environment"}),
                                ("dependencies", {"dependency"}), ("container", {"environment"})):
             value = payload[field]
@@ -408,7 +413,13 @@ def execution(files: dict[str, bytes], source_id: str, policy: dict[str, Any], c
         references.add(artifact(scope["suite"], members, {"suite"}))
         require(scope["environment"] == payload["environment"], "snapshot_verification_environment_mismatch")
         temporal = fields(payload["temporal"], {"mode", "cutoff", "limitations"})
-        require(temporal["mode"] == "current" and temporal["cutoff"] is None, "snapshot_historical_execution_unsupported")
+        require(temporal["mode"] in {"current", "historical-audit", "historical-available"}
+                and (temporal["mode"] == "current") == (temporal["cutoff"] is None), "snapshot_execution_temporal_invalid")
+        if temporal["mode"] != "current":
+            require(historical, "snapshot_historical_execution_unsupported")
+            require(instant(temporal["cutoff"]) <= instant(payload["started_at"]), "execution_input_cutoff_after_start")
+            require(all(not isinstance(model[field], dict) or model[field]["path"] in input_paths for field in ("prompt", "context")),
+                    "execution_historical_context_input_required")
         for values in (payload["warnings"], payload["limits"], temporal["limitations"]):
             require(all(isinstance(v, str) and len(v) <= 4096 for v in items(values, 128)), "snapshot_execution_text_invalid")
         for path in sorted(references):
@@ -467,7 +478,76 @@ def execution(files: dict[str, bytes], source_id: str, policy: dict[str, Any], c
                          "label": "positive" if target["outcome"] == "passed" else "negative",
                          "outcome": target["outcome"], **{key: target[key] for key in (
                              "episode_id", "task_id", "run_id", "problem_id", "input_group_id", "held_out_role")}},
-            "inputs": input_revisions, "packets": qualified_packets}
+            "inputs": input_revisions, "packets": qualified_packets, "generations": list(records.values())}
+
+
+def execution_input_context(sources: dict[str, dict[str, Any]], files: dict[str, dict[str, bytes]],
+                            nodes: dict[str, dict[str, Any]], proofs: dict[str, Any], policy: dict[str, Any],
+                            clock: datetime, checkpoint_time: datetime) -> dict[str, Any]:
+    """Bind every execution input and qualify its complete ancestry at its own cutoff.
+
+    Callers supply an accepted, currently authorized closure or independently
+    verified snapshot bindings. Result availability and run authentication use
+    the enclosing clock; input availability uses each generation's cutoff.
+    """
+    require(len(sources) <= BOUNDS["source_revisions"] and len(nodes) <= BOUNDS["lineage_nodes"]
+            and set(sources) == set(files) and set(sources) <= set(nodes), "execution_input_context_bound_exceeded")
+    require(sum(len(raw) for group in files.values() for raw in group.values()) <= BOUNDS["decoded_bytes"],
+            "execution_input_context_bound_exceeded")
+    require(checkpoint_time <= clock, "execution_input_checkpoint_after_clock")
+    closures, originals, runs = {}, {}, {}
+    deadlines = [instant(policy["expires_at"])]
+
+    def ancestors(revision: str, active: set[str]) -> set[str]:
+        require(revision in nodes and revision not in active and len(active) <= 64, "execution_input_lineage_incomplete_or_cyclic")
+        if revision not in closures:
+            result = {revision}
+            for parent in nodes[revision]["parents"]:
+                result.update(ancestors(parent, active | {revision}))
+            closures[revision] = result
+        return closures[revision]
+
+    for revision, source in sources.items():
+        prefix = source["descriptor"]["evidence_root"]
+        originals[revision] = {} if prefix is None else {
+            path[len(prefix) + 1:]: raw for path, raw in files[revision].items() if path.startswith(prefix + "/")
+        }
+        if "execution-record.json" in originals[revision]:
+            runs[revision] = execution(originals[revision], source["source_id"], policy, clock, historical=True)
+            captured = document(originals[revision]["execution-record.json"])
+            deadlines.extend(instant(envelope["authentication"]["expires_at"])
+                             for group in ("records", "receipts") for envelope in captured[group])
+            for item in runs[revision]["inputs"]:
+                parent = item["source_revision"]
+                require(parent in ancestors(revision, set()) - {revision} and parent in sources
+                        and sources[parent]["source_id"] == item["source_id"]
+                        and {key: item[key] for key in ("content_hash", "size_bytes")} in (binding(raw) for raw in files[parent].values()),
+                        "snapshot_execution_input_lineage_missing")
+    checked = set()
+    historical = False
+    for result in runs.values():
+        for generation in result["generations"]:
+            settings = generation["temporal"]
+            if settings["mode"] == "current":
+                continue
+            historical = True
+            cutoff = instant(settings["cutoff"])
+            for item in generation["inputs"]:
+                for parent in ancestors(item["revision_id"], set()):
+                    key = (parent, settings["mode"], cutoff)
+                    if key in checked:
+                        continue
+                    require(len(checked) < 4096, "execution_temporal_check_bound_exceeded")
+                    require(parent in sources, "execution_historical_non_source_ancestor_unsupported")
+                    proof = proofs.get(parent) if settings["mode"] == "historical-available" else None
+                    require(settings["mode"] != "historical-available" or proof is not None,
+                            "execution_independent_availability_missing")
+                    temporal_source(sources[parent], files[parent], proof, policy, settings, checkpoint_time)
+                    if parent in runs:
+                        execution(originals[parent], sources[parent]["source_id"], policy, cutoff, historical=True)
+                    checked.add(key)
+    return {"historical": historical, "complete": True, "qualified_source_cutoffs": len(checked),
+            "bound": 4096, "model_training_cutoff": "not_established", "valid_until": min(deadlines).isoformat()}
 
 
 def validate_files(members: Any, blobs: dict[str, bytes]) -> dict[str, bytes]:
@@ -512,13 +592,14 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
                       qualify_source=None) -> dict[str, Any]:
     """Verify independent bindings; current_time is reserved for host reconciliation."""
     bundle = fields(document(data), {"schema_version", "snapshot_id", "manifest", "registration", "blobs"})
-    temporal = bundle["schema_version"] == TEMPORAL_SCHEMA
-    contract = TEMPORAL_CONTRACT if temporal else CONTRACT
-    manifest_schema = TEMPORAL_MANIFEST_SCHEMA if temporal else MANIFEST_SCHEMA
-    require(bundle["schema_version"] in {SCHEMA, TEMPORAL_SCHEMA} and canonical(bundle) == data, "snapshot_encoding_unsupported")
+    historical_inputs = bundle["schema_version"] == EXECUTION_SCHEMA
+    temporal = bundle["schema_version"] == TEMPORAL_SCHEMA or historical_inputs and "temporal" in bundle["manifest"]
+    contract = EXECUTION_CONTRACT if historical_inputs else TEMPORAL_CONTRACT if temporal else CONTRACT
+    manifest_schema = EXECUTION_MANIFEST_SCHEMA if historical_inputs else TEMPORAL_MANIFEST_SCHEMA if temporal else MANIFEST_SCHEMA
+    require(bundle["schema_version"] in {SCHEMA, TEMPORAL_SCHEMA, EXECUTION_SCHEMA} and canonical(bundle) == data, "snapshot_encoding_unsupported")
     manifest = fields(bundle["manifest"], {"schema_version", "contract", "exporter", "selection", "captured_state", "policy",
                                           "sources", "lineage", "examples", "exclusions", "qualifications", "coverage", "bounds"}
-                      | ({"temporal"} if temporal else set()))
+                      | ({"temporal"} if temporal else set()) | ({"execution_inputs"} if historical_inputs else set()))
     require(manifest["schema_version"] == manifest_schema and manifest["contract"] == contract and manifest["bounds"] == BOUNDS,
             "snapshot_contract_unsupported")
     require(digest(bundle["snapshot_id"]) == identifier(manifest_schema, manifest), "snapshot_manifest_digest_mismatch")
@@ -594,6 +675,9 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
         sources[revision], files_by_revision[revision] = source, files
     require(list(sources) == sorted(sources) and referenced == set(blobs), "snapshot_artifact_closure_incomplete")
     require(not temporal or set(proofs) == set(sources), "snapshot_temporal_closure_incomplete")
+    if historical_inputs:
+        input_proofs = fields(manifest["execution_inputs"], {"availability"})["availability"]
+        require(isinstance(input_proofs, dict) and set(input_proofs) == set(sources), "snapshot_execution_input_proofs_incomplete")
     nodes = {}
     for node in items(manifest["lineage"], BOUNDS["lineage_nodes"], 1):
         fields(node, {"node_id", "kind", "parents", "source_id", "depth"})
@@ -638,9 +722,9 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
         prefix = source["descriptor"]["evidence_root"]
         require(prefix is not None, "snapshot_execution_record_missing")
         originals = {path[len(prefix) + 1:]: raw for path, raw in files_by_revision[revision].items() if path.startswith(prefix + "/")}
-        result = execution(originals, source["source_id"], policy, clock)
+        result = execution(originals, source["source_id"], policy, clock, historical=historical_inputs)
         if temporal:
-            execution(originals, source["source_id"], policy, instant(request["temporal"]["cutoff"]))
+            execution(originals, source["source_id"], policy, instant(request["temporal"]["cutoff"]), historical=historical_inputs)
         require(example == {"source_revision": revision, **result["example"]}, "snapshot_example_binding_mismatch")
         require(example["label"] != "negative" or request["include_negative_examples"], "snapshot_negative_not_requested")
         for item in result["inputs"]:
@@ -657,15 +741,18 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
         originals = {path[len(prefix) + 1:]: raw for path, raw in files_by_revision[revision].items()
                      if prefix is not None and path.startswith(prefix + "/")}
         if "execution-record.json" in originals:
-            result = execution(originals, source["source_id"], policy, clock)
+            result = execution(originals, source["source_id"], policy, clock, historical=historical_inputs)
             if temporal:
-                execution(originals, source["source_id"], policy, instant(request["temporal"]["cutoff"]))
+                execution(originals, source["source_id"], policy, instant(request["temporal"]["cutoff"]), historical=historical_inputs)
             for item in result["inputs"]:
                 parent = item["source_revision"]
                 require(parent in ancestors(revision, set()) - {revision} and parent in sources
                         and sources[parent]["source_id"] == item["source_id"]
                         and {key: item[key] for key in ("content_hash", "size_bytes")} in sources[parent]["files"].values(),
                         "snapshot_execution_input_lineage_missing")
+    if historical_inputs:
+        result = execution_input_context(sources, files_by_revision, nodes, input_proofs, policy, clock, captured)
+        require(result["historical"], "snapshot_execution_contract_unnecessary")
     excluded = []
     for item in items(manifest["exclusions"], BOUNDS["selected_revisions"]):
         fields(item, {"source_revision", "reason"})

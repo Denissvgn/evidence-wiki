@@ -13,6 +13,9 @@ from _snapshot_qualifications import qualify_source
 from _snapshot_verifier import (
     BOUNDS,
     CONTRACT,
+    EXECUTION_CONTRACT,
+    EXECUTION_MANIFEST_SCHEMA,
+    EXECUTION_SCHEMA,
     MANIFEST_SCHEMA,
     SCHEMA,
     TEMPORAL_CONTRACT,
@@ -23,6 +26,7 @@ from _snapshot_verifier import (
     canonical,
     document,
     execution,
+    execution_input_context,
     identifier,
     instant,
     name,
@@ -80,6 +84,7 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
         require(event is not None, "snapshot_temporal_checkpoint_unknown")
         temporal_state = UsageState(state.root, state.state_id, canonical({**state.document, "events": state.events[:event["sequence"]]}))
     examples, exclusions, all_nodes, all_files = [], [], set(), {}
+    historical_inputs = False
     for revision in request["source_revisions"]:
         try:
             require(revision in state.revisions, "snapshot_source_revision_unknown")
@@ -90,10 +95,10 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
             prefix = record["descriptor"]["evidence_root"]
             require(prefix is not None, "snapshot_execution_record_missing")
             originals = {path[len(prefix) + 1:]: raw for path, raw in record["files"].items() if path.startswith(prefix + "/")}
-            result = execution(originals, record["source_id"], policy, frozen.now)
-            execution(originals, record["source_id"], policy, view.now)
+            result = execution(originals, record["source_id"], policy, frozen.now, historical=True)
+            execution(originals, record["source_id"], policy, view.now, historical=True)
             if temporal is not None:
-                execution(originals, record["source_id"], policy, instant(temporal["cutoff"]))
+                execution(originals, record["source_id"], policy, instant(temporal["cutoff"]), historical=True)
             require(result["example"]["label"] != "negative" or request["include_negative_examples"], "snapshot_negative_not_requested")
             for item in result["inputs"]:
                 parent = item["source_revision"]
@@ -121,10 +126,10 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
                 originals = {path[len(ancestor_prefix) + 1:]: raw for path, raw in files[node_id].items()
                              if ancestor_prefix is not None and path.startswith(ancestor_prefix + "/")}
                 if node_id != revision and "execution-record.json" in originals:
-                    execution(originals, source["source_id"], policy, frozen.now)
-                    ancestor = execution(originals, source["source_id"], policy, view.now)
+                    execution(originals, source["source_id"], policy, frozen.now, historical=True)
+                    ancestor = execution(originals, source["source_id"], policy, view.now, historical=True)
                     if temporal is not None:
-                        execution(originals, source["source_id"], policy, instant(temporal["cutoff"]))
+                        execution(originals, source["source_id"], policy, instant(temporal["cutoff"]), historical=True)
                     for item in ancestor["inputs"]:
                         parent = item["source_revision"]
                         require(parent in approved(view, node_id, request) - {node_id} and parent in state.revisions
@@ -134,6 +139,10 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
                                 "snapshot_execution_input_lineage_missing")
             require(len(all_nodes | closure) <= BOUNDS["lineage_nodes"]
                     and len(set(all_files) | set(files)) <= BOUNDS["source_revisions"], "snapshot_closure_bound_exceeded")
+            input_context = execution_input_context({key: frozen_source(key, state.revisions[key]) for key in files}, files,
+                                                     {key: state.nodes[key] for key in closure}, state.availability,
+                                                     policy, view.now, state.last_observed)
+            historical_inputs |= input_context["historical"]
             examples.append({"source_revision": revision, **result["example"]})
             all_nodes.update(closure)
             all_files.update(files)
@@ -144,8 +153,9 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
     require(len(blobs) <= BOUNDS["artifact_blobs"] and sum(map(len, blobs.values())) <= BOUNDS["decoded_bytes"],
             "snapshot_blob_bound_exceeded")
     sources = [frozen_source(revision, state.revisions[revision]) for revision in sorted(all_files)]
-    contract = TEMPORAL_CONTRACT if temporal is not None else CONTRACT
-    manifest = {"schema_version": TEMPORAL_MANIFEST_SCHEMA if temporal is not None else MANIFEST_SCHEMA, "contract": contract,
+    contract = EXECUTION_CONTRACT if historical_inputs else TEMPORAL_CONTRACT if temporal is not None else CONTRACT
+    schema = EXECUTION_MANIFEST_SCHEMA if historical_inputs else TEMPORAL_MANIFEST_SCHEMA if temporal is not None else MANIFEST_SCHEMA
+    manifest = {"schema_version": schema, "contract": contract,
                 "exporter": {"name": "evidence-wiki", "version": contract, "implementation": implementation_identity()},
                 "selection": request,
                 "captured_state": {"state_id": state.state_id, "workspace_binding": state.binding,
@@ -161,6 +171,8 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
                              "included_count": len(examples), "excluded_count": len(exclusions),
                              "source_count": len(sources), "lineage_count": len(all_nodes), "blob_count": len(blobs)},
                 "bounds": dict(BOUNDS)}
+    if historical_inputs:
+        manifest["execution_inputs"] = {"availability": {revision: state.availability.get(revision) for revision in sorted(all_files)}}
     if temporal_state is not None:
         require(all(state.nodes[node]["kind"] == "source" for node in all_nodes), "snapshot_temporal_non_source_lineage_unsupported")
         manifest["temporal"] = {"checkpoint_observed_at": temporal_state.last_observed.isoformat(),
@@ -195,7 +207,8 @@ def registered_bundle(root: Path, view: UsageView, request: dict[str, Any], requ
     base = UsageState(root, view.state.state_id, canonical({**view.state.document, "events": view.state.events[:event["sequence"] - 1]}))
     historical = UsageView(base, view.trust, base.last_observed)
     manifest, blobs = candidate(historical, request)
-    bundle = {"schema_version": TEMPORAL_SCHEMA if "temporal" in request else SCHEMA,
+    schema = EXECUTION_SCHEMA if "execution_inputs" in manifest else TEMPORAL_SCHEMA if "temporal" in request else SCHEMA
+    bundle = {"schema_version": schema,
               "snapshot_id": identifier(manifest["schema_version"], manifest), "manifest": manifest,
               "registration": event["command"], "blobs": {key: base64.b64encode(raw).decode("ascii") for key, raw in sorted(blobs.items())}}
     data = canonical(bundle)

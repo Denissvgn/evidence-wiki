@@ -49,7 +49,7 @@ def validate_execution(project_root: Path, source_id: str) -> dict[str, Any]:
     config, record = selected_source(project_root, source_id)
     execution = load_workspace_module(Path(__file__).resolve().parent, "_execution_evidence")
     report = execution.inspect_execution(project_root, config, record)
-    return {**report, "verification": execution.assess_verification(report, project_root, config)}
+    return {**report, "verification": execution.assess_verification(report, project_root, config, source_record=record)}
 
 
 def validate_market(project_root: Path, source_id: str) -> dict[str, Any]:

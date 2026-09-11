@@ -1936,7 +1936,8 @@ def evaluate_source_policy(
         verdict = VERDICT_OK
         for source_id in present:
             report = execution.inspect_execution(inputs.project_root, inputs.config, inputs.manifest_records[source_id])
-            assessment = execution.assess_verification(report, inputs.project_root, inputs.config, evaluated_at)
+            assessment = execution.assess_verification(report, inputs.project_root, inputs.config, evaluated_at,
+                                                        source_record=inputs.manifest_records[source_id])
             reasons.append(f"{source_id}: {assessment['reason']}")
             if not assessment["eligible"]:
                 verdict = VERDICT_FAIL
