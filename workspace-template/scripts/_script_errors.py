@@ -344,6 +344,9 @@ _REMEDIATIONS = {
     "EVIDENCE_TEMPORAL_REFUSED": (
         "Check the bounded request, immutable source clocks, host checkpoint and independent authority."
     ),
+    "EVIDENCE_ASSESSMENT_REFUSED": (
+        "Check the bounded request, current source revisions, assessment authority and host checkpoint."
+    ),
     "SOURCE_NOT_NORMALIZABLE": (
         "The manifest holds this source but no extractor in this package handles it. Check its kind and "
         "raw_paths with scripts/source_inventory.py --report, or write the record by hand to the contract "

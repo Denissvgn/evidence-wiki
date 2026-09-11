@@ -60,7 +60,7 @@ importantly, what it does not.
 
 ## The Surface
 
-Forty operations. Most hang off an open handle, in namespaces; the
+Most operations hang off an open handle, in namespaces; the
 exceptions are `Workspace.open` itself and the three module-level functions that
 belong to no single workspace.
 
@@ -123,6 +123,20 @@ See [Temporal evidence](temporal-evidence.md) for explicit source clocks,
 accepted checkpoints, independent public-availability receipts, and replay
 limits. Selection, lexical retrieval, declarative facets, and scalar grounding
 share the same cutoff. Current retrieval permission remains mandatory.
+
+**`ws.assessments`** — authenticated selected evidence and current refresh:
+
+| Operation | Signature |
+| --- | --- |
+| `assessments.prepare` | `ws.assessments.prepare(request: dict) -> dict` |
+| `assessments.issue` | `ws.assessments.issue(envelope: dict) -> dict` |
+| `assessments.check` | `ws.assessments.check(envelope: dict) -> dict` |
+| `assessments.plan_refresh` | `ws.assessments.plan_refresh(request: dict) -> dict` |
+| `assessments.apply_refresh` | `ws.assessments.apply_refresh(envelope: dict) -> dict` |
+
+See [Authenticated evidence assessments](evidence-assessments.md) for host
+attestation, current-use verification, explicit validity, bounded refresh and
+retained history. Host action approval and execution remain separate.
 
 **`ws.snapshots`** and `evidence_wiki.verify_snapshot` — frozen evidence:
 
@@ -256,6 +270,10 @@ snapshot v4 with explicitly declared execution profiles. Existing generic
 execution records retain their contract. The [simulation profile](market-simulation.md)
 recalculates bounded portfolio results and qualifies preselected configuration
 without starting a runner or adding a feed dependency.
+Version `"11"` adds the five `assessments` operations and their versioned
+capabilities. Assessment checks return current eligibility; invalid operations
+raise `EvidenceWikiError` with `EVIDENCE_ASSESSMENT_REFUSED`. Signed issuance and
+refresh application use the existing host usage ledger and checkpoint contract.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;

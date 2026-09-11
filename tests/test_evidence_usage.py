@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -48,25 +48,28 @@ def test_separate_permissions_and_exact_originals(usage):
 
 def test_grant_expiring_during_read_cannot_return_an_eligible_result(usage, monkeypatch):
     module, fixture = usage
-    fixture.transact(module, "initialize")
-    body, files = fixture.source()
-    body["grant"]["payload"]["expires_at"] = "2026-09-11T00:00:00Z"
-    body["grant"] = authenticate(body["grant"]["payload"], "owner", "usage")
-    fixture.transact(module, "deposit", body, files)
+    started = datetime.now(timezone.utc)
+    deadline = started + timedelta(hours=1)
 
     class Clock:
-        value = datetime(2026, 9, 10, 23, 59, 59, tzinfo=timezone.utc)
+        value = started
 
         @classmethod
         def now(cls, zone):
             return cls.value
 
     monkeypatch.setattr(module, "datetime", Clock)
+    fixture.transact(module, "initialize")
+    body, files = fixture.source()
+    body["grant"]["payload"]["expires_at"] = deadline.isoformat()
+    body["grant"] = authenticate(body["grant"]["payload"], "owner", "usage")
+    fixture.transact(module, "deposit", body, files)
+
     with pytest.raises(ValueError, match="usage_outside_validity"):
         with module.current_view(fixture.root, fixture.config) as view:
             assert view.check(body["source_revision"], uses=["training"],
                               purpose="training-snapshot", consumer="evidence-wiki")["eligible"]
-            Clock.value = datetime(2026, 9, 11, tzinfo=timezone.utc)
+            Clock.value = deadline
 
 
 def test_materialization_rechecks_authority_before_rename(tmp_path):

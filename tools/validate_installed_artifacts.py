@@ -821,7 +821,7 @@ HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
     del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
     del os.environ["EVIDENCE_WIKI_STATE_DIR"]
     assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
-    assert contract()["library_api"]["version"] == "10"
+    assert contract()["library_api"]["version"] == "11"
     print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
     '''
 )
@@ -879,6 +879,78 @@ SIMULATION_PROBE = textwrap.dedent(
     assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
     assert contract()["evidence_snapshots"]["optional_execution_profiles"] == ["market-simulation/v1"]
     print(json.dumps({"market_simulation": "independently_recalculated", "profiled_snapshot": "independent_offline_verification"}))
+    '''
+)
+
+
+ASSESSMENT_PROBE = textwrap.dedent(
+    r'''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import Workspace, contract
+    from evidence_wiki.errors import EvidenceWikiError
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"evidence_assessments": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("assessment_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+    def initialize(profile):
+        result = subprocess.run([str(cli), "init", "--profile", str(profile)], capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr
+    host = data.AssessmentFixture(directory, Environment(), initialize)
+    with Workspace.open(host.root) as workspace:
+        host.checkpoint = workspace.usage.transact(host.command("initialize"))["checkpoint"]
+        body, files = host.temporal_source()
+        host.checkpoint = workspace.usage.transact(host.command("deposit", body), artifacts=files)["checkpoint"]
+        def command(operation, value):
+            result = subprocess.run([str(cli), "assessments", operation, "--target", str(host.root)],
+                                    input=json.dumps(value), capture_output=True, text=True, timeout=60)
+            assert result.returncode == 0, result.stderr
+            return json.loads(result.stdout)
+        prepared = command("prepare", host.request())
+        envelope = host.sign(prepared["registration"])
+        receipt = command("issue", envelope)
+        host.checkpoint = receipt["checkpoint"]
+        assert workspace.assessments.issue(envelope) == receipt
+        assert workspace.assessments.check(envelope)["eligible"]
+        assert command("check", envelope)["external_action_authorized"] is False
+        corrupt = json.loads(json.dumps(envelope))
+        corrupt["payload"]["body"]["assessment"]["publication"]["export"]["questions"][0]["answer_summary"] = "forged"
+        before = (host.host / "evidence-state.json").read_bytes()
+        try:
+            workspace.assessments.issue(corrupt)
+        except EvidenceWikiError as exc:
+            assert exc.error_code == "EVIDENCE_ASSESSMENT_REFUSED"
+        else:
+            raise AssertionError("altered assessment was accepted")
+        assert (host.host / "evidence-state.json").read_bytes() == before
+        revocation = {"source_id": body["source_id"], "scope": "revision", "source_revision": body["source_revision"], "reason": "owner-withdrawal"}
+        host.checkpoint = workspace.usage.transact(host.command("revoke", revocation))["checkpoint"]
+        assert not workspace.assessments.check(envelope)["eligible"]
+        refresh = workspace.assessments.plan_refresh(host.refresh())
+        assert refresh["plan"]["coverage"]["complete"] and len(refresh["plan"]["entries"]) == 1
+        application = host.sign(refresh["application"])
+        applied = command("apply-refresh", application)
+        assert workspace.assessments.apply_refresh(application) == applied
+        assert workspace.assessments.check(envelope)["reasons"] == ["assessment_invalidated"]
+        assert command("plan-refresh", host.refresh())["plan"]["entries"] == []
+        assert contract()["library_api"]["version"] == "11"
+    print(json.dumps({"evidence_assessments": "authenticated_cli_api_parity", "assessment_refresh": "revocation_and_idempotent_apply"}))
     '''
 )
 
@@ -982,9 +1054,14 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(python), "-c", SIMULATION_PROBE, str(cli), str(REPO_ROOT / "tests/_simulation_fixture.py"),
         str(scratch / "market-simulation"),
     ], cwd=outside)
+    assessments = run([
+        str(python), "-c", ASSESSMENT_PROBE, str(cli), str(REPO_ROOT / "tests/_assessment_fixture.py"),
+        str(scratch / "assessment-evidence"),
+    ], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
-            **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation)}
+            **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
+            **json.loads(assessments)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

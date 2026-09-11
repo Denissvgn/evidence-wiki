@@ -231,6 +231,7 @@ class EmittedCodeFamilyTests(unittest.TestCase):
     NOT_ERROR_CODES = {
         "O_BINARY": "os.open flag",
         "O_NOFOLLOW": "os.open flag",
+        "ROUND_HALF_EVEN": "decimal rounding mode recorded in simulation results",
         "EVIDENCE_WIKI_HANDOFF_SECRET": "environment variable name",
         "EVIDENCE_WIKI_SINGLE_WRITER": "environment variable name",
         "EVIDENCE_WIKI_AUTHORITY_FILE": "environment variable naming independent host authority",

@@ -81,6 +81,7 @@ WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
         ),
     ),
     "doctor.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
+    "evidence_assessments.py": (Case((*ROOT, "prepare", "--format", "json"), EMPTY),),
     "evidence_snapshots.py": (Case((*ROOT, "prepare", "--format", "json"), EMPTY),),
     "evidence_temporal.py": (Case((*ROOT, "evaluate", "--format", "json"), EMPTY),),
     "evidence_usage.py": (Case((*ROOT, "status", "--format", "json"), EMPTY),),

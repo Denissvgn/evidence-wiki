@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from _assessment_contract import assessment_document, refresh_document
 from _evidence_authority import (
     EvidenceInvalid,
     authority_basis,
@@ -24,8 +25,10 @@ from _evidence_authority import (
 )
 from _evidence_revision import canonical_bytes, content_id
 from _host_evidence_store import STATE_ENV, locked_state, read_state, write_state
+from _publication_context import captured_view
 from _record_artifacts import artifact_path, closure_identity, json_document, validate_file_bounds
 from _temporal_contract import authenticate_availability, availability_receipt
+from _workspace_module_loader import load_workspace_module
 
 STATE_SCHEMA = "evidence-usage-state/v1"
 COMMAND_SCHEMA = "evidence-usage-command/v1"
@@ -176,6 +179,8 @@ class UsageState:
         self.nodes: dict[str, dict[str, Any]] = {}
         self.revisions: dict[str, dict[str, Any]] = {}
         self.availability: dict[str, dict[str, Any]] = {}
+        self.assessments: dict[str, dict[str, Any]] = {}
+        self.assessment_invalidations: dict[str, dict[str, Any]] = {}
         self.revoked_sources: set[str] = set()
         self.revoked_revisions: set[str] = set()
         self.last_observed: datetime | None = None
@@ -245,6 +250,23 @@ class UsageState:
                 self.revoked_revisions.add(revision)
         elif action == "register":
             self._node(body["node_id"], body["kind"], body["parents"], None)
+        elif action == "register-assessment":
+            assessment = body["assessment"]
+            identifier = assessment["assessment_id"]
+            self._node(identifier, "assessment", assessment["inputs"]["ancestors"], None)
+            self.assessments[identifier] = {"envelope": event["command"], "event_id": identity}
+            for previous in body["supersedes"]:
+                if previous not in self.assessments or previous == identifier:
+                    raise EvidenceInvalid("assessment_superseded_identity_unknown")
+                self.assessment_invalidations.setdefault(previous, {"event_id": identity, "superseded_by": identifier,
+                                                                    "status": "superseded"})
+        elif action == "invalidate-assessments":
+            for entry in body["plan"]["entries"]:
+                identifier = entry["assessment_id"]
+                if identifier not in self.assessments:
+                    raise EvidenceInvalid("assessment_invalidation_identity_unknown")
+                self.assessment_invalidations.setdefault(identifier, {**entry, "event_id": identity,
+                                                                       "status": "needs-reevaluation"})
         self.requests[request] = event
         self.checkpoint = identity
         self.last_observed = observed
@@ -314,9 +336,22 @@ def validate_command(envelope: Any, state_id: str, binding: str) -> dict[str, An
         references(body["parents"])
         if name(body["kind"]) not in {"derived", "snapshot", "dataset", "adapter", "model"} or not body["parents"]:
             raise EvidenceInvalid("invalid_lineage_node")
+    elif action == "register-assessment":
+        body = exact_object(command["body"], {"assessment", "supersedes"})
+        assessment_document(body["assessment"])
+        references(body["supersedes"])
+    elif action == "invalidate-assessments":
+        body = exact_object(command["body"], {"plan"})
+        refresh_document(body["plan"])
     else:
         raise EvidenceInvalid("usage_action_unsupported")
     return command
+
+
+def command_role(action: str) -> str:
+    if action in {"register-assessment", "invalidate-assessments"}:
+        return "assessment"
+    return "revocation" if action == "revoke" else "usage"
 
 
 def qualify_revision(record: dict[str, Any], revision: str, trust: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -343,7 +378,7 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
     envelope = json_document(serialized)
     command = validate_command(envelope, state_id, workspace_binding(root))
     trust = load_trust(root, config, now)
-    authenticated(envelope, "revocation" if command["action"] == "revoke" else "usage", trust, now)
+    authenticated(envelope, command_role(command["action"]), trust, now)
     artifacts = dict(files) if files is not None else {}
     if command["action"] == "deposit":
         descriptor = source_descriptor(artifacts)
@@ -373,6 +408,14 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
             if revision not in state.revisions:
                 raise EvidenceInvalid("source_revision_unknown")
             authenticate_availability(command["body"], state.revisions[revision], trust, now)
+        assessment_view = UsageView(state, trust, now) if command["action"] in {"register-assessment", "invalidate-assessments"} else None
+        assessment_engine = None
+        if command["action"] == "register-assessment":
+            assessment_engine = load_workspace_module(Path(__file__).resolve().parent, "_assessment_engine")
+            assessment_engine.validate_issue(root, config, envelope, assessment_view)
+        if command["action"] == "invalidate-assessments":
+            assessment_engine = load_workspace_module(Path(__file__).resolve().parent, "_assessment_refresh")
+            assessment_engine.validate_apply(root, config, command["body"]["plan"], assessment_view)
         receipt = state.append(envelope, artifacts, trust, now)
         # A host policy change during validation cannot authorize the commit.
         committed_at = datetime.now(timezone.utc)
@@ -380,11 +423,15 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
             raise EvidenceInvalid("host_state_clock_regressed")
         if load_trust(root, config, committed_at)["content_hash"] != trust["content_hash"]:
             raise EvidenceInvalid("host_trust_changed")
-        authenticated(envelope, "revocation" if command["action"] == "revoke" else "usage", trust, committed_at)
+        authenticated(envelope, command_role(command["action"]), trust, committed_at)
         if command["action"] in {"deposit", "authorize"}:
             qualify_revision(command["body"], command["body"]["source_revision"], trust, committed_at)
         if command["action"] == "attest-availability":
             authenticate_availability(command["body"], state.revisions[command["body"]["source_revision"]], trust, committed_at)
+        if command["action"] == "register-assessment":
+            assessment_engine.closing_issue(root, config, command["body"]["assessment"], assessment_view)
+        if command["action"] == "invalidate-assessments":
+            assessment_engine.closing_apply(root, config, command["body"]["plan"], assessment_view)
         write_state(directory, canonical_bytes(state.document))
         return receipt
 
@@ -430,6 +477,8 @@ class UsageView:
                     raise EvidenceInvalid("lineage_bound_exceeded")
                 visited.add(current)
                 node = self.state.nodes[current]
+                if current in self.state.assessment_invalidations:
+                    raise EvidenceInvalid("assessment_invalidated")
                 pending.extend(node["parents"])
                 if current in self.state.revisions:
                     record = self.state.revisions[current]
@@ -473,6 +522,12 @@ class UsageView:
 @contextmanager
 def current_view(root: Path, config: dict[str, Any], *, exclusive: bool = False) -> Iterator[UsageView]:
     """Hold one revocation generation through the caller's complete read operation."""
+    borrowed = captured_view(root, config)
+    if borrowed is not None:
+        if exclusive:
+            raise EvidenceInvalid("assessment_capture_is_read_only")
+        yield borrowed
+        return
     state_id = selection(config)
     with locked_state(root, write=exclusive) as directory:
         now = datetime.now(timezone.utc)

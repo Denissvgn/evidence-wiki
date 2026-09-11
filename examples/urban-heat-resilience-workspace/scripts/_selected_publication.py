@@ -6,11 +6,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 from _evidence_revision import MAX_ATTEMPTS, capture_workspace, content_id, refuse
+from _publication_context import authorized_capture
 from _workspace_module_loader import load_workspace_module
 
 SCHEMA_VERSION = "evidence-selected-publication/v1"
@@ -80,7 +82,7 @@ def logical_paths(value: Any, temporary_root: Path) -> Any:
     return value
 
 
-def validate_before_materialization(files: Any, readiness: Any) -> dict[str, Any]:
+def validate_before_materialization(files: Any, readiness: Any, *, usage_view=None, purpose=None, consumer=None, expected_config=None) -> tuple[dict[str, Any], Any]:
     """Validate config and detect known secret forms before copying retained bytes."""
     try:
         config = yaml.safe_load(files.get("research.yml", b""))
@@ -90,15 +92,25 @@ def validate_before_materialization(files: Any, readiness: Any) -> dict[str, Any
         raise refuse("PUBLICATION_CONFIG_INVALID", "research.yml must contain a mapping.")
     validate_config_paths(config)
     usage = load_workspace_module(SCRIPT_DIR, "_usage_gate")
-    usage.require_legacy_export(config)
-    if any(usage.bytes_have_claims(name, data, config) for name, data in files.items()):
-        raise usage.refusal("explicit_usage_requires_host_authorization")
+    inputs = None
+    if usage_view is None:
+        usage.require_legacy_export(config)
+        if any(usage.bytes_have_claims(name, data, config) for name, data in files.items()):
+            raise usage.refusal("explicit_usage_requires_host_authorization")
+    else:
+        if config != expected_config:
+            raise usage.refusal("assessment_configuration_changed")
+        qualification = load_workspace_module(SCRIPT_DIR, "_publication_usage")
+        try:
+            inputs = qualification.qualify_capture(files, config, usage_view, purpose=purpose, consumer=consumer)
+        except qualification.EvidenceInvalid as exc:
+            raise usage.refusal(str(exc)) from exc
     reasons = readiness.empty_reasons()
     for name, data in files.items():
         if Path(name).parts[0] in readiness.SCAN_ROOTS and Path(name).suffix.lower() in readiness.SECRET_SCAN_SUFFIXES:
             if readiness.scan_text_for_secrets(name, data.decode("utf-8", errors="ignore"), reasons):
                 raise refuse("PUBLICATION_SAFETY_REFUSED", "Retained content matches the publication secret guard.", path=name)
-    return config
+    return config, inputs
 
 
 def enforce_global_source_gates(lint: dict[str, Any], root: Path, config: dict[str, Any]) -> None:
@@ -131,6 +143,7 @@ def enforce_global_source_gates(lint: dict[str, Any], root: Path, config: dict[s
 
 def run_selected_publication(
     project_root: Path, question_slugs: Any, *, expected_revision: str | None = None,
+    _usage_view=None, _purpose=None, _consumer=None, _expected_config=None,
 ) -> dict[str, Any]:
     """Return scoped readiness and answers; concurrent changes retry or refuse."""
     selected = normalize_selection(question_slugs)
@@ -149,8 +162,11 @@ def run_selected_publication(
         revision = capture_workspace(root)
         if expected_revision is not None and revision.revision_id != expected_revision:
             raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace no longer matches the expected revision.", expected_revision=expected_revision, actual_revision=revision.revision_id)
-        config = validate_before_materialization(revision.files, readiness)
-        with revision.materialize() as captured_root:
+        config, inputs = validate_before_materialization(revision.files, readiness, usage_view=_usage_view,
+                                                        purpose=_purpose, consumer=_consumer, expected_config=_expected_config)
+        with revision.materialize() as captured_root, (
+            authorized_capture(captured_root, config, _usage_view) if _usage_view is not None else nullcontext()
+        ):
             question_dir = questions.questions_directory(captured_root, config)
             known = {item["slug"] for item in questions.collect_questions(question_dir)}
             unknown = sorted(set(selected) - known)
@@ -174,6 +190,8 @@ def run_selected_publication(
                 "readiness": report,
                 "export": answers,
             }, captured_root)
+            if inputs is not None:
+                document["authorized_inputs"] = inputs
         if capture_workspace(root).revision_id == revision.revision_id and producer_identity() == producer:
             return document
     raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace or publication implementation changed during evaluation.")

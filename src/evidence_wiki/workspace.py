@@ -16,6 +16,7 @@ from typing import Any
 
 from . import _script_host
 from ._facades._base import call_seam
+from ._facades.assessments import AssessmentsNamespace
 from ._facades.coverage import CoverageNamespace
 from ._facades.diagnostics import DiagnosticsNamespace
 from ._facades.grounding import GroundingNamespace
@@ -81,6 +82,7 @@ class Workspace:
         "usage",
         "snapshots",
         "temporal",
+        "assessments",
         "orchestrate",
         "diagnostics",
     )
@@ -95,6 +97,7 @@ class Workspace:
         self.usage = UsageNamespace(self)
         self.snapshots = SnapshotsNamespace(self)
         self.temporal = TemporalNamespace(self)
+        self.assessments = AssessmentsNamespace(self)
         self.orchestrate = OrchestrateNamespace(self)
         self.diagnostics = DiagnosticsNamespace(self)
 

@@ -31,7 +31,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "10"
+LIBRARY_API_VERSION = "11"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -77,6 +77,11 @@ LIBRARY_API_SURFACE = (
     "snapshots.export",
     "snapshots.check",
     "temporal.evaluate",
+    "assessments.prepare",
+    "assessments.issue",
+    "assessments.check",
+    "assessments.plan_refresh",
+    "assessments.apply_refresh",
     "verify_snapshot",
     "questions.claim",
     "questions.release",
@@ -391,6 +396,18 @@ def contract() -> dict:
             "retrieval": "pure lexical ranking of qualified revisions; no persistent index or wiki reads",
             "contract_document": "docs/temporal-evidence.md",
         },
+        "evidence_assessments": {
+            "contract": "evidence-assessment/v1",
+            "required_capabilities": ["assessment-refresh/v1", "current-usage-check/v1", "selected-publication/v1", "whole-envelope-attestation/v1"],
+            "registration": "whole-envelope host assessment attestation; signed usage command with expected checkpoint and stable request ID",
+            "current_use": "recomputed selected answers, source revisions, current permissions, validity and monotone invalidation",
+            "dependency_coverage": "all workspace sources; bounded complete closure required",
+            "refresh": "bounded resumable scan; changed source revisions are hints; signed compare-and-swap invalidation in the usage ledger",
+            "external_action_authorized": False,
+            "limits": {"questions": 32, "workspace_sources": 64, "source_ancestry": 128, "source_history_revisions": 64,
+                       "artifact_bytes": 8388608, "assessments_per_refresh": 32, "changed_source_hints": 128, "request_bytes": 1048576},
+            "contract_document": "docs/evidence-assessments.md",
+        },
         "source_providers": {
             "discovery": list(provider_registry_module.DISCOVERY_PROVIDER_IDS),
             "acquisition": list(provider_registry_module.ACQUISITION_PROVIDER_IDS),
@@ -442,6 +459,11 @@ def contract() -> dict:
             "evidence_availability_receipt": "evidence-availability-receipt/v1",
             "evidence_temporal_request": "evidence-temporal-request/v1",
             "evidence_temporal_result": "evidence-temporal-result/v1",
+            "evidence_assessment": "evidence-assessment/v1",
+            "evidence_assessment_request": "evidence-assessment-request/v1",
+            "evidence_assessment_check": "evidence-assessment-check/v1",
+            "evidence_assessment_refresh": "evidence-assessment-refresh/v1",
+            "evidence_assessment_refresh_request": "evidence-assessment-refresh-request/v1",
             "fleet_status": fleet_status_module.SCHEMA_VERSION,
             "error_envelope": script_errors_module.SCHEMA_VERSION,
         },

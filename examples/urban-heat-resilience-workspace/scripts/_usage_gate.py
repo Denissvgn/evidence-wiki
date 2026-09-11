@@ -13,6 +13,7 @@ import yaml
 from _evidence_authority import EvidenceInvalid, digest
 from _evidence_revision import observation, read_observed_file
 from _evidence_usage import CLAIM_KEYS, UsageView, configured, current_view
+from _publication_context import captured_config, captured_view
 from _record_artifacts import artifact_path
 from _script_errors import ScriptRefusal
 
@@ -148,7 +149,7 @@ def require_host_intake(config: dict[str, Any], documents: list[dict[str, Any]] 
 
 
 def require_legacy_export(config: dict[str, Any]) -> None:
-    if configured(config):
+    if configured(config) and not captured_config(config):
         raise refusal("protected_publication_requires_approved_artifact_closure")
 
 
@@ -221,6 +222,8 @@ def workspace_has_claims(root: Path, config: dict[str, Any]) -> bool:
 
 
 def require_unrestricted_legacy(root: Path, config: dict[str, Any]) -> None:
+    if captured_view(root, config) is not None:
+        return
     require_legacy_export(config)
     if workspace_has_claims(root, config):
         raise refusal("explicit_usage_requires_host_authorization")

@@ -413,6 +413,7 @@ errors that prevent the report from being built.
 | Script | JSON mode | Fatal envelope codes |
 |--------|-----------|----------------------|
 | `evidence_snapshots.py` | `python3 scripts/evidence_snapshots.py prepare\|export\|check\|verify --format json` with a JSON request on stdin and explicit trust for offline verification | `EVIDENCE_SNAPSHOT_REFUSED` |
+| `evidence_assessments.py` | `python3 scripts/evidence_assessments.py prepare\|issue\|check\|plan-refresh\|apply-refresh --format json` with a bounded JSON request on stdin | `EVIDENCE_ASSESSMENT_REFUSED` |
 | `evidence_temporal.py` | `python3 scripts/evidence_temporal.py evaluate --format json` with a bounded JSON request on stdin | `EVIDENCE_TEMPORAL_REFUSED` |
 | `evidence_usage.py` | `python3 scripts/evidence_usage.py transact\|status\|check\|lineage\|materialize --format json` | `EVIDENCE_USAGE_REFUSED` |
 | `qualified_packet.py` | `python3 scripts/qualified_packet.py profiles\|packet\|execution --format json` | `SOURCE_UNKNOWN`, `CONFIG_MISSING`, `CONFIG_INVALID`, `MANIFEST_MISSING`, `MANIFEST_INVALID` |
@@ -466,6 +467,7 @@ Stable error codes:
 | `EVIDENCE_REVISION_UNSUPPORTED` | The platform cannot provide the required anchored, no-follow file reads. | Capture on a platform supporting the required filesystem operations. |
 | `EVIDENCE_SNAPSHOT_REFUSED` | Snapshot selection, authorization, registration, content, or offline verification failed; `details.reason` identifies the boundary. | Check the declared selection, independent authority and host registration; preserve rejected bytes for inspection. |
 | `EVIDENCE_TEMPORAL_REFUSED` | The temporal request, immutable clocks, checkpoint, or authority failed validation; `details.reason` identifies the boundary. | Correct the bounded request or supply valid immutable evidence and independent authority. |
+| `EVIDENCE_ASSESSMENT_REFUSED` | Assessment preparation, attestation, current eligibility or refresh failed validation; `details.reason` identifies the boundary. | Check the bounded request, current source revisions, assessment authority and host checkpoint. |
 | `EVIDENCE_USAGE_REFUSED` | The host rejected a revision, usage event, rights check, lineage query, or materialization; `details.reason` identifies the boundary. | Provide current authorization for the exact sanitized revision and requested use. |
 | `PUBLICATION_CONFIG_INVALID` | Selected publication configuration is malformed, excessively nested, or names an unsafe local path. | Correct the configuration and use workspace-relative paths. |
 | `PUBLICATION_OUTPUT_INVALID` | Selected publication output would be written inside the workspace being evaluated. | Choose an output destination outside that workspace. |

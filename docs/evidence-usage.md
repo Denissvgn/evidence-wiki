@@ -48,7 +48,8 @@ privileged host replacing the entire store with an older coherent backup.
 ## Signed commands and exact revisions
 
 Commands use the whole-payload `evidence-authentication/v1` envelope. All actions
-require the `usage` role except `revoke`, which requires `revocation`. A command
+require the `usage` role except `revoke`, which requires `revocation`, and
+`register-assessment` / `invalidate-assessments`, which require `assessment`. A command
 payload has exactly these fields:
 
 | Field | Meaning |
@@ -58,8 +59,14 @@ payload has exactly these fields:
 | `workspace_binding` | Content identity of the resolved workspace root |
 | `request_id` | Unique host request identity; reuse only for exact retries |
 | `expected_checkpoint` | Current event identity, or null for initialization |
-| `action` | `initialize`, `deposit`, `authorize`, `attest-availability`, `revoke`, or `register` |
+| `action` | `initialize`, `deposit`, `authorize`, `attest-availability`, `revoke`, `register`, `register-assessment`, or `invalidate-assessments` |
 | `body` | Action-specific fields below |
+
+The two assessment actions are prepared, independently qualified and applied
+through the [assessment API](evidence-assessments.md). They share this ledger's
+atomic writes, request identity, checkpoint and host authority. They retain
+whole assessment envelopes and monotone invalidation history; derived usage
+lineage also refuses an invalidated assessment ancestor.
 
 Content identities hash the UTF-8 domain, a NUL byte, and canonical JSON with
 one trailing newline, using SHA-256 and the prefix `sha256:`. Canonical JSON

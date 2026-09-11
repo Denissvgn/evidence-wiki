@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Authenticated assessments recheck current evidence before consumption.**
+  Library API contract version 11 adds domain-neutral assessment preparation,
+  issuance, current checks and bounded refresh. Whole-envelope host authority
+  binds selected answers, source revisions, policy and validity. Corrections,
+  expiry and revocation invalidate future use while retaining history. Host
+  approval, risk policy, action idempotency and reconciliation remain external;
+  the optional standard-library host example illustrates those boundaries.
+
 - **Optional historical simulations separate arithmetic from performance.**
   Library API contract version 10 exposes `market-simulation/v1` qualifications
   within generic execution evidence. Bound portfolio arithmetic, costs,
