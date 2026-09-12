@@ -1,4 +1,6 @@
 import io
+import itertools
+import shlex
 import tarfile
 import zipfile
 from pathlib import Path
@@ -82,6 +84,39 @@ def test_ci_runs_the_same_shared_artifact_gate_as_the_release() -> None:
     assert "tools/validate_installed_artifacts.py --dist-dir dist" in text
     assert "pip install dist/*.whl" not in text
     assert "import pypdf" not in text
+
+
+def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results() -> None:
+    workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    test, package = workflow["jobs"]["test"], workflow["jobs"]["package"]
+    matrix = test["strategy"]["matrix"]
+    assert set(matrix) == {"platform", "shard"}
+    assert matrix["shard"] == [1, 2, 3]
+    expected = {("ubuntu-latest", "3.10"), ("ubuntu-latest", "3.14"),
+                ("macos-latest", "3.12"), ("windows-latest", "3.12")}
+    assert {(cell["os"], cell["python-version"]) for cell in matrix["platform"]} == expected
+    assert len(list(itertools.product(matrix["platform"], matrix["shard"]))) == 12
+    assert test["strategy"]["fail-fast"] is False
+    assert package["needs"] == "test" and "if" not in package
+    commands = [step["run"] for step in test["steps"] if "tools/run_test_groups.py" in step.get("run", "")]
+    assert len(commands) == 2
+    assert all("--shard-count 3 --shard-index ${{ matrix.shard }}" in command for command in commands)
+    assert all("-m ruff check ." in command and "sync_vendored_scripts.py --check" in command for command in commands)
+    upload = next(step for step in test["steps"] if "actions/upload-artifact@" in step.get("uses", ""))
+    assert upload["if"] == "always()"
+    assert upload["with"]["name"].endswith("-shard-${{ matrix.shard }}")
+    assert upload["with"]["retention-days"] == 90
+    steps = package["steps"]
+    download = next(step for step in steps if "actions/download-artifact@" in step.get("uses", ""))
+    gate = next(step for step in steps if "-m tools.verify_test_shards" in step.get("run", ""))
+    build = next(step for step in steps if "-m build" in step.get("run", ""))
+    assert steps.index(download) < steps.index(gate) < steps.index(build)
+    assert download["with"] == {"pattern": "suite-${{ github.sha }}-*-shard-*", "path": "suite-shards/"}
+    assert gate["env"] == {"SUITE_COMMIT": "${{ github.sha }}", "SUITE_RUN_ID": "${{ github.run_id }}"}
+    command = shlex.split(gate["run"].replace("\\\n", " "))
+    assert command[command.index("--shard-count") + 1] == "3"
+    assert {command[i + 1] for i, arg in enumerate(command) if arg == "--platform"} == {
+        "Linux/X64/3.10", "Linux/X64/3.14", "macOS/ARM64/3.12", "Windows/X64/3.12"}
 
 
 def test_shared_artifact_gate_carries_every_check_the_workflows_used_to_inline() -> None:

@@ -81,11 +81,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=Path("suite-evidence"))
     parser.add_argument("--coverage", action="store_true")
     parser.add_argument("--group-size", type=int, default=160)
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=1,
+                        help="One-based shard; whole groups are distributed round-robin.")
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("targets", nargs="*", default=["tests"])
     args = parser.parse_args(argv)
     if args.group_size < 1 or args.timeout <= 0:
         parser.error("group size and timeout must be positive")
+    if not 1 <= args.shard_index <= args.shard_count:
+        parser.error("shard index must be between 1 and shard count")
     root, output = args.root.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     identity = source_identity(root)
@@ -96,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
                          "Two combined module orders cover selected shared caches and registries only.",
                          "A module larger than the target runs alone; timeout is per process."],
               "python": sys.version, "platform": platform.platform(), "source_sha256": identity,
+              "shard": {"index": args.shard_index, "count": args.shard_count},
+              "group_size": args.group_size, "targets": args.targets,
               "commit": commit.stdout.strip() if commit is not None and commit.returncode == 0 else None,
               "runner": {key: os.environ[key] for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
                          "RUNNER_OS", "RUNNER_ARCH", "RUNNER_NAME") if key in os.environ},
@@ -114,8 +121,13 @@ def main(argv: list[str] | None = None) -> int:
         nodes = collected["result"]["collected"]
         if not nodes or len(nodes) != len(set(nodes)):
             raise ValueError("collection is empty or has duplicate node identifiers")
+        planned = groups(nodes, args.group_size)
+        if args.shard_count > len(planned):
+            raise ValueError("shard count exceeds the number of test groups")
         failed = False
-        for number, selected in enumerate(groups(nodes, args.group_size), 1):
+        for number, selected in enumerate(planned, 1):
+            if (number - 1) % args.shard_count != args.shard_index - 1:
+                continue
             row = run(root, output, f"group-{number:03}", selected, coverage=args.coverage, timeout=args.timeout)
             observed = row.get("result", {})
             row["selection_matches"] = observed.get("collected") == selected
@@ -124,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             report["groups"].append(row)
             save()
         modules = [name for name in COMBINED_MODULES if any(node.startswith(name + "::") for node in nodes)]
-        if len(modules) >= 2:
+        if args.shard_index == 1 and len(modules) >= 2:
             for label, order in (("combined-forward", modules), ("combined-reverse", modules[::-1])):
                 row = run(root, output, label, order, coverage=args.coverage, timeout=args.timeout)
                 expected = [node for module in order for node in nodes if node.startswith(module + "::")]
