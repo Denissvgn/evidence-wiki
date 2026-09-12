@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Bounded Windows file reads for legacy workspace declaration inspection."""
 
 from __future__ import annotations
