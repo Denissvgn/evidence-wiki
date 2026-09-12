@@ -20,6 +20,16 @@ FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_TYPE_DISK = 1
 
 
+def checked_file_observation(path: Path, descriptor: int, expected: tuple[int, ...]) -> tuple[int, ...]:
+    """Match the pinned path and descriptor without mixing their clock meanings."""
+    opened = observation(os.fstat(descriptor))
+    # Python 3.12's Windows stat reports creation time as ctime, while fstat
+    # reports change time. Compare each clock only with the same API's snapshot.
+    if opened[:6] != expected[:6] or observation(path.lstat()) != expected:
+        raise EvidenceInvalid("usage_workspace_changed")
+    return opened
+
+
 def read_legacy_file(root: Path, relative: str, expected: tuple[int, ...], limit: int) -> bytes:
     """Read one regular file while holding its ancestors against replacement.
 
@@ -86,8 +96,7 @@ def read_legacy_file(root: Path, relative: str, expected: tuple[int, ...], limit
                 raise EvidenceInvalid("unsafe_usage_workspace_file")
         descriptor = msvcrt.open_osfhandle(handles[-1], os.O_RDONLY | os.O_BINARY)
         handles.pop()  # The CRT descriptor now owns the leaf handle.
-        if observation(os.fstat(descriptor)) != expected:
-            raise EvidenceInvalid("usage_workspace_changed")
+        opened = checked_file_observation(path, descriptor, expected)
         chunks = []
         size = 0
         while chunk := os.read(descriptor, min(1024 * 1024, limit + 1 - size)):
@@ -95,7 +104,7 @@ def read_legacy_file(root: Path, relative: str, expected: tuple[int, ...], limit
             size += len(chunk)
             if size > limit:
                 raise EvidenceInvalid("usage_workspace_bound_exceeded")
-        if observation(os.fstat(descriptor)) != expected or size != expected[4]:
+        if checked_file_observation(path, descriptor, expected) != opened or size != expected[4]:
             raise EvidenceInvalid("usage_workspace_changed")
         return b"".join(chunks)
     finally:

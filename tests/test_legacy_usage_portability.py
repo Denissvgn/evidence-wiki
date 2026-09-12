@@ -102,6 +102,50 @@ def test_legacy_exports_inspect_crlf_manifest_declarations(legacy, declaration):
     assert caught.value.details["reason"] == "explicit_usage_requires_host_authorization"
 
 
+def test_windows_observation_accepts_distinct_path_and_descriptor_clocks(legacy, monkeypatch):
+    root, source = legacy
+    native = load_isolated_module("portable_windows_clocks", SCRIPTS / "_windows_files.py")
+    expected = native.observation(source.lstat())
+    original_fstat = os.fstat
+
+    def descriptor_change_time(descriptor):
+        info = original_fstat(descriptor)
+        fields = {name: getattr(info, name) for name in (
+            "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns",
+        )}
+        return SimpleNamespace(**fields, st_ctime_ns=expected[-1] + 100)
+
+    monkeypatch.setattr(os, "fstat", descriptor_change_time)
+    with source.open("rb") as handle:
+        observed = native.checked_file_observation(source, handle.fileno(), expected)
+    assert observed[-1] == expected[-1] + 100
+
+
+def test_windows_observation_refuses_a_different_file_descriptor(legacy):
+    root, source = legacy
+    native = load_isolated_module("portable_windows_descriptor", SCRIPTS / "_windows_files.py")
+    replacement = root / "replacement.md"
+    replacement.write_bytes(source.read_bytes())
+    expected = native.observation(source.lstat())
+    with replacement.open("rb") as handle:
+        with pytest.raises(native.EvidenceInvalid, match="usage_workspace_changed"):
+            native.checked_file_observation(source, handle.fileno(), expected)
+
+
+def test_windows_observation_still_checks_path_change_time(legacy, monkeypatch):
+    root, source = legacy
+    native = load_isolated_module("portable_windows_path_clock", SCRIPTS / "_windows_files.py")
+    info = source.lstat()
+    expected = native.observation(info)
+    fields = {name: getattr(info, name) for name in (
+        "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns",
+    )}
+    monkeypatch.setattr(Path, "lstat", lambda self: SimpleNamespace(**fields, st_ctime_ns=expected[-1] + 100))
+    with source.open("rb") as handle:
+        with pytest.raises(native.EvidenceInvalid, match="usage_workspace_changed"):
+            native.checked_file_observation(source, handle.fileno(), expected)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Exercises native Windows handle sharing")
 def test_windows_reader_holds_files_and_ancestors_until_read_finishes(legacy, monkeypatch):
     root, source = legacy
