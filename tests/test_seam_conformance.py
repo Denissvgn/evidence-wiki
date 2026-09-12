@@ -350,6 +350,9 @@ class SeamConformanceTests(unittest.TestCase):
         else:
             self.fail(f"{context}: the seam returned {returned!r} where the CLI refused")
 
+        if case.error_code is not None:
+            self.assertEqual(case.error_code, getattr(refusal, "error_code", None), f"{context}: unexpected refusal reason")
+
         try:
             emitted = json.loads(result.stderr)
         except json.JSONDecodeError as exc:

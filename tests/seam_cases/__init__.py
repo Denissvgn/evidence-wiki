@@ -41,6 +41,8 @@ class SeamCase:
 
     ``stdin`` and ``environment`` provide equivalent transport and host authority
     settings to the subprocess and in-process call without leaking between cases.
+
+    ``error_code`` pins a refusal to its intended reason as well as CLI parity.
     """
 
     name: str
@@ -51,3 +53,4 @@ class SeamCase:
     note: str = ""
     stdin: str = ""
     environment: dict[str, str] = field(default_factory=dict)
+    error_code: str | None = None
