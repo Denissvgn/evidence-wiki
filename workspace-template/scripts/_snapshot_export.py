@@ -86,6 +86,7 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
         event = next((event for event in state.events if event["event_id"] == temporal["checkpoint"]), None)
         require(event is not None, "snapshot_temporal_checkpoint_unknown")
         temporal_state = UsageState(state.root, state.state_id, canonical({**state.document, "events": state.events[:event["sequence"]]}))
+    input_state = temporal_state if temporal_state is not None else state
     examples, exclusions, all_nodes, all_files = [], [], set(), {}
     historical_inputs = False
     execution_profiles = set()
@@ -144,8 +145,8 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
             require(len(all_nodes | closure) <= BOUNDS["lineage_nodes"]
                     and len(set(all_files) | set(files)) <= BOUNDS["source_revisions"], "snapshot_closure_bound_exceeded")
             input_context = execution_input_context({key: frozen_source(key, state.revisions[key]) for key in files}, files,
-                                                     {key: state.nodes[key] for key in closure}, state.availability,
-                                                     policy, view.now, state.last_observed)
+                                                     {key: state.nodes[key] for key in closure}, input_state.availability,
+                                                     policy, view.now, input_state.last_observed)
             historical_inputs |= input_context["historical"]
             execution_profiles.update(input_context["execution_profiles"])
             examples.append({"source_revision": revision, **result["example"]})
@@ -177,7 +178,7 @@ def candidate(view: UsageView, request: dict[str, Any]) -> tuple[dict[str, Any],
                              "source_count": len(sources), "lineage_count": len(all_nodes), "blob_count": len(blobs)},
                 "bounds": dict(BOUNDS)}
     if historical_inputs:
-        manifest["execution_inputs"] = {"availability": {revision: state.availability.get(revision) for revision in sorted(all_files)}}
+        manifest["execution_inputs"] = {"availability": {revision: input_state.availability.get(revision) for revision in sorted(all_files)}}
     if execution_profiles:
         manifest["execution_profiles"] = sorted(execution_profiles)
     if temporal_state is not None:

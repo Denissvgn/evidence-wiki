@@ -8,12 +8,14 @@ import contextlib
 import io
 import json
 from pathlib import Path
+from unittest import SkipTest
 
 import pytest
 import yaml
 
 from evidence_wiki import Workspace, cli
 from evidence_wiki.errors import ConfigError, SourceError
+from tests import _usage_fixture
 from tests._execution_fixture import canonical
 from tests._script_loader import load_isolated_module
 from tests._usage_fixture import UsageFixture
@@ -295,11 +297,22 @@ def test_materialization_detects_destination_replacement_after_rename(host, monk
     assert caught.value.details["reason"] == "normalized_destination_changed"
 
 
-def test_unsupported_host_storage_fails_without_initializing(host, monkeypatch):
-    fixture, module = host
-    store = module.locked_state.__wrapped__.__globals__
-    monkeypatch.setitem(store["host_directory"].__wrapped__.__globals__, "fcntl", None)
+def test_unsupported_host_storage_fails_without_initializing(tmp_path, monkeypatch):
+    root, host = tmp_path / "workspace", tmp_path / "host"
+    root.mkdir()
+    host.mkdir(mode=0o700)
+    monkeypatch.setenv("EVIDENCE_WIKI_STATE_DIR", str(host.resolve()))
+    store = load_isolated_module("unsupported_host_storage", SCRIPTS / "_host_evidence_store.py")
+    monkeypatch.setattr(store, "fcntl", None)
     with pytest.raises(ValueError, match="host_state_unsupported"):
-        fixture.transact(module, "initialize")
-    assert not (fixture.host / "evidence-state.json").exists()
-    assert not (fixture.host / "evidence-state.lock").exists()
+        with store.locked_state(root, write=True, initialize=True):
+            pytest.fail("unsupported storage yielded a writable state")
+    assert not list(host.iterdir())
+
+
+def test_host_fixture_skips_before_setup_without_posix_locking(tmp_path, monkeypatch):
+    original = _usage_fixture.importlib.util.find_spec
+    monkeypatch.setattr(_usage_fixture.importlib.util, "find_spec", lambda name: None if name == "fcntl" else original(name))
+    with pytest.raises(SkipTest, match="host evidence storage requires POSIX"):
+        UsageFixture(tmp_path, monkeypatch)
+    assert not list(tmp_path.iterdir())

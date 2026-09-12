@@ -78,6 +78,52 @@ def test_historical_available_requires_accepted_independent_proof(host):
     assert assessment["reason"] == "execution_independent_availability_missing"
 
 
+@pytest.mark.parametrize("input_mode", ["historical-audit", "historical-available"])
+def test_temporal_export_cannot_borrow_input_proof_from_a_later_checkpoint(host, input_mode):
+    body, _files = host.history(mode=input_mode, available=False)
+    checkpoint = host.checkpoint
+    selection = {**host.selection(body), "schema_version": "evidence-snapshot-selection/v2",
+                 "temporal": {"mode": "historical-audit", "cutoff": "2026-09-10T05:00:00Z", "checkpoint": checkpoint}}
+    host.set_time("2026-09-10T06:00:00Z")
+    host.availability(host.parent, host.parent_files)
+    current, _, _, _ = host.export(host.selection(body))
+    assert verify_snapshot(current, trust_policy_bytes=host.policy_path.read_bytes())["valid"]
+    assert json.loads(current)["manifest"]["execution_inputs"]["availability"][host.parent["source_revision"]] is not None
+    before = (host.host / "evidence-state.json").read_bytes()
+    if input_mode == "historical-available":
+        with pytest.raises(SourceError) as caught:
+            host.workspace.snapshots.prepare(selection)
+        assert caught.value.details["reason"] == "snapshot_no_eligible_examples"
+        assert (host.host / "evidence-state.json").read_bytes() == before
+    else:
+        historical, _, _, _ = host.export(selection)
+        assert json.loads(historical)["manifest"]["execution_inputs"]["availability"][host.parent["source_revision"]] is None
+        assert verify_snapshot(historical, trust_policy_bytes=host.policy_path.read_bytes())["valid"]
+
+
+@pytest.mark.parametrize("checkpoint_time,valid", [("2026-09-10T05:00:00Z", False), ("2026-09-10T06:00:00Z", True)])
+def test_offline_historical_input_proof_is_bounded_by_checkpoint_not_capture(host, checkpoint_time, valid):
+    body, _files = host.history(mode="historical-available", available=False)
+    checkpoint = host.checkpoint
+    host.set_time("2026-09-10T06:00:00Z")
+    host.availability(host.parent, host.parent_files)
+    data, _, _, _ = host.export(host.selection(body))
+    bundle = json.loads(data)
+    manifest = bundle["manifest"]
+    manifest["selection"].update(schema_version="evidence-snapshot-selection/v2", temporal={
+        "mode": "historical-audit", "cutoff": "2026-09-10T05:00:00Z",
+        "checkpoint": manifest["captured_state"]["checkpoint"] if valid else checkpoint})
+    manifest["temporal"] = {"checkpoint_observed_at": checkpoint_time,
+                            "availability": {source["source_revision"]: None for source in manifest["sources"]}}
+    bundle["snapshot_id"] = identifier(manifest["schema_version"], manifest)
+    bundle["registration"]["payload"]["body"]["node_id"] = bundle["snapshot_id"]
+    bundle["registration"] = signature_at(bundle["registration"]["payload"], "owner", "usage", "2026-09-10T06:00:00Z")
+    result = verify_snapshot(canonical(bundle), trust_policy_bytes=host.policy_path.read_bytes())
+    assert result["valid"] is valid, result
+    if not valid:
+        assert result["reason"] == "snapshot_availability_observation_invalid"
+
+
 @pytest.mark.parametrize("change", ["cutoff", "context"])
 def test_historical_generation_shape_rejects_time_travel_and_unbound_context(host, change):
     def edit(files, record):

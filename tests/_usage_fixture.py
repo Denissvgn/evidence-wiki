@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
+import os
 from pathlib import Path
+from unittest import SkipTest
 
 from tests._execution_fixture import authenticate, canonical, closure, host_policy, identifier
 
 
+def require_host_storage():
+    if (importlib.util.find_spec("fcntl") is None or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "getuid")
+            or os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd):
+        raise SkipTest("host evidence storage requires POSIX locking, ownership and no-follow directory operations")
+
+
 class UsageFixture:
     def __init__(self, directory: Path, monkeypatch):
+        require_host_storage()
         self.root = (directory / "workspace").resolve()
         self.root.mkdir()
         self.host = (directory / "host").resolve()

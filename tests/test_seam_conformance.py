@@ -102,7 +102,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -256,6 +256,7 @@ class Enrollment:
     script: str
     scratch: Path
     cases: tuple[SeamCase, ...]
+    skip_reason: str | None = None
 
 
 class SeamConformanceTests(unittest.TestCase):
@@ -276,10 +277,15 @@ class SeamConformanceTests(unittest.TestCase):
             scratch.mkdir(parents=True)
             workspace = scratch / "workspace"
             initialize_workspace(workspace, f"seam-{stem}")
+            try:
+                cases, skip_reason = tuple(case_module.cases(workspace)), None
+            except unittest.SkipTest as exc:
+                cases, skip_reason = (), str(exc)
             cls.enrollments[case_module.SCRIPT] = Enrollment(
                 script=case_module.SCRIPT,
                 scratch=scratch,
-                cases=tuple(case_module.cases(workspace)),
+                cases=cases,
+                skip_reason=skip_reason,
             )
 
     @classmethod
@@ -380,6 +386,8 @@ class SeamConformanceTests(unittest.TestCase):
         """Half of the seam contract is the refusal, so every script exercises both."""
         for script, enrollment in sorted(self.enrollments.items()):
             with self.subTest(script=script):
+                if enrollment.skip_reason is not None:
+                    self.skipTest(enrollment.skip_reason)
                 outcomes = {case.expect for case in enrollment.cases}
                 self.assertIn(SUCCESS, outcomes, f"{script}: declare at least one success case")
                 if script in SEAM_WITHOUT_REFUSAL:
@@ -413,6 +421,9 @@ class SeamConformanceTests(unittest.TestCase):
 
     def test_the_seam_and_the_cli_agree(self):
         for script, enrollment in sorted(self.enrollments.items()):
+            if enrollment.skip_reason is not None:
+                with self.subTest(script=script):
+                    self.skipTest(enrollment.skip_reason)
             for case in enrollment.cases:
                 with self.subTest(script=script, case=case.name):
                     context = f"{script} [{case.name}]"
@@ -423,6 +434,35 @@ class SeamConformanceTests(unittest.TestCase):
                         self.check_success(enrollment, case, context)
                     else:
                         self.check_refusal(enrollment, case, context)
+
+
+def test_unsupported_fixture_does_not_skip_other_seams(monkeypatch):
+    def unavailable(workspace):
+        raise unittest.SkipTest("host storage unavailable")
+
+    monkeypatch.setitem(SeamConformanceTests.setUpClass.__func__.__globals__, "discovered_case_modules", lambda: {
+        "unsupported": SimpleNamespace(SCRIPT="unsupported.py", cases=unavailable),
+        "supported": SimpleNamespace(SCRIPT="supported.py", cases=lambda workspace: (SeamCase("works", (), lambda module: {}),)),
+    })
+    monkeypatch.setitem(SeamConformanceTests.setUpClass.__func__.__globals__, "initialize_workspace", lambda *args: None)
+
+    class Contract(SeamConformanceTests):
+        pass
+
+    Contract.setUpClass()
+    try:
+        assert Contract.enrollments["unsupported.py"].skip_reason == "host storage unavailable"
+        assert Contract.enrollments["supported.py"].skip_reason is None
+        checked = []
+        case = Contract("test_the_seam_and_the_cli_agree")
+        monkeypatch.setattr(case, "check_success", lambda enrollment, *args: checked.append(enrollment.script))
+        result = unittest.TestResult()
+        case.run(result)
+        assert not result.errors and not result.failures
+        assert checked == ["supported.py"]
+        assert len(result.skipped) == 1 and result.skipped[0][1] == "host storage unavailable"
+    finally:
+        Contract.tearDownClass()
 
 
 if __name__ == "__main__":

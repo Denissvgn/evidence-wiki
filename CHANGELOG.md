@@ -32,8 +32,10 @@
   API contract version 9 exposes bounded input qualification across accepted
   immutable ancestry, independently attested availability, and nested execution
   history. Snapshot contract v3 preserves those proofs for independent offline
-  verification. Later computation does not make future inputs available earlier;
-  model training cutoff remains explicitly unestablished.
+  verification. Historical snapshots use input proofs accepted by their declared
+  checkpoint, and offline verification enforces that checkpoint's observation
+  time. Later computation does not make future inputs available earlier; model
+  training cutoff remains explicitly unestablished.
 
 - **Optional market evidence retains exact values and qualifications.** The
   `capital-markets` guidance pack supplies namespaced questions, coverage rules,

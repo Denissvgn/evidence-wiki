@@ -12,7 +12,7 @@ import pytest
 
 from tests._execution_fixture import authenticate, canonical, identifier
 from tests._script_loader import load_isolated_module
-from tests._usage_fixture import UsageFixture
+from tests._usage_fixture import UsageFixture, require_host_storage
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "workspace-template" / "scripts"
 
@@ -73,6 +73,7 @@ def test_grant_expiring_during_read_cannot_return_an_eligible_result(usage, monk
 
 
 def test_materialization_rechecks_authority_before_rename(tmp_path):
+    require_host_storage()
     module = load_isolated_module("usage_publication_boundary", SCRIPTS / "_usage_materialization.py")
     root = tmp_path / "workspace"
     root.mkdir()

@@ -779,7 +779,8 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
                         and {key: item[key] for key in ("content_hash", "size_bytes")} in sources[parent]["files"].values(),
                         "snapshot_execution_input_lineage_missing")
     if historical_inputs:
-        result = execution_input_context(sources, files_by_revision, nodes, input_proofs, policy, clock, captured)
+        result = execution_input_context(sources, files_by_revision, nodes, input_proofs, policy, clock,
+                                         temporal_time if temporal else captured)
         require(result["historical"], "snapshot_execution_contract_unnecessary")
         require(not result["execution_profiles"] or profiled, "snapshot_execution_profile_contract_required")
         require(result["execution_profiles"] == manifest.get("execution_profiles", []), "snapshot_execution_profiles_mismatch")
