@@ -284,7 +284,7 @@ def test_scale_workflow_runs_on_a_schedule_on_demand_and_for_labelled_pull_reque
     workflow = load_scale_workflow()
 
     assert set(workflow["on"]) == {"schedule", "workflow_dispatch", "pull_request"}
-    assert workflow["on"]["workflow_dispatch"]["inputs"]["profile"]["options"] == ["standard", "near-partition"]
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["profile"]["options"] == ["standard", "near-partition", "both"]
     assert workflow["permissions"] == {"contents": "read"}
     for job in workflow["jobs"].values():
         assert "performance" in job["if"]

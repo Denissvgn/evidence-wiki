@@ -78,6 +78,7 @@ from _review_config import DEFAULT_ESCALATION_SCOPE, ESCALATION_SCOPE_QUESTION, 
 from _workspace_health import evaluate_workspace_health
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load
 
 SCHEMA_VERSION = "1.0"
 STATUS_CACHE_CONTRACT = 2
@@ -411,7 +412,7 @@ def load_frontmatter(path: Path) -> dict[str, Any]:
     if end == -1:
         return {}
     try:
-        document = yaml.safe_load(text[3:end]) or {}
+        document = safe_load(text[3:end]) or {}
     except yaml.YAMLError:
         return {}
     return document if isinstance(document, dict) else {}

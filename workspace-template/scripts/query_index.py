@@ -70,6 +70,7 @@ from _script_errors import ScriptRefusal, emit_refusal, handle_system_exit, json
 from _usage_gate import require_unrestricted_legacy
 from _usage_query import query_authorized
 from _workspace_locks import workspace_lock
+from _yaml_safe import safe_load
 
 # Field weights for lexical scoring. Titles, headings, and source IDs are
 # stronger signals than body text.
@@ -399,7 +400,7 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     block = "\n".join(lines[1:closing_index])
     body = "\n".join(lines[closing_index + 1 :])
     try:
-        data = yaml.safe_load(block)
+        data = safe_load(block)
     except yaml.YAMLError:
         return {}, body
     if not isinstance(data, dict):
