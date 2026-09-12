@@ -197,11 +197,13 @@ additive member.
 | `orchestrate.session.next` | `session.next(*, agent_id=None, resume=False) -> dict` |
 | `orchestrate.session.submit` | `session.submit(action_id, result: dict \| str \| PathLike, *, agent_id=None) -> dict` |
 | `orchestrate.session.status` | `session.status() -> dict` |
+| `orchestrate.session.retire` | `session.retire(reason: str, *, apply=False, payload_policy="retain", driver_wait_seconds=None) -> dict` |
+| `orchestrate.session.cleanup_claims` | `session.cleanup_claims(*, apply=False, driver_wait_seconds=None) -> dict` |
 
 Every limit left as `None` is omitted from the controller's argv, so the
 workspace's deployed controller applies its own default rather than this package
 pinning one a newer workspace has moved on from. See [version
-authority](#version-authority) for why these four are the operations that keep a
+authority](#version-authority) for why these six are the operations that keep a
 subprocess.
 
 **Module level** — no single handle owns these:
@@ -225,7 +227,6 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "10"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -274,6 +275,12 @@ Version `"11"` adds the five `assessments` operations and their versioned
 capabilities. Assessment checks return current eligibility; invalid operations
 raise `EvidenceWikiError` with `EVIDENCE_ASSESSMENT_REFUSED`. Signed issuance and
 refresh application use the existing host usage ledger and checkpoint contract.
+Version `"12"` adds `orchestrate.session.retire` and
+`orchestrate.session.cleanup_claims`. Both return a read-only plan by default;
+`apply=True` archives and seals a terminal session or removes its matching live
+claim ledgers. See the [retention contract](../workspace-template/docs/orchestration.md#claim-retirement-and-cleanup)
+before applying either operation. Archives and tombstones remain permanent;
+payload erasure is unsupported and explicitly refused.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;
@@ -283,7 +290,7 @@ One public method is intentionally absent from that list:
 `ws.orchestrate.session(orchestration_id)` returns a driver for an existing
 session without touching it (naming a session is not reading one), so a host that
 restarts can reconstruct its drivers without a controller spawn per session. It
-is a handle constructor; the four protocol operations are declared separately.
+is a handle constructor; the six protocol operations are declared separately.
 
 ## Operation Boundaries
 
@@ -554,8 +561,8 @@ every open workspace, and a host cannot be made to execute code out of a
 workspace directory. The installed library version is the behavior version,
 exactly as it already is for `evidence-wiki status`.
 
-**Orchestration `start`/`next`/`submit`/`status` keeps a subprocess.** Each of
-those four spawns the workspace's *own deployed* controller at
+**Orchestration `start`/`next`/`submit`/`status`/`retire`/`cleanup-claims` keeps a subprocess.** Each of
+those six spawns the workspace's *own deployed* controller at
 `<workspace>/scripts/orchestration_controller.py`:
 
 ```text
@@ -593,7 +600,7 @@ recorded metadata:
 
 ```python
 ws.versions()
-# {'package': '0.6.0',
+# {'package': '0.7.0',
 #  'workspace': {'starter_version': '0.7.0',
 #                'schema_version': '0.1',
 #                'compatible_research_yml_contract': '0.1'}}

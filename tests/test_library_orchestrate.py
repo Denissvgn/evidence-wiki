@@ -801,6 +801,8 @@ class PublishedSurfaceTests(WorkspaceBuilder, unittest.TestCase):
                 "orchestrate.session.next": session.next,
                 "orchestrate.session.submit": session.submit,
                 "orchestrate.session.status": session.status,
+                "orchestrate.session.retire": session.retire,
+                "orchestrate.session.cleanup_claims": session.cleanup_claims,
             }
 
         self.assertEqual(sorted(resolved), sorted(declared))

@@ -1110,6 +1110,18 @@ def protocol_status(root: Path, *, orchestration_id: str | None = None) -> dict[
     return _controller_json(root, "status", _identifier_arguments(orchestration_id=orchestration_id))
 
 
+def protocol_retention(
+    root: Path, command: str, orchestration_id: str, *, apply: bool = False,
+    reason: str | None = None, payload_policy: str | None = None, driver_wait_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Plan or apply retention through the session's deployed controller."""
+    arguments = _identifier_arguments(orchestration_id=orchestration_id, reason=reason,
+                                      payload_policy=payload_policy, driver_wait_seconds=driver_wait_seconds)
+    if apply:
+        arguments.append("--apply")
+    return _controller_json(root, command, arguments)
+
+
 def _passthrough_controller(root: Path, command: str, arguments: list[str]) -> int:
     completed = _invoke_controller(root, command, arguments)
     if completed.stdout:
@@ -4829,6 +4841,17 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--orchestration-id", default=None)
     _add_format(status)
 
+    for command in ("retire", "cleanup-claims"):
+        retention = subparsers.add_parser(command, help="Plan or apply archive-backed claim retention.")
+        _add_target(retention)
+        retention.add_argument("--orchestration-id", required=True)
+        retention.add_argument("--apply", action="store_true")
+        if command == "retire":
+            retention.add_argument("--reason", required=True)
+            retention.add_argument("--payload-policy", choices=("retain", "delete-required"), default="retain")
+        _add_driver_wait(retention)
+        _add_format(retention)
+
     run = subparsers.add_parser("run", help="Create and drive a session with a managed agent CLI.")
     _add_target(run)
     _add_managed_runner(run)
@@ -4859,6 +4882,8 @@ def _protocol_arguments(args: argparse.Namespace) -> list[str]:
         "total_timeout_seconds",
         "result_file",
         "driver_wait_seconds",
+        "reason",
+        "payload_policy",
     ):
         if not hasattr(args, option):
             continue
@@ -4868,6 +4893,8 @@ def _protocol_arguments(args: argparse.Namespace) -> list[str]:
     forwarded.extend(["--format", args.format])
     if getattr(args, "resume", False):
         forwarded.append("--resume")
+    if getattr(args, "apply", False):
+        forwarded.append("--apply")
     return forwarded
 
 
@@ -4875,7 +4902,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         root = _workspace_root(args.target)
-        if args.command in {"start", "next", "submit", "status"}:
+        if args.command in {"start", "next", "submit", "status", "retire", "cleanup-claims"}:
             return _passthrough_controller(root, args.command, _protocol_arguments(args))
 
         # Before the runner is resolved and before `run` creates a session: a delegated

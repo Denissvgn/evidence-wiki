@@ -366,6 +366,37 @@ class OrchestrationSession:
         """The workspace root, refusing once the owning handle is closed."""
         return self._namespace._workspace_root()
 
+    def retire(
+        self, reason: str, *, apply: bool = False, payload_policy: str = "retain",
+        driver_wait_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Archive a terminal session and seal its claims; default to a nonwriting plan.
+
+        Archives, session evidence, lock files and the retirement marker are
+        retained. ``delete-required`` refuses instead of retaining payloads in
+        conflict with an erasure obligation. Retirement cannot be undone.
+        """
+        if (not isinstance(reason, str) or not reason.strip() or not isinstance(payload_policy, str)
+                or payload_policy not in {"retain", "delete-required"}):
+            raise UsageError("VALUE_INVALID", "Retirement requires a reason and a supported payload policy.")
+        if not isinstance(apply, bool):
+            raise UsageError("VALUE_INVALID", "apply must be a boolean.")
+        with _typed_errors("retire"):
+            return orchestration.protocol_retention(
+                self._root(), "retire", self._orchestration_id, reason=reason, apply=apply,
+                payload_policy=payload_policy, driver_wait_seconds=_checked_wait_seconds(driver_wait_seconds),
+            )
+
+    def cleanup_claims(self, *, apply: bool = False, driver_wait_seconds: float | None = None) -> dict[str, Any]:
+        """Remove only retired live ledgers backed by matching archives; default to a plan."""
+        if not isinstance(apply, bool):
+            raise UsageError("VALUE_INVALID", "apply must be a boolean.")
+        with _typed_errors("cleanup-claims"):
+            return orchestration.protocol_retention(
+                self._root(), "cleanup-claims", self._orchestration_id, apply=apply,
+                driver_wait_seconds=_checked_wait_seconds(driver_wait_seconds),
+            )
+
 
 class OrchestrateNamespace(Namespace):
     """Orchestration operations for the owning workspace."""

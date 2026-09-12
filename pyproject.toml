@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evidence-wiki"
-version = "0.6.0"
+version = "0.7.0"
 description = "Verifiable autonomous research workspaces: agent-driven research where every answer cites provenance-tracked sources or blocks with a structured evidence request."
 readme = "README.md"
 license = { text = "MIT" }
@@ -121,8 +121,8 @@ branch = true
 # Workspace scripts run as subprocesses from copied workspaces during the suite.
 # ``patch = ["subprocess"]`` measures those child processes; ``parallel`` gives
 # each its own data file to combine; the ``include`` patterns admit the copies
-# a test deployed under ``<workspace>/scripts``; and ``[tool.coverage.paths]``
-# folds every copy back onto the template it was copied from at combine time.
+# a test deployed under ``<workspace>/scripts``. tools/coverage_report.py retains
+# exact-path and copy-alias views separately; aliases do not prove copy identity.
 parallel = true
 patch = ["subprocess"]
 include = [

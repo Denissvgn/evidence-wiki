@@ -1,7 +1,7 @@
 # Contributing
 
 Thank you for helping improve EvidenceWiki. The project is intended to stay
-reusable across research domains, so changes should be focused, tested, and
+reusable across research domains, so changes should be focused and
 documented from the perspective of workspace users.
 
 ## Forks and contributions
@@ -47,12 +47,8 @@ The commands below use the POSIX path. On Windows, replace
   ```
 
 - Keep domain-specific reusable guidance in `domain-packs/`.
-- Keep test-only workspaces and source examples in `tests/fixtures/`.
-- Register every fixture path in `tests/fixtures/fixture-provenance.yml`.
-  Prefer synthetic or reserved-domain content; third-party material needs
-  explicit redistribution evidence and attribution.
 - Do not copy project-specific wiki content into the reusable starter.
-- Do not mutate raw source fixtures unless a test explicitly needs new evidence.
+- Preserve raw source evidence and keep redistribution permissions explicit.
 
 ## Development rules
 
@@ -66,66 +62,6 @@ The commands below use the POSIX path. On Windows, replace
 - Preserve compatibility with Python 3.10+ on Windows, macOS, and Ubuntu.
 - Avoid broad refactors while implementing a focused change.
 
-## Verification
-
-Run the full suite before opening a pull request:
-
-```bash
-.venv/bin/python -m pytest -q
-.venv/bin/python -m ruff check .
-.venv/bin/python tools/sync_vendored_scripts.py --check
-git diff --check
-```
-
-Useful focused checks include:
-
-```bash
-.venv/bin/python -m pytest -q tests/test_package_cli.py
-.venv/bin/python -m pytest -q tests/test_init_research_workspace.py tests/test_smoke_validate_workspace.py
-.venv/bin/python -m pytest -q tests/test_inventory_normalization.py
-.venv/bin/python -m pytest -q tests/test_end_to_end_init_fixture.py
-.venv/bin/python -m pytest -q tests/test_pdf_success_path.py
-```
-
-Optional scale checks remain outside the default suite:
-
-```bash
-EVIDENCE_WIKI_RUN_SCALE=1 .venv/bin/python -m pytest -q tests/test_scale_smoke.py
-```
-
-Scale budgets are enforced by automation, not by the fast gate. The
-`Scale and coverage evidence` workflow measures the frozen `standard` profile
-weekly, on demand, and for pull requests labelled `performance` (both profiles
-on the schedule); the release gate measures `standard` for every release
-candidate and stores the JSON beside the distributions. Each run calls
-`tools/scale_benchmark.py --profile <name> --require-budget --output <file>`,
-which exits `3` on a budget violation and records the commit, Python,
-platform, and runner beside the timings. The budgets in
-`tools/scale_benchmark.py` are configured thresholds; runner calibration must
-be established from the recorded measurements. Cold `workspace_status` and warm `workspace_status_cached` are
-measured separately. A violation is a measurement to read against the recorded
-environment, not a prompt to rerun until a sample passes: a slower runner or a
-regression both fail, and telling them apart is the reviewer's job. Run the
-same command locally to compare a laptop sample, remembering that it is
-evidence about the laptop. The same workflow publishes branch coverage of the
-default suite, with workspace-script subprocesses and copied workspace scripts
-folded back onto their template sources; treat the report as evidence of what
-ran, with unmeasured execution explicit in it, not as a threshold.
-
-Agent-quality evaluation is a manual check for comparing prompts or agent-runner
-behavior against the deterministic fixture in
-`tests/fixtures/agent-quality-eval/`:
-
-```bash
-.venv/bin/python tools/score_eval_workspace.py \
-  --export /path/to/export.json \
-  --expected tests/fixtures/agent-quality-eval/expected-answers.yml \
-  --format json
-```
-
-The setup flow and scoring rubric are documented in
-`workspace-template/docs/agent-quality-evaluation.md`.
-
 ## Packaging
 
 Before proposing a release, build and inspect both distribution formats:
@@ -136,8 +72,7 @@ Before proposing a release, build and inspect both distribution formats:
 ```
 
 The wheel must contain the starter workspace, domain packs, and orchestrator
-guide. The source distribution additionally carries tests and development
-tools. Neither artifact should contain reports, caches, virtual environments,
+guide. The source distribution additionally carries development tools. Neither artifact should contain reports, caches, virtual environments,
 scratch workspaces, or build output. One tool checks all of that and is the
 gate both CI and the publishing workflow run:
 
@@ -173,8 +108,8 @@ to tell whether each command is read-only, a dry run, or writes files.
 
 ## Pull request checklist
 
-- The change has focused tests, or a clear reason tests are unnecessary.
-- The full test and lint suite passes.
+- The change has clear supporting evidence.
+- Required repository checks pass.
 - `git diff --check` passes.
 - New files are intentional and no scratch directories are present.
 - Public behavior changes are documented.

@@ -13,7 +13,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCORER_PATH = REPO_ROOT / "tools" / "score_eval_workspace.py"
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "agent-quality-eval"
 EVAL_DOC = REPO_ROOT / "workspace-template" / "docs" / "agent-quality-evaluation.md"
-CONTRIBUTING = REPO_ROOT / "CONTRIBUTING.md"
 
 
 def load_scorer():
@@ -193,11 +192,6 @@ class ScoreEvalWorkspaceTests(unittest.TestCase):
         self.assertIn("tools/score_eval_workspace.py --export", doc)
         self.assertIn("manual/periodic", doc)
         self.assertIn("distractor", doc)
-
-        contributing = CONTRIBUTING.read_text(encoding="utf-8")
-        self.assertIn("Agent-quality evaluation is a manual check", contributing)
-        self.assertIn("tools/score_eval_workspace.py", contributing)
-        self.assertIn("--export /path/to/export.json", contributing)
 
 
 if __name__ == "__main__":

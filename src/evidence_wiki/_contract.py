@@ -31,7 +31,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "11"
+LIBRARY_API_VERSION = "12"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -98,6 +98,8 @@ LIBRARY_API_SURFACE = (
     "orchestrate.session.next",
     "orchestrate.session.submit",
     "orchestrate.session.status",
+    "orchestrate.session.retire",
+    "orchestrate.session.cleanup_claims",
     "fleet_status",
     "contract",
 )
@@ -343,7 +345,17 @@ def contract() -> dict:
         },
         "orchestration_capabilities": {
             "managed_runner_ids": list(orchestration.managed_runner_names()),
-            "external_protocol_commands": ["start", "next", "submit", "status"],
+            "external_protocol_commands": ["start", "next", "submit", "status", "retire", "cleanup-claims"],
+            "claim_retention": {
+                "schema_version": 1,
+                "owner": "package",
+                "default": "read-only plan; explicit apply required",
+                "retirement": "terminal session, no pending work, verified archive, permanent marker",
+                "cleanup": "only matching owned live ledgers; archives, session evidence and locks retained",
+                "payload_policies": ["retain"],
+                "payload_erasure": "unsupported; delete-required refuses before writing",
+                "limits": {"archive_files": 4096, "archive_bytes": 67108864},
+            },
             "canonical_instruction_file": "AGENTS.md",
         },
         "library_api": {

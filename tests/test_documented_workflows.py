@@ -155,6 +155,15 @@ def test_code_surfaces_do_not_embed_planning_identifiers():
     assert not offenders, "\n".join(offenders)
 
 
+def test_public_contribution_guidance_excludes_internal_verification_content():
+    # This reviewed surface has no contributor exception; unrelated documents
+    # retain their existing policy scope.
+    content = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    forbidden = re.compile(r"\b(?:tests?|testing|tested|pytest|milestones?|epics?)\b|docs/CR/|docs/llm_wiki/", re.I)
+    assert not forbidden.search(content)
+    assert "## Documentation" in content and "## Repository boundaries" in content
+
+
 def test_upgrade_documentation_agrees_on_locks_conditional_log_and_dry_run():
     for path in (README, WORKSPACE_INIT_DOC, ORCHESTRATE_SKILL):
         text = path.read_text(encoding="utf-8")

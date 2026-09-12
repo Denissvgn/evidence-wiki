@@ -53,6 +53,8 @@ _ROWS = (
     ("orchestrate.session.next", "evidence-wiki orchestrate next", "session state, order, claims and recovery artifacts", "controller-owned session driver lock", "one version-matched controller process per call"),
     ("orchestrate.session.submit", "evidence-wiki orchestrate submit", "session state, results and committed workspace effects", "controller-owned session driver lock and effect-specific locks", "one version-matched controller process per call"),
     ("orchestrate.session.status", "evidence-wiki orchestrate status", "none", "read-only session inspection", "one version-matched controller process per call"),
+    ("orchestrate.session.retire", "evidence-wiki orchestrate retire", "archives, permanent retirement marker and lock residue only with apply=True", "controller session, retention, and action locks on apply; read-only plan by default", "one version-matched controller process per call"),
+    ("orchestrate.session.cleanup_claims", "evidence-wiki orchestrate cleanup-claims", "removes verified archived live claim ledgers only with apply=True; retains archives, session evidence, markers and locks", "controller session, retention, and action locks on apply; read-only plan by default", "one version-matched controller process per call"),
     ("fleet_status", "evidence-wiki fleet-status", "per-target derived caches unless no_cache", "no lock; atomic per-target cache replacement", "none"),
     ("contract", "evidence-wiki contract", "none in a workspace; package resources may be extracted privately", "process-local resource lifetime", "none"),
 )

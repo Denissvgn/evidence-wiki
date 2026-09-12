@@ -348,6 +348,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     status = subparsers.add_parser("status", help="Read a parent orchestration session.")
     status.add_argument("--orchestration-id", default=None)
     status.add_argument("--format", choices=("text", "json"), default="text")
+    for command in ("retire", "cleanup-claims"):
+        retention = subparsers.add_parser(command, help="Plan or apply archive-backed claim retention.")
+        retention.add_argument("--orchestration-id", required=True)
+        retention.add_argument("--apply", action="store_true")
+        if command == "retire":
+            retention.add_argument("--reason", required=True)
+            retention.add_argument("--payload-policy", choices=("retain", "delete-required"), default="retain")
+        add_driver_wait_argument(retention)
+        retention.add_argument("--format", choices=("text", "json"), default="text")
     return parser.parse_args(argv)
 
 
@@ -779,6 +788,12 @@ def driver_session_lock(
             raise driver_busy_error(lock_path, orchestration_id) from error
 
         refuse_if_upgrade_in_progress(project_root, orchestration_id)
+        if command not in {"retire", "cleanup-claims"}:
+            claims = load_sibling_module("_order_claims")
+            try:
+                claims.require_unretired(project_root, orchestration_id)
+            except claims.OrderClaimError as error:
+                raise OrchestrationControllerError("ORCHESTRATION_RETIRED", str(error)) from error
         previous = _ACTIVE_DRIVER
         _ACTIVE_DRIVER = published if published is not None else driver_identity(command, agent_id)
         stack.callback(_restore_active_driver, previous)
@@ -10099,6 +10114,10 @@ def command_document(project_root: Path, args: argparse.Namespace) -> dict[str, 
         return submit_result(project_root, args)
     if args.command == "status":
         return status_session(project_root, args)
+    if args.command in {"retire", "cleanup-claims"}:
+        from types import SimpleNamespace
+
+        return load_sibling_module("_order_retention").execute(SimpleNamespace(**globals()), project_root, args)
     raise OrchestrationControllerError("VALUE_INVALID", f"unknown command: {args.command}")
 
 

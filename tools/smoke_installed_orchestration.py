@@ -102,6 +102,77 @@ def fake_codex_environment() -> dict[str, str]:
     return environment
 
 
+def verify_installed_retention(cli: str, workspace: Path) -> None:
+    """Exercise the installed facade and deployed claim writer across retirement."""
+    from evidence_wiki import Workspace
+    from evidence_wiki.errors import OrchestrationError
+
+    def require(condition, message):
+        if not condition:
+            raise SystemExit(f"installed retention: {message}")
+
+    run([cli, "deploy", "--target", str(workspace), "--project-name", "retention-smoke",
+         "--project-description", "Installed orchestration retention"])
+    batch = workspace / "batch.yaml"
+    batch.write_text('schema_version: "1.0"\nquestions:\n'
+                     '  - question: "Can a retired session retain its audit evidence?"\n'
+                     '    id: retention-smoke\n    priority: high\n', encoding="utf-8", newline="\n")
+    run([cli, "questions", "add", "--target", str(workspace), "--from-file", str(batch)])
+    identity = "installed-retention"
+    with Workspace.open(workspace) as opened:
+        session = opened.orchestrate.start("retention-agent", orchestration_id=identity)
+        order = session.next()
+        writer = (
+            "import sys; from pathlib import Path; "
+            "sys.path.insert(0, str(Path(sys.argv[1]) / 'scripts')); "
+            "import _order_claims as claims; "
+            "claims.record_fulfilment_claim(Path(sys.argv[1]), sys.argv[2], sys.argv[3], "
+            "request_id='request-1', source_id='source-1', claimed_at='2026-01-01T00:00:00Z')"
+        )
+        run([sys.executable, "-c", writer, str(workspace), identity, order["action_id"]])
+        try:
+            session.retire("Still active", apply=True)
+        except OrchestrationError as error:
+            require(error.error_code == "ORCHESTRATION_RETENTION_UNSAFE", "wrong active-session refusal")
+        else:
+            raise AssertionError("installed retirement admitted a pending action")
+        session.submit(order["action_id"], {"schema_version": "1.0", "action_id": order["action_id"],
+                       "outcome": "failed", "summary": "Research closed", "artifacts": []})
+        ledger = workspace / "runs/order-claims" / identity / f"{order['action_id']}.json"
+        payload = ledger.read_bytes()
+        unknown = ledger.parent / ".incomplete.tmp"
+        unknown.write_bytes(b"preserve incomplete write")
+
+        def tree_bytes():
+            return {path.relative_to(workspace).as_posix(): path.read_bytes()
+                    for path in workspace.rglob("*") if path.is_file()}
+
+        before = tree_bytes()
+        require(session.retire("Research closed")["status"] == "retirement_planned", "dry run failed")
+        require(tree_bytes() == before, "retirement dry run changed workspace bytes")
+        retired = session.retire("Research closed", apply=True)
+        archive = workspace / "runs/order-claim-archives" / identity / retired["evidence"][ledger.relative_to(workspace).as_posix()]
+        require(archive.read_bytes() == payload, "archive differs from ledger")
+        before = tree_bytes()
+        require(session.cleanup_claims()["eligible"] == [ledger.relative_to(workspace).as_posix()], "wrong cleanup selection")
+        require(tree_bytes() == before, "cleanup dry run changed workspace bytes")
+        # Include the installed CLI dispatch, independently of facade dispatch.
+        cleaned = json.loads(run([cli, "orchestrate", "cleanup-claims", "--target", str(workspace),
+                                  "--orchestration-id", identity, "--apply", "--format", "json"]).stdout)
+        require(cleaned["status"] == "cleaned" and not ledger.exists(), "CLI cleanup did not remove ledger")
+        require(session.cleanup_claims(apply=True)["eligible"] == [], "cleanup repetition is not idempotent")
+        require(session.retire("Research closed", apply=True)["status"] == "already_retired", "retirement repetition failed")
+        require(archive.read_bytes() == payload and unknown.read_bytes() == b"preserve incomplete write", "retained evidence changed")
+        refused = run([sys.executable, "-c", writer, str(workspace), identity, order["action_id"]], expected=1)
+        require("retired" in refused.stderr and not ledger.exists(), "retired claim writer recreated ledger")
+        try:
+            session.next()
+        except OrchestrationError as error:
+            require(error.error_code == "ORCHESTRATION_RETIRED", "wrong retired-session refusal")
+        else:
+            raise AssertionError("installed controller resumed a retired session")
+
+
 def verify_installed_pdf_backend(cli: str, workspace: Path) -> None:
     run(
         [
@@ -210,6 +281,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-wheel-smoke-") as tmpdir:
         temporary_root = Path(tmpdir)
+        verify_installed_retention(cli, temporary_root / "retention workspace")
         verify_installed_pdf_backend(cli, temporary_root / "portable PDF workspace")
         workspace = temporary_root / "workspace with spaces"
         fake_bin = temporary_root / "bin"

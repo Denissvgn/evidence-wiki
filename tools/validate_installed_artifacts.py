@@ -821,7 +821,7 @@ HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
     del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
     del os.environ["EVIDENCE_WIKI_STATE_DIR"]
     assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
-    assert contract()["library_api"]["version"] == "11"
+    assert contract()["library_api"]["version"] == "12"
     print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
     '''
 )
@@ -949,7 +949,7 @@ ASSESSMENT_PROBE = textwrap.dedent(
         assert workspace.assessments.apply_refresh(application) == applied
         assert workspace.assessments.check(envelope)["reasons"] == ["assessment_invalidated"]
         assert command("plan-refresh", host.refresh())["plan"]["entries"] == []
-        assert contract()["library_api"]["version"] == "11"
+        assert contract()["library_api"]["version"] == "12"
     print(json.dumps({"evidence_assessments": "authenticated_cli_api_parity", "assessment_refresh": "revocation_and_idempotent_apply"}))
     '''
 )

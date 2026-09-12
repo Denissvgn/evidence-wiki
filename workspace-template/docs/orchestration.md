@@ -8,6 +8,63 @@ returns, and may reference several immutable child `run_id` records.
 
 ## Command Surface
 
+### Claim retirement and cleanup
+
+The package owns explicit orchestration retirement and live claim-ledger cleanup.
+Retirement is permanent and requires a terminal session with a completion time,
+no pending action or submission, no active child run, and no unresolved recovery.
+Paused or stranded sessions are ineligible. A missing session, an old modification
+time, ordinary run garbage collection, and usage revocation are not retirement proof.
+
+Preview each operation before applying it:
+
+```bash
+evidence-wiki orchestrate retire --target PATH --orchestration-id ORCH_ID \
+  --reason "Research closed; retain audit evidence" --format json
+evidence-wiki orchestrate retire --target PATH --orchestration-id ORCH_ID \
+  --reason "Research closed; retain audit evidence" --apply --format json
+evidence-wiki orchestrate cleanup-claims --target PATH --orchestration-id ORCH_ID --format json
+evidence-wiki orchestrate cleanup-claims --target PATH --orchestration-id ORCH_ID --apply --format json
+```
+
+Without `--apply`, these commands read evidence without creating locks, directories,
+archives, or records. The Python equivalents are `session.retire(reason, apply=False)`
+and `session.cleanup_claims(apply=False)`, advertised by library API version `12`.
+
+Applying retirement takes the session driver lock, the session claim-retention
+lock, and the eligible action locks. It archives the session evidence and owned
+claim ledgers under `runs/order-claim-archives/ORCH_ID/`, verifies every content
+digest, revalidates live evidence, and publishes
+`runs/order-claims/ORCH_ID/.retired.json` last. Each eligible ledger must name the
+same session and action as its retained work order. The inventory is bounded to
+4,096 archived files and 64 MiB. All package claim writers share the retention
+lock and refuse writes after the marker exists. Session mutation also refuses;
+`status` remains available. Use version-matched package and deployed scripts.
+
+Cleanup reacquires these locks and validates the marker, archived bytes, owning
+orders, and unchanged session evidence before removing matching live ledgers.
+Changed or unknown ledgers, ambiguous ownership, incomplete-write temporaries,
+and newly appeared members remain in place with an explicit disposition. Unsafe
+paths or missing archives refuse cleanup. Interrupted cleanup can be repeated:
+already absent ledgers are reported, and no ledger is recreated. Held locks
+refuse with `LOCK_UNAVAILABLE` or `ORCHESTRATION_DRIVER_BUSY`; invalid retirement
+evidence returns `ORCHESTRATION_RETENTION_UNSAFE`.
+
+The payload policy is **retain**. Archives, session evidence, retirement markers,
+lock files and directories (including empty ones) remain in place. This preserves
+evidence that retained assessments, snapshots, or audit consumers may still need;
+cleanup does not infer that those consumers are finished. It reduces live claim
+ledgers and does not erase payloads or guarantee reduced total storage.
+`--payload-policy delete-required` explicitly refuses before writing. Resolve
+payload-deletion obligations with the owner of those obligations before selecting
+archive retention. The package has no archive-erasure operation.
+
+An existing host cleanup adapter remains the host's responsibility until that host
+has independently verified this contract against its selected installed artifact.
+Retirement and cleanup do not establish recovery of legacy stranded orders.
+
+### Driving sessions
+
 Use the package-managed Codex or Claude runner for a complete loop:
 
 ```bash

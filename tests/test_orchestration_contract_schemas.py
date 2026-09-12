@@ -303,7 +303,17 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
         self.assertEqual(
             {
                 "managed_runner_ids": ["codex", "claude"],
-                "external_protocol_commands": ["start", "next", "submit", "status"],
+                "external_protocol_commands": ["start", "next", "submit", "status", "retire", "cleanup-claims"],
+                "claim_retention": {
+                    "schema_version": 1,
+                    "owner": "package",
+                    "default": "read-only plan; explicit apply required",
+                    "retirement": "terminal session, no pending work, verified archive, permanent marker",
+                    "cleanup": "only matching owned live ledgers; archives, session evidence and locks retained",
+                    "payload_policies": ["retain"],
+                    "payload_erasure": "unsupported; delete-required refuses before writing",
+                    "limits": {"archive_files": 4096, "archive_bytes": 67108864},
+                },
                 "canonical_instruction_file": "AGENTS.md",
             },
             payload["orchestration_capabilities"],

@@ -115,19 +115,14 @@ jobs:
       - name: Run the default suite under branch coverage, subprocesses included
         shell: bash
         run: |
-          # ``parallel`` and ``patch = ["subprocess"]`` in pyproject.toml give every
-          # workspace-script subprocess its own data file; combine folds them, and
-          # the copied-script paths, back onto the template sources.
-          .venv/bin/python -m coverage run -m pytest -q
+          .venv/bin/python tools/coverage_report.py snapshot --source-manifest coverage-source.json
+          .venv/bin/python tools/run_test_groups.py --coverage
 
       - name: Generate coverage reports even when a test fails
         if: always()
         shell: bash
         run: |
-          .venv/bin/python -m coverage combine
-          .venv/bin/python -m coverage report --show-missing --skip-empty | tee coverage-report.txt
-          .venv/bin/python -m coverage xml -o coverage.xml
-          .venv/bin/python -m coverage html -d coverage-html
+          .venv/bin/python tools/coverage_report.py report --source-manifest coverage-source.json
 
       - name: Store the coverage evidence keyed to the commit
         if: always()
@@ -135,8 +130,10 @@ jobs:
         with:
           name: coverage-${{ github.sha }}
           path: |
-            coverage-report.txt
-            coverage.xml
-            coverage-html
+            coverage-source.json
+            coverage-evidence/
+            suite-evidence/
+            .coverage*
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 90

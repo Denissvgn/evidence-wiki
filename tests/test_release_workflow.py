@@ -60,7 +60,7 @@ def test_release_gate_checks_identity_quality_and_runs_the_shared_artifact_gate(
         'project["version"]',
         "src/evidence_wiki/__init__.py",
         "CHANGELOG.md",
-        "-m pytest -q",
+        "tools/run_test_groups.py",
         "-m ruff check .",
         "tools/sync_vendored_scripts.py --check",
         "git diff --check",
@@ -265,9 +265,9 @@ def test_scale_workflow_enforces_budgets_and_keeps_evidence_keyed_to_the_commit(
         "--output",
         "${GITHUB_SHA}",
         "near-partition",
-        "-m coverage run -m pytest -q",
-        "-m coverage combine",
-        "-m coverage xml",
+        "tools/run_test_groups.py --coverage",
+        "tools/coverage_report.py snapshot",
+        "tools/coverage_report.py report",
         "if: always()",
         "retention-days: 90",
     ):
@@ -282,6 +282,19 @@ def test_release_gate_measures_the_standard_profile_and_stores_it() -> None:
     assert "--profile standard" in text
     assert "--require-budget" in text
     assert "scale-benchmark-standard.json" in text
+
+
+def test_release_failure_diagnostics_do_not_admit_failed_distributions() -> None:
+    workflow = load_workflow()
+    steps = workflow["jobs"]["release-gate"]["steps"]
+    collector = next(step for step in steps if "tools/collect_release_diagnostics.py" in step.get("run", ""))
+    upload = next(step for step in steps if step.get("with", {}).get("path", "").startswith("release-diagnostics/"))
+    distributions = next(step for step in steps if step["name"] == "Store verified distributions")
+    assert collector["if"] == upload["if"] == "always()"
+    assert "github.sha" in upload["with"]["name"] and "runner.arch" in upload["with"]["name"]
+    assert "dist/" not in upload["with"]["path"]
+    assert "if" not in distributions
+    assert "if" not in workflow["jobs"]["publish-to-pypi"]
 
 
 def test_coverage_measures_subprocesses_and_folds_copied_scripts_onto_the_template() -> None:

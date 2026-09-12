@@ -88,6 +88,21 @@ def claims_lock_path(project_root: Path, orchestration_id: str, action_id: str) 
     )
 
 
+def retirement_path(project_root: Path, orchestration_id: str) -> Path:
+    return claims_dir(project_root, orchestration_id) / ".retired.json"
+
+
+def retention_lock_path(project_root: Path, orchestration_id: str) -> Path:
+    return claims_dir(project_root, orchestration_id) / LOCKS_DIR / "retention.lock"
+
+
+def require_unretired(project_root: Path, orchestration_id: str) -> None:
+    # A damaged or dangling marker must also block writers. Never infer retirement
+    # from age, a missing session, a terminal status, or usage revocation.
+    if os.path.lexists(retirement_path(project_root, orchestration_id)):
+        raise OrderClaimError("orchestration is retired; its claims cannot be changed")
+
+
 def empty_claims(orchestration_id: str = "", action_id: str = "") -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -244,10 +259,15 @@ def _record_claim(
     lock_path = claims_lock_path(project_root, orchestration_id, action_id)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with workspace_lock(
+        retention_lock_path(project_root, orchestration_id),
+        timeout_seconds=CLAIM_LOCK_TIMEOUT_SECONDS,
+        purpose="order claim retention",
+    ), workspace_lock(
         lock_path,
         timeout_seconds=CLAIM_LOCK_TIMEOUT_SECONDS,
         purpose="order claim filing",
     ):
+        require_unretired(project_root, orchestration_id)
         document = load_claims(path)
         document["schema_version"] = SCHEMA_VERSION
         document["orchestration_id"] = str(orchestration_id)

@@ -216,6 +216,14 @@ _REMEDIATIONS = {
         "Do not hand-edit the append-only event log to clear the refusal."
     ),
     "ORCHESTRATION_OWNER_MISMATCH": "Retry with the owning agent_id or start a separately owned session.",
+    "ORCHESTRATION_RETIRED": (
+        "Preserve the retired session, archives, locks and retirement marker. Start a new orchestration "
+        "for new work; retirement is permanent."
+    ),
+    "ORCHESTRATION_RETENTION_UNSAFE": (
+        "Retain the evidence and resolve the reported state before retrying retirement or cleanup; "
+        "preserve all locks and retirement markers."
+    ),
     "ORCHESTRATION_DRIVER_BUSY": (
         "Retry after the holder's call completes, or serialize drivers host-side; status polling never "
         "requires this lock. Pass --driver-wait-seconds SECONDS to wait instead of refusing."
@@ -798,6 +806,7 @@ NON_RECOVERABLE_CODES = frozenset(
         "CLAIM_NOT_STALE",
         "CANDIDATE_STORE_INVALID",
         "ORCHESTRATION_OWNER_MISMATCH",
+        "ORCHESTRATION_RETIRED",
         "ORCHESTRATION_STATE_INVALID",
         "PROVIDER_REGISTRATION_INVALID",
         "WORKSPACE_UNREADABLE",

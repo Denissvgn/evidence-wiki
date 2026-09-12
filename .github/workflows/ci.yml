@@ -82,7 +82,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          .venv/bin/python -m pytest -q
+          .venv/bin/python tools/run_test_groups.py
           .venv/bin/python -m ruff check .
           .venv/bin/python tools/sync_vendored_scripts.py --check
 
@@ -90,12 +90,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          .\.venv\Scripts\python.exe -m pytest -q
+          .\.venv\Scripts\python.exe tools/run_test_groups.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\.venv\Scripts\python.exe -m ruff check .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\.venv\Scripts\python.exe tools\sync_vendored_scripts.py --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retain suite outcomes and process evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: suite-${{ github.sha }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}
+          path: suite-evidence/
+          if-no-files-found: warn
+          retention-days: 90
 
   package:
     name: Build distributions

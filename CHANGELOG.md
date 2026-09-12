@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-09-12
+
+- **Terminal orchestration claims can be retired and cleaned up by the package.**
+  Library API contract version 12 adds `session.retire` and
+  `session.cleanup_claims`, with matching CLI commands and read-only defaults.
+  Applied retirement archives the completed session and owned ledgers, prevents
+  later session and claim writes, and permits repeated cleanup under locks.
+  Archives, retirement markers, locks and unknown files remain retained;
+  payload erasure requires a separate retention policy.
+
 - **Authenticated assessments recheck current evidence before consumption.**
   Library API contract version 11 adds domain-neutral assessment preparation,
   issuance, current checks and bounded refresh. Whole-envelope host authority
