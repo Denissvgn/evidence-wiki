@@ -4,6 +4,11 @@
 
 ## 0.7.0 - 2026-09-12
 
+- **Windows workspace operations preserve portable file semantics.** Legacy
+  exports and search caches inspect permission declarations through bounded
+  native file handles. Atomic question writes retain LF bytes for replay, and
+  named market time zones work without a system time-zone database.
+
 - **Terminal orchestration claims can be retired and cleaned up by the package.**
   Library API contract version 12 adds `session.retire` and
   `session.cleanup_claims`, with matching CLI commands and read-only defaults.

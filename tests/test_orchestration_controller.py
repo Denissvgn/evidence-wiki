@@ -7447,7 +7447,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                         "blocking_request_ids": [request_id],
                         "page_blocking_request_ids": [request_id],
                         "source_ids_before": [],
-                        "page_before": (target / "wiki/questions/test-question.md").read_text(),
+                        "page_before": (target / "wiki/questions/test-question.md").read_bytes().decode("utf-8"),
                     }
                 },
                 acquisition_guards["linked_blocked_questions_reopened"]["blocked_questions_before"],

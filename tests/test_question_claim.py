@@ -28,6 +28,22 @@ STATUS = load_script_module("research_question_claim_workspace_status", "workspa
 EXPORT = load_script_module("research_question_claim_export", "export_answers.py")
 
 
+def test_atomic_page_writer_preserves_rendered_bytes_with_windows_text_defaults(tmp_path, monkeypatch):
+    original_open = Path.open
+
+    def windows_open(path, mode="r", *args, **kwargs):
+        if "b" not in mode and "w" in mode and "newline" not in kwargs:
+            kwargs["newline"] = "\r\n"
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", windows_open)
+    page = tmp_path / "question.md"
+    rendered = "---\nstatus: open\n---\nA question with café evidence.\n"
+    CLAIM.write_page_atomic(page, rendered)
+    assert page.read_bytes() == rendered.encode("utf-8")
+    assert list(tmp_path.iterdir()) == [page]
+
+
 class ClaimTestBase(unittest.TestCase):
     def init_workspace(self, root: Path, questions: list[dict] | None = None, run_block: dict | None = None) -> Path:
         target = root / "claim-workspace"

@@ -276,7 +276,7 @@ def write_page_atomic(path: Path, content: str) -> None:
     # the final rename stays atomic on POSIX (same filesystem).
     tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        with tmp_path.open("w", encoding="utf-8") as handle:
+        with tmp_path.open("w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
             handle.flush()
             try:

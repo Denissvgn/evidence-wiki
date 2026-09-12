@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from _evidence_usage import CLAIM_KEYS, UsageView, configured, current_view
 from _publication_context import captured_config, captured_view
 from _record_artifacts import artifact_path
 from _script_errors import ScriptRefusal
+from _windows_files import read_legacy_file
 
 
 class UsageRefusal(ScriptRefusal, SystemExit):
@@ -77,14 +79,17 @@ def normalized_relative(config: dict[str, Any], source_id: str) -> str:
     return f"{directory}/{value or 'source'}.md"
 
 
-def read_workspace_file(root: Path, relative: str) -> bytes:
+def read_workspace_file(root: Path, relative: str, *, legacy: bool = False) -> bytes:
     artifact_path(relative)
     path = root / relative
     try:
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 16 * 1024 * 1024:
             raise EvidenceInvalid("unsafe_usage_workspace_file")
-        data = read_observed_file(root, relative, observation(info))
+        if legacy and sys.platform == "win32":
+            data = read_legacy_file(root, relative, observation(info), 16 * 1024 * 1024)
+        else:
+            data = read_observed_file(root, relative, observation(info))
         if observation(path.lstat()) != observation(info):
             raise EvidenceInvalid("usage_workspace_changed")
         return data
@@ -192,7 +197,8 @@ def workspace_has_claims(root: Path, config: dict[str, Any]) -> bool:
         artifact_path(normalized)
         paths = [manifest] if (root / manifest).exists() else []
         directory = root / normalized
-        if directory.is_symlink():
+        if directory.is_symlink() or (directory.exists() and
+                                      getattr(directory.lstat(), "st_file_attributes", 0) & 0x400):
             raise EvidenceInvalid("unsafe_usage_workspace_file")
         # Bound discovery as well as file contents. Do not follow directory links.
         pending = [directory] if directory.exists() else []
@@ -202,7 +208,7 @@ def workspace_has_claims(root: Path, config: dict[str, Any]) -> bool:
                 entries += 1
                 if entries > 8192:
                     raise EvidenceInvalid("usage_workspace_bound_exceeded")
-                if path.is_symlink():
+                if path.is_symlink() or getattr(path.lstat(), "st_file_attributes", 0) & 0x400:
                     raise EvidenceInvalid("unsafe_usage_workspace_file")
                 if path.is_dir():
                     pending.append(path)
@@ -210,7 +216,7 @@ def workspace_has_claims(root: Path, config: dict[str, Any]) -> bool:
                     paths.append(path.relative_to(root).as_posix())
         total = 0
         for relative in sorted(paths):
-            data = read_workspace_file(root, relative)
+            data = read_workspace_file(root, relative, legacy=True)
             total += len(data)
             if total > 64 * 1024 * 1024:
                 raise EvidenceInvalid("usage_workspace_bound_exceeded")

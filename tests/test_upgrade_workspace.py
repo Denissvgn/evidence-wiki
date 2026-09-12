@@ -7,7 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
-from collections.abc import Callable
+from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
@@ -547,13 +547,9 @@ class UpgradeUnitTests(unittest.TestCase):
 class UpgradePendingOrderTests(unittest.TestCase):
     """The upgrade refuses to replace what a pending order was issued under."""
 
-    def spawn_lock_holder(self, target: Path, lock_path: Path, scratch: Path) -> Callable[[], None]:
-        """Hold ``lock_path`` from a second process; returns the release callable.
-
-        Two hosts is the situation the lock exists for, so the holder is a process.
-        The caller releases it before its temporary directory disappears; the
-        cleanup registration is only the safety net.
-        """
+    @contextlib.contextmanager
+    def holding_lock(self, target: Path, lock_path: Path, scratch: Path) -> Iterator[None]:
+        """Hold the lock in another process and release it before workspace cleanup."""
         scratch.mkdir(parents=True, exist_ok=True)
         ready = scratch / "ready"
         release = scratch / "release"
@@ -573,14 +569,18 @@ class UpgradePendingOrderTests(unittest.TestCase):
                 process.kill()
                 process.wait(30)
 
-        self.addCleanup(stop)
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline and not ready.exists():
-            if process.poll() is not None:
-                self.fail(f"lock holder exited early: {process.stderr.read()}")
-            time.sleep(0.02)
-        self.assertTrue(ready.exists(), "lock holder never reported holding the lock")
-        return stop
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and not ready.exists():
+                if process.poll() is not None:
+                    self.fail(f"lock holder exited early: {process.stderr.read()}")
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "lock holder never reported holding the lock")
+            yield
+        finally:
+            stop()
+            process.stdout.close()
+            process.stderr.close()
 
     def test_upgrade_refuses_while_an_orchestration_order_is_pending(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -637,27 +637,40 @@ class UpgradePendingOrderTests(unittest.TestCase):
             code, _, stderr = controller(target, "start", "--orchestration-id", "orch-held", "--agent-id", "agent-a")
             self.assertEqual(0, code, stderr)
             lock_path = CONTROLLER.session_lock_path(target, "orch-held")
-            release = self.spawn_lock_holder(target, lock_path, root / "scratch-held")
-            drifted = target / "scripts" / "query_index.py"
-            drifted.write_text("# stale local copy\n")
+            with self.holding_lock(target, lock_path, root / "scratch-held"):
+                drifted = target / "scripts" / "query_index.py"
+                drifted.write_text("# stale local copy\n")
 
-            before = {path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()}
-            code, _stdout, stderr = run_cli_result("upgrade", "--target", str(target), "--dry-run")
-            self.assertEqual(2, code, stderr)
-            self.assertIn("UPGRADE_PENDING_ORDER", stderr)
-            self.assertIn("active driver", stderr)
-            self.assertEqual(before, {path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()})
+                def snapshot():
+                    contents = {}
+                    for path in target.rglob("*"):
+                        if path.is_file():
+                            if path == lock_path:
+                                # Windows byte-range locks also prevent reads. Inspect
+                                # the locked file's identity and metadata without opening it.
+                                info = path.stat()
+                                value = (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
+                            else:
+                                value = path.read_bytes()
+                            contents[path.relative_to(target)] = value
+                    return contents
 
-            code, _stdout, stderr = run_cli_result("upgrade", "--target", str(target))
+                before = snapshot()
+                code, _stdout, stderr = run_cli_result("upgrade", "--target", str(target), "--dry-run")
+                self.assertEqual(2, code, stderr)
+                self.assertIn("UPGRADE_PENDING_ORDER", stderr)
+                self.assertIn("active driver", stderr)
+                self.assertEqual(before, snapshot())
 
-            self.assertEqual(2, code, stderr)
-            self.assertIn("UPGRADE_PENDING_ORDER", stderr)
-            self.assertIn("orch-held", stderr)
-            self.assertIn("active driver", stderr)
-            self.assertEqual("# stale local copy\n", drifted.read_text())
-            self.assertFalse((target / ".locks" / "upgrade.lock").exists())
+                code, _stdout, stderr = run_cli_result("upgrade", "--target", str(target))
 
-            release()
+                self.assertEqual(2, code, stderr)
+                self.assertIn("UPGRADE_PENDING_ORDER", stderr)
+                self.assertIn("orch-held", stderr)
+                self.assertIn("active driver", stderr)
+                self.assertEqual(before, snapshot())
+                self.assertFalse((target / ".locks" / "upgrade.lock").exists())
+
             code, stdout, stderr = run_cli_result("upgrade", "--target", str(target))
             self.assertEqual(0, code, stderr)
             self.assertIn("Upgraded research workspace", stdout)
@@ -685,16 +698,15 @@ class UpgradePendingOrderTests(unittest.TestCase):
             self.assertEqual(0, code, stderr)
             self.assertFalse((target / ".locks" / "upgrade.lock").exists(), "the probe must not create the lock file")
 
-            release = self.spawn_lock_holder(target, INIT.upgrade_lock_path(target), root / "scratch-upgrade")
-            code, payload, _stderr = controller(target, "start", "--orchestration-id", "orch-late", "--agent-id", "agent-a")
-            self.assertNotEqual(0, code)
-            self.assertEqual("ORCHESTRATION_UPGRADE_IN_PROGRESS", payload.get("error_code"), payload)
-            self.assertIs(True, payload.get("recoverable"), payload)
-            self.assertFalse((target / "runs" / "orchestrations" / "orch-late" / "session.json").exists())
-            code, payload, _stderr = controller(target, "next", "--orchestration-id", "orch-probe", "--agent-id", "agent-a")
-            self.assertEqual("ORCHESTRATION_UPGRADE_IN_PROGRESS", payload.get("error_code"), payload)
+            with self.holding_lock(target, INIT.upgrade_lock_path(target), root / "scratch-upgrade"):
+                code, payload, _stderr = controller(target, "start", "--orchestration-id", "orch-late", "--agent-id", "agent-a")
+                self.assertNotEqual(0, code)
+                self.assertEqual("ORCHESTRATION_UPGRADE_IN_PROGRESS", payload.get("error_code"), payload)
+                self.assertIs(True, payload.get("recoverable"), payload)
+                self.assertFalse((target / "runs" / "orchestrations" / "orch-late" / "session.json").exists())
+                code, payload, _stderr = controller(target, "next", "--orchestration-id", "orch-probe", "--agent-id", "agent-a")
+                self.assertEqual("ORCHESTRATION_UPGRADE_IN_PROGRESS", payload.get("error_code"), payload)
 
-            release()
             code, payload, stderr = controller(target, "start", "--orchestration-id", "orch-late", "--agent-id", "agent-a")
             self.assertEqual(0, code, stderr)
             self.assertEqual("orch-late", payload.get("orchestration_id"))

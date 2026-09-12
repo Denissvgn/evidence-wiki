@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,10 @@ STRUCTURED = load_isolated_module("market_structured", SCRIPTS / "_structured_vi
 USAGE = load_isolated_module("market_usage", SCRIPTS / "_evidence_usage.py")
 QUALIFICATIONS = load_isolated_module("market_qualifications", SCRIPTS / "_snapshot_qualifications.py")
 SNAPSHOT = load_isolated_module("market_snapshot", SCRIPTS / "_snapshot_verifier.py")
+CAPTURE_SUPPORTED = (os.open in os.supports_dir_fd and os.scandir in os.supports_fd
+                     and hasattr(os, "O_NOFOLLOW"))
+requires_artifact_capture = pytest.mark.skipif(
+    not CAPTURE_SUPPORTED, reason="Coherent artifact capture requires no-follow directory descriptors")
 
 
 def normalize(root, config, record):
@@ -50,13 +55,11 @@ def reasons(root, config, record, path):
 
 
 @pytest.mark.parametrize("route", MARKET.ROUTES)
-def test_inert_exact_decimal_observations_and_grounding(tmp_path, route):
+def test_inert_exact_decimal_observations(route):
     files, _ = example(route)
-    config, record, _ = workspace(tmp_path, files)
     before = {path: data for path, data in files.items()}
     with patch("subprocess.run", side_effect=AssertionError("inert delivery")), patch("socket.create_connection", side_effect=AssertionError("offline")):
-        report = MARKET.inspect_market(tmp_path, config, record)
-        source, path = normalize(tmp_path, config, record)
+        report = MARKET.validate_closure(SOURCE_ID, files)
     assert report["valid"] and report["completeness"]["complete"], report
     assert report["authority"] == "not_evaluated"
     assert files == before
@@ -67,12 +70,25 @@ def test_inert_exact_decimal_observations_and_grounding(tmp_path, route):
         assert {item["value"] for item in values} == {"1234567890123456789", "1234567890123456790"}
         assert {item["form"] for item in values} == {"10-Q", "10-Q/A"}
         assert all(item["available_at"] is None and item["scale"] == 0 for item in values)
-        pointer, exact, rounded = "/observations/0/value", "1234567890123456789", "1234567890123456800"
     else:
         assert values[0]["close"] == "10.1234567890123456789"
         assert values[1]["close"] == "21"
         assert report["data"]["listings"][1]["status"] == "delisted"
         assert [item["type"] for item in report["data"]["provenance"]["corporate_actions"]] == ["split", "dividend"]
+
+
+@requires_artifact_capture
+@pytest.mark.parametrize("route", MARKET.ROUTES)
+def test_captured_market_observations_retain_exact_grounding(tmp_path, route):
+    files, _ = example(route)
+    config, record, _ = workspace(tmp_path, files)
+    with patch("subprocess.run", side_effect=AssertionError("inert delivery")), patch("socket.create_connection", side_effect=AssertionError("offline")):
+        report = MARKET.inspect_market(tmp_path, config, record)
+        source, path = normalize(tmp_path, config, record)
+    assert report == MARKET.validate_closure(SOURCE_ID, files)
+    if route == "sec-company-concept":
+        pointer, exact, rounded = "/observations/0/value", "1234567890123456789", "1234567890123456800"
+    else:
         pointer, exact, rounded = "/observations/0/close", "10.1234567890123456789", "10.123456789012346"
     frontmatter, _ = LINT.load_frontmatter(path)
     sidecar = STRUCTURED.sidecar_path(path.parent, SOURCE_ID)
@@ -101,7 +117,7 @@ def test_inert_exact_decimal_observations_and_grounding(tmp_path, route):
     ("duplicate", "duplicate_or_conflicting_price_bar"),
     ("terms", "usage_policy_evidence_missing"),
 ])
-def test_missing_or_ambiguous_market_scope_is_a_gap(tmp_path, change, gap):
+def test_missing_or_ambiguous_market_scope_is_a_gap(change, gap):
     files, document = example()
 
     def mutate(doc, artifacts):
@@ -141,8 +157,7 @@ def test_missing_or_ambiguous_market_scope_is_a_gap(tmp_path, change, gap):
         artifacts["page.json"] = canonical(page)
 
     files, _ = revise(files, document, mutate)
-    config, record, _ = workspace(tmp_path, files)
-    report = MARKET.inspect_market(tmp_path, config, record)
+    report = MARKET.validate_closure(SOURCE_ID, files)
     assert report["valid"], report
     assert not report["completeness"]["complete"]
     assert gap in report["completeness"]["gaps"]
@@ -164,6 +179,28 @@ def test_ticker_rename_and_reuse_keep_distinct_issuer_identity():
     report = MARKET.validate_closure(SOURCE_ID, files)
     assert report["completeness"]["complete"], report
     assert report["data"]["observations"][0]["listing_id"] == "listing-a"
+
+
+def test_named_market_timezone_works_without_a_system_timezone_database():
+    result = subprocess.run(
+        [sys.executable, "-c", """
+from pathlib import Path
+from tests._market_fixture import SOURCE_ID, example
+from tests._script_loader import load_isolated_module
+market = load_isolated_module("timezone_market", Path("workspace-template/scripts/_market_evidence.py").resolve())
+report = market.validate_closure(SOURCE_ID, example()[0])
+assert report["valid"] and report["completeness"]["complete"], report
+"""], cwd=SCRIPTS.parents[1], env={**os.environ, "PYTHONTZPATH": ""}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_market_capture_refuses_when_directory_descriptors_are_unavailable(tmp_path, monkeypatch):
+    config, record, _ = workspace(tmp_path)
+    monkeypatch.setattr(os, "supports_dir_fd", set())
+    report = MARKET.inspect_market(tmp_path, config, record)
+    assert not report["valid"] and report["reason"] == "artifact_capture_unsupported"
+    source, _ = normalize(tmp_path, config, record)
+    assert source.extraction_method == "market_stub"
 
 
 def test_pagination_requires_a_complete_ordered_chain():
@@ -210,16 +247,21 @@ def test_malformed_or_rebound_slices_refuse(tmp_path, change):
             elif change == "bad-schema":
                 doc["schema_version"] = "market-evidence/v999"
         files, _ = revise(files, document, mutate)
+    with pytest.raises(ValueError) as rejected:
+        MARKET.validate_closure(SOURCE_ID, files)
     config, record, _ = workspace(tmp_path, files)
     report = MARKET.inspect_market(tmp_path, config, record)
     assert not report["valid"], report
+    assert report["reason"] == (str(rejected.value) if CAPTURE_SUPPORTED else "artifact_capture_unsupported")
     source, _ = normalize(tmp_path, config, record)
     assert source.extraction_method == "market_stub"
 
 
+@requires_artifact_capture
 @pytest.mark.parametrize("change", ["original", "report", "sidecar"])
 def test_normalized_market_bytes_cannot_detach_from_originals(tmp_path, change):
     config, record, folder = workspace(tmp_path)
+    assert MARKET.inspect_market(tmp_path, config, record)["valid"]
     _, path = normalize(tmp_path, config, record)
     frontmatter, body, _ = LINT._normalized_contract.split_record(path.read_text())
     if change == "original":
@@ -278,8 +320,11 @@ def test_real_cli_and_public_api_report_the_same_bounded_slice(tmp_path):
     ws = Workspace.open(tmp_path)
     report = ws.normalize.validate_market(SOURCE_ID)
     result = subprocess.run([sys.executable, "-m", "evidence_wiki.cli", "normalize", "market", "--target", str(tmp_path),
-                             "--source-id", SOURCE_ID, "--format", "json"], capture_output=True, text=True, check=True)
+                             "--source-id", SOURCE_ID, "--format", "json"], capture_output=True, text=True)
+    assert result.returncode == (0 if CAPTURE_SUPPORTED else 1), result.stderr
     assert json.loads(result.stdout) == report
+    if not CAPTURE_SUPPORTED:
+        assert not report["valid"] and report["reason"] == "artifact_capture_unsupported"
     assert ws.normalize.profiles() == contract()["intake_profiles"]
     assert "normalize.validate_market" in contract()["library_api"]["surface"]
     with pytest.raises(SourceError):
