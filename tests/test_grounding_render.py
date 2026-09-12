@@ -1,4 +1,4 @@
-"""Canonical frontmatter serialization for `grounding` entries (CR-7 T6).
+"""Canonical frontmatter serialization for `grounding` entries.
 
 The byte layout asserted in `CanonicalGroundingBytesTests` is normative: the supported
 write path is specified against it, and a hand edit is "compliant" exactly when it
@@ -18,8 +18,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 
 
-RESOLVE = load_script_module("cr7_grounding_render_resolve", "question_resolve.py")
-CLAIM = load_script_module("cr7_grounding_render_claim", "question_claim.py")
+RESOLVE = load_script_module("grounding_render_resolve", "question_resolve.py")
+CLAIM = load_script_module("grounding_render_claim", "question_claim.py")
 
 QUOTE_ENTRY = {
     "claim": "The product spec is vendor-controlled.",
@@ -263,7 +263,7 @@ class RendererRoutingTests(unittest.TestCase):
 
 
 class HumanReviewsRegressionTests(unittest.TestCase):
-    """`human_reviews` is live on `render_mapping_sequence`; CR-7 must not move it."""
+    """`human_reviews` is live on `render_mapping_sequence`; structured grounding must not move it."""
 
     ENTRIES = [
         {

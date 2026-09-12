@@ -737,7 +737,7 @@ def blocked_request_link_summary(
                     missing_request_ids.append(request_id)
                     errors.append({"slug": slug, "request_id": request_id, "problem": "missing"})
                     continue
-                if request.get("status") != "open":
+                if request.get("status") not in {"open", "fulfilled"}:
                     slug_has_error = True
                     errors.append(
                         {
@@ -768,10 +768,14 @@ def blocked_request_link_summary(
     }
 
 
-def questions_section(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
+def questions_section(
+    project_root: Path, config: dict[str, Any], *, question_slugs: frozenset[str] | None = None,
+) -> dict[str, Any]:
     question_status = load_sibling_module("question_status")
     questions_dir = question_status.questions_directory(project_root, config)
     records = question_status.collect_questions(questions_dir)
+    if question_slugs is not None:
+        records = [record for record in records if record["slug"] in question_slugs]
     report = question_status.build_report(records)
     actionable = [record for record in report["questions"] if record.get("status") in question_status.ACTIONABLE_STATUSES]
     blocked = [record for record in report["questions"] if record.get("status") == "blocked"]
@@ -816,7 +820,9 @@ def questions_section(project_root: Path, config: dict[str, Any]) -> dict[str, A
     }
 
 
-def coverage_section(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
+def coverage_section(
+    project_root: Path, config: dict[str, Any], *, question_slugs: frozenset[str] | None = None,
+) -> dict[str, Any]:
     coverage = load_sibling_module("coverage_manifest")
     question_status = load_sibling_module("question_status")
     section = {
@@ -842,7 +848,13 @@ def coverage_section(project_root: Path, config: dict[str, Any]) -> dict[str, An
     except coverage.CoverageManifestError:
         coverage_dir = None
     if coverage_dir is not None and coverage_dir.is_dir():
+        if question_slugs is not None:
+            section["manifests_total"] = sum(
+                path.is_file() and path.stem in question_slugs for path in coverage_dir.glob("*.yml")
+            )
         for path in sorted(coverage_dir.glob("*.yml")):
+            if question_slugs is not None and path.stem not in question_slugs:
+                continue
             if not path.is_file():
                 continue
             summary = coverage.coverage_summary_for_question(project_root, config, path.stem, {})
@@ -861,6 +873,8 @@ def coverage_section(project_root: Path, config: dict[str, Any]) -> dict[str, An
     if not questions_dir.is_dir():
         return section
     for path in sorted(questions_dir.glob("*.md")):
+        if question_slugs is not None and path.stem not in question_slugs:
+            continue
         frontmatter = question_status.load_frontmatter(path)
         if not isinstance(frontmatter, dict):
             continue
@@ -1086,11 +1100,18 @@ def evidence_usability_override_summary(records: list[dict[str, Any]]) -> dict[s
     return {"count": len(source_ids), "source_ids": sorted(source_ids)}
 
 
-def lint_section(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
+def lint_section(
+    project_root: Path, config: dict[str, Any], *, question_slugs: frozenset[str] | None = None,
+) -> dict[str, Any]:
     section: dict[str, Any] = {"issue_counts": {}, "pages_checked": 0, "error": None}
     lint = load_sibling_module("lint")
     try:
-        results = lint.run_checks(project_root, config)
+        question_paths = None
+        if question_slugs is not None:
+            question_status = load_sibling_module("question_status")
+            question_root = question_status.questions_directory(project_root, config)
+            question_paths = frozenset(question_root / f"{slug}.md" for slug in question_slugs)
+        results = lint.run_checks(project_root, config, question_paths=question_paths)
     except SystemExit as exc:
         section["error"] = str(exc)
         return section
@@ -2239,6 +2260,7 @@ def build_status_document(
     web_downloads_this_run: int | None = None,
     manual_url_deliveries_this_run: int | None = None,
     run_id: str | None = None,
+    question_slugs: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     domain_pack = domain_pack_section(project_root)
     workspace_health = evaluate_workspace_health(project_root)
@@ -2292,12 +2314,12 @@ def build_status_document(
     review = validated_review_config(config)
     run_controller = run_controller_section(project_root, run_id, int(run["stale_run_threshold_hours"]))
     smoke = smoke_section(project_root)
-    questions = questions_section(project_root, config)
-    coverage = coverage_section(project_root, config)
+    questions = questions_section(project_root, config, question_slugs=question_slugs)
+    coverage = coverage_section(project_root, config, question_slugs=question_slugs)
     intake = intake_section(project_root, questions)
     candidates = candidate_section(project_root, config)
     sources = sources_section(project_root, config)
-    lint = lint_section(project_root, config)
+    lint = lint_section(project_root, config, question_slugs=question_slugs)
     operational_debt = operational_debt_section(questions, candidates, sources, lint)
     readiness = readiness_section(smoke, questions, sources, lint, operational_debt, review)
     readiness["operational_debt"] = operational_debt

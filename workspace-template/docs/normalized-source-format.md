@@ -147,6 +147,7 @@ codebase_repo:
 codebase_revision:
 codebase_tool:
 codebase_artifact_paths: []
+qualified_context:
 codebase_intake_status: validated
 codebase_execution_scope: external_worker_only
 codebase_artifact_manifest: sources/code_wikis/repo--example/artifact-manifest.json
@@ -965,6 +966,8 @@ Violation codes:
 | `NORMALIZED_CONTRACT_FRONTMATTER_MISSING` | The record is unreadable or has no usable YAML frontmatter block. |
 | `NORMALIZED_CONTRACT_FRONTMATTER_INVALID` | A required frontmatter field is absent or has the wrong type or value. |
 | `NORMALIZED_CONTRACT_FORMAT_VERSION_UNSUPPORTED` | `normalized_format` is absent from an externally written record, or declares a version this package does not accept. |
+| `NORMALIZED_CONTRACT_QUALIFIED_PACKET_INVALID` | An opted-in record lacks a supported original packet, changes its recorded qualifications, or fails the current intake policy. The report preserves the specific refusal reason. |
+| `NORMALIZED_CONTRACT_MARKET_EVIDENCE_INVALID` | An opted-in market record fails original delivery validation or no longer binds the normalized qualifications and exact structured values to the captured slice. See [market evidence](market-evidence.md). |
 | `NORMALIZED_CONTRACT_SECTIONS_INVALID` | A required section is missing, or the required sections are out of order. |
 | `NORMALIZED_CONTRACT_MANIFEST_MISMATCH` | The record disagrees with the manifest about its path, source id, raw paths, or raw fingerprint. |
 | `NORMALIZED_CONTRACT_WARNINGS_INCONSISTENT` | A `parse_warnings` entry is not restated in the `Parse Warnings` section. |
@@ -1365,6 +1368,18 @@ Maintained source text copied from a trusted manual note.
 
 - None.
 ```
+
+Opted-in qualified codebase sources also carry the `qualified_context` report
+described in [Codebase Analysis](codebase-analysis.md#qualified-context-packet-intake).
+
+Execution sources carry an `execution_evidence` structural report and retain
+the original observations, hypotheses, receipts, and artifacts described in
+[Execution evidence](execution-evidence.md). Invalid structure makes evidence
+unusable. A failed execution outcome does not: independent passing authority is
+evaluated separately by the `independent_execution_pass` coverage policy.
+This report is bound to the original packet and delivery bytes. Readers check
+that binding independently of the declared normalizer and refuse missing or
+altered qualifications when the source or workspace requires the profile.
 
 ## Validation Expectations
 

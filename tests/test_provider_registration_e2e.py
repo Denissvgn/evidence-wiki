@@ -1,46 +1,14 @@
-"""CR-5 end to end: a pip-installed provider becomes first-class evidence, or is refused.
+"""Registered providers produce ordinary evidence only after workspace authorization.
 
-Every other CR-5 suite tests one leg against a hand-built workspace. This file is the
-acceptance gate: one named test per acceptance criterion in the change request, each run
-against a **real** workspace that `init_research_workspace.py` produced, driving the real
-commands an operator or host would drive.
+Real initialized workspaces exercise acquisition, discovery, inventory, normalization,
+doctor, smoke validation and controller startup. Installation alone never enables a
+provider. The package checks declared domains before transport, records credential
+names without values, and refuses missing or invalid registrations. Discovery writes
+candidates without creating raw evidence; acquisition refusals leave no partial files.
 
-What the change request asks for, and what each test therefore has to show:
-
-1. A pip-installed provider that `research.yml` authorizes by id is *usable* — and usable
-   means the artifact it delivers is ordinary evidence, so the chain continues past
-   `registered get` into `source_inventory.py` and `normalize_sources.py`. Stopping at
-   "a file appeared" would prove a download, not an integration.
-2. Without the `research.yml` entry the same command is refused exactly as today, with an
-   envelope indistinguishable from a disabled **built-in** provider's. Installing a
-   distribution must never be able to enable itself.
-3. A plan that targets a host outside the provider's declared `allowed_domains` is blocked
-   *by the package*, before any socket or DNS work — and leaves nothing behind. The
-   leftover check compares a full recursive snapshot of the workspace tree, because a
-   half-written artifact, an orphan sidecar, or a stale `.acquisition-incomplete` marker
-   are each a different way for a refusal to become durable state.
-4. The sidecar carries the declared capability summary, credential **names** only, even
-   when the credential's value is in this process's environment.
-5. With no entry points installed the built-in lists are the universe, byte for byte. The
-   validation sentences hosts parse are pinned as literal strings.
-6. `doctor` lists registered providers with their declared capabilities, and separates
-   *available* (installed here) from *enabled* (authorized in `research.yml`).
-7. An authorization the environment cannot satisfy is loud: smoke fails, and the
-   orchestration controller refuses to start a session over that workspace.
-8. Registered **discovery** proposes candidates through the same hygiene every other
-   candidate goes through, and writes nothing outside the candidate store.
-
-No test here touches the network or DNS. The fixture distribution declares hosts under the
-reserved `.invalid` TLD, and transport is stubbed at the seam the implementation exposes
-(`execute_planned_request` for the acquisition flow, `REGISTERED_OPENER`/
-`REGISTERED_RESOLVER` when the package's own domain check is the subject). A test that
-escaped both stubs would fail on resolution rather than reach a live service.
-
-Two hazards this file works around deliberately. Registration lookups are cached per
-process and `fetch_sources.py` loads the loader through its own module loader, so its copy
-of the cache is cleared alongside the shared one. And criterion 5 asserts the *absence* of
-registration state, which a sibling test could have armed process-globally, so it runs in
-a subprocess with an environment this file controls.
+Transport and DNS are replaced at their supported seams. Fixture hosts use .invalid.
+Registration caches are cleared explicitly; the no-registration case runs in its own
+process so a sibling fixture cannot supply cached provider state.
 """
 
 from __future__ import annotations
@@ -80,14 +48,14 @@ from tests._script_loader import load_script as load_script_module  # noqa: E402
 
 # Names are prefixed per file: these scripts are reachable through more than one loader,
 # and two copies under one name would share -- or clobber -- each other's module state.
-INIT = load_script_module("cr5_e2e_init", "init_research_workspace.py")
-FETCH = load_script_module("cr5_e2e_fetch_sources", "fetch_sources.py")
-DISCOVER = load_script_module("cr5_e2e_discover_sources", "discover_sources.py")
-INVENTORY = load_script_module("cr5_e2e_source_inventory", "source_inventory.py")
-NORMALIZE = load_script_module("cr5_e2e_normalize_sources", "normalize_sources.py")
-DOCTOR = load_script_module("cr5_e2e_doctor", "doctor.py")
-SMOKE = load_script_module("cr5_e2e_smoke", "smoke_validate_workspace.py")
-CONTROLLER = load_script_module("cr5_e2e_orchestration_controller", "orchestration_controller.py")
+INIT = load_script_module("provider_e2e_init", "init_research_workspace.py")
+FETCH = load_script_module("provider_e2e_fetch_sources", "fetch_sources.py")
+DISCOVER = load_script_module("provider_e2e_discover_sources", "discover_sources.py")
+INVENTORY = load_script_module("provider_e2e_source_inventory", "source_inventory.py")
+NORMALIZE = load_script_module("provider_e2e_normalize_sources", "normalize_sources.py")
+DOCTOR = load_script_module("provider_e2e_doctor", "doctor.py")
+SMOKE = load_script_module("provider_e2e_smoke", "smoke_validate_workspace.py")
+CONTROLLER = load_script_module("provider_e2e_orchestration_controller", "orchestration_controller.py")
 
 CREDENTIAL_ENV_VAR = "KEEPA_FIXTURE_API_KEY"
 #: Never a real key. Distinctive enough that finding it anywhere is unambiguous.
@@ -112,7 +80,7 @@ SEARCH_RESPONSE = json.dumps(
 ADAPTER_NAME = "stub-normalize"
 ADAPTER_VERSION = "1.0.0"
 
-#: The two blocks the change request's third criterion names, as exact key sets.
+#: Exact key sets for delivery provenance and provider declaration.
 REGISTRATION_BLOCK_KEYS = {"id", "phase", "distribution", "version", "entry_point", "provider_api_version"}
 CAPABILITY_BLOCK_KEYS = {
     "allowed_domains",
@@ -125,7 +93,7 @@ CAPABILITY_BLOCK_KEYS = {
     "request_kinds",
 }
 
-# Pre-CR-5 wording, pinned verbatim: hosts parse these sentences, and the backwards
+# legacy wording, pinned verbatim: hosts parse these sentences, and the backwards
 # compatibility criterion is precisely that registration did not disturb them.
 BUILT_IN_ACQUISITION_SENTENCE = (
     "research.yml integrations.acquisition.providers has unknown provider(s): gitlab. "
@@ -427,7 +395,7 @@ class RegisteredProviderWorkspace:
 
 
 class PipInstalledProviderIsUsableTests(RegisteredProviderWorkspace, unittest.TestCase):
-    """Criterion 1: installed + authorized -> usable, and its evidence is first-class."""
+    """Installed + authorized -> usable, and its evidence is first-class."""
 
     def test_authorized_registered_provider_delivers_evidence_that_inventories_and_normalizes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -455,7 +423,7 @@ class PipInstalledProviderIsUsableTests(RegisteredProviderWorkspace, unittest.Te
                 self.assertEqual(ARTIFACT_RELATIVE_PATH, report["target_path"])
 
             document = self.sidecar_document(workspace)
-            with self.subTest("the sidecar carries both blocks the change request names"):
+            with self.subTest("the sidecar carries provenance and provider declaration"):
                 self.assertEqual(ACQUISITION_PROVIDER_ID, document["provider_registration"]["id"])
                 self.assertEqual("keepa-fixture", document["provider_registration"]["distribution"])
                 self.assertEqual(
@@ -505,7 +473,7 @@ class PipInstalledProviderIsUsableTests(RegisteredProviderWorkspace, unittest.Te
 
 
 class UnauthorizedRegisteredProviderTests(RegisteredProviderWorkspace, unittest.TestCase):
-    """Criterion 2: installing a distribution can never enable it."""
+    """Installing a distribution can never enable it."""
 
     def test_registered_provider_absent_from_research_yml_is_refused_exactly_like_a_built_in(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -550,7 +518,7 @@ class UnauthorizedRegisteredProviderTests(RegisteredProviderWorkspace, unittest.
 
 
 class OutOfDeclarationFetchTests(RegisteredProviderWorkspace, unittest.TestCase):
-    """Criterion 3: the declaration is the egress boundary, enforced by the package."""
+    """The declaration is the egress boundary, enforced by the package."""
 
     def planned_requests(self, keepa_fixture, *urls):
         return tuple(keepa_fixture.PlannedRequest(url=url) for url in urls)
@@ -693,7 +661,7 @@ class OutOfDeclarationFetchTests(RegisteredProviderWorkspace, unittest.TestCase)
 
 
 class SidecarCapabilitySummaryTests(RegisteredProviderWorkspace, unittest.TestCase):
-    """Criterion 4: the declaration is recorded, credential names only."""
+    """The declaration is recorded, credential names only."""
 
     def test_the_sidecar_records_the_exact_declared_summary_and_never_a_credential_value(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -751,7 +719,7 @@ class SidecarCapabilitySummaryTests(RegisteredProviderWorkspace, unittest.TestCa
 
 
 class NoEntryPointsInstalledTests(RegisteredProviderWorkspace, unittest.TestCase):
-    """Criterion 5: with nothing installed, the built-in lists are the whole universe.
+    """With nothing installed, the built-in lists are the whole universe.
 
     Run in a subprocess on purpose. This is the one criterion that asserts an *absence* of
     registration state, and registration lookups are cached process-globally: a sibling
@@ -782,7 +750,7 @@ class NoEntryPointsInstalledTests(RegisteredProviderWorkspace, unittest.TestCase
         report = json.loads(result.stdout or result.stderr)
         return [issue["message"] for issue in report.get("issues", [])]
 
-    def test_built_in_only_validation_messages_are_byte_identical_to_their_pre_cr5_text(self):
+    def test_built_in_only_validation_messages_remain_byte_identical(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.make_workspace(
                 Path(tmpdir),
@@ -822,7 +790,7 @@ class NoEntryPointsInstalledTests(RegisteredProviderWorkspace, unittest.TestCase
 
 
 class DoctorListsRegisteredProvidersTests(RegisteredProviderWorkspace, unittest.TestCase):
-    """Criterion 6: an auditor can see what this workspace could reach, and what it enabled."""
+    """An auditor can see what this workspace could reach, and what it enabled."""
 
     def test_doctor_names_every_registration_and_separates_available_from_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -876,14 +844,10 @@ class DoctorListsRegisteredProvidersTests(RegisteredProviderWorkspace, unittest.
 
 
 class AuthorizedButUninstalledTests(RegisteredProviderWorkspace, unittest.TestCase):
-    """Criterion 7: an authorization the environment cannot satisfy stops the workspace.
+    """An authorized but unavailable provider prevents workspace execution.
 
-    The backlog (§2.7) puts enforcement on smoke and explanation on doctor. The
-    orchestration controller refuses too -- with ``CONFIG_INVALID``, deliberately: a
-    missing distribution and a typo'd id are the same observation to the controller, so
-    ``tests/test_orchestration_controller_registered_providers.py`` pins that a new code
-    was *not* introduced for one of them. This test asserts the refusal actually happens
-    and names the id; the sibling suite owns the argument for which code it carries.
+    Doctor explains availability, smoke reports the invalid configuration, and
+    controller startup refuses with CONFIG_INVALID while naming the provider id.
     """
 
     def test_smoke_fails_and_the_controller_refuses_to_start_over_the_same_workspace(self):
@@ -897,7 +861,7 @@ class AuthorizedButUninstalledTests(RegisteredProviderWorkspace, unittest.TestCa
             smoke_report = json.loads(smoke_stdout or smoke_stderr)
             controller_code, controller_stdout, controller_stderr = self.run_module(
                 CONTROLLER,
-                ["--project-root", str(workspace), "start", "--orchestration-id", "orch-cr5-e2e",
+                ["--project-root", str(workspace), "start", "--orchestration-id", "orch-provider-e2e",
                  "--agent-id", "pm-agent", "--format", "json"],
             )
 
@@ -921,7 +885,7 @@ class AuthorizedButUninstalledTests(RegisteredProviderWorkspace, unittest.TestCa
                 )
                 self.assertIn("entry-point group", envelope["remediation"])
                 self.assertFalse(
-                    (workspace / "runs" / "orchestrations" / "orch-cr5-e2e" / "session.json").exists(),
+                    (workspace / "runs" / "orchestrations" / "orch-provider-e2e" / "session.json").exists(),
                     "a refused start must not leave a session behind",
                 )
 
@@ -935,7 +899,7 @@ class AuthorizedButUninstalledTests(RegisteredProviderWorkspace, unittest.TestCa
                 )
                 controller_code, controller_stdout, controller_stderr = self.run_module(
                     CONTROLLER,
-                    ["--project-root", str(workspace), "start", "--orchestration-id", "orch-cr5-e2e-ok",
+                    ["--project-root", str(workspace), "start", "--orchestration-id", "orch-provider-e2e-ok",
                      "--agent-id", "pm-agent", "--format", "json"],
                 )
 
@@ -949,7 +913,7 @@ class AuthorizedButUninstalledTests(RegisteredProviderWorkspace, unittest.TestCa
 
 
 class RegisteredDiscoveryProposesCandidatesTests(RegisteredProviderWorkspace, unittest.TestCase):
-    """Criterion 8: registered discovery proposes, through the normal hygiene, and nothing more."""
+    """Registered discovery proposes, through the normal hygiene, and nothing more."""
 
     def test_registered_search_writes_classified_candidates_and_touches_nothing_else(self):
         with tempfile.TemporaryDirectory() as tmpdir:

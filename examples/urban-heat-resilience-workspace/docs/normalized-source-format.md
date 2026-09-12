@@ -551,6 +551,12 @@ Maintained source text copied from a trusted manual note.
 
 ## Validation Expectations
 
+Execution sources carry an `execution_evidence` structural report and retain
+the original observations, hypotheses, receipts, and artifacts described in
+[Execution evidence](execution-evidence.md). Invalid structure makes evidence
+unusable. A failed execution outcome does not: independent passing authority is
+evaluated separately by the `independent_execution_pass` coverage policy.
+
 Future linting should check:
 
 - required frontmatter fields exist;

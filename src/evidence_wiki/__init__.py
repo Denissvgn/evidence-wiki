@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
     # Spelled as redundant aliases: ``__all__`` is derived from the table below
@@ -21,6 +21,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
     from . import errors as errors
     from ._contract import contract as contract
     from ._facades.diagnostics import fleet_status as fleet_status
+    from ._facades.snapshots import verify_snapshot as verify_snapshot
     from .workspace import Workspace as Workspace
 
 # Attribute name -> (submodule to import, attribute on it, or ``None`` for the
@@ -42,6 +43,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     # Module-level rather than a handle method: it aggregates across many
     # workspaces, so no single handle owns it.
     "fleet_status": ("._facades.diagnostics", "fleet_status"),
+    "verify_snapshot": ("._facades.snapshots", "verify_snapshot"),
 }
 
 __all__ = ["__version__", *sorted(_LAZY_ATTRS)]

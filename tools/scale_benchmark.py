@@ -11,6 +11,9 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
+import platform
+import subprocess
 import sys
 import tempfile
 import time
@@ -27,6 +30,7 @@ SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 SCHEMA_VERSION = "1.0"
 BENCHMARK_DATE = "2026-06-13"
 DEFAULT_QUERY = "scale benchmark evidence"
+EXIT_BUDGET_VIOLATED = 3
 
 T = TypeVar("T")
 
@@ -132,6 +136,54 @@ NORMALIZE = load_script_module("scale_benchmark_normalize", "normalize_sources.p
 LINT = load_script_module("scale_benchmark_lint", "lint.py")
 QUERY = load_script_module("scale_benchmark_query", "query_index.py")
 STATUS = load_script_module("scale_benchmark_status", "workspace_status.py")
+
+
+def current_commit() -> str | None:
+    """The revision this sample belongs to: CI's, else the checkout's, else unknown."""
+    sha = os.environ.get("GITHUB_SHA")
+    if sha:
+        return sha
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, repository-owned tool.
+            ["git", "rev-parse", "HEAD"],  # noqa: S607 - resolved through PATH by design.
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(REPO_ROOT),
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip()
+    return value if completed.returncode == 0 and value else None
+
+
+def environment_record() -> dict[str, Any]:
+    """Where a sample was measured, so budgets are compared like with like.
+
+    A budget is calibrated for one runner class. A sample from a laptop, a
+    loaded shared runner, or a different Python is evidence about that machine,
+    not about the release; recording the environment beside the timings is what
+    lets a reader tell the two apart instead of retrying until one passes.
+    """
+    return {
+        "commit": current_commit(),
+        "python": platform.python_version(),
+        "implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "cpu_count": os.cpu_count(),
+        "ci": {
+            "provider": "github-actions" if os.environ.get("GITHUB_ACTIONS") == "true" else None,
+            "runner_os": os.environ.get("RUNNER_OS"),
+            "runner_arch": os.environ.get("RUNNER_ARCH"),
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+            "event": os.environ.get("GITHUB_EVENT_NAME"),
+            "ref": os.environ.get("GITHUB_REF"),
+        },
+    }
 
 
 def timestamp_utc() -> str:
@@ -513,6 +565,7 @@ def run_workspace_benchmark(config: BenchmarkConfig, root: Path, workspace_prese
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": timestamp_utc(),
+        "environment": environment_record(),
         "workspace_path": str(workspace) if workspace_preserved else None,
         "workspace_preserved": workspace_preserved,
         "config": {
@@ -627,6 +680,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tmpdir", type=Path, default=None, help="Parent directory for the generated workspace.")
     parser.add_argument("--keep-workspace", action="store_true", help="Preserve the generated workspace for inspection.")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format. Defaults to text.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Also write the full JSON result to this path, whatever --format renders.",
+    )
+    parser.add_argument(
+        "--require-budget",
+        action="store_true",
+        help=(
+            f"Exit {EXIT_BUDGET_VIOLATED} when the profile's release budget is violated. "
+            "Refuses a run whose counts were overridden, because such a run has no budget to enforce."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -636,6 +703,10 @@ def main(argv: list[str] | None = None) -> int:
     sources = args.sources if args.sources is not None else profile.sources
     wiki_pages = args.wiki_pages if args.wiki_pages is not None else profile.wiki_pages
     retained_profile = profile.name if (sources, wiki_pages) == (profile.sources, profile.wiki_pages) else None
+    if args.require_budget and retained_profile is None:
+        raise SystemExit(
+            "--require-budget needs the profile's own counts; --sources/--wiki-pages overrides have no release budget."
+        )
     result = run_benchmark(
         BenchmarkConfig(
             sources=sources,
@@ -645,10 +716,24 @@ def main(argv: list[str] | None = None) -> int:
             profile=retained_profile,
         )
     )
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     if args.format == "json":
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         print(render_text(result), end="")
+    release_budget = result.get("release_budget")
+    if args.require_budget and isinstance(release_budget, dict) and release_budget.get("verdict") != "pass":
+        violations = ", ".join(
+            f"{item['metric']} observed {item['observed']} > {item['threshold']}" for item in release_budget["violations"]
+        )
+        print(
+            f"release budget violated for profile {release_budget['profile']}: {violations}. "
+            "This is a measurement on the environment recorded in the result, not a retry prompt.",
+            file=sys.stderr,
+        )
+        return EXIT_BUDGET_VIOLATED
     return 0
 
 

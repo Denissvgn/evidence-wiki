@@ -1,10 +1,10 @@
-"""Tests for companion artifact discovery (E35-T03).
+"""Tests for companion artifact discovery.
 
 `discover_sources.py companions --source-id ID` finds a paper's companion
 repositories, datasets, project pages, supplemental material, and publisher
 pages. It prefers links already present in the paper body/frontmatter `links` or
 its provider metadata (highest trust), then falls back to GitHub repository
-discovery (E32-T02) and the configured general search provider (E33). It proposes
+discovery and the configured general search provider. It proposes
 candidates for review and never fetches or executes anything.
 
 These tests use a mocked GitHub transport and a fixture search provider (no real

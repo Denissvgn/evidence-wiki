@@ -1,8 +1,8 @@
-"""Unit tests for the run-scoped provider-call ledger (CR-5 T6).
+"""Unit tests for the run-scoped provider-call ledger.
 
 Why these tests exist, in one sentence each:
 
-- A declared rate limit that is merely recorded is the exact gap CR-5 was filed
+- A declared rate limit that is merely recorded is the exact gap provider registration was filed
   over, so every ceiling is asserted as a *refusal*, not as a report.
 - A budget kept in memory silently resets on every restart, so the ledger is
   written, every in-process object is thrown away, the module is loaded afresh,
@@ -958,7 +958,7 @@ class AcademicLedgerCompatibilityTests(AccountingTestCase):
             self.assertEqual(3, self.discover.academic_provider_request_count(root, "run-academic"))
 
     def test_a_declared_rate_limit_tightens_the_academic_run_budget(self):
-        """What T6 adds on top of the existing academic accounting."""
+        """The declared provider limit also bounds the academic run budget."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             run_dir = self.academic_run(root)

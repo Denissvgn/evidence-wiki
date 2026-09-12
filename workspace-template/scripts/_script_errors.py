@@ -10,6 +10,16 @@ from typing import Any
 SCHEMA_VERSION = "1.0"
 
 _REMEDIATIONS = {
+    'EVIDENCE_REVISION_INVALID': "Correct the selected scope or workspace input before retrying publication.",
+    'EVIDENCE_REVISION_LIMIT': "Correct the selected scope or workspace input before retrying publication.",
+    'EVIDENCE_REVISION_UNSAFE': "Correct the selected scope or workspace input before retrying publication.",
+    'EVIDENCE_REVISION_UNSUPPORTED': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_SELECTION_INVALID': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_QUESTION_UNKNOWN': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_CONFIG_INVALID': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_SAFETY_REFUSED': "Correct the selected scope or workspace input before retrying publication.",
+    'PUBLICATION_OUTPUT_INVALID': "Correct the selected scope or workspace input before retrying publication.",
+    "EVIDENCE_REVISION_CHANGED": "Retry after workspace writers finish, using the current revision.",
     "DEPENDENCY_MISSING": "Install the missing runtime dependency and rerun the command.",
     "CONFIG_MISSING": "Run from an initialized workspace or pass --project-root to one.",
     "CONFIG_INVALID": "Fix research.yml so it is valid YAML and matches the workspace contract.",
@@ -17,6 +27,11 @@ _REMEDIATIONS = {
     "UPGRADE_WRITE_FAILED": (
         "Restore write access and free space for the target workspace, preview the same command with "
         "--dry-run, then retry the upgrade."
+    ),
+    "UPGRADE_PENDING_ORDER": (
+        "Complete or fail the pending work order through the orchestration driver, or preserve the "
+        "session for audit and start a fresh one after upgrading; then retry the upgrade once no driver "
+        "is active."
     ),
     "DOMAIN_PACK_INVALID": (
         "Fix the domain pack so it passes evidence-wiki pack validate, then rerun the command."
@@ -201,9 +216,21 @@ _REMEDIATIONS = {
         "Do not hand-edit the append-only event log to clear the refusal."
     ),
     "ORCHESTRATION_OWNER_MISMATCH": "Retry with the owning agent_id or start a separately owned session.",
+    "ORCHESTRATION_RETIRED": (
+        "Preserve the retired session, archives, locks and retirement marker. Start a new orchestration "
+        "for new work; retirement is permanent."
+    ),
+    "ORCHESTRATION_RETENTION_UNSAFE": (
+        "Retain the evidence and resolve the reported state before retrying retirement or cleanup; "
+        "preserve all locks and retirement markers."
+    ),
     "ORCHESTRATION_DRIVER_BUSY": (
         "Retry after the holder's call completes, or serialize drivers host-side; status polling never "
         "requires this lock. Pass --driver-wait-seconds SECONDS to wait instead of refusing."
+    ),
+    "ORCHESTRATION_UPGRADE_IN_PROGRESS": (
+        "Wait for the workspace upgrade holding .locks/upgrade.lock to finish, then retry the same command; "
+        "the refused call wrote nothing."
     ),
     "ORCHESTRATION_WRITE_FAILED": "Restore workspace write access or free space, then retry the idempotent command.",
     "ORCHESTRATION_WORKSPACE_UNSAFE": (
@@ -312,6 +339,22 @@ _REMEDIATIONS = {
         "outside it, or replace a symlinked or mounted workspace subtree with a real directory."
     ),
     "SOURCE_UNKNOWN": "Run scripts/source_inventory.py --report and choose a source id present in the manifest.",
+    "QUESTION_BLOCKERS_UNFULFILLED": (
+        "Fulfil every blocking request with normalized evidence through its owning acquisition flow, "
+        "then retry reopening the question. Preserve existing request and claim audit records."
+    ),
+    "EVIDENCE_USAGE_REFUSED": (
+        "Provide current host authorization for the exact sanitized revision and requested use."
+    ),
+    "EVIDENCE_SNAPSHOT_REFUSED": (
+        "Check the declared selection, independent authority and current host registration before retrying."
+    ),
+    "EVIDENCE_TEMPORAL_REFUSED": (
+        "Check the bounded request, immutable source clocks, host checkpoint and independent authority."
+    ),
+    "EVIDENCE_ASSESSMENT_REFUSED": (
+        "Check the bounded request, current source revisions, assessment authority and host checkpoint."
+    ),
     "SOURCE_NOT_NORMALIZABLE": (
         "The manifest holds this source but no extractor in this package handles it. Check its kind and "
         "raw_paths with scripts/source_inventory.py --report, or write the record by hand to the contract "
@@ -752,7 +795,7 @@ def classify_error_code(message: str) -> str:
 # conflict or a corrupt artifact, not an input a caller can correct and resend. Mirrored in
 # ``src/evidence_wiki/errors.py``; `test_non_recoverable_codes_are_mirrored` pins the pair.
 #
-# CR-15a added five. Each was previously answered *both* ways across its own raise sites —
+# The recoverability audit added five. Each was previously answered *both* ways across its own raise sites —
 # `ORCHESTRATION_STATE_INVALID` three ways across 25 — so a host branching on `recoverable`
 # retried some occurrences of one code and not others, with nothing in the envelope
 # explaining the difference. Declaring them here rather than annotating every site keeps
@@ -763,9 +806,20 @@ NON_RECOVERABLE_CODES = frozenset(
         "CLAIM_NOT_STALE",
         "CANDIDATE_STORE_INVALID",
         "ORCHESTRATION_OWNER_MISMATCH",
+        "ORCHESTRATION_RETIRED",
         "ORCHESTRATION_STATE_INVALID",
         "PROVIDER_REGISTRATION_INVALID",
         "WORKSPACE_UNREADABLE",
+        'EVIDENCE_REVISION_INVALID',
+        'EVIDENCE_REVISION_LIMIT',
+        'EVIDENCE_REVISION_UNSAFE',
+        'EVIDENCE_REVISION_UNSUPPORTED',
+        'PUBLICATION_SELECTION_INVALID',
+        'PUBLICATION_QUESTION_UNKNOWN',
+        'PUBLICATION_CONFIG_INVALID',
+        'PUBLICATION_SAFETY_REFUSED',
+        'PUBLICATION_OUTPUT_INVALID',
+
     }
 )
 
@@ -969,6 +1023,8 @@ def handle_system_exit(
     remediation: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> int:
+    if is_refusal(exc):
+        return emit_refusal(exc, json_mode=json_mode)
     if not isinstance(exc.code, str):
         raise exc
     emit_error(

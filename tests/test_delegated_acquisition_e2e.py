@@ -1,27 +1,12 @@
-"""CR-3 end to end: a host acquires, the workspace audits, and the loop closes.
+"""An external host delivers evidence inside a controller-issued acquisition order.
 
-Every other CR-3 suite tests one leg. This one walks the chain the change request
-actually asks for, in a workspace built the way an operator builds one:
+The chain starts with a question blocked on a request, issues an order to the acquirer,
+delivers and normalizes a structured payload, files fulfilment and reopen claims, and
+submits for controller verification. Successful completion returns routing to research.
 
-    question blocked on a request -> `orchestrate start` -> `next` issues an
-      acquisition order addressed to the acquirer -> the acquirer delivers,
-      normalizes, fulfils and reopens *inside that order* -> `submit` verifies it
-      -> routing returns to research
-
-The legs are load-bearing in sequence rather than individually. A delivered payload
-is only evidence once it normalizes; a normalized record is what opens the reopen
-gate; and the reopened question is what lets the session make progress at all. A
-regression in any one of them shows up here as a broken chain rather than as a
-passing unit test about a stage nobody can reach.
-
-The evidence is a structured JSON payload normalized through the CR-2 adapter, so
-this also demonstrates the composition the two change requests describe: CR-2 makes
-a non-documentary payload citable, CR-3 lets an external host be the one to deliver
-it.
-
-`ClosedGateTests` asserts the behaviour CR-3 exists to remove — the same workspace,
-without the declaration, has no route to acquisition at all — because a chain that
-never showed the gate shut would not be demonstrating anything.
+A configured normalization adapter makes the JSON payload citable. Without delegated
+acquisition enabled, the same workspace has no delegated route. Refusals cover missing
+artifacts, out-of-scope mutations, unaccounted fulfilments and exhausted retries.
 """
 
 import contextlib
@@ -370,16 +355,10 @@ class DelegatedWorkspace:
         )
 
     def build_backlog(self, root: Path) -> tuple[Path, dict[str, str]]:
-        """Two blocked questions over three requests, none of them satisfiable yet.
+        """Exercise independent progress and grouped retries on two questions.
 
-        The *second* question carries two of the requests. That grouping is deliberate:
-        a blocked question must have every one of its blocking requests still open —
-        `workspace_status` reports a fulfilled blocker as a missing open link and flips the
-        verdict to `attention_required`, which freezes the session. So the request that
-        gets fulfilled has to be the sole blocker of its question, and the two that fail
-        can share one. (That constraint predates delegation entirely: it reproduces with
-        no session and no `orchestration:` section. Batching just makes it easier to walk
-        into — see the follow-up in the backlog.)
+        One question has a delivered blocker; the other retains two failed blockers
+        so retry grouping and eventual exhaustion can be checked independently.
         """
         workspace = self.init_workspace(root, spare_question=False)
         self.configure(workspace, delegated=True)
@@ -607,7 +586,7 @@ class DelegatedWorkspace:
 
 
 class DelegatedStructuredSourceTests(DelegatedWorkspace, unittest.TestCase):
-    """A fulfilment whose normalized record binds a structured-view sidecar (EW-BUG-004).
+    """A fulfilment whose normalized record binds a structured-view sidecar.
 
     The rest of this file delivers a payload that normalizes to exactly one file, which is
     the only shape the postcondition's allowed set was ever built for. A well-formed CSV
@@ -696,7 +675,7 @@ class DelegatedStructuredSourceTests(DelegatedWorkspace, unittest.TestCase):
     def test_an_unauthorised_normalized_file_is_still_refused(self):
         """The guard grew by one declared companion per source, not by a directory.
 
-        Fixing EW-BUG-004 relaxes a fail-closed check, so the refusal it still owes is the
+        Fixing structured-view attribution relaxes a fail-closed check, so the refusal it still owes is the
         part worth pinning: a normalized output no fulfilled source accounts for.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -788,7 +767,7 @@ class DelegatedStructuredSourceTests(DelegatedWorkspace, unittest.TestCase):
 
 
 class DelegatedAcquisitionChainTests(DelegatedWorkspace, unittest.TestCase):
-    """CR-3 AC1, walked end to end."""
+    """Delegated acquisition, walked end to end."""
 
     def test_the_delegated_loop_closes_and_leaves_no_unaccounted_mutation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -843,7 +822,7 @@ class DelegatedAcquisitionChainTests(DelegatedWorkspace, unittest.TestCase):
             self.assertIn(
                 ADAPTER_NAME,
                 normalized[0].read_text(encoding="utf-8"),
-                "the CR-2 adapter is what made a structured payload citable",
+                "the structured normalization adapter is what made a structured payload citable",
             )
 
             after_submit = self.evidence_state(workspace)
@@ -862,7 +841,7 @@ class DelegatedAcquisitionChainTests(DelegatedWorkspace, unittest.TestCase):
                 "issuing the next order must not touch evidence state either",
             )
 
-            # 6. The audit accounts for every mutation. This is the CR's own wording —
+            # 6. The audit accounts for every mutation —
             #    "no out-of-band mutation exists in the audit log" — as an assertion.
             self.assert_every_mutation_is_bracketed_by_an_order(workspace)
 
@@ -891,7 +870,7 @@ class DelegatedAcquisitionChainTests(DelegatedWorkspace, unittest.TestCase):
         Checked from the two artifacts a host can read after the fact: the event log
         says which actions were issued and completed, and each retained work order says
         what that action was allowed to touch. A fulfilment or reopening that no such
-        order scopes is precisely the unaccounted-for mutation CR-3 exists to remove.
+        order scopes is precisely the unaccounted-for mutation delegated acquisition exists to remove.
         """
         events = self.events(workspace)
         issued = {
@@ -949,7 +928,7 @@ class DelegatedAcquisitionChainTests(DelegatedWorkspace, unittest.TestCase):
 
 
 class RefusedArtifactTests(DelegatedWorkspace, unittest.TestCase):
-    """CR-3 AC2: a claimed fulfilment is only accepted when its artifacts exist.
+    """A claimed fulfilment is only accepted when its artifacts exist.
 
     Each case takes the same working chain and breaks exactly one artifact, then requires
     the refusal to name what is missing rather than reporting a generic postcondition
@@ -1206,7 +1185,7 @@ class RefusedArtifactTests(DelegatedWorkspace, unittest.TestCase):
 
 
 class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
-    """Fulfilling a scoped request from evidence the workspace already held (EW-BUG-005).
+    """Fulfilling a scoped request from evidence the workspace already held.
 
     Everywhere else in this file the acquirer delivers a *new* artifact inside its order,
     so the reuse leg the delegated arm deliberately keeps — an unchanged source delivered
@@ -1433,7 +1412,7 @@ class PreExistingEvidenceReuseTests(DelegatedWorkspace, unittest.TestCase):
         is measurable: neutralising all four of this arm's scope guards -- manifest,
         reconciliation, normalized and raw -- on 0.5.1 leaves
         `tests/test_orchestration_controller.py` and this file passing, 197 of 197. A
-        repair of EW-BUG-005 that widened those guards instead of naming the constraint
+        repair of pre-existing evidence attribution that widened those guards instead of naming the constraint
         would have landed green with nobody the wiser.
 
         Reuse is read-only, which is why the raw tree, the normalized tree and the manifest
@@ -3548,7 +3527,7 @@ class AuditAssertionTests(DelegatedWorkspace, unittest.TestCase):
 
             # A second request fulfilled before any session exists: the delegation gate
             # allows it (nothing is live to violate), and no work order will ever scope
-            # it. This is precisely the residue CR-3 removes from the normal path.
+            # it. This is precisely the residue delegated acquisition removes from the normal path.
             smuggled = self.run_script(
                 REQUESTS,
                 [
@@ -3616,7 +3595,7 @@ class AuditAssertionTests(DelegatedWorkspace, unittest.TestCase):
 
 
 class OutOfBandGateTests(DelegatedWorkspace, unittest.TestCase):
-    """CR-3 AC3: with delegation on, a direct mutation an active session does not
+    """With delegation on, a direct mutation an active session does not
     account for is refused.
 
     The unit suite pins each combination against the controller. What this adds is the
@@ -3747,7 +3726,7 @@ class OutOfBandGateTests(DelegatedWorkspace, unittest.TestCase):
         #
         # Its third state is not "an order scopes the request": without providers there is
         # no route to acquisition, so `next` terminates the session `blocked_on_sources`.
-        # That *is* the pre-CR-3 world, and fulfilling out of band there was the only way
+        # That *is* the legacy world, and fulfilling out of band there was the only way
         # to close the question — so it is the case that must keep working untouched.
         for state in ("no session", "session live, nothing pending", "session blocked_on_sources"):
             with self.subTest(state=state), tempfile.TemporaryDirectory() as tmpdir:
@@ -4079,7 +4058,7 @@ class BatchRetryAndExhaustionTests(DelegatedWorkspace, unittest.TestCase):
 
 
 class ClosedGateTests(DelegatedWorkspace, unittest.TestCase):
-    """The behaviour CR-3 removes, asserted so the chain above means something."""
+    """The behaviour delegated acquisition removes, asserted so the chain above means something."""
 
     def test_without_the_declaration_the_same_workspace_cannot_acquire_at_all(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4102,7 +4081,7 @@ class ClosedGateTests(DelegatedWorkspace, unittest.TestCase):
             )
 
     def test_the_out_of_band_fulfilment_a_host_used_to_need_is_now_refused(self):
-        # The workaround CR-3 replaces: fulfil after the protocol has nothing to offer.
+        # The workaround delegated acquisition replaces: fulfil after the protocol has nothing to offer.
         # Under delegation that is refused, which is what makes the work-order path the
         # only path rather than merely the recommended one.
         with tempfile.TemporaryDirectory() as tmpdir:

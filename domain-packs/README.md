@@ -117,6 +117,9 @@ syntax, field references, and verdicts are documented in
 
 ## Reference Packs
 
+- `capital-markets`: optional guidance for issuer facts, bounded market
+  observations, strategy hypotheses, and contradictory evidence. Filings and
+  prices use the opt-in market evidence profile; the pack enables no providers.
 - `llm-research`: guidance for LLM systems, autonomous research agents,
   benchmarks, datasets, and implementation availability.
 - `general-science`: guidance for broad scientific literature reviews,

@@ -121,12 +121,13 @@ HIGH_RISK_SECRET_PATTERNS = {
     "token_assignment": re.compile(r"\b(?:token|secret|password|credential)\s*[:=]\s*[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE),
 }
 SCAN_ROOTS = ("research.yml", "log.md", "runs", "sources", "wiki", "raw")
+SECRET_SCAN_SUFFIXES = frozenset({"", ".md", ".json", ".jsonl", ".yml", ".yaml", ".txt", ".html"})
 _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_error, emit_refusal, handle_system_exit, is_refusal, json_mode_requested
 from _workspace_health import evaluate_workspace_health
 from _workspace_module_loader import load_workspace_module
 
@@ -145,6 +146,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional citation verification JSON path to include in the gate.",
     )
+    parser.add_argument("--question", action="append", default=None, help="Publish only these question slugs; repeatable, duplicates collapse.")
+    parser.add_argument("--expected-revision", default=None, help="Refuse selected publication if the workspace revision differs.")
     subparsers = parser.add_subparsers(dest="command")
     bundle = subparsers.add_parser("bundle", help="Write deterministic evaluation inputs under runs/<run-id>/evaluation/.")
     bundle.add_argument("--run-id", required=True, help="Run id used for runs/<run-id>/evaluation/.")
@@ -614,7 +617,7 @@ def classify_citation_verification(report: dict[str, Any], reasons: dict[str, li
 
 
 def should_scan_file(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in {"", ".md", ".json", ".jsonl", ".yml", ".yaml", ".txt", ".html"}
+    return path.is_file() and path.suffix.lower() in SECRET_SCAN_SUFFIXES
 
 
 def scan_text_for_secrets(label: str, text: str, reasons: dict[str, list[str]]) -> bool:
@@ -812,6 +815,7 @@ def write_json(path: Path, document: dict[str, Any]) -> None:
 def build_bundle(project_root: Path, run_id: str) -> dict[str, Any]:
     run_id = validate_run_id(run_id)
     config = load_config(project_root)
+    load_sibling_module("_usage_gate").require_unrestricted_legacy(project_root, config)
     status_module = load_sibling_module("workspace_status")
     lint_module = load_sibling_module("lint")
     export_module = load_sibling_module("export_answers")
@@ -859,12 +863,28 @@ def render(document: dict[str, Any]) -> str:
     return json.dumps(document, indent=2, sort_keys=False) + "\n"
 
 
+def run_selected_publication(project_root: Path, question_slugs: list[str], *, expected_revision: str | None = None) -> dict[str, Any]:
+    """Read selected questions and their gates from one validated revision."""
+    return load_sibling_module("_selected_publication").run_selected_publication(
+        project_root, question_slugs, expected_revision=expected_revision,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     json_mode = json_mode_requested(argv, default_json=True)
     project_root = Path(args.project_root).expanduser().resolve()
     try:
-        if args.command == "bundle":
+        if args.question is not None:
+            if args.command or args.citation_verification:
+                raise ScriptRefusal("PUBLICATION_SELECTION_INVALID", "Selected publication cannot consume an external citation report or create an evaluation bundle.", exit_code=EXIT_UNREADABLE)
+            if args.output and Path(args.output).expanduser().resolve().is_relative_to(project_root):
+                raise ScriptRefusal("PUBLICATION_OUTPUT_INVALID", "Selected publication output must be outside the workspace.", exit_code=EXIT_UNREADABLE)
+            document = run_selected_publication(project_root, args.question, expected_revision=args.expected_revision)
+            exit_code = EXIT_READY if document["verdict"] == VERDICT_SHIP else EXIT_NOT_READY
+        elif args.expected_revision is not None:
+            raise ScriptRefusal("PUBLICATION_SELECTION_INVALID", "An expected revision requires a question selection.", exit_code=EXIT_UNREADABLE)
+        elif args.command == "bundle":
             document = build_bundle(project_root, args.run_id)
             exit_code = EXIT_READY if document["publication_readiness"]["verdict"] == VERDICT_SHIP else EXIT_NOT_READY
         else:
@@ -891,6 +911,11 @@ def main(argv: list[str] | None = None) -> int:
             details=exc.details,
         )
         return EXIT_UNREADABLE
+
+    except Exception as exc:
+        if is_refusal(exc):
+            return emit_refusal(exc, json_mode=json_mode)
+        raise
 
     output = render(document)
     if args.output:

@@ -1,6 +1,6 @@
-"""CR-2's backward-compatibility promise: no adapters configured, no change in behaviour.
+"""Structured normalization's backward-compatibility promise: no adapters configured, no change in behaviour.
 
-CR-2 added a config section, a kind, a contract validator, a version stamp, and a
+structured normalization added a config section, a kind, a contract validator, a version stamp, and a
 subprocess execution path. Every one of those is reachable from code that also runs for
 a workspace that configures none of it, so "additive" has to be checked rather than
 asserted. These tests check it on `arxiv-source-project`, an existing fixture whose
@@ -273,7 +273,7 @@ class NoAdapterBackwardCompatTests(unittest.TestCase):
     # The frontmatter keys a native record emits. Pinned, not derived: this is the
     # shape a host parses, so adding or removing one is a change to the public record
     # and should require saying so here. `normalized_format` and `rendered_coverage`
-    # are CR-2's two additions; `structured_view` is CR-7's one, and it lands on every
+    # are structured normalization's two additions; `structured_view` is structured grounding's one, and it lands on every
     # record — `frontmatter_for` builds one flat mapping with every key present, and a
     # record with no structured view to bind carries the key as `null` rather than
     # omitting it. Everything else predates all of them.
@@ -293,11 +293,12 @@ class NoAdapterBackwardCompatTests(unittest.TestCase):
             "source_id", "source_kind", "standards", "status", "structured_view",
             "title", "title_confidence", "title_source", "type",
             "unusable_evidence_reasons", "updated", "url", "venue",
+            "qualified_context", "execution_evidence",
         }
     )
 
-    def test_the_native_record_shape_gained_only_what_cr_2_declared(self):
-        """CR-2 may add fields to the record; it may not add them quietly.
+    def test_native_record_shape_matches_the_format_contract(self):
+        """Structured normalization may add fields to the record; it may not add them quietly.
 
         The differential tests above compare current output to current output, so a
         field added to every record is invisible to them. This pins the shape itself,
@@ -318,7 +319,7 @@ class NoAdapterBackwardCompatTests(unittest.TestCase):
                 self.assertEqual(self.NATIVE_FRONTMATTER_KEYS, keys)
 
     def test_a_native_record_binds_no_structured_view_and_writes_no_sidecar(self):
-        """CR-7's field lands on every record and is null where there is nothing to bind.
+        """Structured grounding's field lands on every record and is null where there is nothing to bind.
 
         `frontmatter_for` builds one flat mapping with every key present, so the key is
         unconditional — that is what NATIVE_FRONTMATTER_KEYS pins. What must not happen

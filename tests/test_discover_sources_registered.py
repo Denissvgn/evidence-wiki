@@ -1,4 +1,4 @@
-"""Registered discovery providers: `discover_sources.py registered search` (CR-5 T7, T3, T6).
+"""Registered discovery providers: `discover_sources.py registered search`.
 
 Why each group of cases exists, in one sentence each:
 
@@ -19,7 +19,7 @@ Why each group of cases exists, in one sentence each:
 - **Discovery stays read-only.** `registered search` proposes candidates. The
   only files it may create are the candidate store, its lock, and the run-scoped
   provider-call ledger that bounds it — nothing under `raw/`, ever.
-- **The academic budget survives its migration (T6).** A ledger written by the
+- **The academic budget survives its migration.** A ledger written by the
   pre-migration writer must keep its spent slots after the accounting moves onto
   the shared module: an upgrade that hands a mid-run workspace a fresh allowance
   would be a budget that resets, which is not a budget.
@@ -649,7 +649,7 @@ class RegisteredSearchDeclaredDomainTests(RegisteredDiscoveryTestBase):
 
 
 class RegisteredSearchAuthorizationTests(RegisteredDiscoveryTestBase):
-    """Available is not enabled, and enabled is not available (T3)."""
+    """Available is not enabled, and enabled is not available."""
 
     def test_an_authorized_but_unregistered_id_refuses_with_provider_not_registered(self):
         """`research.yml` may name an id this environment cannot supply; say which."""
@@ -820,7 +820,7 @@ class RegisteredSearchReadOnlyTests(RegisteredDiscoveryTestBase):
 
 
 class RegisteredSearchAccountingTests(RegisteredDiscoveryTestBase):
-    """The declared rate limit is a refusal, not a note in a report (T6)."""
+    """The declared rate limit is a refusal, not a note in a report."""
 
     def test_the_plan_is_reserved_in_the_registered_ledger_before_transport(self):
         self.opener.bodies = [search_payload(product("B0ABC12345", "Retrieval Benchmark Kit"))]
@@ -898,7 +898,7 @@ class RegisteredSearchAccountingTests(RegisteredDiscoveryTestBase):
 
 
 class AcademicLedgerMigrationTests(unittest.TestCase):
-    """T6: the migrated academic budget must not restart at zero on upgrade.
+    """The migrated academic budget must not restart at zero on upgrade.
 
     These cases write the ledger the way the *pre-migration* writer did — its
     exact key order, its ``academic-call-<hex>`` id prefix — and then drive the

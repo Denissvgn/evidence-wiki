@@ -678,7 +678,7 @@ class AdapterStructuredViewStalenessTests(StructuredViewWorkspaceMixin, unittest
         return int(code or 0), (json.loads(raw) if raw.strip() else {}), stderr.getvalue()
 
     def make_record_predate_the_sidecar(self, workspace: Path) -> None:
-        """Turn a record back into what this package wrote before CR-7."""
+        """Turn a record back into what this package wrote before structured grounding."""
         path = self.record_path(workspace)
         frontmatter, body, error = CONTRACT.split_record(path.read_text(encoding="utf-8"))
         self.assertIsNone(error)
@@ -727,7 +727,7 @@ class AdapterStructuredViewStalenessTests(StructuredViewWorkspaceMixin, unittest
     def test_a_native_tabular_record_that_emits_no_sidecar_still_settles(self):
         """`table_text` is in the rule on eligibility, not on what any one table yields.
 
-        Native tabular emission (CR-7 T13) is fail-closed: a ragged table cannot be
+        Native tabular emission is fail-closed: a ragged table cannot be
         faithfully addressed, so it is written with `structured_view: null` and no
         sidecar. The key's presence is what settles it — if the rule keyed on the
         sidecar file instead, every unaddressable CSV in every workspace would
@@ -1003,7 +1003,7 @@ class AdapterReportingTests(AdapterWorkspaceMixin, unittest.TestCase):
         self.assertEqual(1, report["summary"]["methods"]["adapter"])
         # Every extractor keeps a key, so a consumer iterating methods sees a stable set.
         self.assertEqual(
-            {"latex", "pdf", "links", "html", "tables", "codebase", "adapter"},
+            {"latex", "pdf", "links", "html", "tables", "codebase", "execution", "adapter"},
             set(report["summary"]["methods"]),
         )
 

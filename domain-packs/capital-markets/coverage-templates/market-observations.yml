@@ -1,0 +1,10 @@
+coverage_profile: market-observations
+required_facets:
+  - facet_id: qualified-price-slice
+    description: Ground exact observations in metadata.currency and review every listing, adjustment, and universe qualification.
+    evidence_path: pack:capital-markets/market-observations
+    source_policy: pack:capital-markets/complete-prices
+    freshness_policy: pack:capital-markets/price-48h
+    identity_policy: pack:capital-markets/listing-review
+    min_sources: 1
+optional_facets: []

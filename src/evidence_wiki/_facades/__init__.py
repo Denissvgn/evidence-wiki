@@ -15,14 +15,19 @@ handle as ``self._workspace`` and reaches scripts through ``self._script(stem)``
 from __future__ import annotations
 
 from ._base import Namespace
+from .assessments import AssessmentsNamespace
 from .coverage import CoverageNamespace
 from .diagnostics import DiagnosticsNamespace
 from .grounding import GroundingNamespace
 from .normalize import NormalizeNamespace
 from .orchestrate import OrchestrateNamespace, OrchestrationSession
 from .questions import QuestionsNamespace
+from .snapshots import SnapshotsNamespace
+from .temporal import TemporalNamespace
+from .usage import UsageNamespace
 
 __all__ = [
+    "AssessmentsNamespace",
     "CoverageNamespace",
     "DiagnosticsNamespace",
     "GroundingNamespace",
@@ -31,4 +36,7 @@ __all__ = [
     "OrchestrateNamespace",
     "OrchestrationSession",
     "QuestionsNamespace",
+    "SnapshotsNamespace",
+    "TemporalNamespace",
+    "UsageNamespace",
 ]

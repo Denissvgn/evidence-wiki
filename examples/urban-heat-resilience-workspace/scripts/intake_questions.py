@@ -104,7 +104,7 @@ class IntakeValidationError(ScriptRefusal, SystemExit):
 
     The two bases are deliberate, and both are load-bearing.
 
-    ``ScriptRefusal`` is what the CR-6 library seam needs: a host that calls
+    ``ScriptRefusal`` is what the library seam needs: a host that calls
     ``run_intake`` in-process catches the one refusal type every seam raises and
     reads ``to_envelope()`` off it, instead of parsing a stderr envelope.
 

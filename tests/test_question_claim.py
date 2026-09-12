@@ -28,6 +28,22 @@ STATUS = load_script_module("research_question_claim_workspace_status", "workspa
 EXPORT = load_script_module("research_question_claim_export", "export_answers.py")
 
 
+def test_atomic_page_writer_preserves_rendered_bytes_with_windows_text_defaults(tmp_path, monkeypatch):
+    original_open = Path.open
+
+    def windows_open(path, mode="r", *args, **kwargs):
+        if "b" not in mode and "w" in mode and "newline" not in kwargs:
+            kwargs["newline"] = "\r\n"
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", windows_open)
+    page = tmp_path / "question.md"
+    rendered = "---\nstatus: open\n---\nA question with café evidence.\n"
+    CLAIM.write_page_atomic(page, rendered)
+    assert page.read_bytes() == rendered.encode("utf-8")
+    assert list(tmp_path.iterdir()) == [page]
+
+
 class ClaimTestBase(unittest.TestCase):
     def init_workspace(self, root: Path, questions: list[dict] | None = None, run_block: dict | None = None) -> Path:
         target = root / "claim-workspace"
@@ -237,7 +253,7 @@ class ClaimTestBase(unittest.TestCase):
 
 
 class QuestionClaimTests(ClaimTestBase):
-    """E20-T01: claim/release transitions and refusals."""
+    """Claim/release transitions and refusals."""
 
     def test_claim_transitions_open_to_in_progress_with_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -467,7 +483,7 @@ class QuestionClaimTests(ClaimTestBase):
 
 
 class ClaimLintTests(ClaimTestBase):
-    """E20-T01: lint coverage for claim hygiene."""
+    """Lint coverage for claim hygiene."""
 
     def run_lint(self, target: Path) -> dict:
         return LINT.run_checks(target, LINT.load_config(target))
@@ -521,7 +537,7 @@ class ClaimLintTests(ClaimTestBase):
 
 
 class RunBudgetTests(ClaimTestBase):
-    """E20-T02: run budgets in config, profile, and status output."""
+    """Run budgets in config, profile, and status output."""
 
     def status_json(self, target: Path) -> dict:
         stdout = io.StringIO()
@@ -700,7 +716,7 @@ class RunBudgetTests(ClaimTestBase):
 
 
 class VerificationFieldTests(ClaimTestBase):
-    """E20-T05: confidence/evidence_strength schema and export propagation."""
+    """Confidence/evidence_strength schema and export propagation."""
 
     def resolve_answered(self, target: Path, slug: str, extra_fields: dict) -> None:
         answer_dir = target / "wiki" / "synthesis"
@@ -769,7 +785,7 @@ class VerificationFieldTests(ClaimTestBase):
 
 
 class ClaimSeamTests(ClaimTestBase):
-    """CR-6 T9: the library seam and the CLI are one operation, audit entry included.
+    """The library seam and the CLI are one operation, audit entry included.
 
     ``tests/test_seam_conformance.py`` already holds the two paths to the same
     *document*. It cannot see ``log.md``, and that is the half of this command that

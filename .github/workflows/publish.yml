@@ -79,7 +79,7 @@ jobs:
       - name: Run release gates
         shell: bash
         run: |
-          .venv/bin/python -m pytest -q
+          .venv/bin/python tools/run_test_groups.py
           .venv/bin/python -m ruff check .
           .venv/bin/python tools/sync_vendored_scripts.py --check
           git diff --check
@@ -90,101 +90,42 @@ jobs:
           .venv/bin/python -m build --sdist --wheel --no-isolation
           .venv/bin/python -m twine check --strict dist/*.whl dist/*.tar.gz
 
-      - name: Smoke-test the built wheel
+      - name: Validate the built wheel and sdist through the shared installed-artifact gate
         shell: bash
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python -m venv .wheel-venv
-          .wheel-venv/bin/python -m pip install dist/*.whl
-          .wheel-venv/bin/evidence-wiki --version
-          smoke_root="$(mktemp -d)/provider-workspace"
-          .wheel-venv/bin/evidence-wiki contract > /tmp/evidence-wiki-contract.json
-          .wheel-venv/bin/evidence-wiki deploy \
-            --target "$smoke_root" \
-            --project-name provider-workspace \
-            --project-description "Release wheel orchestration smoke" \
-            --domain-pack general-science \
-            --discovery-provider arxiv \
-            --acquisition-provider arxiv
-          .wheel-venv/bin/evidence-wiki pack refresh \
-            --target "$smoke_root" --path general-science \
-            --format json > /tmp/evidence-wiki-pack-refresh.json
-          .wheel-venv/bin/evidence-wiki orchestrate start \
-            --target "$smoke_root" --orchestration-id wheel-smoke \
-            --agent-id release-smoke --format json > /tmp/evidence-wiki-start.json
-          .wheel-venv/bin/evidence-wiki orchestrate next \
-            --target "$smoke_root" --orchestration-id wheel-smoke \
-            --agent-id release-smoke --format json > /tmp/evidence-wiki-next.json
-          .wheel-venv/bin/evidence-wiki orchestrate status \
-            --target "$smoke_root" --orchestration-id wheel-smoke \
-            --format json > /tmp/evidence-wiki-status.json
-          .wheel-venv/bin/python - <<'PY'
-          import json
-          import os
-          from io import StringIO
-          from pathlib import Path
+          .venv/bin/python tools/validate_installed_artifacts.py \
+            --dist-dir dist \
+            --expected-version "${RELEASE_TAG#v}" | tee artifact-validation.json
 
-          import evidence_wiki
-          import pypdf
-          import ruamel.yaml
-          from evidence_wiki import resources
-          from evidence_wiki.orchestration import ORCHESTRATION_RESULT_SCHEMA
+      - name: Measure the standard scale profile against its release budget
+        shell: bash
+        run: |
+          .venv/bin/python tools/scale_benchmark.py \
+            --profile standard \
+            --require-budget \
+            --output scale-benchmark-standard.json
 
-          expected = os.environ["RELEASE_TAG"].removeprefix("v")
-          if evidence_wiki.__version__ != expected:
-              raise SystemExit(
-                  f"Installed wheel version {evidence_wiki.__version__!r} does not match release version {expected!r}"
-              )
-          installed_path = Path(evidence_wiki.__file__).resolve()
-          if "site-packages" not in installed_path.parts:
-              raise SystemExit(f"EvidenceWiki was not imported from the installed wheel: {installed_path}")
-          if not pypdf.__version__.startswith("6."):
-              raise SystemExit(f"Installed wheel resolved unsupported pypdf version {pypdf.__version__!r}")
-          if not ruamel.yaml.__version__.startswith("0.19."):
-              raise SystemExit(
-                  f"Installed wheel resolved unsupported ruamel.yaml version {ruamel.yaml.__version__!r}"
-              )
+      - name: Collect release diagnostics
+        if: always()
+        shell: bash
+        env:
+          RELEASE_GATE_STATUS: ${{ job.status }}
+        run: .venv/bin/python tools/collect_release_diagnostics.py
 
-          round_trip_yaml = ruamel.yaml.YAML(typ="rt", pure=True)
-          round_trip_yaml.preserve_quotes = True
-          round_trip_source = '# operator note\nquoted: "preserve me"\n'
-          round_trip_document = round_trip_yaml.load(round_trip_source)
-          round_trip_output = StringIO()
-          round_trip_yaml.dump(round_trip_document, round_trip_output)
-          if round_trip_output.getvalue() != round_trip_source:
-              raise SystemExit("Installed ruamel.yaml dependency did not preserve YAML comments and quotes")
-
-          pack_refresh = json.loads(Path("/tmp/evidence-wiki-pack-refresh.json").read_text(encoding="utf-8"))
-          if pack_refresh.get("status") != "no_changes" or pack_refresh.get("log_appended") is not False:
-              raise SystemExit(f"Installed-wheel bundled pack refresh was not a no-op: {pack_refresh!r}")
-          if not (Path(pack_refresh["target"]) / "domain-packs" / ".evidence-wiki-state.yml").is_file():
-              raise SystemExit("Installed-wheel pack initialization did not create lifecycle state")
-
-          properties = ORCHESTRATION_RESULT_SCHEMA["properties"]
-          if properties["schema_version"] != {"type": "string", "enum": ["1.0"]}:
-              raise SystemExit("Installed wheel contains an incompatible orchestration result schema")
-          if any("type" not in definition for definition in properties.values()):
-              raise SystemExit("Installed wheel result schema contains an untyped property")
-
-          with resources.assets_root() as assets:
-              required = (
-                  "workspace-template/docs/orchestration.md",
-                  "workspace-template/docs/orchestrator-handoff.md",
-                  "workspace-template/docs/run-controller.md",
-                  "workspace-template/scripts/_domain_pack_lifecycle.py",
-                  "workspace-template/skills/research-run.md",
-                  "workspace-template/skills/research-discover.md",
-                  "workspace-template/skills/research-acquire.md",
-                  "workspace-template/skills/research-verify.md",
-                  "orchestrator/skills/research-orchestrate.md",
-              )
-              missing = [relative for relative in required if not (assets / relative).is_file()]
-              if missing:
-                  raise SystemExit(f"Installed wheel is missing orchestration assets: {missing}")
-          PY
-          .wheel-venv/bin/python tools/smoke_installed_orchestration.py \
-            --cli .wheel-venv/bin/evidence-wiki
+      - name: Store release diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-diagnostics-${{ github.sha }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release-diagnostics/
+            suite-evidence/
+            artifact-validation.json
+            scale-benchmark-standard.json
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Store verified distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -193,6 +134,8 @@ jobs:
           path: |
             dist/*.whl
             dist/*.tar.gz
+            artifact-validation.json
+            scale-benchmark-standard.json
           if-no-files-found: error
           retention-days: 7
 

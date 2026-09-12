@@ -37,6 +37,8 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/discover_sources.py",
     "scripts/fetch_sources.py",
     "scripts/orchestration_controller.py",
+    "scripts/_order_claims.py",
+    "scripts/_order_retention.py",
     "scripts/run_controller.py",
     "scripts/source_requests.py",
     "scripts/smoke_validate_workspace.py",
@@ -59,6 +61,7 @@ REQUIRED_STARTER_ASSETS = (
     "skills/research-verify.md",
 )
 REQUIRED_DOMAIN_PACKS = (
+    "capital-markets",
     "general-science",
     "legal-regulatory",
     "llm-research",

@@ -1,4 +1,4 @@
-"""Tests for the read-only discovery CLI skeleton (E31-T03).
+"""Tests for the read-only discovery CLI skeleton.
 
 `discover_sources.py` is intentionally inert: it validates arguments, loads
 config, enforces the disabled-by-default discovery gate, and emits a structured
@@ -41,9 +41,9 @@ COMMAND_CASES = {
     ],
 }
 
-# Every discovery provider transport now has a real adapter: `github` (E32-T02),
-# `search` (E33-T01), `legal` (E34-T02), `authors` (E35-T01), and fixture-backed
-# `standards` (SRSE-004..007). Their enabled-path behavior is covered by their
+# Every discovery provider transport now has a real adapter: `github`,
+# `search`, `legal`, `authors`, and fixture-backed
+# `standards`. Their enabled-path behavior is covered by their
 # own focused tests, so there are no inert provider commands left to assert here.
 INERT_COMMAND_CASES = {
     name: args

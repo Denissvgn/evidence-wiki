@@ -1,63 +1,12 @@
-"""CR-19: a directory-shaped raw delivery must be deliverable inside an acquisition order.
+"""Directory-shaped raw evidence is attributed inside acquisition orders.
 
-WRITTEN RED, KEPT AS REGRESSION TESTS. Every test here asserts the *desired* end state,
-and the first three failed on the controller as it stood when they were written. The
-unified attribution predicate has since landed — allowed new raw files became what
-`source_inventory.build_records` attributes to the fulfilled/correlated records, rather
-than the literal `raw_paths` strings — so every test here passes today and stays as its
-regression test. Nothing here is marked `xfail` or skipped: this repository uses neither
-mechanism, and a suppressed regression test is a regression test nobody reads.
+Delegated, provider and blocked-partial submissions must expand an admitted record's
+directory into inventory-derived regular files. The provider case uses the documented
+arxiv source-download command with HTTP transport replaced at its supported seam.
 
-The defect, stated once:
-
-    `raw_tree_snapshot` records one entry per REGULAR FILE beneath `raw/`, while each
-    arm's `allowed_new_raw_paths` builder adds the literal `raw_paths` string of each
-    admitted manifest record plus `<string>.provenance.yml`, with no prefix expansion.
-    When a record's `raw_paths` names a DIRECTORY — which is exactly what inventory
-    derives for a LaTeX/e-print bundle, and exactly what the documented
-    `fetch_sources.py arxiv download --format source` command writes — the allowed set
-    contains a directory path that the tree snapshot never emits. The guard therefore
-    admits ZERO of what the record declares, and every member file of the bundle lands
-    in `unexpected_new_raw_paths`.
-
-All three raw-scope arms build that allowed set independently and all three share the
-bug, so all three are pinned here — named by function, never by line number:
-
-  * delegated                 `verify_delegated_acquisition_postconditions`
-  * provider, non-delegated   `verify_action_postconditions`
-  * blocked partial delivery  `verify_blocked_action_postconditions`
-
-The provider case deliberately drives the *documented* first-party command —
-`fetch_sources.py … arxiv download --id <id> --format source --request-id … --candidate-id …`
-with only the HTTP transport mocked — because that is the flow two shipped documents
-instruct an operator to run: `workspace-template/skills/research-acquire.md` and
-`workspace-template/docs/acquisition.md`. Pinning it to the real command rather than to a
-synthetic fixture is what makes this a regression test for shipped documentation rather
-than for a test helper.
-
-The fourth case measures the opposite edge of the same predicate: expansion turns a
-directory entry into a whole subtree, so it may only widen admission for records the
-acquisition itself created. Its red state is the window between `1cda9e7` and the
-narrowing that followed, where a blocked partial delivery could write new files into a
-PRE-EXISTING correlated bundle and have them admitted as residue — there it fails on
-behaviour, admitting what it should refuse. It also fails against states before
-`1cda9e7`, but on a payload field rather than on that behaviour, so only the window is
-evidence of the defect it pins.
-
-The fifth case measures what that same arm SAYS when it refuses. A continued partial
-delivery appends no correlated record, which leaves the attribution predicate with an
-empty question and no consumer for its answer — but the guard derived it anyway, and
-derivation re-walks the whole raw tree and can raise. When it raised, the refusal an
-operator needed — this delivered file is correlated to nothing — was replaced by an
-unrelated one about a broken raw tree, naming no file at all. Its red state is bounded by
-the same window as the fourth case's, and for the same reason: before `1cda9e7` this arm
-asked no derivation and so had nothing to raise, so the substitution it pins was reachable
-only between that commit and the narrowing of the gate that called it.
-
-Nothing here asserts a line number: guards move, and the contract an operator sees is the
-error code, the refusal message, and the payload fields. Each failure message carries the
-observed refusal and its `unexpected_new_raw_paths` payload, so the red output reads as a
-diagnosis of the defect rather than as a bare `0 != 1`.
+Expansion authorizes only newly created correlated records. Writing new files into a
+pre-existing bundle must still refuse. If no new record requires attribution, refusal
+must identify the unrelated delivery without invoking a needless raw derivation.
 """
 
 import io
@@ -146,7 +95,7 @@ def raw_tree_files(workspace: Path) -> list[str]:
 
 
 def diagnose(arm: str, expected: str, code: int, envelope: dict, workspace: Path) -> str:
-    """Render the observed refusal so a red run reads as the CR-19 diagnosis itself.
+    """Render the observed refusal so a red run reads as the directory attribution diagnosis itself.
 
     A bare `assertEqual(0, code)` would print `0 != 1` and tell a reader nothing. The
     payload fields below — the refusal message, `unexpected_new_raw_paths`, and the
@@ -157,7 +106,7 @@ def diagnose(arm: str, expected: str, code: int, envelope: dict, workspace: Path
     details = envelope.get("details") if isinstance(envelope.get("details"), dict) else {}
     return "\n".join(
         [
-            f"CR-19 [{arm} arm]: expected {expected}, observed exit {code}.",
+            f"directory attribution [{arm} arm]: expected {expected}, observed exit {code}.",
             f"  error_code ............... {envelope.get('error_code')!r}",
             f"  message .................. {envelope.get('message')!r}",
             f"  unexpected_new_raw_paths . {json.dumps(details.get('unexpected_new_raw_paths'))}",
@@ -245,13 +194,7 @@ class DelegatedDirectoryBundleTests(DelegatedWorkspace, unittest.TestCase):
         return str(records[0]["id"])
 
     def test_a_delegated_order_can_deliver_a_directory_shaped_bundle(self):
-        """RED: the delegated raw guard admits none of the bundle it just accepted.
-
-        The record the workspace's own inventory wrote declares `raw/papers/arxiv-<id>`;
-        the tree snapshot the guard diffs against contains `.../00README.json` and
-        `.../main.tex`. Neither member is in the allowed set, so a lawful delivery is
-        refused for being outside the scope of the record that describes it.
-        """
+        """A delegated order admits the members inventory attributes to its delivered bundle."""
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace, request_id = self.make_workspace(Path(tmpdir))
             self.start(workspace)
@@ -537,18 +480,10 @@ class ProviderDirectoryBundleTests(unittest.TestCase):
     # -- provider arm: the documented first-party command ----------------------------
 
     def test_the_documented_arxiv_source_download_completes_inside_an_order(self):
-        """RED: the flow two shipped documents tell operators to run cannot be submitted.
+        """The arxiv source-download command produces a bundle that completes its order.
 
-        `skills/research-acquire.md` and `docs/acquisition.md` both instruct
-
-            fetch_sources.py … arxiv download --id <id> --format source \\
-                --request-id <rid> --candidate-id <cid>
-
-        and that command unpacks the e-print tarball into a DIRECTORY under `raw/papers/`.
-        Only the HTTP transport is mocked here; the argument parsing, the unpack, the
-        sidecar it writes, and the path it reports are all the shipped code. So the
-        refusal this test currently records is not a property of a test fixture — it is
-        the documented acquisition route being unusable end to end.
+        Only HTTP transport is replaced. Parsing, extraction, sidecar creation, inventory,
+        normalization and submission all use the deployed commands.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -645,15 +580,10 @@ class ProviderDirectoryBundleTests(unittest.TestCase):
     # -- blocked-partial arm ----------------------------------------------------------
 
     def test_a_blocked_partial_delivery_of_a_bundle_pauses_rather_than_refusing(self):
-        """RED: an honest partial delivery is refused instead of pausing the session.
+        """An inventoried bundle can remain as correlated residue in a blocked delivery.
 
-        `blocked` is how an acquirer reports "I fetched something but could not finish
-        with it" — the payload is on disk and inventoried, nothing is fulfilled. The
-        blocked-partial raw guard correlates the delivery against the manifest records
-        the order scoped, and hits the same directory-vs-file mismatch: the correlated
-        record declares the directory, the tree snapshot lists its members. So the arm
-        that exists to record incomplete work cannot record this incomplete work, and the
-        session gets a hard postcondition failure where `EXIT_PAUSED` is the contract.
+        Nothing is fulfilled; the controller records the incomplete work and pauses the
+        session after checking the directory members against the issued scope.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

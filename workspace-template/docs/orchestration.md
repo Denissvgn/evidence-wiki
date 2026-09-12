@@ -8,6 +8,63 @@ returns, and may reference several immutable child `run_id` records.
 
 ## Command Surface
 
+### Claim retirement and cleanup
+
+The package owns explicit orchestration retirement and live claim-ledger cleanup.
+Retirement is permanent and requires a terminal session with a completion time,
+no pending action or submission, no active child run, and no unresolved recovery.
+Paused or stranded sessions are ineligible. A missing session, an old modification
+time, ordinary run garbage collection, and usage revocation are not retirement proof.
+
+Preview each operation before applying it:
+
+```bash
+evidence-wiki orchestrate retire --target PATH --orchestration-id ORCH_ID \
+  --reason "Research closed; retain audit evidence" --format json
+evidence-wiki orchestrate retire --target PATH --orchestration-id ORCH_ID \
+  --reason "Research closed; retain audit evidence" --apply --format json
+evidence-wiki orchestrate cleanup-claims --target PATH --orchestration-id ORCH_ID --format json
+evidence-wiki orchestrate cleanup-claims --target PATH --orchestration-id ORCH_ID --apply --format json
+```
+
+Without `--apply`, these commands read evidence without creating locks, directories,
+archives, or records. The Python equivalents are `session.retire(reason, apply=False)`
+and `session.cleanup_claims(apply=False)`, advertised by library API version `12`.
+
+Applying retirement takes the session driver lock, the session claim-retention
+lock, and the eligible action locks. It archives the session evidence and owned
+claim ledgers under `runs/order-claim-archives/ORCH_ID/`, verifies every content
+digest, revalidates live evidence, and publishes
+`runs/order-claims/ORCH_ID/.retired.json` last. Each eligible ledger must name the
+same session and action as its retained work order. The inventory is bounded to
+4,096 archived files and 64 MiB. All package claim writers share the retention
+lock and refuse writes after the marker exists. Session mutation also refuses;
+`status` remains available. Use version-matched package and deployed scripts.
+
+Cleanup reacquires these locks and validates the marker, archived bytes, owning
+orders, and unchanged session evidence before removing matching live ledgers.
+Changed or unknown ledgers, ambiguous ownership, incomplete-write temporaries,
+and newly appeared members remain in place with an explicit disposition. Unsafe
+paths or missing archives refuse cleanup. Interrupted cleanup can be repeated:
+already absent ledgers are reported, and no ledger is recreated. Held locks
+refuse with `LOCK_UNAVAILABLE` or `ORCHESTRATION_DRIVER_BUSY`; invalid retirement
+evidence returns `ORCHESTRATION_RETENTION_UNSAFE`.
+
+The payload policy is **retain**. Archives, session evidence, retirement markers,
+lock files and directories (including empty ones) remain in place. This preserves
+evidence that retained assessments, snapshots, or audit consumers may still need;
+cleanup does not infer that those consumers are finished. It reduces live claim
+ledgers and does not erase payloads or guarantee reduced total storage.
+`--payload-policy delete-required` explicitly refuses before writing. Resolve
+payload-deletion obligations with the owner of those obligations before selecting
+archive retention. The package has no archive-erasure operation.
+
+An existing host cleanup adapter remains the host's responsibility until that host
+has independently verified this contract against its selected installed artifact.
+Retirement and cleanup do not establish recovery of legacy stranded orders.
+
+### Driving sessions
+
 Use the package-managed Codex or Claude runner for a complete loop:
 
 ```bash
@@ -509,7 +566,7 @@ to the host's own connectors, which no managed worker can be.
 has performed and the controller has not yet verified — "request `R` is fulfilled
 by source `S`", "question `Q` reopens with these sources" — and never a statement
 about the evidence itself, which is still checked against the manifest, the
-normalized tree, and the raw tree exactly as before. Inside a pending delegated
+normalized tree, and the raw tree exactly as before. Inside a pending provider or delegated
 acquisition order `source_requests.py fulfill` writes a claim to
 `runs/order-claims/<orchestration_id>/<action_id>.json` rather than to
 `sources/source-requests.jsonl`, and `question_resolve.py reopen` writes one
@@ -547,6 +604,16 @@ page straight through, since no acquisition submission would ever come along to
 commit a claim for it, while a workspace acquiring through its own providers is
 covered on the same terms as a delegated one — both are verified by a submission
 that can accept or refuse what was done, which is the whole requirement.
+
+A question can accumulate fulfilled blockers across orders. Each new order captures
+all blocker links and the complete original question page. Reopening requires every
+blocker to be fulfilled; earlier fulfilments must match their captured request
+records. Partially delivered questions retain their blocker links and remain
+eligible for later acquisition. Commit recovery recognizes only the exact page
+rendered from that original page, the accepted sources, and the claim's timestamp.
+Changes to the body, unrelated frontmatter, or answer link remain scope violations.
+A pending order without these complete baselines requires an audited fresh-session
+recovery; current fulfilled state alone cannot reconstruct its issuance authority.
 
 **Result semantics.** Every scoped request must end the action with a claimed
 fulfilment **or** a recorded attempt failure naming that action; a request with
@@ -826,6 +893,11 @@ the reported paths.
 
 After upgrading the package, refresh an existing workspace's managed scripts
 and inspect the retained phase before deciding whether it is safe to resume.
+`upgrade` refuses with `UPGRADE_PENDING_ORDER` while any session holds a
+pending work order or an active driver, so drain orchestration first: submit or
+fail the pending action, or preserve the session for audit and start a fresh one
+afterwards. While an upgrade holds `.locks/upgrade.lock`, `start`, `next`,
+`resume`, and `submit` refuse with `ORCHESTRATION_UPGRADE_IN_PROGRESS`.
 Preview both steps first:
 
 ```bash

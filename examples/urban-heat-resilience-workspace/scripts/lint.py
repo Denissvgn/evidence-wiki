@@ -1217,8 +1217,9 @@ def check_normalized_record_contract(
     manifest_by_id: dict[str, dict[str, Any]],
     results: dict[str, Any],
     min_coverage_ratio: float | None = None,
+    config: dict[str, Any] | None = None,
 ) -> tuple[int, int, int]:
-    """Hold externally produced records to the published record contract.
+    """Check external records and original-byte qualifications for opted-in sources.
 
     A record from another tool is evidence on the same terms as one this package wrote,
     which is only safe if "conforms" is checked rather than assumed. Records that name
@@ -1226,6 +1227,9 @@ def check_normalized_record_contract(
     and lint's job here is to widen what is accepted, not to newly fail records that a
     re-normalization repairs on its own. `normalize_verify.py` checks every record
     regardless, for callers that want the stricter reading.
+
+    Qualified packet bindings are rechecked for every producer, including native
+    records, whenever the workspace or source selects that intake profile.
 
     Returns the number of foreign records seen, the number of violations reported, and
     the number of records reported as thinly rendered.
@@ -1245,13 +1249,14 @@ def check_normalized_record_contract(
         if check_rendered_coverage_ratio(project_root, path, frontmatter, min_coverage_ratio, results):
             low_coverage_records += 1
         if not _normalized_contract.declares_foreign_normalizer(frontmatter):
-            continue
-        foreign_records += 1
-        violations = _normalized_contract.validate_record(
-            path,
-            manifest_by_id=manifest_by_id,
-            normalized_root=normalized_root,
-        )
+            violations = _normalized_contract.check_qualified_packet(project_root, config or {}, manifest_by_id, frontmatter)
+            violations.extend(_normalized_contract.check_execution_evidence(project_root, config or {}, manifest_by_id, frontmatter))
+        else:
+            foreign_records += 1
+            violations = _normalized_contract.validate_record(
+                path, manifest_by_id=manifest_by_id, normalized_root=normalized_root,
+                project_root=project_root, config=config,
+            )
         if not violations:
             continue
         violation_count += len(violations)
@@ -1269,7 +1274,7 @@ def check_normalized_record_contract(
             "MEDIUM",
             "normalized_record_contract_violation",
             (
-                f"Externally produced normalized record does not match the record contract: "
+                f"Normalized record does not match the record contract: "
                 f"{label} — {first.code}{detail}: {first.message}"
             ),
             [label],
@@ -3122,6 +3127,7 @@ def check_source_coverage(
     wiki_files: list[Path],
     results: dict[str, Any],
     min_coverage_ratio: float | None = None,
+    config: dict[str, Any] | None = None,
 ) -> None:
     stats = results["stats"]
     manifest_by_id = index_manifest_records(manifest_records)
@@ -3197,6 +3203,7 @@ def check_source_coverage(
         manifest_by_id,
         results,
         min_coverage_ratio=min_coverage_ratio,
+        config=config,
     )
 
     source_notes_by_id, note_integrated_ids = index_source_notes(wiki_root)
@@ -3785,7 +3792,9 @@ def generate_recommendations(results: dict[str, Any]) -> None:
     results["recommendations"] = recommendations
 
 
-def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
+def run_checks(
+    project_root: Path, config: dict[str, Any], *, question_paths: frozenset[Path] | None = None,
+) -> dict[str, Any]:
     workspace_health = evaluate_workspace_health(project_root)
     raw_config = config_mapping(config, "raw")
     sources_config = config_mapping(config, "sources")
@@ -3960,6 +3969,7 @@ def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
             wiki_files,
             results,
             min_coverage_ratio=min_rendered_coverage_ratio(lint_config),
+            config=config,
         )
     if validate_provenance:
         check_provenance(project_root, manifest_path, manifest_records, results)
@@ -3979,7 +3989,8 @@ def run_checks(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if lint_config.get("validate_claims", True):
         check_claims(project_root, wiki_root, wiki_files, results)
     if lint_config.get("validate_questions", True):
-        check_questions(project_root, wiki_files, claim_staleness_window_hours(config), results, config)
+        selected_files = wiki_files if question_paths is None else [path for path in wiki_files if path in question_paths]
+        check_questions(project_root, selected_files, claim_staleness_window_hours(config), results, config)
     levels = severity_order(config)
     results["stats"]["issue_counts"] = issue_counts(results, levels)
     generate_recommendations(results)

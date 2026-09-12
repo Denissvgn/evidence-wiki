@@ -166,7 +166,7 @@ class NormalizationCoverageBase(unittest.TestCase):
 
 
 class HtmlNormalizationTests(NormalizationCoverageBase):
-    """E19-T01: HTML inventory mapping and stdlib extraction."""
+    """HTML inventory mapping and stdlib extraction."""
 
     def test_inventory_classifies_html_with_fingerprint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -281,7 +281,7 @@ class HtmlNormalizationTests(NormalizationCoverageBase):
 
 
 class TableNormalizationTests(NormalizationCoverageBase):
-    """E19-T03: CSV/TSV table normalization."""
+    """CSV/TSV table normalization."""
 
     def test_clean_csv_yields_columns_rows_and_sample_table(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -375,7 +375,7 @@ class TableNormalizationTests(NormalizationCoverageBase):
 
 
 class TableStructuredViewTests(NormalizationCoverageBase):
-    """CR-7 T13: the structured-view sidecar the native tabular path emits.
+    """The structured-view sidecar the native tabular path emits.
 
     `normalize_table_record` already streams every row through `csv.reader` and then
     keeps 20 of them, cells ellipsized at 80 characters, for the quotable body. For a
@@ -758,7 +758,7 @@ class TableStructuredViewTests(NormalizationCoverageBase):
             self.deliver(workspace, "price-history.csv", "date,price\n2026-08-01,23.99\n")
             self.normalize(workspace)
 
-            # Rewind the record to its pre-CR-7 shape: no key, no sidecar.
+            # Rewind the record to its legacy shape: no key, no sidecar.
             record_path = self.record_path(workspace)
             record_path.write_text(
                 "\n".join(
@@ -781,7 +781,7 @@ class TableStructuredViewTests(NormalizationCoverageBase):
 
 
 class NeedsOcrDetectionTests(NormalizationCoverageBase):
-    """E19-T02: scanned-PDF detection and surfacing."""
+    """Scanned-PDF detection and surfacing."""
 
     def normalize_pdf(self, workspace: Path) -> tuple:
         records = self.run_inventory(workspace)

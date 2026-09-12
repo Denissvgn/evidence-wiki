@@ -41,6 +41,8 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from _workspace_module_loader import load_workspace_module
 
+require_host_intake = load_workspace_module(_SCRIPT_DIR, "_usage_gate").require_host_intake
+
 _academic_identity = load_workspace_module(_SCRIPT_DIR, "_academic_identity")
 author_sets_match = _academic_identity.author_sets_match
 
@@ -86,7 +88,7 @@ OPENALEX_CLOCK = time.monotonic
 OPENALEX_LAST_REQUEST_AT: float | None = None
 DOI_TIMEOUT_SECONDS = 10.0
 DOI_TRANSPORT = None
-# --- GitHub bounded acquisition (E32-T03) ------------------------------------
+# --- GitHub bounded acquisition ------------------------------------
 # Acquisition captures explicitly selected repositories as evidence: a repository
 # metadata snapshot, release asset metadata, or a source archive for a chosen ref.
 # It never clones, never executes repository code, and never auto-selects a repo
@@ -147,7 +149,7 @@ WEB_DEFAULT_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 WEB_TIMEOUT_SECONDS = 30.0
 WEB_RETRIEVED_BY = "fetch_sources.py/web"
 WEB_TRANSPORT = None
-# --- Registered third-party acquisition (CR-5 T5) -----------------------------
+# --- Registered third-party acquisition ---------------------------------------
 # A registered provider plans requests and interprets responses; this script fetches,
 # bounds, and writes. Registered ids deliberately stay out of PROVIDER_REGISTRY and
 # ACQUISITION_PROVIDER_IDS: the built-in allow-lists are a closed set by design, and a
@@ -257,9 +259,9 @@ PROVIDER_REGISTRY: dict[str, dict[str, Any]] = {
             "https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api",
             "https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository",
         ],
-        # Bounded acquisition (E32-T03): capture an explicitly selected repository
+        # Bounded acquisition: capture an explicitly selected repository
         # as evidence without cloning or executing code. Repository discovery lives
-        # in discover_sources.py github (E32-T02).
+        # in discover_sources.py github.
         "supported_commands": ["repo-metadata", "release-metadata", "download-archive"],
         "license_inference": "partial",
     },
@@ -829,6 +831,8 @@ def acquisition_context(
     registered: tuple[str, ...] = (),
     requested_id: str | None = None,
 ) -> dict[str, Any]:
+
+    require_host_intake(config)
     acquisition = acquisition_config(config)
     providers = validate_provider_list(
         acquisition.get("providers", []),
@@ -3552,7 +3556,7 @@ def run_web_command(project_root: Path, context: dict[str, Any], args: argparse.
     )
 
 
-# --- Registered provider acquisition (CR-5 T5) --------------------------------
+# --- Registered provider acquisition ------------------------------------------
 #
 # The plugin is a request planner and a response interpreter; it never opens a socket and
 # never touches the workspace. This section is the whole of what the package does on its
@@ -4744,6 +4748,8 @@ def run_github_command(project_root: Path, context: dict[str, Any], args: argpar
 def run_provider_command(args: argparse.Namespace) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
     config = load_config(project_root)
+
+    require_host_intake(config)
     if args.provider == REGISTERED_SUBCOMMAND:
         # args.provider holds the literal subcommand word here; the provider id is --id.
         return run_registered_command(project_root, config, args)
@@ -4782,6 +4788,8 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = json_mode_requested(argv, default_json=args.output_format == "json")
     try:
         report = run_provider_command(args)
+    except _script_errors.ScriptRefusal as exc:
+        return _script_errors.emit_refusal(exc, json_mode=json_mode)
     except FetchSourcesError as exc:
         emit_error(
             redact_diagnostic(exc.message),

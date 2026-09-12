@@ -56,7 +56,7 @@ def load_frontmatter(path: Path) -> dict:
 
 
 class SourceDeliveryTests(unittest.TestCase):
-    """E17-T01/T02: delivery idempotency and provenance sidecar handling."""
+    """Delivery idempotency and provenance sidecar handling."""
 
     def copy_workspace(self, root: Path) -> Path:
         workspace = root / "workspace"
@@ -392,7 +392,7 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertEqual(3, report["summary"]["would_create"])
         self.assertEqual(0, report["summary"]["failed"])
         self.assertEqual(
-            {"latex": 1, "pdf": 0, "links": 2, "html": 0, "tables": 0, "codebase": 0, "adapter": 0},
+            {"latex": 1, "pdf": 0, "links": 2, "html": 0, "tables": 0, "codebase": 0, "adapter": 0, "execution": 0},
             report["summary"]["methods"],
         )
         self.assertEqual(3, len(report["actions"]))

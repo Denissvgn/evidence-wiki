@@ -1,5 +1,171 @@
 # Changelog
 
+## Unreleased
+
+## 0.7.0 - 2026-09-12
+
+- **Windows workspace operations preserve portable file semantics.** Legacy
+  exports and search caches inspect permission declarations through bounded
+  native file handles. Atomic question writes retain LF bytes for replay, and
+  named market time zones work without a system time-zone database.
+
+- **Terminal orchestration claims can be retired and cleaned up by the package.**
+  Library API contract version 12 adds `session.retire` and
+  `session.cleanup_claims`, with matching CLI commands and read-only defaults.
+  Applied retirement archives the completed session and owned ledgers, prevents
+  later session and claim writes, and permits repeated cleanup under locks.
+  Archives, retirement markers, locks and unknown files remain retained;
+  payload erasure requires a separate retention policy.
+
+- **Authenticated assessments recheck current evidence before consumption.**
+  Library API contract version 11 adds domain-neutral assessment preparation,
+  issuance, current checks and bounded refresh. Whole-envelope host authority
+  binds selected answers, source revisions, policy and validity. Corrections,
+  expiry and revocation invalidate future use while retaining history. Host
+  approval, risk policy, action idempotency and reconciliation remain external;
+  the optional standard-library host example illustrates those boundaries.
+
+- **Optional historical simulations separate arithmetic from performance.**
+  Library API contract version 10 exposes `market-simulation/v1` qualifications
+  within generic execution evidence. Bound portfolio arithmetic, costs,
+  historical universe, preselected configuration, and input availability are
+  checked independently. Losing results and failed observations retain their
+  meaning. Snapshot contract v4 declares required execution profiles and
+  rechecks them offline. No feed, broker, model, or simulator SDK is required.
+
+- **Historical execution qualifies inputs at each generation's cutoff.** Library
+  API contract version 9 exposes bounded input qualification across accepted
+  immutable ancestry, independently attested availability, and nested execution
+  history. Snapshot contract v3 preserves those proofs for independent offline
+  verification. Historical snapshots use input proofs accepted by their declared
+  checkpoint, and offline verification enforces that checkpoint's observation
+  time. Later computation does not make future inputs available earlier; model
+  training cutoff remains explicitly unestablished.
+
+- **Optional market evidence retains exact values and qualifications.** The
+  `capital-markets` guidance pack supplies namespaced questions, coverage rules,
+  and explicit review requirements. Library API contract version 8 adds
+  `normalize.validate_market` for delegated SEC company-concept and Alpaca
+  stock-bars slices. Bounded pagination, listing identity, filing revisions,
+  units, adjustments, completeness, and original artifact bindings remain
+  explicit. Shared temporal and usage checks govern consumption. The pack
+  enables no providers and introduces no SDK dependencies or market metadata
+  requirements for other workspaces.
+
+- **Historical evidence evaluation uses one explicit cutoff.** Library API
+  contract version 7 adds bounded revision selection, lexical retrieval,
+  declarative facet evaluation, and scalar grounding through `Workspace.temporal`
+  and the matching CLI. Host-observed audit replay and independently attested
+  public availability have separate requirements. Unknown dates, unfinished
+  measurements, future corrections, and unqualified ancestors remain gaps.
+  Historical snapshot bundles retain those time and proof bindings for offline
+  verification. Current permissions and revocations still govern each use.
+
+- **Evidence snapshots freeze a complete authorized artifact closure.** Library
+  API contract version 6 adds preparation, host-registered atomic publication,
+  current-use reconciliation, and independent offline verification, with matching
+  CLI operations. Canonical bundles retain exact inputs, execution history,
+  authenticated evaluator receipts, packet qualifications, permissions, and
+  lineage. Historical integrity stays separate from current permission after
+  revocation. Explicit negative examples preserve authenticated failed outcomes.
+
+- **Host-owned evidence revisions carry separate retrieval, training, and export permissions.**
+  Authenticated grants and scrub receipts bind exact sanitized bytes before storage.
+  A locked external event log preserves revocations and downstream lineage across
+  workspace rollbacks. Protected queries read currently authorized source revisions;
+  incompatible intake, caches, and publication paths refuse safely. Library API
+  contract version 5 adds `Workspace.usage` and matching CLI operations for signed
+  transactions, status, eligibility, lineage, and exact source materialization.
+
+- **Execution evidence preserves observations, hypotheses, and evaluator receipts.**
+  The `execution_evidence/v1` profile validates a bounded closure of original
+  inputs, outputs, logs, environment, and verification scope. Failed and
+  inconclusive outcomes remain explicit. The `independent_execution_pass`
+  coverage policy requires a complete passing receipt bound to the selected
+  observation and authenticated by a separately controlled evaluator through
+  the host's external trust policy. Library API contract version 4 adds
+  `Workspace.normalize.validate_execution` and a matching CLI operation.
+
+- **Qualified codebase packets retain their original qualifications.** Opt in to
+  `qualified_context_packet/v1` to check bounded delivery bytes and the pinned
+  producer's native packet contract offline. Normalization, verification, lint,
+  and coverage recheck the same original delivery. Stale or incomplete packets
+  keep those labels; integrity does not establish worker identity or live source
+  freshness. Library API contract version 3 adds intake-profile discovery and
+  `Workspace.normalize.validate_packet`, with matching CLI operations.
+
+- **Publish selected questions from one captured workspace revision.**
+  `Workspace.publish_selected` and `evidence-wiki publication --question SLUG`
+  return scoped readiness and answers with a content identity, explicit global
+  gates, and bounded retry or refusal when evidence changes. Unrelated pending
+  question reviews do not block the selection; source and configuration defects
+  remain global. The operation preserves live workspace files. Library API
+  contract version 2 also declares each operation's CLI, write, lock, and
+  subprocess boundaries.
+
+- **Acquisition progress now survives partial deliveries across orders.** Provider and
+  delegated acquisition retain fulfilled requests while other blockers remain. A
+  question reopens only after every blocker is fulfilled, with earlier evidence
+  included and earlier request records verified against the issued baseline.
+  Interrupted reopen commits are accepted only when the complete question page
+  matches the expected change; edits to its body or unrelated metadata are refused.
+
+- **Scale measurements run weekly and accompany release candidates.** The frozen
+  `standard` and `near-partition` profiles enforce time, memory, and output budgets.
+  Reports identify the commit and execution environment; exceeding a configured
+  budget returns exit code `3`.
+
+- **Built distributions include the required starter assets.** The source archive
+  now includes the tracked `AGENTS.md` files needed by workspace initialization.
+  Distribution validation checks archive membership and exercises fresh wheel and
+  source-archive installations from outside the checkout.
+
+- **Warm script loads reuse content fingerprints and execute current source bytes.**
+  Unchanged script trees avoid repeated content reads. Changed trees invalidate
+  cached modules, including sibling imports whose size and modification time are
+  preserved and whose old bytecode cache still exists. Cache generations are
+  bounded per workspace and module.
+
+- **Public guidance points only at published files, and a refused companion declaration
+  says why.** The README linked an architecture index and a release process that are not
+  part of the repository; it now links the publishing workflow and the workspace
+  documents, and the contributing guide carries the release steps itself. The inventory
+  warning for a `companions:` declaration on a capture whose kind and suffix do not both
+  carry a fingerprint now names the record's kind and the kind/suffix pairs that do. The
+  `starter_version` field is documented as the starter-content version, distinct from the
+  installed package version, with neither proving deployed script bytes.
+
+- **`upgrade` now refuses to strand a pending acquisition order.** The 0.6.0 notes asked
+  operators to drain pending orders before upgrading; a downstream host reported the failure
+  that instruction guards against, a fulfilled request whose order could no longer be
+  submitted after its scripts and metadata were replaced underneath it. Write mode and
+  `--dry-run` now both refuse with `UPGRADE_PENDING_ORDER` while any orchestration session
+  holds a pending work order, naming the session, action, phase, and the request ids the
+  order scopes, and refuse the same way for a session whose `session.json` cannot be read.
+  Write mode takes the upgrade lock and then every session lock, holding all of them until
+  the replacement finishes; a session whose lock a live driver holds is reported as
+  `driver_active`. On the other side, `start`, `next`, `resume`, and `submit` take their
+  session lock and then probe the upgrade lock, refusing with
+  `ORCHESTRATION_UPGRADE_IN_PROGRESS` while an upgrade holds it. Because each side takes its
+  own lock before looking at the other's, an order cannot become pending between the
+  upgrade's preflight and its replacement. A workspace never upgraded has no upgrade lock
+  file and the probe creates none. Repair of a workspace already stranded by an earlier
+  upgrade is not part of this change; it stays a refusal with exact identifiers.
+
+- **`build-index` now publishes a search index whose fingerprint describes the pages it
+  actually read.** The builder lock serializes builders, not page edits. A page edited
+  between the moment the builder read it and the moment it fingerprinted the corpus was
+  stored with the *new* corpus fingerprint, so query mode accepted the index as fresh and
+  served the old page: the new text was findable by a fresh in-memory scan and not by the
+  index. The build now takes an optimistic snapshot -- it records every indexed file's size
+  and modification time, reads, and records them again -- and publishes only a read whose
+  two observations agree, under the fingerprint those observations produced. A corpus that
+  changes during the read is re-read; after three consecutive changed reads the build aborts
+  naming the paths that moved, leaves any prior index untouched, and removes its own
+  temporary database. The fingerprint remains metadata-only, and the documentation now
+  says so: an edit that preserves both size and modification time is invisible to it, at
+  build time and at query time alike.
+
 ## 0.6.0 - 2026-08-30
 
 - **A delivery can now declare the files that belong to a capture, and every acquisition arm
@@ -86,7 +252,7 @@
   bundle: nothing named it, and the field's documented purpose -- "raw files whose bytes
   determine a record's normalized output" -- does not reach it. A declared companion the
   normalizer keys its structured view on is precisely a file of that description. The bundle
-  case is unchanged, and still pinned by its own test.
+  case is unchanged.
 
   Consequences to expect, and for a workspace this package wrote there are none. No record
   it wrote is rewritten and no such `raw_fingerprint` moves, verified byte-identical over
@@ -342,7 +508,7 @@
   target is a directory can never be verified at all, which is why the requirement would
   refuse every paired paper, whose primary capture is the bundle root. A record whose sole
   unverified checksum sits on a secondary capture is therefore still admitted under
-  `--require-checksum` alone, pinned end to end by its own test.
+  `--require-checksum` alone.
 
   Rated low, not a security fix, and the severity is stated here rather than left to
   inference. The mismatch was never silent: it always warned in the report and always marked
@@ -353,9 +519,7 @@
   alongside a mismatched `additional_provenance` entry, which an exported citation reports as
   the record's verification status. Every consumer other than `--reject-mismatch` — lint, the
   evidence gates, export — still reads the primary `provenance` alone; that boundary is now
-  stated where it is relied upon rather than assumed away. Verified by reverting only the
-  production change and confirming the refusal tests fail while both `--require-checksum`
-  controls still pass.
+  stated where it is relied upon rather than assumed away.
 - **Fix: a file delivered under a dot path inside a bundle was admitted by the record that
   owns it and counted by nothing.** An arXiv or LaTeX bundle record declares one `raw_paths`
   entry — the bundle directory — and no member list anywhere, so the whole subtree beneath
@@ -474,7 +638,7 @@
   standing advice — re-run `source_inventory.py --report` — does not repair a hand-edited
   record, so following it reached a second, honest refusal rather than the fix. The new
   field names the path to remove, and the advice is unchanged. It supplements the
-  pinned-order equality test and never replaces it, and it is one-sided on purpose: it
+  ordered equality check and never replaces it, and it is one-sided on purpose: it
   reports what a record declared that inventory accounts for nowhere, so it is empty
   whenever every declared path is accounted for. A reorder, a duplicate, and a declared
   list that omits a derived path are all still mismatches, each reporting an empty
@@ -488,11 +652,6 @@
   today, because the snapshot refuses such a file before the expansion is ever consulted;
   that agreement was incidental, and is now stated.
 
-  Both defects arrived with the derived-attribution predicate described in the entries below
-  and were caught before any release carried them, so there is no released version to
-  reproduce them on. Both were reproduced on this branch by reverting the repair and watching
-  the test fail: the mismatch payload missing its field, and a derivation across one `mkdir`
-  answered from the stale memo.
 
 - **Fix: a directory-shaped `raw_paths` entry could not be delivered inside any acquisition
   order.** A bundle record — an arXiv or LaTeX source archive, a local code repository —
@@ -587,8 +746,7 @@
   `origin_url`, `retrieved_at` and verified `checksum` with it. Nothing in the manifest
   said where the PDF had come from. The bytes were never unaccounted for — both sidecars
   already counted toward `raw_fingerprint`, so a correction to either still re-triggered
-  normalization — but the parsed fields were dropped, and no test exercised the path at
-  all. Every matching sidecar is merged now: the first still becomes `provenance`,
+  normalization — but the parsed fields were dropped. Every matching sidecar is merged now: the first still becomes `provenance`,
   unchanged in shape, selection and checksum handling, and each further one becomes an
   entry in a new record-level `additional_provenance` list that names the `path` it
   describes and is checksum-verified against that path's own bytes rather than the
@@ -709,8 +867,7 @@
   meant. That code's registry remediation was written for `record-attempt-failure` alone and
   now answers both commands that reach it, since a fulfilled request accepts neither a
   recorded attempt failure nor a relink. Re-fulfilling a request with the *same* source id
-  is unchanged and still succeeds idempotently. The tests now assert `error_code` and
-  `recoverable` rather than a stderr substring, which is what let the mismatch ship.
+  is unchanged and still succeeds idempotently.
 
 - **Fix: the reuse and reconciliation refusals stopped advising commands that refuse.**
   Every escape those refusals printed was unfollowable in the only state that could print
@@ -723,8 +880,7 @@
   An operator who followed the printed advice reached a second refusal for having followed
   it.
 
-  Both doors were walked in tests rather than reasoned about, and neither is named now.
-  What the refusals state instead is the fact underneath all of them — a fulfilled request
+  The refusals state that a fulfilled request
   has no second route — and, where the per-source repair cannot be performed, that this
   order has none either. Two more escapes were found the same way and removed: the provider
   arms' "acquire it through another selected candidate" bottoms out at that same relink
@@ -748,9 +904,8 @@
   scope check runs. The fulfilment the acquirer already wrote stays in the request store with
   its `source_id`; `open_requests` selects on `status == "open"`, so no later order sees that
   request again; and evidence the controller had just declined to verify is accepted
-  permanently. The repair names that cost now instead of naming the command, and a test
-  performs the outcome and observes each part of it. The hole itself is unchanged and stays
-  open on purpose.
+  permanently. The remediation now describes that consequence. This limitation remains
+  unchanged.
 
 ## 0.5.2 - 2026-08-19
 
@@ -1029,35 +1184,6 @@
   parser, the dispatch and the `run_reopen` seam but not the published facade, which
   made `library-api.md`'s promise that an operation "does not change what it means"
   between doors false for it.
-- Three consistency rules that were previously conventions are now tests.
-  `test_no_shipped_surface_teaches_a_retired_scope_example` sweeps every tracked
-  surface for retired example *values* — the check that replaces the one-shot grep
-  which matched two syntaxes and missed the JSON form of the same value in
-  `mcp-server.md`. `test_dispatch_seam_forwards_every_cli_flag_to_its_seam` compares
-  each subparser's flags against the keywords `dispatch_seam` forwards, after
-  `--require-decisive-scope` was parsed by the CLI, dropped at the seam boundary,
-  and silently ignored while the library seam honoured it.
-  `test_library_facade_forwards_every_seam_keyword` pins the next boundary out —
-  every seam keyword reachable from the facade, and every accepted keyword actually
-  passed on — after the same flag was found missing there too. The repo had
-  `sync_vendored_scripts.py --check` for template↔mirror drift and `llm-wiki lint
-  --strict` for code↔wiki drift; these close the doc↔doc, CLI↔seam and seam↔facade
-  equivalents.
-- Each of those guards now derives its own coverage instead of listing it, after the
-  first versions were found to protect only the case that prompted them. The facade
-  guard walks 18 door→seam bindings across all seven namespaces and the `Workspace`
-  handle, in both call shapes, rather than eight hardcoded for one namespace; it also
-  reads positional-or-keyword parameters, not just keyword-only ones. The set of
-  scripts required to appear in the JSON Output Scripts table is derived from the
-  scripts directory rather than a hardcoded list that silently omitted eight
-  qualifying scripts, `orchestration_controller.py` — the largest error surface in
-  the package — among them; remaining exemptions are declared with a written reason.
-- Fix a Markdown table parser in the error-envelope checks that split rows on a bare
-  `|` and ignored `\|`. Rows whose JSON-mode column reads `next\|submit\|…` had a
-  fragment of the wrong column parsed as their error codes, so
-  `test_json_output_scripts_table_uses_stable_error_codes` was passing while
-  examining 85 of 131 codes and one orchestration code instead of 22. No shipped
-  behavior changes; the check simply now sees what it always claimed to.
 - Stop `reopen` from crediting declared scope for a pairing that argument order
   decided, and say which scope keys are worth declaring in the first place.
   Request scope narrows the sources that can answer each request, but it does not
@@ -1152,9 +1278,7 @@
   scripts, the library, and the repository tools now pass `encoding="utf-8"` and
   `newline="\n"`, and text-mode subprocess calls decode as UTF-8 with
   `errors="replace"`, matching the convention `_normalizer_adapter.py` already
-  used. A new contract test scans the shipped sources and fails on any
-  unqualified text read, write, or text-mode subprocess, so the class cannot
-  return; CI could not have caught it, because `PYTHONUTF8: "1"` masks it there.
+  used.
   Behavior on macOS and Linux is unchanged. Exception handling is deliberately
   untouched: readers that convert `OSError` into a diagnostic still do not catch
   `UnicodeDecodeError`, which remains a separate robustness question.
@@ -1214,12 +1338,8 @@
   The guard stays syntactic and conservative, and is not a proof of safety in either
   direction: it still refuses shapes that would have been safe (an optional lead is
   reported unknowable rather than resolved, so `(b?a|c)+` is refused too), and a
-  construct nobody has taught it to see would still pass. The shapes named above are
-  the ones it is known to catch, not the closure of what can backtrack. Beside the
-  per-spelling tests, the suite now asserts the complementary property on what actually
-  ships — every pattern the guard *accepts* must match adversarial input quickly —
-  because enumerating exponential spellings only ever catches the ones somebody
-  thought of.
+  construct nobody has taught it to see would still pass. The guard detects the shapes named above; it does not prove that every
+  accepted pattern is free of excessive backtracking.
 
 - Let a recorded review settle the coverage policy it was collected for. A policy
   that needs a person was a `safety` no-ship reason until the review was recorded
@@ -1407,9 +1527,6 @@
   Every workspace script grew a `run_<op>(...) -> dict` seam; the CLI prints what
   it returns or renders the refusal's envelope, and the API returns the same dict
   or raises the typed exception built from that same envelope.
-  `tests/test_seam_conformance.py` runs the CLI as a real subprocess against the
-  seam over identical inputs and requires agreement on the success document, the
-  refusal envelope, and the exit code, for every enrolled script.
 
   Refusals arrive as `evidence_wiki.errors.EvidenceWikiError` carrying
   `error_code`, `message`, `recoverable`, `remediation`, `details`, and
@@ -1837,47 +1954,16 @@
   any record declaring a lower ratio emits LOW `normalized_low_rendered_coverage`,
   counted in the `normalized_low_rendered_coverage` stat. It is unset by default and
   LOW when it fires, because capping a long series is a legitimate rendering choice
-  rather than a defect — this is a visibility tool, and CR-7's structured grounding
-  anchors are the actual fix for un-quotable content. Unlike the contract check, it
+  rather than a defect — this is a visibility tool, and structured grounding
+  anchors address content that cannot be quoted from rendered text. Unlike the contract check, it
   applies to native and foreign records alike; a threshold that is not a number in
   `[0, 1]` disables the notice instead of failing the run.
-- Cover the structured-evidence path end to end.
-  `tests/test_structured_evidence_e2e.py` walks a delivered JSON payload and its
-  sidecar through the whole chain in a workspace built by initialization — inventory,
-  adapter normalization, contract verification, reopening the blocked question,
-  grounding a claim in a facet value, lint, and the orchestration controller's own
-  workspace-safety postcondition. The legs are load-bearing in sequence rather than
-  individually: normalization is what opens the reopen gate, and the facet headings the
-  adapter emits are what make a value quotable at all, so a regression in any stage
-  surfaces as a broken chain instead of a passing unit test about a stage nothing can
-  reach. Two companion cases pin the boundaries — the same delivery with no adapter
-  configured is classified but never normalized and the gate stays shut, and a capped
-  rendering still grounds what it did render while a dropped facet fails closed with
-  `anchor_not_found`.
-- Hold the hand-written path to the same chain. The same suite now runs a record an
-  external tool wrote itself, with no adapter configured anywhere: it verifies against
-  the same validator, opens the reopen gate, grounds a quote from a facet section, and
-  leaves lint with nothing to say beyond the missing wiki source note — the same residue
-  the adapter path leaves. A full `--all` normalization run is asserted to leave that
-  record byte-identical, since a kind nothing here normalizes belongs to whoever wrote
-  it. One mutation per contract violation family then shows each is named: verify
-  reports exactly that family's code and nothing else, and lint reports it as MEDIUM
-  `normalized_record_contract_violation` with the same code. The one asymmetry is
-  asserted rather than glossed — a record with no frontmatter names no producing tool,
-  so lint cannot tell it from a stray Markdown file and leaves it alone, while
-  `normalize_verify.py` still refuses it.
-- Guard the "no adapters configured, no change in behavior" promise.
-  `tests/test_no_adapter_backward_compat.py` runs an existing fixture twice with one
-  variable changed — whether `research.yml` has a `normalization:` section at all — and
-  compares whole artifacts: the manifest, every normalized record byte for byte, the
-  normalization report, the verifier report, and the lint payload. The declared command
-  points at a path that cannot exist, so an adapter consulted for a kind it does not map
-  would surface as a failed action rather than a silent no-op. Three further cases cover
-  what the differential cannot see: a second normalization run rewrites nothing (the
-  bumped `NORMALIZER_VERSION` must not perma-stale the records it was added to); a
-  record written before the contract existed is still accepted, uncounted as foreign and
-  unflagged; and the native frontmatter shape is pinned key by key, so a field added to
-  every record has to be declared here rather than appearing quietly.
+- Apply the same normalized-record and grounding contracts to configured adapters
+  and external producers. A rendered facet can support a quote; a facet omitted by
+  rendering cannot. Use a structured anchor for values outside the rendered text.
+  Full normalization preserves external records whose kinds have no configured
+  normalizer. Unmapped kinds and workspaces without adapters retain their existing
+  normalization behavior.
 - Document the record fields that were being written but not published. Five
   codebase-record fields — `codebase_intake_status`, `codebase_execution_scope`,
   `codebase_artifact_manifest`, `codebase_artifact_checksums`, and
@@ -1904,17 +1990,9 @@
   from the version check only — a record written before a required field existed can
   still be reported by `normalize_verify.py`, which the first re-normalization repairs
   and which lint never escalates.
-- Make every normalized record in this repository pass its own contract, and keep it
-  that way. Four fixture records did not: three battery-workspace stubs that carried no
-  `type` at all, and a standards record missing half its required frontmatter and living
-  at a path its `source_id` did not resolve to. Fixtures are what a reader opens to learn
-  the format, so one that fails the verifier teaches the wrong shape and makes the
-  verifier look broken. They are now full records — quoted prose preserved verbatim under
-  `Extracted Text`, so grounding still verifies against them. A new conformance test walks
-  the repository for workspaces with committed records rather than naming them, so a new
-  fixture is enrolled by existing. Nothing caught this before: lint holds only externally
-  produced records to the contract, which is what leaves a native record missing a field
-  invisible.
+- Correct incomplete example normalized records, including missing type and
+  frontmatter fields and a source ID whose record path did not match. Their quoted
+  prose remains under `Extracted Text`.
 - State the machine-output contract for hosts: `docs/orchestrator-handoff.md` gains a
   "Machine Output On stdout" section — under `--format json`, stdout carries exactly
   one JSON document, diagnostics go to stderr, and a fatal error leaves stdout empty —
@@ -1925,16 +2003,6 @@
   section also names the two things not to mistake for violations — a non-zero exit
   still carries a report from the commands whose job is to assess a workspace, and
   `source_inventory.py --dry-run` without `--report` keeps its documented JSONL stream.
-- Enforce machine-output purity per script. `tests/test_json_stdout_purity.py` runs
-  every command that accepts `--format json` as a subprocess — in a real workspace and
-  against an unreadable one — and asserts stdout parses as exactly one JSON document
-  with nothing before or after it, by consuming the whole buffer rather than scanning
-  for the first `{`. Fatal paths must leave stdout empty and put the shared envelope on
-  stderr. Enrollment is automatic: a script that declares `--format` and is not listed
-  fails the suite, so a new command cannot skip the contract. Two surfaces are encoded
-  as the documented exceptions they are — `source_inventory.py --dry-run` without
-  `--report` keeps its JSONL stream contract, and `query_index.py build-index` accepts
-  no `--format` at all.
 - Send `scripts/workspace_gc.py` fatal errors to stderr instead of stdout. Under
   `--format json` it printed a hand-rolled error object on stdout, where a caller
   parsing stdout could not tell it from a report document, and the object omitted

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Structured request scope: what would satisfy a source request, machine-readably.
 
-A source request carries free-text ``query_or_identifier`` for a human and, since
-CR-4, an optional ``scope`` mapping for a machine::
+A source request carries free-text ``query_or_identifier`` for a human and
+optionally a ``scope`` mapping for a machine::
 
     source_requests.py add --kind pack:market-data/supplier_quote \\
         --scope facet_id=supplier_quote ...

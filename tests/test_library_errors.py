@@ -215,7 +215,7 @@ class EmittedCodeFamilyTests(unittest.TestCase):
     raised ``RESULT_INVALID``, ``WORK_ORDER_INVALID`` and seven more with no
     ``ORCHESTRATION_`` prefix -- and those reached a host as the bare base class.
     A host writing ``except OrchestrationError`` around ``session.submit`` caught
-    nothing, for the refusal that call makes most often. CR-14 gave every code the
+    nothing, for the refusal that call makes most often. error contracts gave every code the
     controller raises a registry entry, so that particular gap is closed; this
     test stays source-scanned because the registry is a table someone maintains
     and the next uncovered code will appear in a script first.
@@ -230,10 +230,15 @@ class EmittedCodeFamilyTests(unittest.TestCase):
     #: Screaming-snake literals that are demonstrably not error codes.
     NOT_ERROR_CODES = {
         "O_BINARY": "os.open flag",
+        "O_DIRECTORY": "os.open flag",
         "O_NOFOLLOW": "os.open flag",
+        "ROUND_HALF_EVEN": "decimal rounding mode recorded in simulation results",
         "EVIDENCE_WIKI_HANDOFF_SECRET": "environment variable name",
         "EVIDENCE_WIKI_SINGLE_WRITER": "environment variable name",
+        "EVIDENCE_WIKI_AUTHORITY_FILE": "environment variable naming independent host authority",
+        "EVIDENCE_WIKI_STATE_DIR": "environment variable naming private host storage",
         "QUERY_INDEX_FALLBACK": "retrieval mode name, not a refusal",
+        "QUERY_AUTHORIZED_REVISIONS_ONLY": "retrieval scope warning, not a refusal",
     }
 
     CODE_SHAPED = re.compile(r'"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,})"')
@@ -277,7 +282,7 @@ class ExitStatusReconstructionTests(unittest.TestCase):
     against the scripts' own ``EXIT_*`` constants -- and that is only ever as
     good as the table.
 
-    CR-8 supplied the first miss. ``ORCHESTRATION_DRIVER_BUSY`` exits the
+    driver locking supplied the first miss. ``ORCHESTRATION_DRIVER_BUSY`` exits the
     controller with ``EXIT_DRIVER_BUSY`` (6), the first refusal in the workspace
     scripts to exit with anything the table had not been told about; every earlier
     one exits 2, or the 3 the two claim codes already occupy. Until the table

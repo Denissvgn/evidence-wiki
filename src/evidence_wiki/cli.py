@@ -77,6 +77,16 @@ def _run_upgrader(forwarded_args: list[str]) -> int:
         initializer = _load_initializer(starter_root)
         try:
             return int(initializer.upgrade_main(args) or 0)
+        except initializer.UpgradeRefusedError as exc:
+            return int(
+                initializer.emit_initializer_error(
+                    str(exc),
+                    operation="upgrade",
+                    error_code=exc.error_code,
+                    remediation=exc.remediation,
+                    details=exc.details,
+                )
+            )
         except initializer.UpgradeWriteError as exc:
             return int(
                 initializer.emit_initializer_error(
@@ -446,6 +456,26 @@ def _run_questions_add(forwarded: list[str]) -> int:
     return int(script.EXIT_OK)
 
 
+def _run_publication(args: list[str]) -> int:
+    script = _packaged_script("publication_readiness")
+    forwarded = _forward_target(args, prog="evidence-wiki publication")
+    parsed = script.parse_args(forwarded)
+    if parsed.question is None or parsed.command or parsed.citation_verification:
+        return int(script.main(forwarded))
+    if parsed.output and Path(parsed.output).expanduser().resolve().is_relative_to(Path(parsed.project_root).expanduser().resolve()):
+        return int(script.main(forwarded))
+    try:
+        document = _handle(parsed.project_root).publish_selected(parsed.question, expected_revision=parsed.expected_revision)
+    except EvidenceWikiError as exc:
+        return _refuse(exc, json_mode=True)
+    rendered = script.render(document)
+    if parsed.output:
+        Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
+    else:
+        sys.stdout.write(rendered)
+    return int(script.EXIT_READY if document["verdict"] == script.VERDICT_SHIP else script.EXIT_NOT_READY)
+
+
 def _run_questions_export(forwarded: list[str]) -> int:
     script = _packaged_script("export_answers")
     parsed = script.parse_args(forwarded)
@@ -515,8 +545,25 @@ def _run_normalize_verify(forwarded: list[str]) -> int:
     return int(script.EXIT_OK if report["overall_result"] == script.RESULT_VERIFIED else script.EXIT_NOT_VERIFIED)
 
 
+def _run_normalize_packet_operation(operation: str, forwarded: list[str]) -> int:
+    script = _packaged_script("qualified_packet")
+    parsed = script.parse_args([operation, *forwarded])
+    try:
+        namespace = _handle(Path(parsed.project_root).expanduser().resolve()).normalize
+        operation_function = {"packet": namespace.validate_packet, "execution": namespace.validate_execution, "market": namespace.validate_market}
+        report = namespace.profiles() if operation == "profiles" else operation_function[operation](parsed.source_id)
+    except EvidenceWikiError as exc:
+        return _refuse(exc, json_mode=True)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return int(operation != "profiles" and (not report["valid"] or operation == "packet" and not report.get("policy_satisfied")))
+
+
 _NORMALIZE_SHELLS = {
     "verify": _run_normalize_verify,
+    "profiles": lambda forwarded: _run_normalize_packet_operation("profiles", forwarded),
+    "packet": lambda forwarded: _run_normalize_packet_operation("packet", forwarded),
+    "execution": lambda forwarded: _run_normalize_packet_operation("execution", forwarded),
+    "market": lambda forwarded: _run_normalize_packet_operation("market", forwarded),
 }
 
 
@@ -525,6 +572,10 @@ def _print_normalize_help() -> None:
         "evidence-wiki normalize: normalized-record contract utilities\n\n"
         "Usage:\n"
         "  evidence-wiki normalize verify [--target PATH] [--source-id ID ...] [--format json|text]\n\n"
+        "  evidence-wiki normalize profiles [--target PATH]\n"
+        "  evidence-wiki normalize packet [--target PATH] --source-id ID\n"
+        "  evidence-wiki normalize execution [--target PATH] --source-id ID\n"
+        "  evidence-wiki normalize market [--target PATH] --source-id ID\n\n"
         "`verify` checks normalized records against the published record contract\n"
         "(docs/normalized-source-format.md) and reports each breach with a stable\n"
         "code. Records written by an external normalizer are checked exactly as\n"
@@ -545,6 +596,24 @@ def _run_normalize(args: list[str]) -> int:
         return 2
     forwarded = _forward_target(args, prog=f"evidence-wiki normalize {subcommand}")
     return _NORMALIZE_SHELLS[subcommand](forwarded)
+
+
+def _run_usage(args: list[str]) -> int:
+    """Use the same host-state operation seams as the embeddable namespace."""
+    return int(_packaged_script("evidence_usage").main(_forward_target(args, prog="evidence-wiki usage")))
+
+
+def _run_snapshot(args: list[str]) -> int:
+    """The offline verifier does not require an originating workspace."""
+    return int(_packaged_script("evidence_snapshots").main(_forward_target(args, prog="evidence-wiki snapshot")))
+
+
+def _run_temporal(args: list[str]) -> int:
+    return int(_packaged_script("evidence_temporal").main(_forward_target(args, prog="evidence-wiki temporal")))
+
+
+def _run_assessments(args: list[str]) -> int:
+    return int(_packaged_script("evidence_assessments").main(_forward_target(args, prog="evidence-wiki assessments")))
 
 
 def _print_pack_help() -> None:
@@ -597,6 +666,12 @@ def _print_help() -> None:
         "  evidence-wiki questions add|export [--target PATH] [options]\n"
         "  evidence-wiki status [--target PATH] [--format text|json]\n"
         "  evidence-wiki export [--target PATH] [--format json]\n"
+        "  evidence-wiki usage status|transact|check|lineage|materialize [--target PATH] [options]\n"
+        "  evidence-wiki temporal evaluate [--target PATH] [--format json]\n"
+        "  evidence-wiki assessments prepare|issue|check|plan-refresh|apply-refresh [--target PATH]\n"
+        "  evidence-wiki snapshot prepare|export|check [--target PATH] [options]\n"
+        "  evidence-wiki snapshot verify --trust-policy PATH\n"
+        "  evidence-wiki publication [--target PATH] --question SLUG [--question SLUG ...]\n"
         "  evidence-wiki normalize verify [--target PATH] [--source-id ID] [--format json|text]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
         "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [options]\n"
@@ -604,7 +679,7 @@ def _print_help() -> None:
         "  evidence-wiki doctor [--target PATH] [--format text|json]\n"
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
-        "  evidence-wiki orchestrate start|next|submit|status [options]\n"
+        "  evidence-wiki orchestrate start|next|submit|status|retire|cleanup-claims [options]\n"
         f"  evidence-wiki orchestrate run|resume --runner {managed_runners} [options]\n"
         "  evidence-wiki contract\n"
         "  evidence-wiki orchestrator-guide [--print] [--format json]\n\n"
@@ -687,8 +762,18 @@ def main(argv: list[str] | None = None) -> int:
         return _run_fleet_status(args)
     if command == "status":
         return _run_status(args)
+    if command == "publication":
+        return _run_publication(args)
     if command == "export":
         return _run_export(args)
+    if command == "usage":
+        return _run_usage(args)
+    if command == "snapshot":
+        return _run_snapshot(args)
+    if command == "temporal":
+        return _run_temporal(args)
+    if command == "assessments":
+        return _run_assessments(args)
     if command == "serve-mcp":
         return _run_serve_mcp(args)
     if command == "orchestrate":

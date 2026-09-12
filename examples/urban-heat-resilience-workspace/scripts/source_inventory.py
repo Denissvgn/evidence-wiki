@@ -232,6 +232,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _request_scope import normalize_scope
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import (
     DELIVERY_FAILURE_CODES,
@@ -768,8 +769,8 @@ def is_contained_nonsymlink(path: Path, root_resolved: Path) -> bool:
 
     "Safe" means the entry is *not* a symlink and its real path stays inside the
     workspace. This is the single definition of filesystem containment shared by
-    the source readers (``iter_raw_files`` / ``iter_local_code_repos``, security
-    review SEC-E1-T01/T02) and the init/upgrade copy paths (SEC-E1-T04), so the
+    the source readers (``iter_raw_files`` / ``iter_local_code_repos``)
+    and the init/upgrade copy paths, so the
     two can never drift. ``raw/`` is the untrusted-input boundary the research
     wiki rests on: a symlink (pointing anywhere, inside or outside the workspace)
     is refused outright so its target bytes are never read, and the ``resolve()``
@@ -1081,7 +1082,7 @@ def iter_local_code_repos(
         # real path escapes the workspace, is refused outright before rglob can
         # descend into it. raw/ is the untrusted-input boundary the research
         # wiki rests on; extracted code trees are exactly where malicious
-        # symlinks land (review SEC-E1 / H1, cross-ref M-14). The symlink check
+        # symlinks land. The symlink check
         # stays explicit and before is_dir (a symlink to a directory passes
         # is_dir) to emit the root-specific wording; is_contained_nonsymlink then
         # supplies the shared containment guard for the escape case.
@@ -1941,7 +1942,14 @@ def resolve_declared_companions(
         # would write `companion_paths` onto a record whose fingerprint could never carry
         # it, and silence is the worst way to break that promise: the acquirer would read
         # a clean record and believe editing the companion re-triggers normalization.
-        refuse(f"provenance companions are not carried by this record's fingerprint: {target_rel}")
+        allowed = ", ".join(
+            f"{record_kind}: {'/'.join(sorted(suffixes))}" for record_kind, suffixes in RAW_FINGERPRINT_CAPTURE_SUFFIXES.items()
+        )
+        refuse(
+            "provenance companions are not carried by this record's fingerprint: "
+            f"{target_rel} is classified {kind!r} and only a capture whose kind and suffix both "
+            f"fingerprint carries companions ({allowed})"
+        )
         return []
 
     target_path = PurePosixPath(target_rel)
@@ -2876,6 +2884,7 @@ def run_inventory(args: argparse.Namespace) -> int:
 
     project_root = Path(args.project_root).resolve()
     config = load_config(project_root)
+    require_host_intake(config)
     sources_config = config.get("sources") or {}
     if not isinstance(sources_config, dict):
         raise SystemExit("research.yml sources must be a mapping")

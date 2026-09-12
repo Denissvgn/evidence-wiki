@@ -1,7 +1,7 @@
 """The inventory must recognise the provenance fields a registered acquisition writes.
 
 `PROVENANCE_FIELDS` is an allow-list: anything outside it is dropped with an "unknown
-provenance field ignored" warning. `registered get` writes four fields CR-5 introduced,
+provenance field ignored" warning. `registered get` writes four fields provider registration introduced,
 so before this was modelled every registered artifact drew four warnings naming fields
 the package itself had authored -- and the manifest could not say which provider supplied
 a source.
@@ -85,7 +85,7 @@ class RegisteredProvenanceInventoryTests(unittest.TestCase):
                 self.assertNotIn(field, data)
 
     def test_a_genuinely_unknown_field_is_still_reported(self):
-        """Recognising CR-5's fields must not turn the allow-list into a free-for-all."""
+        """Recognising provider registration's fields must not turn the allow-list into a free-for-all."""
         document = self.full_sidecar()
         document["totally_made_up_field"] = "x"
         _data, warnings = self.read_sidecar(document)
@@ -116,7 +116,7 @@ class RegisteredProvenanceInventoryTests(unittest.TestCase):
         )
 
     def test_a_sidecar_without_any_registered_field_is_unchanged(self):
-        """Built-in acquisitions must read exactly as they did before CR-5."""
+        """Built-in acquisitions must read exactly as they did before provider registration."""
         data, warnings = self.read_sidecar(
             {"url": "https://arxiv.org/abs/1234.5678", "retrieved_by": "fetch_sources.py/arxiv"}
         )

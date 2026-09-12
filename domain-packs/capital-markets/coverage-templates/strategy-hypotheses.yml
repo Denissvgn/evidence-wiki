@@ -1,0 +1,10 @@
+coverage_profile: strategy-hypotheses
+required_facets:
+  - facet_id: reproducible-hypothesis
+    description: Review hypothesis revision, chronological evaluation, costs, benchmark, failures, and unresolved bias.
+    evidence_path: pack:capital-markets/strategy-hypotheses
+    source_policy: pack:capital-markets/review-evaluation
+    freshness_policy: pack:capital-markets/review-validity
+    identity_policy: pack:capital-markets/scope-review
+    min_sources: 1
+optional_facets: []

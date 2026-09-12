@@ -938,7 +938,7 @@ class PdfExtractionBugTests(unittest.TestCase):
 
 
 class LatexSafetyTests(unittest.TestCase):
-    """E15-T04: verify existing LaTeX include safety guards produce warnings without crashing."""
+    """Verify existing LaTeX include safety guards produce warnings without crashing."""
 
     def test_circular_include_returns_cyclic_warning(self):
         r"""A→B→A circular \input{} should complete with a 'cyclic include skipped' warning."""
@@ -1252,7 +1252,7 @@ class StructuredDataKindTests(unittest.TestCase):
 
 
 class ConcurrentInventoryTests(unittest.TestCase):
-    """E15-T05: manifest write is atomic and inventory is idempotent under repeat/concurrent runs."""
+    """Manifest write is atomic and inventory is idempotent under repeat/concurrent runs."""
 
     def _manifest_path(self, workspace: Path) -> Path:
         config = INVENTORY.load_config(workspace)

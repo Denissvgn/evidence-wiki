@@ -323,6 +323,8 @@ class NativeKindDriftTests(unittest.TestCase):
             "html": {"id": "raw:h", "kind": "html", "raw_paths": ["raw/web/page.html"]},
             "table": {"id": "raw:t", "kind": "table", "raw_paths": ["raw/data/rows.csv"]},
             "codebase_architecture": {"id": "code:c", "kind": "codebase_architecture"},
+            "execution_evidence": {"id": "execution:c", "kind": "execution_evidence"},
+            "market_evidence": {"id": "market:c", "kind": "market_evidence"},
         }
 
     def test_every_declared_native_kind_is_actually_normalized(self):

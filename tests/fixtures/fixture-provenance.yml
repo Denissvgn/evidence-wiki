@@ -50,7 +50,7 @@ fixtures:
   - <<: *synthetic_defaults
     stable_id: codebase-intake
     source_work: Synthetic bounded codebase artifact and malicious nonexecution probes
-    transformations: Wholly synthetic inert archive bytes, architecture JSON, and hook-shaped text.
+    transformations: Wholly synthetic inert archive bytes, architecture JSON, and hook-shaped text; native qualified packets generated offline by agent-wiki-cli 1.8.0 from project-authored synthetic Python and wiki prose.
     shipped_paths:
       - tests/fixtures/codebase-intake/**
   - <<: *synthetic_defaults

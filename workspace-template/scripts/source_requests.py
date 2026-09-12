@@ -158,6 +158,7 @@ from _request_scope import (
     scope_match,
 )
 from _script_errors import emit_error, handle_system_exit, json_mode_requested, remediation_for
+from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import ATTEMPT_FAILURE_CODES, is_attempt_failure_code
 
@@ -905,10 +906,10 @@ def plan_warnings(acquisition: dict[str, Any], routes: list[dict[str, Any]]) -> 
     return warnings
 
 
-# --- Selected-candidate routes (E36-T02) -------------------------------------
+# --- Selected-candidate routes -------------------------------------
 # `plan-fetch` includes acquisition guidance for discovery candidates that were
-# explicitly selected for the request (discover_sources.py candidates select,
-# E36-T01). A selected candidate carries status "selected" and
+# explicitly selected for the request (discover_sources.py candidates select).
+# A selected candidate carries status "selected" and
 # selected_for_request_id == the request id (legacy selected_request_id is still
 # accepted). Planning stays read-only: it suggests
 # the exact provider command (or manual-delivery target) for each candidate type
@@ -1901,7 +1902,7 @@ def run_add(args: argparse.Namespace) -> dict[str, Any]:
         }
         if scope:
             # Present only when declared: an empty mapping would read as "nothing satisfies
-            # this", and its absence keeps unscoped records identical to pre-CR-4 ones.
+            # this", and its absence keeps unscoped records identical to pre-scope ones.
             record["scope"] = scope
         _append_request_unlocked(path, record)
     append_log_entry(
@@ -1983,7 +1984,7 @@ def check_fulfill_scope(
 ) -> None:
     """Refuse a fulfilment whose scope evidence contradicts the request. Never writes.
 
-    Three layers, each answering a different failure (CR-4 §2.3):
+    Three layers, each answering a different failure:
 
     1. **Contradiction** — keys the request and the delivery both declare must agree.
        Unconditional, because it cannot fire unless both sides opted into scope: a
@@ -1993,7 +1994,7 @@ def check_fulfill_scope(
        facet-X request into accepting facet-Y evidence.
     3. **Absence** (``--require-scope``) — a key the delivery never states, whether the
        request declared it or the caller asserted it. Tolerated by default, since no
-       pre-CR-4 delivery stamps scope; refused on request by hosts whose pipeline does,
+       pre-scope delivery stamps scope; refused on request by hosts whose pipeline does,
        which closes the hole where omitting scope evades layers 1 and 2. Asserted keys
        belong in this set: layer 2 can only catch an assertion the delivery *disagrees*
        with, so without this an explicit ``--match-scope`` claim against an unstamped
@@ -2078,6 +2079,7 @@ def check_fulfill_scope(
 def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
     config = load_config(project_root)
+    require_host_intake(config)
     path = requests_path(project_root, config)
 
     request_id = args.request_id.strip()
@@ -2298,7 +2300,7 @@ def run_plan_fetch(args: argparse.Namespace) -> dict[str, Any]:
     acquisition = acquisition_plan_context(config)
     plan_status, routes, warnings = plan_routes_for_request(target, acquisition)
 
-    # Fold in explicitly selected discovery candidates (E36-T02). These are
+    # Fold in explicitly selected discovery candidates. These are
     # authoritative — a reviewer picked them — so when present they supersede the
     # heuristic query routing for an unsupported/ambiguous request.
     selected = load_selected_candidates(project_root, config, request_id, args.candidate_id)

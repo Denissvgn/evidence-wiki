@@ -80,7 +80,7 @@ class ControllerRegisteredProviderPolicyTests(unittest.TestCase):
         self.assertIn("entry-point group", error.remediation)
 
     def test_unknown_provider_still_reports_config_invalid_verbatim(self):
-        """A typo'd id keeps exactly the code and message it produced before CR-5."""
+        """A typo'd id keeps exactly the code and message it produced before provider registration."""
         with self.assertRaises(CONTROLLER.OrchestrationControllerError) as caught:
             CONTROLLER.provider_policy(config_authorizing("acquisition", ["not-a-real-provider"]))
         self.assertEqual("CONFIG_INVALID", caught.exception.error_code)

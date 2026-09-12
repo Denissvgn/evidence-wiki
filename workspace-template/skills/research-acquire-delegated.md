@@ -319,13 +319,14 @@ python3 scripts/source_requests.py record-attempt-failure \
 python3 scripts/question_resolve.py reopen --slug example --agent-id ACQUIRER_ID --source-id data:keepa-b0abc123 --request-id req-1a2b3c4d5e
 ```
 
-   Count only the blockers this order scopes. A question stays blocked and untouched
-   while any request in `scope.request_ids` that blocks it is unfulfilled; a
-   `blocking_request_ids` entry the order does not scope — one an earlier session retired,
-   or one held over by the scope cap — is not yours to wait on and does not keep the
-   question out of the set. Do not hand-edit question frontmatter; `reopen` is the
-   deterministic verb, and it refuses with `SOURCE_NOT_NORMALIZED` when the fulfilled
-   source has no normalized record.
+   Count every request in the page's `blocking_request_ids`. Scoped fulfilments
+   can be claims in this order; other blockers must already be durably fulfilled
+   with unchanged request records. An open, failed, exhausted, or missing blocker
+   keeps the question blocked, even outside this order's scope. The accepted
+   delivery still counts as progress and remains available to later orders.
+   `reopen` refuses premature attempts with `QUESTION_BLOCKERS_UNFULFILLED` and
+   includes normalized evidence from earlier fulfilled blockers automatically.
+   Use the command to record the reopen; preserve the page until acceptance.
 
 8. Submit the result for the action:
 
@@ -388,10 +389,10 @@ evidence-wiki orchestrate submit --target . --orchestration-id ORCH_ID \
   reused source that was already normalized was not normalized again.
 - `reopen` was called for **exactly** the questions this action unblocked — no fewer, and
   no others. The controller compares the reopen claims against that set and refuses in
-  either direction. Work each question out by intersecting its `blocking_request_ids`,
-  which the freeze leaves intact in the frontmatter, with `scope.request_ids`, and asking
-  whether you fulfilled all of what remains. The page's bytes settle nothing, because a
-  claimed reopen leaves it `blocked` exactly like a question you never touched.
+  either direction. Check every `blocking_request_ids` entry against this order's
+  fulfilment claims or unchanged earlier fulfilments. Failed or unfulfilled blockers
+  keep the question blocked. A reopen claim leaves the original page unchanged
+  until submission is accepted.
 - No candidate record was created or changed; delegated acquisition has no candidate store.
 - Nothing below `runs/orchestrations/` was written.
 - No credential appears in any sidecar, request, attempt detail, log entry, or summary.

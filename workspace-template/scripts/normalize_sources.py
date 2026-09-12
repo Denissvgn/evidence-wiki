@@ -188,6 +188,9 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 # The contract module owns the record format this script writes, so the version stamped
 # into output and the path a source id resolves to are defined in exactly one place.
+import _execution_evidence
+import _market_evidence
+import _qualified_packet
 from _normalization_config import NormalizationConfigError, adapter_for_kind, normalization_config
 from _normalized_contract import (
     NORMALIZED_FORMAT_VERSION,
@@ -206,11 +209,12 @@ from _normalizer_adapter import (
     build_request,
     run_adapter,
 )
-from _script_errors import emit_error, handle_system_exit
+from _script_errors import ScriptRefusal, emit_error, emit_refusal, handle_system_exit
 
 # Aliased because this module already has a `content_hash` — that one hashes a record's
 # extracted content, this one hashes the sidecar bytes a `structured_view` block binds.
 from _structured_view import content_hash as structured_view_content_hash
+from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import unusable_evidence_reasons as delivery_unusable_evidence_reasons
 
@@ -693,6 +697,12 @@ def complete_evidence_usability_override(provenance: dict[str, Any]) -> dict[str
 
 def record_unusable_evidence_reasons(record: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
+    execution = record_metadata(record).get("execution_evidence")
+    if isinstance(execution, dict) and execution.get("valid") is not True:
+        reasons.append("execution_evidence_invalid")
+    qualified = record_metadata(record).get("qualified_context")
+    if isinstance(qualified, dict) and (qualified.get("valid") is not True or qualified.get("policy_satisfied") is not True):
+        reasons.append("qualified_packet_policy_not_satisfied")
     explicit = record.get("unusable_evidence_reasons")
     if isinstance(explicit, list):
         reasons.extend(reason for reason in explicit if isinstance(reason, str) and reason.strip())
@@ -847,6 +857,18 @@ def normalization_method(
     this package extracts itself, so an adapter fills a gap rather than shadowing a
     built-in extractor. Callers that pass no adapters get the pre-adapter behaviour.
     """
+    try:
+        execution_profile = _execution_evidence.profile_for(record)
+    except _execution_evidence.EvidenceInvalid:
+        execution_profile = True
+    if execution_profile:
+        return "execution"
+    try:
+        market_profile = _market_evidence.profile_for(record)
+    except _market_evidence.EvidenceInvalid:
+        market_profile = True
+    if market_profile:
+        return "market"
     if is_codebase_record(record):
         return "codebase"
     if is_latex_record(record):
@@ -972,6 +994,8 @@ def normalize_selected_record(
     *,
     pdftotext_path: str | None = None,
 ) -> NormalizedSource:
+
+    require_host_intake(config, [item.record])
     if pdftotext_path is not None:
         if pdf_extractor is not None:
             raise TypeError("pass pdf_extractor or pdftotext_path, not both")
@@ -991,6 +1015,10 @@ def normalize_selected_record(
         return normalize_table_record(project_root, item.record)
     if item.method == "codebase":
         return normalize_codebase_record(project_root, config, item.record)
+    if item.method == "execution":
+        return normalize_execution_record(project_root, config, item.record)
+    if item.method == "market":
+        return normalize_market_record(project_root, config, item.record)
     if item.method == ADAPTER_METHOD:
         return normalize_adapter_record(project_root, config, item.record)
     raise RuntimeError(f"Unsupported normalization method: {item.method}")
@@ -1017,6 +1045,8 @@ def normalize_adapter_record(
     manifest and the validated response, so a buggy adapter cannot make a record claim
     more than it earned.
     """
+
+    require_host_intake(config, [record])
     configured = normalization_config(config)["adapters"] if adapters is None else adapters
     source_id = record_id(record)
     adapter = adapter_for_kind(configured, record.get("kind"))
@@ -3397,7 +3427,91 @@ def read_codebase_artifact(project_root: Path, artifact_path: Path) -> tuple[str
     return normalized or "None extracted.", summary, extract_pdf_outline(normalized), extract_links(normalized), []
 
 
+def normalize_execution_record(project_root: Path, config: dict[str, Any], record: dict[str, Any]) -> NormalizedSource:
+    """Preserve all observations and receipt claims without assigning evaluator authority."""
+    report = _execution_evidence.inspect_execution(project_root, config, record)
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        record["metadata"] = metadata
+    metadata["execution_evidence"] = report
+    warnings = manifest_warnings(record)
+    if not report["valid"]:
+        warnings.append("Execution evidence refused: " + report["reason"])
+    warnings.append("Observed outcomes and structural validation do not establish independent verification; receipt authority is evaluated under current host policy.")
+    paths = [f"sources/evidence/{safe_source_id(record_id(record))}/{path}" for path in report.get("originals", {})]
+    return NormalizedSource(
+        record=record, extraction_method="execution_evidence" if report["valid"] else "execution_stub",
+        title=record.get("title") or record_id(record), authors=[], abstract="Execution observations, hypotheses, and separately bound verification receipts.",
+        outline=[(2, "Execution Evidence")], extracted_text=json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False),
+        media=[], links=[], bibliography_files=[], included_paths=paths, warnings=unique_values(warnings),
+    )
+
+
+def normalize_market_record(project_root: Path, config: dict[str, Any], record: dict[str, Any]) -> NormalizedSource:
+    """Keep exact scalar observations and the delegated slice's completeness limits."""
+    report = _market_evidence.inspect_market(project_root, config, record)
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        record["metadata"] = metadata
+    metadata["market_evidence"] = report
+    warnings = manifest_warnings(record)
+    if not report["valid"]:
+        warnings.append("Market evidence refused: " + report["reason"])
+    else:
+        warnings.extend("Market coverage gap: " + gap for gap in report["completeness"]["gaps"])
+    warnings.append("Provider identity, completeness and feed claims are unverified; host usage authority and temporal availability are evaluated separately.")
+    return NormalizedSource(
+        record=record, extraction_method="market_evidence" if report["valid"] else "market_stub",
+        title=record.get("title") or record_id(record), authors=[], abstract="Delegated filings and price observations with explicit scope and coverage gaps.",
+        outline=[(2, "Market Observations")], extracted_text=json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False),
+        media=[], links=[], bibliography_files=[], warnings=unique_values(warnings),
+        included_paths=[f"sources/evidence/{safe_source_id(record_id(record))}/{path}" for path in report.get("originals", {})],
+        structured=report.get("data") if report["valid"] else None,
+    )
+
+
+def normalize_qualified_packet(project_root: Path, config: dict[str, Any], record: dict[str, Any]) -> NormalizedSource:
+    """Render only after original-byte validation, retaining loss-explicit qualifications."""
+    report = _qualified_packet.inspect_packet(project_root, config, record)
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        record["metadata"] = metadata
+    metadata["qualified_context"] = report
+    metadata["codebase_intake_status"] = "validated" if report["valid"] else "invalid"
+    metadata["codebase_execution_scope"] = "external_worker_only"
+    original = report.get("original") or {}
+    delivery = report.get("delivery_manifest") or {}
+    manifest = delivery.get("provenance") or {}
+    paths = [original["path"]] if "path" in original else []
+    metadata["codebase_artifact_paths"] = paths
+    metadata["codebase_artifact_manifest"] = delivery.get("path")
+    metadata["codebase_artifact_checksums"] = [{"path": original["path"], "sha256": original["sha256"], "size_bytes": original["bytes"]}] if original else []
+    metadata["codebase_artifact_provenance"] = {"trust": "self_asserted_external_worker", **{key: manifest.get(key) for key in ("producer", "generated_at", "invocation")}} if manifest else None
+    warnings = manifest_warnings(record)
+    if not report["valid"] or not report.get("policy_satisfied"):
+        warnings.append("Qualified packet refused: " + report.get("reason", report.get("policy_reason", "invalid")))
+    warnings.append("Packet validation is structural; worker authentication and host live reconciliation are not established.")
+    if report.get("omitted_fields"):
+        warnings.append("Opaque selected-file content is omitted from this rendering; original bytes remain referenced with their digest and omitted JSON pointers.")
+    return NormalizedSource(
+        record=record, extraction_method="codebase_context" if report["valid"] else "codebase_stub",
+        title=codebase_title(record), authors=[], abstract="Qualified codebase context with explicit producer qualifications and host validation limits.",
+        outline=[(2, "Qualified Context")], extracted_text=json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False),
+        media=[], links=[record_url(record)] if record_url(record) else [], bibliography_files=[],
+        included_paths=paths, warnings=unique_values(warnings),
+    )
+
+
 def normalize_codebase_record(project_root: Path, config: dict[str, Any], record: dict[str, Any]) -> NormalizedSource:
+    try:
+        profiled = _qualified_packet.profile_for(config, record) is not None
+    except _qualified_packet.IntakeInvalid:
+        profiled = True
+    if profiled:
+        return normalize_qualified_packet(project_root, config, record)
     source_id = record_id(record)
     metadata = record.setdefault("metadata", {})
     if not isinstance(metadata, dict):
@@ -3501,9 +3615,9 @@ def status_for(source: NormalizedSource) -> str:
         # else, but a rendering that capped or dropped payload content looks complete
         # from the outside — only the adapter knows it is `partial`.
         return source.adapter_status
-    if source.extraction_method in {"link_stub", "web_stub", "codebase_stub"}:
+    if source.extraction_method in {"link_stub", "web_stub", "codebase_stub", "execution_stub", "market_stub"}:
         return "stubbed"
-    if source.extraction_method == "codebase_context":
+    if source.extraction_method in {"codebase_context", "execution_evidence", "market_evidence"}:
         return "content_extracted" if source.extracted_text and source.extracted_text != "None extracted." else "partial"
     if not source.extracted_text or source.extracted_text == "None extracted.":
         # A scanned/image-only PDF still produced a usable (degraded) record
@@ -3521,9 +3635,9 @@ def confidence_for(source: NormalizedSource) -> str:
     status = status_for(source)
     if source.needs_ocr:
         return "low"
-    if source.extraction_method == "codebase_context":
+    if source.extraction_method in {"codebase_context", "execution_evidence", "market_evidence"}:
         return "medium"
-    if source.extraction_method == "codebase_stub":
+    if source.extraction_method in {"codebase_stub", "execution_stub", "market_stub"}:
         return "low"
     if source.extraction_method == "link_stub":
         return "high"
@@ -3668,6 +3782,9 @@ def frontmatter_for(
         "codebase_revision": metadata.get("codebase_revision") if isinstance(metadata.get("codebase_revision"), str) else None,
         "codebase_tool": metadata.get("codebase_tool") if isinstance(metadata.get("codebase_tool"), str) else None,
         "codebase_artifact_paths": metadata.get("codebase_artifact_paths") if isinstance(metadata.get("codebase_artifact_paths"), list) else None,
+        "qualified_context": metadata.get("qualified_context") if isinstance(metadata.get("qualified_context"), dict) else None,
+        "execution_evidence": metadata.get("execution_evidence") if isinstance(metadata.get("execution_evidence"), dict) else None,
+        **({"market_evidence": metadata["market_evidence"]} if "market_evidence" in metadata else {}),
         "codebase_intake_status": metadata.get("codebase_intake_status")
         if isinstance(metadata.get("codebase_intake_status"), str)
         else None,
@@ -3919,7 +4036,7 @@ def sync_structured_view(
     file or the file is not there.
 
     Returns the `{path, content_hash}` block to stamp, or ``None`` when the record binds
-    no structured view. Native tabular emission (CR-7 T13) is the second caller.
+    no structured view. Native tabular emission is the second caller.
     """
     sidecar = expected_structured_path(normalized_root, source_id)
     if payload is None:
@@ -4012,6 +4129,7 @@ def empty_summary(
         "tables": 0,
         "codebase": 0,
         "adapter": 0,
+        "execution": 0,
     }
 
 
@@ -4072,6 +4190,7 @@ def render_normalization_log_entry(data: dict[str, Any]) -> str:
         f"html={summary['html']} "
         f"tables={summary['tables']} "
         f"codebase={summary['codebase']} "
+        f"execution={summary.get('execution', 0)} "
         f"adapter={summary['adapter']}\n"
     )
 
@@ -4096,6 +4215,7 @@ def print_summary(summary: dict[str, int | str]) -> None:
         f"html={summary['html']} "
         f"tables={summary['tables']} "
         f"codebase={summary['codebase']} "
+        f"execution={summary.get('execution', 0)} "
         f"adapter={summary['adapter']} "
         f"partial={summary['partial']} "
         f"failed={summary['failed']}",
@@ -4104,7 +4224,9 @@ def print_summary(summary: dict[str, int | str]) -> None:
 
 
 def normalization_report_summary(summary: dict[str, int | str]) -> dict[str, Any]:
-    method_keys = ("latex", "pdf", "links", "html", "tables", "codebase", "adapter")
+    method_keys = ("latex", "pdf", "links", "html", "tables", "codebase", "adapter", "execution")
+    if "market" in summary:
+        method_keys += ("market",)
     skipped_existing = int(summary["skipped_existing"])
     skipped_unsupported = int(summary["skipped_unsupported"])
     return {
@@ -4161,6 +4283,8 @@ def verify_adapter_output(
     output_path: Path,
     records: list[dict[str, Any]],
     normalized_root: Path,
+    *,
+    config: dict[str, Any] | None = None,
 ) -> None:
     """Hold this script's own adapter rendering to the published record contract.
 
@@ -4181,6 +4305,8 @@ def verify_adapter_output(
         output_path,
         manifest_by_id=records_by_source_id(records),
         normalized_root=normalized_root,
+        project_root=project_root,
+        config=config,
     )
     if not violations:
         return
@@ -4198,6 +4324,8 @@ def run_normalization(args: argparse.Namespace) -> int:
     json_output = args.format == "json"
     project_root = Path(args.project_root).resolve()
     config = load_config(project_root)
+
+    require_host_intake(config)
     manifest_path_text, normalized_dir_text = source_paths(config)
     manifest_path = project_root / manifest_path_text
     normalized_root = project_root / normalized_dir_text
@@ -4243,7 +4371,8 @@ def run_normalization(args: argparse.Namespace) -> int:
 
     actionable: list[tuple[EligibleRecord, Path, bool, bool]] = []
     for item in selected:
-        summary[method_count_key(item.method)] += 1
+        method_key = method_count_key(item.method)
+        summary[method_key] = int(summary.get(method_key, 0)) + 1
         output_path = normalized_output_path_for_record(item.record, normalized_root)
         existed = output_path.exists()
         desired_pdf_extractor = selected_pdf_extractor_name if item.method == "pdf" else None
@@ -4357,7 +4486,7 @@ def run_normalization(args: argparse.Namespace) -> int:
                 force=True,
             )
             if item.method == ADAPTER_METHOD:
-                verify_adapter_output(project_root, output_path, records, normalized_root)
+                verify_adapter_output(project_root, output_path, records, normalized_root, config=config)
         except Exception as exc:
             summary["failed"] += 1
             output_text = relative_output_path(project_root, output_path)
@@ -4469,6 +4598,8 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = args.format == "json"
     try:
         return run_normalization(args)
+    except ScriptRefusal as exc:
+        return emit_refusal(exc, json_mode=json_mode)
     except LockUnavailableError as exc:
         emit_error(str(exc), json_mode=json_mode, error_code=exc.error_code, details=exc.details)
         return 2

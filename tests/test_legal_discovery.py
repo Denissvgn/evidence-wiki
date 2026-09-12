@@ -1,8 +1,8 @@
-"""Tests for legal discovery query planning (E34-T02).
+"""Tests for legal discovery query planning.
 
 `discover_sources.py legal --jurisdiction TEXT --topic TEXT` expands a legal topic
 into an official-source-first query plan for a jurisdiction. It is profile-driven:
-it loads the matched jurisdiction profile (E34-T01) and threads its official
+it loads the matched jurisdiction profile and threads its official
 domains and entry-point roots into each planned query, distinguishing the legal
 source categories (statute, regulation, agency guidance, court opinion, official
 form, gazette/legislative-history notice).
@@ -10,7 +10,7 @@ form, gazette/legislative-history notice).
 Planning is read-only: it produces an explained plan and never contacts a search
 backend (`network_io_executed: false`). A missing or incomplete profile is a
 warning, not an error -- the plan is still produced, just without official-domain
-prioritization. Backend execution and legal candidate ranking land in E34-T03.
+prioritization. Backend execution and candidate ranking are exercised in test_legal_ranking.py.
 """
 
 import contextlib
@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 FIXTURE_YAML = REPO_ROOT / "tests" / "fixtures" / "discovery" / "jurisdictions.yml"
 
-# The legal source categories the plan must distinguish (E34-T02).
+# The legal source categories the plan must distinguish.
 EXPECTED_LEGAL_CATEGORIES = {
     "statute",
     "regulation",
@@ -209,7 +209,7 @@ class LegalWarningTests(LegalTestBase):
         self.assertEqual(["no_jurisdiction_profile"], [w["code"] for w in report["warnings"]])
 
     def test_profile_without_official_domains_warns(self):
-        # A valid profile (E34-T01 requires an official root) that supplies only
+        # A valid profile (which requires an official root) that supplies only
         # URL roots -- no bare official_domains -- still plans, with a warning.
         content = (
             'schema_version: "1.0"\n'
@@ -255,7 +255,7 @@ class LegalGateAndSafetyTests(LegalTestBase):
             "jurisdiction_profiles:\n"
             "  - jurisdiction_id: us-federal\n"
             "    name: No roots\n"
-            "    country: US\n"  # no official source root -> invalid (E34-T01)
+            "    country: US\n"  # no official source root -> invalid
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir), jurisdictions_content=bad)

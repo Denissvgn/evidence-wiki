@@ -2167,7 +2167,7 @@ class OrchestrationControllerTests(unittest.TestCase):
     def test_a_second_driver_process_is_refused_and_names_the_winner(self):
         """Two OS processes, one session: the loser exits 6 and says whose pid won.
 
-        This is CR-8's whole point stated as an experiment. Before it, the second
+        This is driver locking's whole point stated as an experiment. Before it, the second
         process waited ten seconds and then proceeded, interleaving its writes
         with the first driver's; the corruption surfaced later, somewhere else,
         with nothing tying it back to the moment two hosts overlapped.
@@ -3314,6 +3314,12 @@ class OrchestrationControllerTests(unittest.TestCase):
         request_id = "req-existing-evidence"
         candidate_id = "cand-existing-evidence"
         source_id = "html:existing-evidence"
+        page_before = (
+            "---\ntype: question\nstatus: blocked\n"
+            f"blocking_request_ids: [{request_id}]\nsource_ids: []\n---\n\n"
+            "# Existing evidence question\n"
+        )
+        page_fingerprint = "sha256:" + hashlib.sha256(page_before.encode()).hexdigest()
         work_order = {
             "phase": "acquisition",
             # Both written by the real issuer, and both needed now that the arm reads the
@@ -3334,7 +3340,9 @@ class OrchestrationControllerTests(unittest.TestCase):
                         "test-question": {
                             "status": "blocked",
                             "blocking_request_ids": [request_id],
+                            "page_blocking_request_ids": [request_id],
                             "source_ids_before": [],
+                            "page_before": page_before,
                         }
                     },
                 },
@@ -3475,7 +3483,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                         "sources/normalized/existing.md": normalized_fingerprint,
                     },
                     "question_file_fingerprints_before": {
-                        "test-question.md": "sha256:" + "4" * 64,
+                        "test-question.md": page_fingerprint,
                     },
                 }
             )
@@ -3485,6 +3493,8 @@ class OrchestrationControllerTests(unittest.TestCase):
                 # a workspace with no ledger is exactly the empty-claims case it handles.
                 if stem == "_order_claims":
                     return load_script_module("reconciliation_order_claims", SCRIPTS / "_order_claims.py")
+                if stem in {"question_resolve", "question_status"}:
+                    return load_script_module(f"reconciliation_{stem}", SCRIPTS / f"{stem}.py")
                 return {
                     "run_controller": run_controller,
                     "source_requests": source_requests,
@@ -3512,7 +3522,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                         # these bytes at the baseline. A page that reached any other status
                         # did so by being written, which is what the fingerprint shows.
                         return_value={
-                            "test-question.md": "sha256:" + ("4" if frozen else "5") * 64
+                            "test-question.md": page_fingerprint if frozen else "sha256:" + "5" * 64
                         },
                     ),
                     mock.patch.object(
@@ -4320,7 +4330,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             target = self.init_workspace(root, question=True)
             request_id = self.block_question(target)
             # Recorded before the session starts: once one is live, the delegation gate
-            # refuses an attempt no pending work order scopes — which is D3's whole point.
+            # refuses an attempt no pending work order scopes.
             for index in range(2):
                 self.record_attempt(
                     target, request_id, code="provider_throttled", session="orch-test", action=f"a{index}"
@@ -4345,7 +4355,10 @@ class OrchestrationControllerTests(unittest.TestCase):
                 CONTROLLER.DELEGATED_EXHAUSTED_TERMINAL_REASON,
             )
             self.assertEqual(
-                {"exhausted_requests": {request_id: "provider_throttled"}},
+                {
+                    "exhausted_requests": {request_id: "provider_throttled"},
+                    "linked_question_slugs": ["test-question"],
+                },
                 context["event_data"],
             )
 
@@ -4375,7 +4388,13 @@ class OrchestrationControllerTests(unittest.TestCase):
             route, context = self.route_for(target)
 
             self.assertIsNone(route)
-            self.assertEqual({"exhausted_requests": {request_id: "not_authorized"}}, context["event_data"])
+            self.assertEqual(
+                {
+                    "exhausted_requests": {request_id: "not_authorized"},
+                    "linked_question_slugs": ["test-question"],
+                },
+                context["event_data"],
+            )
 
     def test_a_configured_budget_replaces_the_default(self):
         # Two workspaces rather than one with a mid-test recording: with a session live the
@@ -4941,7 +4960,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual("action-0001", session["last_completed_action_id"])
 
     def test_a_fulfilment_without_a_provenance_sidecar_is_refused(self):
-        # CR AC2: the refusal must name the missing artifact.
+        # The refusal must name the missing artifact.
         with tempfile.TemporaryDirectory() as tmpdir:
             target, request_id = self.delegated_action(Path(tmpdir))
             source_id = self.deliver_for_request(target, request_id, with_sidecar=False)
@@ -5126,7 +5145,16 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.controller(target, "next", "--orchestration-id", "orch-test")
 
             source_id = self.deliver_for_request(target, first)
-            self.fulfil_and_reopen(target, first, source_id, "test-question")
+            self.assert_json_script_ok(
+                SOURCE_REQUESTS,
+                ["--project-root", str(target), "fulfill", "--request-id", first,
+                 "--source-id", source_id, "--format", "json"],
+            )
+            # Exercise the controller independently of the CLI's early refusal.
+            CONTROLLER.load_sibling_module("_order_claims").record_reopen_claim(
+                target, "orch-test", "action-0001", question_slug="test-question",
+                source_ids=[source_id], request_ids=[first], claimed_at="2026-09-10T00:00:00Z",
+            )
             self.record_attempt(target, second, code="no_result", session="orch-test", action="action-0001")
 
             code, error, _ = self.submit_delegated(target)
@@ -6398,7 +6426,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual("delegated", replayed["acquisition_mode"])
 
     def test_a_blocked_delegated_action_that_fulfilled_a_request_is_refused(self):
-        # CR-3's own acceptance case, in the delegated shape: a blocked attempt cannot
+        # delegated acquisition's own acceptance case, in the delegated shape: a blocked attempt cannot
         # fulfil a request. The work actually done must be reported as completed.
         with tempfile.TemporaryDirectory() as tmpdir:
             target, request_id = self.delegated_action(Path(tmpdir))
@@ -6423,7 +6451,12 @@ class OrchestrationControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             target, request_id = self.delegated_action(Path(tmpdir))
             source_id = self.deliver_for_request(target, request_id)
-            self.reopen_question(target, request_id, source_id, "test-question")
+            claims = CONTROLLER.load_sibling_module("_order_claims")
+            claims.record_reopen_claim(
+                target, "orch-test", "action-0001", question_slug="test-question",
+                source_ids=[source_id], request_ids=[request_id],
+                claimed_at="2026-09-10T12:00:00Z",
+            )
 
             code, error, _ = self.submit_delegated(target, outcome="blocked", summary="Aborted.")
 
@@ -6562,7 +6595,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertEqual(CONTROLLER.EXIT_PAUSED, code, stderr)
             self.assertEqual(CONTROLLER.PAUSED_STATUS, session["status"])
 
-    # -- delegated acquisition: the out-of-band gate (CR AC3) -------------------------
+    # -- delegated acquisition: the out-of-band gate -------------------------
 
     def try_fulfil(self, target: Path, request_id: str, source_id: str) -> tuple:
         return self.json_script(
@@ -6584,7 +6617,7 @@ class OrchestrationControllerTests(unittest.TestCase):
         )
 
     def test_fulfilling_out_of_band_during_a_live_session_is_refused(self):
-        # CR AC3: with delegation on, a direct fulfil against a request scoped to an active
+        # With delegation on, a direct fulfil against a request scoped to an active
         # session is refused. Here the session's pending order is a *research* order, which
         # sanctions questions but never a fulfilment.
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -6851,7 +6884,7 @@ class OrchestrationControllerTests(unittest.TestCase):
             self.assertIsNone(summary["acquirer_agent_id"])
 
     def test_lint_reports_a_fulfilment_no_work_order_accounts_for(self):
-        # The residue the D3 gate cannot close: the gate only refuses while a session is
+        # The residue the live-session gate cannot close: the gate only refuses while a session is
         # live, so a fulfilment recorded with none running leaves exactly this trace.
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -7094,7 +7127,7 @@ class OrchestrationControllerTests(unittest.TestCase):
         self.assertEqual("acquisition", order["phase"])
 
         # A completed claim with no work done, and a blocked claim with nothing changed:
-        # the two submission arms this CR touched, exercised without the full acquisition.
+        # both submission outcomes, exercised without the full acquisition.
         refused_code, refused, _ = self.submit_delegated(target, outcome="completed")
         blocked_code, blocked, _ = self.submit_delegated(
             target, outcome="blocked", summary="Nothing to do."
@@ -7134,7 +7167,7 @@ class OrchestrationControllerTests(unittest.TestCase):
         self.assertEqual(CONTROLLER.EXIT_PAUSED, without["blocked"][0])
 
     def test_the_volatile_key_filter_actually_drops_something(self):
-        # Guards the failure mode CR-2's differential hit: a renamed key silently stops
+        # Guards the failure mode structured normalization's differential hit: a renamed key silently stops
         # being filtered, the comparison starts passing for the wrong reason, and the
         # suite goes green while comparing nothing.
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -7412,7 +7445,9 @@ class OrchestrationControllerTests(unittest.TestCase):
                     "test-question": {
                         "status": "blocked",
                         "blocking_request_ids": [request_id],
+                        "page_blocking_request_ids": [request_id],
                         "source_ids_before": [],
+                        "page_before": (target / "wiki/questions/test-question.md").read_bytes().decode("utf-8"),
                     }
                 },
                 acquisition_guards["linked_blocked_questions_reopened"]["blocked_questions_before"],
@@ -7860,7 +7895,7 @@ class OrchestrationControllerTests(unittest.TestCase):
 
 
 class NormalizedOutputScopeTests(unittest.TestCase):
-    """The declared-only gate on structured-view sidecars (EW-BUG-004).
+    """The declared-only gate on structured-view sidecars.
 
     Normalization writes the sidecar beside the record, so an acquisition that fulfils a
     structured source adds two files under the normalized root and the scope guards must
@@ -7915,7 +7950,7 @@ class NormalizedOutputScopeTests(unittest.TestCase):
 
         `verify_delegated_acquisition_postconditions`, `verify_action_postconditions` and
         `verify_blocked_action_postconditions` each bound what an action may add under the
-        normalized root. EW-BUG-004 was one rule written three times and updated in none of
+        normalized root. structured-view attribution was one rule written three times and updated in none of
         them, so the rule now lives in one helper and this fails if a site stops using it.
         """
         tree = ast.parse(Path(CONTROLLER.__file__).read_text(encoding="utf-8"))

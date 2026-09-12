@@ -113,6 +113,7 @@ ALLOWED_EVIDENCE_PATHS = {
     "vendor_product_spec",
 }
 ALLOWED_SOURCE_POLICIES = {
+    "independent_execution_pass",
     "official_primary",
     "primary_or_official",
     "academic_indexed",
@@ -164,6 +165,7 @@ BASE_POLICY_DEFINITIONS = {
         "vendor_product_spec": "Product, service, hardware, software, or API capability from a vendor-controlled source.",
     },
     "source_policy": {
+        "independent_execution_pass": "Selected passing observation and scope-complete receipt authenticated under current host policy by an independently controlled evaluator.",
         "official_primary": "Primary authority of record.",
         "primary_or_official": "Primary source or official aggregator that republishes authoritative source material.",
         "academic_indexed": "Scholarly index, publisher, DOI resolver, arXiv record, OpenAlex record, or equivalent bibliographic index.",
@@ -1212,6 +1214,7 @@ def evaluate_policy_results_for_manifest(
             "CONFIG_INVALID", exc.message, remediation=exc.remediation, details=exc.details
         ) from exc
     inputs = helper.load_policy_inputs(project_root, config)
+    moment = datetime.now(timezone.utc)
     slug = document.get("question_slug")
     question_slug = slug.strip() if isinstance(slug, str) and slug.strip() else None
     facets: list[dict[str, Any]] = []
@@ -1223,7 +1226,7 @@ def evaluate_policy_results_for_manifest(
         if isinstance(facet_id, str) and isinstance(accepted_source_ids, list) and accepted_source_ids:
             policy_results = [
                 result.to_dict()
-                for result in helper.evaluate_facet_policies(facet, inputs, question_slug=question_slug)
+                for result in helper.evaluate_facet_policies(facet, inputs, question_slug=question_slug, now=moment)
             ]
             by_facet[facet_id] = policy_results
         facets.append(

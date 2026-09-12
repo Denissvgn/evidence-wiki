@@ -198,10 +198,15 @@ class WorkspacePathSafetyTests(unittest.TestCase):
             config["sources"]["normalized_dir"] = "../escaped"
             self.write_config(workspace, config)
 
-            with self.assertRaises(SystemExit) as context:
-                QUERY.main(["--project-root", str(workspace), "--scope", "normalized", "fixture"])
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = QUERY.main(["--project-root", str(workspace), "--scope", "normalized", "--format", "json", "fixture"])
 
-        self.assertIn("sources.normalized_dir", str(context.exception))
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        envelope = json.loads(stderr.getvalue())
+        self.assertEqual("EVIDENCE_USAGE_REFUSED", envelope["error_code"])
+        self.assertEqual("unsafe_artifact_path", envelope["details"]["reason"])
 
     def test_mcp_query_rejects_unsafe_index_path_without_sqlite_side_effects(self):
         with tempfile.TemporaryDirectory() as tmpdir:

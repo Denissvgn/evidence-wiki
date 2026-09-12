@@ -1064,6 +1064,158 @@ class QueryIndexTests(unittest.TestCase):
                     QIDX.main(["build-index", "--project-root", str(root)])
             self.assertIn("SQLite FTS5 is required", str(error.exception))
 
+    def edit_during_read(self, root: Path, edit, *, times: int = 1):
+        """Wrap the real document read so ``edit`` runs after documents are read.
+
+        This plants an edit inside the actual scheduling window between reading
+        the corpus and publishing its fingerprint. It does not fabricate database
+        metadata; whatever the builder publishes is what it really computed.
+        """
+        original = QIDX.build_index
+        calls = {"count": 0}
+
+        def wrapped(project_root, config, scope):
+            documents = original(project_root, config, scope)
+            calls["count"] += 1
+            if calls["count"] <= times:
+                edit(calls["count"])
+            return documents
+
+        return mock.patch.object(QIDX, "build_index", side_effect=wrapped), calls
+
+    def test_edit_during_index_build_cannot_publish_stale_content_as_fresh(self):
+        if not QIDX.sqlite_fts5_available():
+            self.skipTest("SQLite FTS5 is unavailable on this interpreter")
+        page_text = "---\ntype: concept\nsource_ids: []\n---\n\n# Cobalt\n\noldcobaltword\n"
+        rewritten = (
+            "---\ntype: concept\nsource_ids: []\n---\n\n# Cobalt\n\n"
+            "newvermilionword is present now\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self.build_workspace(Path(tmpdir))
+            page = root / "wiki" / "concepts" / "cobalt.md"
+            page.write_text(page_text, encoding="utf-8")
+            index_path = root / QIDX.DEFAULT_INDEX_PATH
+            config = QIDX.load_config(root)
+
+            patcher, calls = self.edit_during_read(root, lambda _n: page.write_text(rewritten, encoding="utf-8"))
+            with patcher:
+                indexed = QIDX.write_fts_index(root, config, "all", index_path)
+
+            self.assertEqual(4, indexed)
+            self.assertGreater(calls["count"], 1, "the builder must re-read after an edit during the read")
+            usable, note = QIDX.evaluate_index(root, config, index_path, "all")
+            self.assertTrue(usable)
+            self.assertIsNone(note)
+            # The index the query path trusts must contain the corpus the fingerprint describes.
+            code, output, stderr = self.run_cli_with_stderr(
+                ["--project-root", str(root), "--format", "json", "newvermilionword"]
+            )
+            self.assertEqual(0, code)
+            payload = json.loads(output)
+            self.assertEqual([], payload["warnings"])
+            self.assertNotIn("note:", stderr)
+            self.assertEqual(["wiki/concepts/cobalt.md"], [row["path"] for row in payload["results"]])
+            code, output, _stderr = self.run_cli_with_stderr(
+                ["--project-root", str(root), "--format", "json", "oldcobaltword"]
+            )
+            self.assertEqual(0, json.loads(output)["result_count"])
+
+    def test_add_and_delete_during_index_build_are_read_before_publication(self):
+        if not QIDX.sqlite_fts5_available():
+            self.skipTest("SQLite FTS5 is unavailable on this interpreter")
+        added_text = "---\ntype: concept\nsource_ids: []\n---\n\n# Added\n\naddedlateword\n"
+        for label in ("add", "delete"):
+            with self.subTest(interleaving=label), tempfile.TemporaryDirectory() as tmpdir:
+                root = self.build_workspace(Path(tmpdir))
+                concepts = root / "wiki" / "concepts"
+                index_path = root / QIDX.DEFAULT_INDEX_PATH
+                config = QIDX.load_config(root)
+                if label == "add":
+                    expected_indexed = 4
+                    target = concepts / "added.md"
+
+                    def edit(_attempt: int, target: Path = target) -> None:
+                        target.write_text(added_text, encoding="utf-8")
+
+                    query, expected_paths = "addedlateword", ["wiki/concepts/added.md"]
+                else:
+                    expected_indexed = 2
+                    target = concepts / "tokenization.md"
+
+                    def edit(_attempt: int, target: Path = target) -> None:
+                        target.unlink()
+
+                    query, expected_paths = "subword", []
+                patcher, _calls = self.edit_during_read(root, edit)
+                with patcher:
+                    indexed = QIDX.write_fts_index(root, config, "all", index_path)
+                self.assertEqual(expected_indexed, indexed)
+                usable, note = QIDX.evaluate_index(root, config, index_path, "all")
+                self.assertTrue(usable)
+                self.assertIsNone(note)
+                results, _count = QIDX.query_fts_index(index_path, query, "all", 10)
+                self.assertEqual(expected_paths, [row["path"] for row in results])
+
+    def test_index_build_refuses_after_bounded_retries_and_keeps_prior_index(self):
+        if not QIDX.sqlite_fts5_available():
+            self.skipTest("SQLite FTS5 is unavailable on this interpreter")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self.build_workspace(Path(tmpdir))
+            index_path = root / QIDX.DEFAULT_INDEX_PATH
+            config = QIDX.load_config(root)
+            code, _output = self.build_index(root)
+            self.assertEqual(0, code)
+            prior_bytes = index_path.read_bytes()
+            page = root / "wiki" / "concepts" / "tokenization.md"
+
+            def churn(attempt: int) -> None:
+                page.write_text(
+                    "---\ntype: concept\nsource_ids: []\n---\n\n# Tokenization\n\n"
+                    + "churn " * attempt
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+            patcher, calls = self.edit_during_read(root, churn, times=10_000)
+            with patcher, self.assertRaises(SystemExit) as error:
+                QIDX.write_fts_index(root, config, "all", index_path)
+
+            message = str(error.exception)
+            self.assertIn("query index build aborted", message)
+            self.assertIn(str(QIDX.INDEX_BUILD_ATTEMPTS), message)
+            self.assertIn("wiki/concepts/tokenization.md", message)
+            self.assertEqual(QIDX.INDEX_BUILD_ATTEMPTS, calls["count"])
+            self.assertEqual(prior_bytes, index_path.read_bytes(), "a refused build must not touch the prior index")
+            self.assertEqual([], list(index_path.parent.glob(f".{index_path.name}.*.tmp*")))
+
+            # The retained index is stale for the churned page, so query mode falls
+            # back to the current in-memory scan and says so.
+            code, output, stderr = self.run_cli_with_stderr(
+                ["--project-root", str(root), "--format", "json", "churn"]
+            )
+            self.assertEqual(0, code)
+            payload = json.loads(output)
+            self.assertEqual(["wiki/concepts/tokenization.md"], [row["path"] for row in payload["results"]])
+            self.assertEqual(["QUERY_INDEX_FALLBACK"], [warning["code"] for warning in payload["warnings"]])
+            self.assertIn("note: query index is stale", stderr)
+
+    def test_build_index_cli_reports_a_refused_build(self):
+        if not QIDX.sqlite_fts5_available():
+            self.skipTest("SQLite FTS5 is unavailable on this interpreter")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self.build_workspace(Path(tmpdir))
+            page = root / "wiki" / "concepts" / "tokenization.md"
+            patcher, _calls = self.edit_during_read(
+                root,
+                lambda attempt: page.write_text(f"# Tokenization\n\n{'x' * attempt}\n", encoding="utf-8"),
+                times=10_000,
+            )
+            with patcher, self.assertRaises(SystemExit) as error:
+                QIDX.main(["build-index", "--project-root", str(root)])
+            self.assertIn("query index build aborted", str(error.exception))
+            self.assertFalse((root / QIDX.DEFAULT_INDEX_PATH).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

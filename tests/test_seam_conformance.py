@@ -1,7 +1,7 @@
 """Seam conformance: a script's CLI and its library seam must never disagree.
 
 `evidence-wiki` scripts are drivable two ways. A host can shell out to the script
-and parse the JSON document it prints, or -- since CR-6 -- call the script's
+and parse the JSON document it prints, or -- since the library API -- call the script's
 ``run_<op>(...) -> dict`` seam in-process. Those are two implementations of one
 operation, and two implementations of one operation drift. This suite is the
 permanent guard against that drift: for every enrolled script it runs the CLI and
@@ -94,6 +94,7 @@ import copy
 import importlib
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -101,8 +102,9 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from tests._script_loader import load_module
 from tests.seam_cases import REFUSAL, SUCCESS, SeamCase
@@ -112,14 +114,16 @@ SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 CASES_DIR = Path(__file__).resolve().parent / "seam_cases"
 CASES_PACKAGE = "tests.seam_cases"
 
-# Defines ScriptRefusal for every script to raise; it is a shared helper, not a
-# command, so it has no seam of its own and no case module.
-NOT_A_SEAM = {"_script_errors.py"}
+NOT_A_SEAM = {
+    "_script_errors.py": "Shared error helper, with no command or operation of its own.",
+    "normalize_sources.py": "run_normalization is a printing command engine returning an exit code; run_* extractor helpers are not library seams.",
+    "fetch_sources.py": "run_provider_command is the provider dispatch engine with argparse inputs and its own FetchSourcesError contract; ScriptRefusal is passed through by main for the host intake guard.",
+}
 
 #: A seam is a top-level ``def run_<op>`` in a script that also speaks the shared
 #: refusal. Both halves are needed: plenty of scripts have had top-level helpers
 #: named ``run_*`` (``run_checks``, ``run_controller_section``, ``run_add``) since
-#: long before CR-6, and naming alone would enroll all of them.
+#: long before the library API, and naming alone would enroll all of them.
 SEAM_DEFINITION = re.compile(r"^def run_\w+\(", re.MULTILINE)
 REFUSAL_TYPE = "ScriptRefusal"
 
@@ -252,6 +256,7 @@ class Enrollment:
     script: str
     scratch: Path
     cases: tuple[SeamCase, ...]
+    skip_reason: str | None = None
 
 
 class SeamConformanceTests(unittest.TestCase):
@@ -272,10 +277,15 @@ class SeamConformanceTests(unittest.TestCase):
             scratch.mkdir(parents=True)
             workspace = scratch / "workspace"
             initialize_workspace(workspace, f"seam-{stem}")
+            try:
+                cases, skip_reason = tuple(case_module.cases(workspace)), None
+            except unittest.SkipTest as exc:
+                cases, skip_reason = (), str(exc)
             cls.enrollments[case_module.SCRIPT] = Enrollment(
                 script=case_module.SCRIPT,
                 scratch=scratch,
-                cases=tuple(case_module.cases(workspace)),
+                cases=cases,
+                skip_reason=skip_reason,
             )
 
     @classmethod
@@ -292,9 +302,15 @@ class SeamConformanceTests(unittest.TestCase):
             [sys.executable, str(SCRIPTS / enrollment.script), *case.argv],
             capture_output=True,
             text=True,
+            input=case.stdin,
+            env={**os.environ, **case.environment},
             check=False,
             cwd=str(enrollment.scratch),
         )
+
+    def call_seam(self, enrollment: Enrollment, case: SeamCase) -> Any:
+        with patch.dict(os.environ, case.environment):
+            return case.call(self.script_module(enrollment.script))
 
     # -- assertions --------------------------------------------------------------
 
@@ -306,7 +322,7 @@ class SeamConformanceTests(unittest.TestCase):
             self.fail(f"{context}: stdout is not one JSON document ({exc}); stderr: {result.stderr[:400]!r}")
 
         try:
-            returned = case.call(self.script_module(enrollment.script))
+            returned = self.call_seam(enrollment, case)
         except Exception as exc:
             refusal = as_refusal(exc)
             if refusal is None:
@@ -326,13 +342,16 @@ class SeamConformanceTests(unittest.TestCase):
     def check_refusal(self, enrollment: Enrollment, case: SeamCase, context: str) -> None:
         result = self.run_cli(enrollment, case)
         try:
-            returned = case.call(self.script_module(enrollment.script))
+            returned = self.call_seam(enrollment, case)
         except Exception as exc:
             refusal = as_refusal(exc)
             if refusal is None:
                 raise
         else:
             self.fail(f"{context}: the seam returned {returned!r} where the CLI refused")
+
+        if case.error_code is not None:
+            self.assertEqual(case.error_code, getattr(refusal, "error_code", None), f"{context}: unexpected refusal reason")
 
         try:
             emitted = json.loads(result.stderr)
@@ -370,6 +389,8 @@ class SeamConformanceTests(unittest.TestCase):
         """Half of the seam contract is the refusal, so every script exercises both."""
         for script, enrollment in sorted(self.enrollments.items()):
             with self.subTest(script=script):
+                if enrollment.skip_reason is not None:
+                    self.skipTest(enrollment.skip_reason)
                 outcomes = {case.expect for case in enrollment.cases}
                 self.assertIn(SUCCESS, outcomes, f"{script}: declare at least one success case")
                 if script in SEAM_WITHOUT_REFUSAL:
@@ -403,6 +424,9 @@ class SeamConformanceTests(unittest.TestCase):
 
     def test_the_seam_and_the_cli_agree(self):
         for script, enrollment in sorted(self.enrollments.items()):
+            if enrollment.skip_reason is not None:
+                with self.subTest(script=script):
+                    self.skipTest(enrollment.skip_reason)
             for case in enrollment.cases:
                 with self.subTest(script=script, case=case.name):
                     context = f"{script} [{case.name}]"
@@ -413,6 +437,35 @@ class SeamConformanceTests(unittest.TestCase):
                         self.check_success(enrollment, case, context)
                     else:
                         self.check_refusal(enrollment, case, context)
+
+
+def test_unsupported_fixture_does_not_skip_other_seams(monkeypatch):
+    def unavailable(workspace):
+        raise unittest.SkipTest("host storage unavailable")
+
+    monkeypatch.setitem(SeamConformanceTests.setUpClass.__func__.__globals__, "discovered_case_modules", lambda: {
+        "unsupported": SimpleNamespace(SCRIPT="unsupported.py", cases=unavailable),
+        "supported": SimpleNamespace(SCRIPT="supported.py", cases=lambda workspace: (SeamCase("works", (), lambda module: {}),)),
+    })
+    monkeypatch.setitem(SeamConformanceTests.setUpClass.__func__.__globals__, "initialize_workspace", lambda *args: None)
+
+    class Contract(SeamConformanceTests):
+        pass
+
+    Contract.setUpClass()
+    try:
+        assert Contract.enrollments["unsupported.py"].skip_reason == "host storage unavailable"
+        assert Contract.enrollments["supported.py"].skip_reason is None
+        checked = []
+        case = Contract("test_the_seam_and_the_cli_agree")
+        monkeypatch.setattr(case, "check_success", lambda enrollment, *args: checked.append(enrollment.script))
+        result = unittest.TestResult()
+        case.run(result)
+        assert not result.errors and not result.failures
+        assert checked == ["supported.py"]
+        assert len(result.skipped) == 1 and result.skipped[0][1] == "host storage unavailable"
+    finally:
+        Contract.tearDownClass()
 
 
 if __name__ == "__main__":

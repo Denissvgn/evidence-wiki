@@ -1,4 +1,4 @@
-"""Why: CR-5 T5 is where every other piece of provider registration is finally spent.
+"""Registered acquisition uses package-controlled transport and provenance.
 
 `fetch_sources.py registered get` takes a pip-installed plugin that `research.yml`
 authorized by id, asks it to *plan* HTTPS requests, executes those requests through the
@@ -6,8 +6,7 @@ package's own pinned transport against the plugin's *declared* `allowed_domains`
 plugin interpret the responses, and writes the result as provenance-stamped evidence. The
 plugin never opens a socket and never touches the workspace.
 
-That makes this file the place where the CR's three non-negotiable properties become
-observable, so these tests pin them rather than the implementation:
+The observable boundaries are:
 
 - **registration makes a provider available, never enabled** — an id the workspace did not
   authorize is refused with the same `ACQUISITION_PROVIDER_DISABLED` a built-in gets, and
@@ -52,9 +51,9 @@ SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 FETCH_PATH = SCRIPTS / "fetch_sources.py"
 ACCOUNTING_PATH = SCRIPTS / "_provider_accounting.py"
 
-FETCH_MODULE_NAME = "cr5_u7_registered_fetch_sources"
-ACCOUNTING_MODULE_NAME = "cr5_u7_registered_provider_accounting"
-LOCKS_MODULE_NAME = "cr5_u7_registered_workspace_locks"
+FETCH_MODULE_NAME = "provider_registered_fetch_sources"
+ACCOUNTING_MODULE_NAME = "provider_registered_provider_accounting"
+LOCKS_MODULE_NAME = "provider_registered_workspace_locks"
 
 #: The declaration the fixture ships, restated here so a silent change to it fails loudly.
 CREDENTIAL_ENV_VAR = "KEEPA_FIXTURE_API_KEY"

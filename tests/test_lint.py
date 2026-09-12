@@ -22,7 +22,7 @@ LINT_PATH = SCRIPTS / "lint.py"
 INIT_PATH = SCRIPTS / "init_research_workspace.py"
 SMOKE_PATH = SCRIPTS / "smoke_validate_workspace.py"
 PROFILE_FIXTURE_PATH = FIXTURES / "workspace-init-profile.yml"
-#: The CR-5 fixture provider distribution: a directory that becomes an installed
+#: The fixture provider distribution: a directory that becomes an installed
 #: distribution the moment it is on a Python process's import path.
 PROVIDER_PLUGIN_ROOT = FIXTURES / "provider-plugins"
 REGISTERED_PROVIDER_ID = "keepa-fixture"
@@ -1219,7 +1219,7 @@ class NormalizedSourceLintTests(unittest.TestCase):
 
 
 class FrontmatterRobustnessTests(unittest.TestCase):
-    """E15-T02: load_frontmatter() handles malformed files without raising."""
+    """Load_frontmatter() handles malformed files without raising."""
 
     def test_truncated_yaml_no_closing_fence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1288,7 +1288,7 @@ class FrontmatterRobustnessTests(unittest.TestCase):
 
 
 class ManifestRobustnessTests(unittest.TestCase):
-    """E15-T03: lint handles malformed manifest.jsonl without crashing."""
+    """Lint handles malformed manifest.jsonl without crashing."""
 
     def copy_fixture(self, fixture_name: str, workspace: Path) -> Path:
         source = FIXTURES / fixture_name
@@ -1386,7 +1386,7 @@ question: Which benchmarks matter?
 
 
 class LintProvenanceAndSourceRequestTests(unittest.TestCase):
-    """E17-T04: provenance and source-request linkage checks."""
+    """Provenance and source-request linkage checks."""
 
     def copy_fixture(self, fixture_name: str, workspace: Path) -> Path:
         source = FIXTURES / fixture_name
@@ -2397,7 +2397,7 @@ class NormalizedRecordContractLintTests(unittest.TestCase):
     """Lint accepts a conforming foreign record and names a failing one.
 
     The fixture record in `minimal-project` is written by a foreign normalizer
-    (`normalizer.name: fixture`), so it exercises exactly the path CR-2 cares about:
+    (`normalizer.name: fixture`), so it exercises exactly the path structured normalization cares about:
     a record this package did not produce, held to the published contract.
     """
 
@@ -2538,7 +2538,7 @@ class RenderedCoverageLintTests(unittest.TestCase):
 
     A thin rendering is not a defect — capping a long series is a legitimate choice —
     so this is off unless an operator sets a threshold, and LOW when it fires. The
-    real fix for un-quotable content is CR-7 anchors, not a lint gate.
+    real fix for un-quotable content is structured grounding anchors, not a lint gate.
     """
 
     CATEGORY = "normalized_low_rendered_coverage"
@@ -2647,7 +2647,7 @@ class RenderedCoverageLintTests(unittest.TestCase):
 
 
 class GroundingFormLintTests(unittest.TestCase):
-    """CR-7 T9: lint accepts both grounding forms and measures the migration between them.
+    """Lint accepts both grounding forms and measures the migration between them.
 
     Lint checks entry *shape* only — whether an anchor actually resolves to its expected
     value is `verify_quotes`' job against the sidecar, and is deliberately not re-derived
@@ -2866,7 +2866,7 @@ optional_facets: []
 
 
 class OrphanedStructuredSidecarLintTests(unittest.TestCase):
-    """CR-7 T9: a structured-view sidecar with no record beside it is reported.
+    """A structured-view sidecar with no record beside it is reported.
 
     Every other consumer in the workspace globs `*.md`, so a sidecar whose record was
     never written is a file nothing will ever open. LOW, because it is inert: it grounds
@@ -2935,14 +2935,14 @@ class OrphanedStructuredSidecarLintTests(unittest.TestCase):
 
 
 class LintEnvironmentIndependenceTests(unittest.TestCase):
-    """Lint is a pure function of the workspace tree, never of the environment (CR-5 §7.1).
+    """Lint is a pure function of the workspace tree, never of the environment.
 
-    CR-5 lets a provider id come from a pip-installed distribution rather than a built-in
+    provider registration lets a provider id come from a pip-installed distribution rather than a built-in
     tuple, which makes "is this provider available?" a question about the *environment*.
-    The change request deliberately keeps that question out of lint: smoke enforces it and
+    Smoke validation enforces provider availability, while
     doctor explains it, so that two lint runs over the same tree, on two machines or in
     two virtualenvs, stay comparable. That property was previously true by accident -- no
-    lint check consulted anything outside the workspace -- and CR-5 is the first change
+    lint check consulted anything outside the workspace -- and provider registration is the first change
     that could have broken it, so it is pinned here.
 
     The workspace under test authorizes a provider id that only the fixture distribution

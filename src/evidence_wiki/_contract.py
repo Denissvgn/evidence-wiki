@@ -25,12 +25,13 @@ from types import ModuleType
 from typing import Any
 
 from . import __version__
+from ._operations import operation_matrix
 from ._script_host import load_packaged_script, shared_assets_root
 from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "1"
+LIBRARY_API_VERSION = "12"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -58,10 +59,30 @@ LIBRARY_API_SURFACE = (
     "workspace.versions",
     "workspace.status",
     "workspace.export_answers",
+    "workspace.publish_selected",
     "workspace.doctor",
     "coverage.evaluate",
     "grounding.verify",
     "normalize.verify",
+    "normalize.profiles",
+    "normalize.validate_packet",
+    "normalize.validate_execution",
+    "normalize.validate_market",
+    "usage.status",
+    "usage.transact",
+    "usage.check",
+    "usage.lineage",
+    "usage.materialize",
+    "snapshots.prepare",
+    "snapshots.export",
+    "snapshots.check",
+    "temporal.evaluate",
+    "assessments.prepare",
+    "assessments.issue",
+    "assessments.check",
+    "assessments.plan_refresh",
+    "assessments.apply_refresh",
+    "verify_snapshot",
     "questions.claim",
     "questions.release",
     "questions.answer",
@@ -77,6 +98,8 @@ LIBRARY_API_SURFACE = (
     "orchestrate.session.next",
     "orchestrate.session.submit",
     "orchestrate.session.status",
+    "orchestrate.session.retire",
+    "orchestrate.session.cleanup_claims",
     "fleet_status",
     "contract",
 )
@@ -278,6 +301,7 @@ def contract() -> dict:
     discover_sources_module = load_packaged_script(root, "discover_sources")
     normalized_contract_module = load_packaged_script(root, "_normalized_contract")
     normalize_sources_module = load_packaged_script(root, "normalize_sources")
+    qualified_packet_module = load_packaged_script(root, "qualified_packet")
     mcp_module = load_packaged_script(root, "serve_mcp")
     script_errors_module = load_packaged_script(root, "_script_errors")
     provider_registry_module = load_packaged_script(root, "_provider_registry")
@@ -321,14 +345,81 @@ def contract() -> dict:
         },
         "orchestration_capabilities": {
             "managed_runner_ids": list(orchestration.managed_runner_names()),
-            "external_protocol_commands": ["start", "next", "submit", "status"],
+            "external_protocol_commands": ["start", "next", "submit", "status", "retire", "cleanup-claims"],
+            "claim_retention": {
+                "schema_version": 1,
+                "owner": "package",
+                "default": "read-only plan; explicit apply required",
+                "retirement": "terminal session, no pending work, verified archive, permanent marker",
+                "cleanup": "only matching owned live ledgers; archives, session evidence and locks retained",
+                "payload_policies": ["retain"],
+                "payload_erasure": "unsupported; delete-required refuses before writing",
+                "limits": {"archive_files": 4096, "archive_bytes": 67108864},
+            },
             "canonical_instruction_file": "AGENTS.md",
         },
         "library_api": {
+            **operation_matrix(),
             "version": LIBRARY_API_VERSION,
             "surface": list(LIBRARY_API_SURFACE),
         },
         "required_asset_manifest": required_asset_manifest(),
+        "intake_profiles": qualified_packet_module.profiles(),
+        "evidence_usage": {
+            "state_environment": "EVIDENCE_WIKI_STATE_DIR",
+            "authority_environment": "EVIDENCE_WIKI_AUTHORITY_FILE",
+            "platform": "POSIX with no-follow directory descriptors and advisory file locking",
+            "actions": ["initialize", "deposit", "authorize", "attest-availability", "revoke", "register"],
+            "uses": ["retrieval", "training", "export"],
+            "retention": ["host-managed"],
+            "limits": {"state_bytes": 67108864, "events": 10000, "nodes": 4096,
+                       "lineage_depth": 64, "revision_files": 256, "file_bytes": 16777216},
+            "legacy_qa_export": "compatible only without usage declarations",
+            "protected_query": "approved normalized bytes, in memory, current permission required",
+            "protected_legacy_publication": "refused; requires approved artifact closure",
+            "contract_document": "docs/evidence-usage.md",
+        },
+        "evidence_snapshots": {
+            "contract": "evidence-snapshot-contract/v1",
+            "temporal_mode": "current",
+            "supported_contracts": ["evidence-snapshot-contract/v1", "evidence-snapshot-contract/v2", "evidence-snapshot-contract/v3", "evidence-snapshot-contract/v4"],
+            "optional_execution_profiles": ["market-simulation/v1"],
+            "historical_inputs": "per-generation cutoff over complete authorized ancestry; contract/v3",
+            "historical_selection": "evidence-snapshot-selection/v2",
+            "temporal_modes": ["current", "historical-audit", "historical-available"],
+            "registration": "host-signed usage command with expected checkpoint and stable request ID",
+            "required_uses": ["training", "export"],
+            "retention": "host-managed",
+            "limits": {"selected_revisions": 32, "source_revisions": 64, "lineage_nodes": 128,
+                       "artifact_blobs": 512, "decoded_bytes": 8388608, "bundle_bytes": 16777216},
+            "encoding": "canonical UTF-8 JSON with content-addressed base64 blobs",
+            "offline_verification": "explicit independent trust bytes; historical bindings only",
+            "current_use": "current host authority, registry and transitive revocations",
+            "contract_document": "docs/evidence-snapshots.md",
+        },
+        "evidence_temporal": {
+            "modes": ["current", "historical-audit", "historical-available"],
+            "current_clock": "host-owned; no supplied cutoff or checkpoint",
+            "historical_basis": "explicit cutoff and accepted immutable host checkpoint",
+            "public_availability": "independently controlled host-selected availability attester and exact proof artifacts",
+            "current_use": "current retrieval authority is mandatory; analysis never grants current-use approval",
+            "limits": {"sources": 32, "revisions": 64, "lineage": 128, "artifact_bytes": 8388608,
+                       "request_bytes": 262144, "facets": 32, "grounding": 128, "query_characters": 1024},
+            "retrieval": "pure lexical ranking of qualified revisions; no persistent index or wiki reads",
+            "contract_document": "docs/temporal-evidence.md",
+        },
+        "evidence_assessments": {
+            "contract": "evidence-assessment/v1",
+            "required_capabilities": ["assessment-refresh/v1", "current-usage-check/v1", "selected-publication/v1", "whole-envelope-attestation/v1"],
+            "registration": "whole-envelope host assessment attestation; signed usage command with expected checkpoint and stable request ID",
+            "current_use": "recomputed selected answers, source revisions, current permissions, validity and monotone invalidation",
+            "dependency_coverage": "all workspace sources; bounded complete closure required",
+            "refresh": "bounded resumable scan; changed source revisions are hints; signed compare-and-swap invalidation in the usage ledger",
+            "external_action_authorized": False,
+            "limits": {"questions": 32, "workspace_sources": 64, "source_ancestry": 128, "source_history_revisions": 64,
+                       "artifact_bytes": 8388608, "assessments_per_refresh": 32, "changed_source_hints": 128, "request_bytes": 1048576},
+            "contract_document": "docs/evidence-assessments.md",
+        },
         "source_providers": {
             "discovery": list(provider_registry_module.DISCOVERY_PROVIDER_IDS),
             "acquisition": list(provider_registry_module.ACQUISITION_PROVIDER_IDS),
@@ -356,6 +447,35 @@ def contract() -> dict:
             "run_report": run_report_module.SCHEMA_VERSION,
             "coverage_manifest": coverage_manifest_module.SCHEMA_VERSION,
             "publication_readiness": publication_readiness_module.SCHEMA_VERSION,
+            "selected_publication": "evidence-selected-publication/v1",
+            "workspace_revision": "evidence-workspace-revision/v1",
+            "execution_evidence": "execution-evidence/v1",
+            "market_evidence": "market-evidence/v1",
+            "evidence_authentication": "evidence-authentication/v1",
+            "evidence_usage_state": "evidence-usage-state/v1",
+            "evidence_usage_command": "evidence-usage-command/v1",
+            "evidence_usage_grant": "evidence-usage-grant/v1",
+            "evidence_snapshot": "evidence-snapshot/v1",
+            "evidence_snapshot_manifest": "evidence-snapshot-manifest/v1",
+            "evidence_snapshot_selection": "evidence-snapshot-selection/v1",
+            "evidence_temporal_snapshot": "evidence-snapshot/v2",
+            "evidence_temporal_snapshot_manifest": "evidence-snapshot-manifest/v2",
+            "evidence_execution_snapshot": "evidence-snapshot/v3",
+            "evidence_execution_snapshot_manifest": "evidence-snapshot-manifest/v3",
+            "evidence_profiled_snapshot": "evidence-snapshot/v4",
+            "evidence_profiled_snapshot_manifest": "evidence-snapshot-manifest/v4",
+            "evidence_temporal_snapshot_selection": "evidence-snapshot-selection/v2",
+            "evidence_scrub_receipt": "evidence-scrub-receipt/v1",
+            "evidence_source_revision": "evidence-source-revision/v1",
+            "evidence_temporal_source": "evidence-temporal-source/v1",
+            "evidence_availability_receipt": "evidence-availability-receipt/v1",
+            "evidence_temporal_request": "evidence-temporal-request/v1",
+            "evidence_temporal_result": "evidence-temporal-result/v1",
+            "evidence_assessment": "evidence-assessment/v1",
+            "evidence_assessment_request": "evidence-assessment-request/v1",
+            "evidence_assessment_check": "evidence-assessment-check/v1",
+            "evidence_assessment_refresh": "evidence-assessment-refresh/v1",
+            "evidence_assessment_refresh_request": "evidence-assessment-refresh-request/v1",
             "fleet_status": fleet_status_module.SCHEMA_VERSION,
             "error_envelope": script_errors_module.SCHEMA_VERSION,
         },

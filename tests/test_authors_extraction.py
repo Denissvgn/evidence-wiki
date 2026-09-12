@@ -1,4 +1,4 @@
-"""Tests for author extraction from normalized paper sources (E35-T01).
+"""Tests for author extraction from normalized paper sources.
 
 `discover_sources.py authors --source-id` reads a normalized paper source (and any
 provider author metadata captured on the manifest record) and emits a bounded

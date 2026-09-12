@@ -60,8 +60,8 @@ importantly, what it does not.
 
 ## The Surface
 
-Twenty-six operations. Most hang off an open handle, in namespaces; the
-exceptions are `Workspace.open` itself and the two module-level functions that
+Most operations hang off an open handle, in namespaces; the
+exceptions are `Workspace.open` itself and the three module-level functions that
 belong to no single workspace.
 
 **`Workspace`** — the handle itself:
@@ -73,6 +73,7 @@ belong to no single workspace.
 | `workspace.versions` | `ws.versions() -> dict` |
 | `workspace.status` | `ws.status(*, no_cache=False, run_id=None, **counters) -> dict` |
 | `workspace.export_answers` | `ws.export_answers(status: list[str] \| None = None) -> dict` |
+| `workspace.publish_selected` | `ws.publish_selected(question_slugs: list[str], *, expected_revision=None) -> dict` |
 | `workspace.doctor` | `ws.doctor() -> dict` |
 
 `ws.status()` takes nine optional counter keywords — `questions_processed_this_run`,
@@ -89,10 +90,66 @@ CLI flag of the same name one for one, plus `no_cache` and `run_id`.
 | `coverage.evaluate` | `ws.coverage.evaluate(slug: str) -> dict` |
 | `grounding.verify` | `ws.grounding.verify(slugs: Sequence[str], *, write=False, verified_by=None) -> dict` |
 | `normalize.verify` | `ws.normalize.verify(source_ids: Sequence[str] \| None = None) -> dict` |
+| `normalize.profiles` | `ws.normalize.profiles() -> dict` |
+| `normalize.validate_packet` | `ws.normalize.validate_packet(source_id: str) -> dict` |
+| `normalize.validate_execution` | `ws.normalize.validate_execution(source_id: str) -> dict` |
+| `normalize.validate_market` | `ws.normalize.validate_market(source_id: str) -> dict` |
 
 `coverage.evaluate` is not a read: the recomputed facet verdicts, coverage
 verdict and `updated_at` are written back to `sources/coverage/<slug>.yml`,
 exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
+
+**`ws.usage`** — host-authorized source revisions:
+
+| Operation | Signature |
+|-----------|-----------|
+| `usage.status` | `ws.usage.status(*, request_id=None) -> dict` |
+| `usage.transact` | `ws.usage.transact(command: dict, *, artifacts: dict[str, bytes] \| None = None) -> dict` |
+| `usage.check` | `ws.usage.check(revision: str, *, uses: list[str], purpose: str, consumer: str) -> dict` |
+| `usage.lineage` | `ws.usage.lineage(revision: str, *, limit=4096) -> dict` |
+| `usage.materialize` | `ws.usage.materialize(revision: str, *, expected_content_hash=None) -> dict` |
+
+These operations use separately provisioned host authority and state. See
+[Evidence usage](evidence-usage.md) for the signing, sanitization, revocation,
+retention, and legacy compatibility contracts.
+
+**`ws.temporal`** — bounded source evaluation at one cutoff:
+
+| Operation | Signature |
+| --- | --- |
+| `temporal.evaluate` | `ws.temporal.evaluate(request: dict) -> dict` |
+
+See [Temporal evidence](temporal-evidence.md) for explicit source clocks,
+accepted checkpoints, independent public-availability receipts, and replay
+limits. Selection, lexical retrieval, declarative facets, and scalar grounding
+share the same cutoff. Current retrieval permission remains mandatory.
+
+**`ws.assessments`** — authenticated selected evidence and current refresh:
+
+| Operation | Signature |
+| --- | --- |
+| `assessments.prepare` | `ws.assessments.prepare(request: dict) -> dict` |
+| `assessments.issue` | `ws.assessments.issue(envelope: dict) -> dict` |
+| `assessments.check` | `ws.assessments.check(envelope: dict) -> dict` |
+| `assessments.plan_refresh` | `ws.assessments.plan_refresh(request: dict) -> dict` |
+| `assessments.apply_refresh` | `ws.assessments.apply_refresh(envelope: dict) -> dict` |
+
+See [Authenticated evidence assessments](evidence-assessments.md) for host
+attestation, current-use verification, explicit validity, bounded refresh and
+retained history. Host action approval and execution remain separate.
+
+**`ws.snapshots`** and `evidence_wiki.verify_snapshot` — frozen evidence:
+
+| Operation | Signature |
+| --- | --- |
+| `snapshots.prepare` | `ws.snapshots.prepare(selection: dict) -> dict` |
+| `snapshots.export` | `ws.snapshots.export(selection: dict, *, registration_request_id: str) -> dict` |
+| `snapshots.check` | `ws.snapshots.check(data: bytes) -> dict` |
+| `verify_snapshot` | `verify_snapshot(data: bytes, *, trust_policy_bytes: bytes) -> dict` |
+
+See [Evidence snapshots](evidence-snapshots.md) for the selection, host signing,
+canonical bundle, offline verification, and current-use contracts. Offline
+verification opens no workspace and requires explicit independent trust bytes.
 
 **`ws.questions`** — the question lifecycle. Every keyword mirrors the CLI flag
 of the same name, and every mutating call writes its `log.md` entry and its page
@@ -140,11 +197,13 @@ additive member.
 | `orchestrate.session.next` | `session.next(*, agent_id=None, resume=False) -> dict` |
 | `orchestrate.session.submit` | `session.submit(action_id, result: dict \| str \| PathLike, *, agent_id=None) -> dict` |
 | `orchestrate.session.status` | `session.status() -> dict` |
+| `orchestrate.session.retire` | `session.retire(reason: str, *, apply=False, payload_policy="retain", driver_wait_seconds=None) -> dict` |
+| `orchestrate.session.cleanup_claims` | `session.cleanup_claims(*, apply=False, driver_wait_seconds=None) -> dict` |
 
 Every limit left as `None` is omitted from the controller's argv, so the
 workspace's deployed controller applies its own default rather than this package
 pinning one a newer workspace has moved on from. See [version
-authority](#version-authority) for why these four are the operations that keep a
+authority](#version-authority) for why these six are the operations that keep a
 subprocess.
 
 **Module level** — no single handle owns these:
@@ -168,7 +227,6 @@ version comparison:
 import evidence_wiki
 
 library_api = evidence_wiki.contract()["library_api"]
-assert library_api["version"] == "1"
 assert "coverage.evaluate" in library_api["surface"]
 ```
 
@@ -176,15 +234,123 @@ assert "coverage.evaluate" in library_api["surface"]
 compatibility signal. The list is a *declaration*, deliberately not introspected
 from live objects — walking the classes at call time would make the published
 contract depend on import order and would silently widen or narrow the API every
-time an internal helper was renamed. A change that a version `"1"` caller cannot
-absorb bumps `version` rather than editing the list in place, so a host that
-understands `"1"` knows exactly which names the list may contain.
+time an internal helper was renamed. The version advances when the declared surface changes. Version `"2"` adds
+selected publication and a versioned operation matrix; callers that only understand
+version `"1"` must negotiate before using the expanded contract. Version `"3"`
+adds offline qualified packet profile discovery and original-byte validation.
+Version `"4"` adds `normalize.validate_execution(source_id)` and
+`evidence-wiki normalize execution --target PATH --source-id ID`. This read-only
+operation returns execution structure and current independent evaluation
+authority as separate results. A structurally valid failed run remains usable
+evidence. Execution CLI exit 1 means the original structure is invalid;
+callers must inspect `verification.eligible` when a passing evaluation is required.
+Version `"5"` adds the five `usage` operations and the `evidence_usage`
+capability description. A usage check returns ineligibility as a verdict;
+invalid operations raise `SourceError` with `EVIDENCE_USAGE_REFUSED`.
+Version `"6"` adds snapshot preparation, publication, current-use reconciliation,
+and workspace-independent verification. Snapshot operations refuse invalid
+inputs with `EVIDENCE_SNAPSHOT_REFUSED`; verification returns a validity verdict.
+Version `"7"` adds read-only `temporal.evaluate`, availability attestations in
+the usage command contract, and historical snapshot selection with the v2
+snapshot schemas. Invalid temporal requests raise `SourceError` with
+`EVIDENCE_TEMPORAL_REFUSED`. A completed evaluation can contain source gaps,
+failed grounding, or unresolved review; inspect the returned outcomes.
+Version `"8"` adds read-only `normalize.validate_market(source_id)` and
+`evidence-wiki normalize market --target PATH --source-id ID --format json`.
+The optional `market_evidence/v1` profile validates inert, bounded filing and
+price deliveries. Inspect `valid`, `completeness`, and current usage eligibility
+separately. A valid structure can contain gaps; the operation grants no rights.
+Other source kinds and existing provider selections do not acquire market requirements.
+Version `"9"` adds accepted historical execution inputs and snapshot v3.
+Every historical generation binds its inputs and their complete ancestry at its
+own cutoff; the result and its independent evaluation can occur later. Inspect
+`historical_inputs` separately from the structural execution report. Historical
+input qualification does not establish a model's training cutoff.
+Version `"10"` adds optional `market-simulation/v1` execution qualifications and
+snapshot v4 with explicitly declared execution profiles. Existing generic
+execution records retain their contract. The [simulation profile](market-simulation.md)
+recalculates bounded portfolio results and qualifies preselected configuration
+without starting a runner or adding a feed dependency.
+Version `"11"` adds the five `assessments` operations and their versioned
+capabilities. Assessment checks return current eligibility; invalid operations
+raise `EvidenceWikiError` with `EVIDENCE_ASSESSMENT_REFUSED`. Signed issuance and
+refresh application use the existing host usage ledger and checkpoint contract.
+Version `"12"` adds `orchestrate.session.retire` and
+`orchestrate.session.cleanup_claims`. Both return a read-only plan by default;
+`apply=True` archives and seals a terminal session or removes its matching live
+claim ledgers. See the [retention contract](../workspace-template/docs/orchestration.md#claim-retirement-and-cleanup)
+before applying either operation. Archives and tombstones remain permanent;
+payload erasure is unsupported and explicitly refused.
+`contract()["intake_profiles"]` advertises the supported native schemas,
+validator pin, bounds, and reconciliation limits. Validation returns a report
+with separate delivery, native consistency, and host reconciliation results;
+the CLI returns exit 1 when validity or the selected policy is unsatisfied.
 
 One public method is intentionally absent from that list:
 `ws.orchestrate.session(orchestration_id)` returns a driver for an existing
 session without touching it (naming a session is not reading one), so a host that
 restarts can reconstruct its drivers without a controller spawn per session. It
-is not a declared v1 operation; the four operations it gives access to are.
+is a handle constructor; the six protocol operations are declared separately.
+
+## Operation Boundaries
+
+`contract()["library_api"]` includes `matrix_version`, `operations`, `cli_only`,
+and `timeout_policy`. Every supported operation has a CLI entry point (or an
+explicit lack of an equivalent), mutation effects, locking behavior, and a
+subprocess boundary. The independently versioned matrix is caller-owned JSON.
+Hosts should check the declared surface at startup and retain an outer timeout.
+Orchestration still launches one version-matched controller process per call;
+`doctor` may probe external tools with individual timeouts.
+
+Lifecycle, full normalization, source inventory and request mutation, coverage
+editing, lint, and workspace-wide publication bundles remain CLI-only. The
+matrix names their supported entry points. Package API use alone does not
+establish that an operation has no subprocesses or writes.
+
+## Selected Publication
+
+```python
+report = ws.publish_selected(["battery-lifetime", "charging-safety"])
+if report["verdict"] == "ship":
+    answers = report["export"]["questions"]
+# Optionally refuse if the workspace differs from this exact captured input:
+again = ws.publish_selected(report["question_slugs"],
+                            expected_revision=report["revision"]["revision_id"])
+```
+
+The CLI uses the same operation:
+
+```bash
+evidence-wiki publication --target /path/to/workspace --question battery-lifetime --question charging-safety
+```
+
+Selections must contain 1–1,000 portable question slugs. Duplicates collapse to a
+sorted set; empty, malformed, and unknown selections refuse. The response binds
+readiness and exported answers to one content identity and a separate trusted
+producer identity. Question lifecycle, review, grounding, citations, and coverage
+are evaluated for the selected questions. Source/configuration integrity, active
+source normalization, request and candidate integrity, claims/contradictions,
+licensing, curation, secrets, and retained output checks remain global. An
+unrelated pending question review is excluded; an unrelated source defect can
+block the selected result. Read `gate_scope` and consume the returned verdict.
+
+The operation captures all workspace files except declared runtime caches and
+Git metadata, evaluates a private read-only materialization, then revalidates
+live bytes. It executes trusted installed scripts. Captured scripts are data.
+Known secret patterns are checked before materialization; this heuristic is not
+permission to export sensitive data. Configured paths must stay within the
+workspace. Three bounded evaluation attempts end in a typed refusal if inputs or
+the producer keep changing. Timestamps and inode values do not enter content
+identity. Identity establishes bytes, not authenticity, historical availability,
+or training rights.
+
+Capture is limited to 10,000 files, 20,000 directory entries, 256 MiB total,
+16 MiB per file, and depth 64. Symlinks, hardlinks, special files, and nonportable
+paths refuse. Platforms lacking no-follow descriptor operations, including
+Windows, return `EVIDENCE_REVISION_UNSUPPORTED`. The live workspace is unchanged;
+CLI `--output` must name a destination outside it. Exit 0 means `ship`, exit 1
+means another research verdict, and exit 2 means refusal. The unscoped operation
+and its bundle behavior retain their existing contract.
 
 ## Errors
 
@@ -200,7 +366,7 @@ carries the whole error envelope:
 | `details` | Structured context, possibly empty. |
 | `exit_code` | The status the CLI would have exited with: `2` for a fatal caller-fixable error, `3` for a conflict, `6` for `ORCHESTRATION_DRIVER_BUSY`. Envelopes carry no status, so it is reconstructed from `error_code`; a code whose script exits with something other than `2` must be registered in `errors._EXIT_CODE_OVERRIDES` for the two doors to agree. Dispatch on `error_code` when you need a specific condition — this attribute groups several. |
 
-Thirteen families sit under the base class. The family is selected from the code
+Error families sit under the base class. The family is selected from the code
 by prefix, with exact codes winning over prefixes and longer prefixes over
 shorter ones — which is how `QUESTION_NOT_CLAIMED` lands in `ClaimError` while
 `QUESTION_REOPEN_DELEGATED` lands in `RequestError`:
@@ -211,6 +377,8 @@ shorter ones — which is how `QUESTION_NOT_CLAIMED` lands in `ClaimError` while
 | `LockError` | `LOCK_UNAVAILABLE` — no workspace lock backend could be established, or a workspace lock stayed held past a call's bounded wait. A contended *orchestration session* lock is not this: it is `OrchestrationError` / `ORCHESTRATION_DRIVER_BUSY`. |
 | `ClaimError` | A claim could not be taken, stolen, released, or resolved: `CLAIM_*`, `STEAL_*`, `STATUS_NOT_*`, `QUESTION_NOT_CLAIMED`. |
 | `QuestionError` | A question, slug, or answer page is unusable: `QUESTION_*`, `SLUG_*`, `ANSWER_*`, `PAGE_INVALID`, `RESOLUTION_REASON_INVALID`. |
+| `PublicationError` | Selected publication selection, configuration, safety, or output refusal: `PUBLICATION_*`. |
+| `RevisionError` | Bounded capture, unsafe paths, unsupported platform, or concurrent changes: `EVIDENCE_REVISION_*`. |
 | `CoverageError` | `COVERAGE_*`, `FACET_SCOPE_CONFLICT`. |
 | `GroundingError` | `GROUNDING_*` — a claim is not grounded in a verifiable quote from an accepted source. |
 | `RequestError` | Source requests: `REQUEST_*`, `SOURCE_REQUEST_FULFILL_DELEGATED`, `QUESTION_REOPEN_DELEGATED`, `ATTEMPT_FAILURE_CODE_INVALID`. |
@@ -271,39 +439,23 @@ maintained. Each operation has exactly one implementation — a `run_<op>(...) -
 dict` seam in the workspace script — and both front ends render from it: the CLI
 prints the returned document or the raised refusal's envelope, the API returns
 the document or raises the typed exception built from that same envelope.
-`tests/test_seam_conformance.py` runs the CLI as a real subprocess against the
-seam over identical inputs and requires them to agree on the success document, on
-the refusal envelope, and on the exit code, for every enrolled script. A change
-to one path cannot quietly move only one of them.
+Both interfaces preserve the owning operation’s document, refusal code, and
+exit status. Presentation choices such as JSON indentation and output files belong
+to the CLI.
 
 ## Thread Safety
 
-**Concurrent API calls are as safe as concurrent CLI processes, and no safer.**
-That is the guarantee, and it is the reason to adopt the API at all: the
-filesystem arbitrates, exactly as it does between processes.
+The operation matrix declares each operation's filesystem effects and locking.
+Per-question claims and controller sessions use their owning locks. Coverage
+rewrites and question intake have no transaction lock; hosts must serialize
+writers to those surfaces. Atomic cache replacement protects individual cache
+files, without making a sequence of workspace reads a transaction.
 
-- **Contention surfaces as a typed refusal, never as corruption.** Two writers
-  racing for the same claim produce one winner and one `ClaimError` /
-  `CLAIM_HELD` (`recoverable=False`, `exit_code=3`), or a `LockError` /
-  `LOCK_UNAVAILABLE` if the workspace write lock itself was contended. Both
-  outcomes are correct; what never happens is two writers both believing they
-  hold the claim.
-- **The API introduces no process-global mutation.** In particular it **never
-  redirects `sys.stdout`**, not on the success path and not on the refusal path
-  where the CLI renders an envelope. That is what makes it usable from a
-  multithreaded server: a host that captured its own stdout concurrently would
-  have had its capture swapped out from under it, and putting the original back
-  afterwards would not help. `tests/test_library_concurrency.py` asserts this by
-  object *identity*, which is the only assertion that notices.
-- **Two threads through one handle each get a whole answer.** Not two halves of
-  one, and not one shared `dict` handed to every caller — results are distinct
-  objects, so a host that mutates its own result cannot corrupt another
-  request's.
-- **A cold start under contention is safe.** Loading a packaged workspace script
-  briefly mutates `sys.path` and `sys.modules`; one process-wide reentrant lock
-  covers every such load, including the lazy sibling loads a script performs
-  *while a seam is running*. The lock is a load-time lock only — a warm operation
-  takes no loads at all, so concurrent operations stay concurrent.
+The API never redirects `sys.stdout`. Script loading temporarily changes
+`sys.path` and `sys.modules` under a process-wide reentrant lock and restores
+those bindings. Sibling loading uses the same lock. Returned documents are
+separate caller-owned objects. Selected publication instead captures and
+revalidates bytes, retrying or refusing when the workspace changes.
 
 What remains the host's job:
 
@@ -409,8 +561,8 @@ every open workspace, and a host cannot be made to execute code out of a
 workspace directory. The installed library version is the behavior version,
 exactly as it already is for `evidence-wiki status`.
 
-**Orchestration `start`/`next`/`submit`/`status` keeps a subprocess.** Each of
-those four spawns the workspace's *own deployed* controller at
+**Orchestration `start`/`next`/`submit`/`status`/`retire`/`cleanup-claims` keeps a subprocess.** Each of
+those six spawns the workspace's *own deployed* controller at
 `<workspace>/scripts/orchestration_controller.py`:
 
 ```text
@@ -443,16 +595,21 @@ compatibility checks.
 Skew therefore surfaces where it already surfaced: as a script's own typed
 refusal, at the call that actually depends on the incompatible piece.
 
-What the API adds is *visibility*. `ws.versions()` reports what is installed
-beside what is deployed:
+`ws.versions()` reports the installed package version beside the workspace's
+recorded metadata:
 
 ```python
 ws.versions()
-# {'package': '0.4.0',
+# {'package': '0.7.0',
 #  'workspace': {'starter_version': '0.7.0',
 #                'schema_version': '0.1',
 #                'compatible_research_yml_contract': '0.1'}}
 ```
+
+`starter_version` identifies reusable starter content; `schema_version` identifies
+the metadata shape. Neither the package version nor these recorded values prove
+that deployed script bytes match a release. Hosts that need that identity must
+compare the files or use their own content digests.
 
 This is a pure read and never refuses *on the basis of what it reads*. Every
 workspace key degrades to `None` when `workspace-system.yml` is absent,
@@ -657,8 +814,9 @@ Notes on the shape:
   workspace artifacts it names and refuses a result whose postconditions the
   workspace does not actually satisfy, so a well-formed document is not a way to
   make a session progress.
-- If the host process holds handles across a workspace upgrade, drop and reopen
-  them; `versions()` is the cheap way to notice.
+- After upgrading a workspace, drop and reopen any handles the host process
+  retained. `versions()` can reveal changed metadata, but an unchanged result
+  does not prove that scripts are unchanged.
 
 ## What The API Deliberately Omits
 

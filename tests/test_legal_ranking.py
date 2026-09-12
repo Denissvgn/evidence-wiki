@@ -1,8 +1,8 @@
-"""Tests for legal candidate ranking by officialness and authority (E34-T03).
+"""Tests for legal candidate ranking by officialness and authority.
 
-`discover_sources.py legal --execute` runs the official-source-first plan (E34-T02)
+`discover_sources.py legal --execute` runs the official-source-first plan
 through the configured search backend and ranks the results with legal-specific
-rules layered on the E33-T03 trust policy:
+rules layered on the search trust policy:
 
 - a profile official-domain match is the major trust signal (official_primary);
 - official gazette/legislature/regulator/court sources outrank aggregators;

@@ -171,6 +171,43 @@ Query JSON exposes the computed relationship as
 `evidence_links.backlinks`. Lint reports `codebase_evidence_link_missing` when a
 validated artifact lacks either navigation direction.
 
+## Qualified Context Packet Intake
+
+Select the optional `qualified_context_packet/v1` profile using
+`integrations.codebase_analysis.intake_profile` or a manifest record's
+`metadata.codebase_intake_profile`. A configured profile cannot be removed by
+an external normalizer. Unknown or conflicting profiles refuse intake.
+
+The delivery manifest retains the format above and adds `intake_profile` and
+`packet_path`, naming a declared original JSON packet. Declare every delivered
+file's exact `size_bytes` and SHA-256. The receiver captures one bounded
+directory generation before parsing, rejects links and undeclared members,
+and checks original canonical packet bytes using the offline validation closure
+from `agent-wiki-cli` 1.8.0. Native packet schemas v1 and v2 are supported.
+The limit is 128 declared files, 512 directory entries, 64 levels, and 16 MiB
+including the manifest; the native validator applies its tighter packet bounds.
+
+`evidence-wiki normalize profiles --target .` reports supported profiles.
+`evidence-wiki normalize packet --target . --source-id <id>` checks a delivery
+without writing normalized files or running a producer, plugin, hook, or network
+request. Exit 1 means invalid evidence or an unsatisfied policy.
+
+Normalized `qualified_context` contains the native packet identity, original
+path and digest, delivery provenance, native validation, and all producer
+qualifications. An opaque Markdown response body is omitted from the rendering and each
+omission is identified by a JSON pointer; the referenced original retains it.
+Availability, freshness, bounds, truncation, coverage, ambiguity, unresolved
+targets, and per-concept comparisons retain their original meanings. Stale,
+absent, and bounded packets can be structurally valid.
+
+Delivery hashes and native consistency do not authenticate a worker or prove
+current source state. Host reconciliation is explicitly unevaluated. Setting
+`integrations.codebase_analysis.require_live_reconciliation: true` therefore
+refuses policy eligibility. Normalization verification, lint, and required
+coverage recheck the originals for both native and external normalized records.
+Changing bytes or a normalized qualification requires a new matching intake;
+rewriting an outer checksum cannot repair an invalid native packet.
+
 ## Product Scope
 
 EvidenceWiki neither clones repositories nor launches `python-wiki-llm` or

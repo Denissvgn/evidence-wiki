@@ -1,6 +1,6 @@
 """The fixture provider distribution and its install helper are themselves under test.
 
-Every other CR-5 unit tests *against* this fixture, so a defect here would be diagnosed
+Every other provider registration unit tests *against* this fixture, so a defect here would be diagnosed
 somewhere else: a loader bug and a fixture bug look identical from a loader test. These
 tests pin the three properties the rest of the work depends on.
 

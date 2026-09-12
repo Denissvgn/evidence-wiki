@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evidence-wiki"
-version = "0.6.0"
+version = "0.7.0"
 description = "Verifiable autonomous research workspaces: agent-driven research where every answer cites provenance-tracked sources or blocks with a structured evidence request."
 readme = "README.md"
 license = { text = "MIT" }
@@ -13,6 +13,7 @@ dependencies = [
   "pypdf>=6.14,<7",
   "PyYAML>=6.0",
   "ruamel.yaml>=0.19.1,<0.20",
+  "tzdata>=2024.1",
 ]
 keywords = [
   "research",
@@ -88,6 +89,16 @@ include = [
   "/tools",
 ]
 
+# ``.gitignore`` ignores ``AGENTS.md`` everywhere and then re-admits the tracked
+# copies with ``!`` rules. The sdist builder honours the ignore but not the
+# re-admission, so without this the sdist silently drops a required starter
+# asset and a wheel built from it cannot locate its own assets root. Listed
+# explicitly so the sdist carries exactly the tracked copies.
+[tool.hatch.build.targets.sdist.force-include]
+"workspace-template/AGENTS.md" = "workspace-template/AGENTS.md"
+"examples/urban-heat-resilience-workspace/AGENTS.md" = "examples/urban-heat-resilience-workspace/AGENTS.md"
+"tests/fixtures/madrid-autonomo-workspace/AGENTS.md" = "tests/fixtures/madrid-autonomo-workspace/AGENTS.md"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/evidence_wiki"]
 
@@ -108,9 +119,28 @@ select = ["E9", "F", "I", "B", "S", "UP"]
 
 [tool.coverage.run]
 branch = true
-source = [
-  "src",
+# Workspace scripts run as subprocesses from copied workspaces during the suite.
+# ``patch = ["subprocess"]`` measures those child processes; ``parallel`` gives
+# each its own data file to combine; the ``include`` patterns admit the copies
+# a test deployed under ``<workspace>/scripts``. tools/coverage_report.py retains
+# exact-path and copy-alias views separately; aliases do not prove copy identity.
+parallel = true
+patch = ["subprocess"]
+include = [
+  "src/evidence_wiki/*",
+  "workspace-template/scripts/*.py",
+  "*/scripts/*.py",
+]
+omit = [
+  "*/.venv/*",
+  "*/site-packages/*",
+  "tests/*",
+]
+
+[tool.coverage.paths]
+workspace_scripts = [
   "workspace-template/scripts",
+  "*/scripts",
 ]
 
 [tool.coverage.report]

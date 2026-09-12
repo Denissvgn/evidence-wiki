@@ -620,6 +620,14 @@ def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> li
     metadata = source_metadata(inputs, source_id)
     provenance = inputs.provenance_by_source_id.get(source_id, {})
     reasons: list[str] = []
+    usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate")
+    reasons.extend(usage.normalized_issues(inputs.project_root, inputs.config, record, normalized))
+    packet = load_workspace_module(_SCRIPT_DIR, "_qualified_packet")
+    reasons.extend(packet.normalized_issues(inputs.project_root, inputs.config, record, normalized))
+    execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence")
+    reasons.extend(execution.normalized_issues(inputs.project_root, inputs.config, record, normalized))
+    market = load_workspace_module(_SCRIPT_DIR, "_market_evidence")
+    reasons.extend(market.consumer_issues(inputs.project_root, inputs.config, record, normalized))
     for document in candidate_values(normalized, metadata, provenance, record):
         reasons.extend(explicit_unusable_reasons(document))
     return unique_strings(reasons)
@@ -1919,6 +1927,21 @@ def evaluate_source_policy(
     unusable = unusable_evidence_result(policy, ids, present, inputs)
     if unusable:
         return unusable
+    if policy == "independent_execution_pass":
+        if missing:
+            return missing_result(policy, ids, missing)
+        execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence")
+        evaluated_at = now or datetime.now(timezone.utc)
+        reasons = []
+        verdict = VERDICT_OK
+        for source_id in present:
+            report = execution.inspect_execution(inputs.project_root, inputs.config, inputs.manifest_records[source_id])
+            assessment = execution.assess_verification(report, inputs.project_root, inputs.config, evaluated_at,
+                                                        source_record=inputs.manifest_records[source_id])
+            reasons.append(f"{source_id}: {assessment['reason']}")
+            if not assessment["eligible"]:
+                verdict = VERDICT_FAIL
+        return result(policy, verdict, ids, reasons)
     if policy == "manual_review_required":
         return manual_result(policy, ids, ["Source policy requires manual review and cannot pass automatically."])
     if policy == "domain_pack_allowed":
@@ -2249,6 +2272,7 @@ def evaluate_facet_policies(
 
 
 def evaluate_coverage_manifest_policies(manifest: dict[str, Any], inputs: PolicyInputs) -> dict[str, Any]:
+    moment = datetime.now(timezone.utc)
     slug = manifest.get("question_slug")
     question_slug = slug.strip() if isinstance(slug, str) and slug.strip() else None
     facets: list[dict[str, Any]] = []
@@ -2266,7 +2290,7 @@ def evaluate_coverage_manifest_policies(manifest: dict[str, Any], inputs: Policy
                     "evidence_path": facet.get("evidence_path"),
                     "policy_results": [
                         policy_result.to_dict()
-                        for policy_result in evaluate_facet_policies(facet, inputs, question_slug=question_slug)
+                        for policy_result in evaluate_facet_policies(facet, inputs, question_slug=question_slug, now=moment)
                     ],
                 }
             )

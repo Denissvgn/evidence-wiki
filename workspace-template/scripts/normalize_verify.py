@@ -176,6 +176,7 @@ def verify_record(
     *,
     manifest_by_id: dict[str, dict[str, Any]],
     normalized_root: Path,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     frontmatter: dict[str, Any] | None = None
     if path.is_file():
@@ -188,6 +189,8 @@ def verify_record(
         path,
         manifest_by_id=manifest_by_id,
         normalized_root=normalized_root,
+        project_root=project_root,
+        config=config,
     )
     source_id = frontmatter.get("source_id") if isinstance(frontmatter, dict) else None
     normalizer = frontmatter.get("normalizer") if isinstance(frontmatter, dict) else None
@@ -312,6 +315,7 @@ def build_report(project_root: Path, *, source_ids: Sequence[str] | None = None)
             path,
             manifest_by_id=manifest_by_id,
             normalized_root=normalized_root,
+            config=config,
         )
         for path in paths
     ]

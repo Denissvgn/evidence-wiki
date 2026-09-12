@@ -1,4 +1,4 @@
-"""Tests for candidate review and selection commands (E36-T01).
+"""Tests for candidate review and selection commands.
 
 `discover_sources.py candidates {list,select,reject,transition}` is an offline read/write
 stage over the durable candidate store `sources/discovery/candidates.jsonl`. It

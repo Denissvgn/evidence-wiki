@@ -31,12 +31,7 @@ JSON_MODE_DOC_EXEMPT = {
     "init_research_workspace.py": "raises no envelope code of its own",
     "serve_mcp.py": "raises no envelope code of its own",
     "workspace_gc.py": "raises no envelope code of its own",
-    # TODO(CR-14): both need a JSON Output Scripts row, and verify_quotes.py additionally
-    # needs GROUNDING_INVALID and GROUNDING_VERIFIER_REQUIRED added to the Stable error
-    # codes table. Deferred only to avoid editing orchestrator-handoff.md while parallel
-    # CR-14 units are writing to it; tracked in docs/CR/CR-14-backlog.md.
-    "normalize_verify.py": "CR-14 follow-up: JSON Output Scripts row pending",
-    "verify_quotes.py": "CR-14 follow-up: row + 2 stable-code rows pending",
+
 }
 
 
@@ -67,22 +62,9 @@ def load_helper():
 
 
 ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{4,}$")
-# Codes whose retry verdict legitimately differs between raise sites, each with a reason.
-# Empty on purpose: CR-15a found no condition that survived the "then the code is doing
-# two jobs" test. An entry here is a claim that one code covers two materially different
-# conditions and should be argued for, not a place to silence the guard.
-RECOVERABILITY_VARIES_BY_SITE: dict[str, str] = {
-    # Empty again, and that is the point. CR-15a exempted ORCHESTRATION_WORKSPACE_UNSAFE
-    # because it carried two conditions whose retry verdicts genuinely differed, and
-    # recorded that as evidence the code was doing two jobs rather than as licence to
-    # vary. CR-15d split the post-issue baseline change into
-    # ORCHESTRATION_WORKSPACE_HEALTH_CHANGED, so each code now answers once and the
-    # exemption is unnecessary.
-    #
-    # An entry here is a claim that one code covers two materially different conditions.
-    # It should be argued for — and preferably resolved by splitting, as this one was —
-    # not used to silence the guard.
-}
+# A code should name one condition with one retry verdict. Any exception must
+# identify a real shared condition and explain why separate codes are unsuitable.
+RECOVERABILITY_VARIES_BY_SITE: dict[str, str] = {}
 # Keywords through which a code reaches an error constructor without being its first
 # positional argument. Each was found the hard way: a code invisible to a positional-only
 # scan, already shipped with no remediation because nothing counted it.
@@ -682,28 +664,11 @@ class ErrorEnvelopeTests(unittest.TestCase):
         self.assertEqual([], missing, "document every required JSON-mode script in orchestrator-handoff.md")
 
     def test_every_raised_error_code_has_a_specific_remediation_and_a_doc_row(self):
-        """CR-14's closing gate: no code falls back to the generic remediation, and every
-        code a script can raise is documented in a table.
+        """Every statically recognized raised code has a specific remediation and doc row.
 
-        The registry and the doc tables are hand-maintained lists that must cover a set
-        nobody was counting. Before CR-14, 97 codes fell back to
-        ``"Read the message, fix the input or workspace state, and rerun the command."``
-        and 37 appeared in no doc at all — while the operator holding one of those
-        refusals was told nothing about how to fix it.
-
-        **This guard deliberately does not reuse the scan that scoped CR-14.** That scan
-        saw only codes passed as a positional string literal, and missed eight across two
-        modules that arrive through a keyword (``status_error_code=``, ``not_found_code=``,
-        ``error_code=``). A completeness check built on it would certify coverage over
-        exactly the codes it could see and stay silent about the rest — a guard carrying
-        the defect it exists to prevent, which is how the JSON Output Scripts check came
-        to pass while reading 85 of 131 codes.
-
-        Known blindness, stated rather than implied: a code assembled at runtime (an
-        f-string, a lookup, a value read from data) is invisible here, as is one raised by
-        a helper this walk does not recognise as an error constructor. The counts asserted
-        below are the guard's own scope, so a change that silently shrinks its reach fails
-        instead of quietly passing.
+        The scan covers literals, constants, conditional choices, boolean fallbacks and
+        recognized error-code keywords. Runtime-computed codes and unknown constructors
+        remain outside its scope. Minimum counts detect accidental loss of scan coverage.
         """
         codes = collect_raised_error_codes()
         helper = load_helper()
@@ -831,19 +796,10 @@ class ErrorEnvelopeTests(unittest.TestCase):
         self.assertEqual([], contradictions)
 
     def test_documentation_tables_have_a_consistent_column_count(self):
-        """Every row in a Markdown table must match its header's column count.
+        """Each Markdown table row must match its own header's column count.
 
-        `test_every_raised_error_code_has_a_specific_remediation_and_a_doc_row` counts a
-        code as documented when a row starting `| \\`CODE\\` |` exists *anywhere*, which is
-        deliberate — codes are documented across several files. The cost is that it cannot
-        tell a row in the right table from a row in the wrong one, and CR-14's insertion
-        script put fourteen 3-column error-code rows inside the 2-column "Required
-        envelope fields" table by partitioning on a marker and appending after the last
-        table row *in the rest of the document*. The completeness guard passed; the page
-        rendered as garbage. A reviewer caught it.
-
-        So the shape is checked separately from the membership. A table is a contiguous run
-        of lines starting `|`; every row in it must have the header's cell count.
+        Code membership alone cannot detect a row inserted into the wrong table. Shape
+        validation therefore checks every contiguous block of pipe-delimited rows.
         """
         offenders: list[str] = []
         roots = [REPO_ROOT / "workspace-template" / "docs", REPO_ROOT / "docs"]
@@ -871,28 +827,11 @@ class ErrorEnvelopeTests(unittest.TestCase):
         self.assertEqual([], offenders, "these table rows do not match their header's column count")
 
     def test_remediations_name_only_commands_that_exist(self):
-        """A remediation must not send an operator to a flag or subcommand that isn't there.
+        """Remediations must name existing commands and required identity flags.
 
-        This is the defect CR-14 kept finding by accident: `BUDGET_EXCEEDED` named a
-        command without its required `--run-id`/`--agent-id`; `DISCOVERY_RUN_RECOVERY_REQUIRED`
-        named `run_controller.py recover`, which refuses without them;
-        `REQUEST_NOT_OPEN` — a *reviewed* table cell — told operators to reopen a request
-        when no command can. Eight were found by reading, two of them introduced by the
-        very changes that fixed the others. Reading is what produced them, so this checks
-        mechanically instead.
-
-        Both halves of what an operator can see are audited: the registry and the inline
-        overrides, since an inline `remediation=` replaces the registry entry entirely.
-
-        Two deliberate limits, so the check is trusted rather than muted:
-
-        - A `<script>.py <token>` pair is judged only when the token is a subcommand of
-          *some* script. Otherwise the token is ordinary prose — `run_controller.py or …`,
-          `publication_readiness.py from …` — and a stricter rule reports five such
-          sentences as defects, which is how a check earns its way onto an ignore list.
-        - A bare verb with no script beside it ("reopen the request") is not mechanically
-          decidable and stays out of scope; that class is why `REQUEST_NOT_OPEN` needed a
-          human to catch it.
+        Registry entries and inline overrides are checked. A script/token pair is treated
+        as a command only when that token is a known subcommand somewhere in the scripts;
+        ordinary prose and bare verbs without a script remain outside this bounded check.
         """
         flags = cli_flag_universe()
         subcommands = script_subcommands()
@@ -926,7 +865,7 @@ class ErrorEnvelopeTests(unittest.TestCase):
         Two hand-mirrored sets with a comment asking for agreement and nothing checking
         it. They happened to match, but a code added to one and not the other would give
         a host a different retry verdict through the in-process door than through the CLI
-        — the same door-disagreement CR-13 fixed for flags, on the field callers act on.
+        — the same door-disagreement surface parity fixed for flags, on the field callers act on.
         """
         helper = load_helper()
         sys.path.insert(0, str(REPO_ROOT / "src"))

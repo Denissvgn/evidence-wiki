@@ -34,6 +34,7 @@ class _DoorBinding(NamedTuple):
     seam_module: object
     seam_name: str
     accepted: frozenset[str]
+    supplied_keywords: frozenset[str]
     forwarded: frozenset[str]
 
 
@@ -61,8 +62,8 @@ def _door_seam_bindings() -> list[_DoorBinding]:
     - the ``Workspace`` handle: ``call_seam(self._script, "stem", "run_x", root, ...)``
 
     Returns one binding per method, carrying the parameters the method *accepts*
-    (positional-or-keyword and keyword-only, minus ``self``) and the keyword names it
-    *forwards* in any call it makes.
+    (positional-or-keyword and keyword-only, minus ``self``), the seam keywords it
+    supplies, and the caller parameters it forwards to that seam.
     """
     sources = sorted((REPO_ROOT / "src" / "evidence_wiki" / "_facades").glob("*.py"))
     sources = [p for p in sources if p.name not in {"__init__.py", "_base.py"}]
@@ -116,7 +117,13 @@ def _door_seam_bindings() -> list[_DoorBinding]:
             #
             # Both calling conventions count, because `grounding.verify` hands `slugs` to
             # the seam positionally; reading only `keywords` reported that as dropped.
-            forwarded = {kw.arg for kw in seam_call.keywords if kw.arg} | {
+            # A facade may bind an operation name or rename an envelope parameter.
+            # Track destinations separately from caller values: `request=command`
+            # supplies `request` and forwards `command`; `request={}` drops it.
+            supplied_keywords = {kw.arg for kw in seam_call.keywords if kw.arg}
+            forwarded = {
+                kw.value.id for kw in seam_call.keywords if isinstance(kw.value, ast.Name)
+            } | {
                 arg.id for arg in seam_call.args if isinstance(arg, ast.Name)
             }
             bindings.append(
@@ -125,6 +132,7 @@ def _door_seam_bindings() -> list[_DoorBinding]:
                     seam_module=module,
                     seam_name=seam_name,
                     accepted=frozenset(accepted),
+                    supplied_keywords=frozenset(supplied_keywords),
                     forwarded=frozenset(forwarded),
                 )
             )
@@ -200,6 +208,16 @@ class QuestionResolveTests(unittest.TestCase):
             )
         self.assertEqual(0, code, stdout.getvalue())
         return json.loads(stdout.getvalue())["request"]["request_id"]
+
+    def fulfill_requests(self, target: Path, pairs: list[tuple[str, str]]) -> None:
+        for request_id, source_id in pairs:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = REQUESTS.main([
+                    "--project-root", str(target), "fulfill", "--request-id", request_id,
+                    "--source-id", source_id, "--format", "json",
+                ])
+            self.assertEqual(0, code, stdout.getvalue() + stderr.getvalue())
 
     def seed_manifest(self, target: Path, source_id: str = "raw:bench-survey-2026") -> None:
         record = {
@@ -1172,6 +1190,7 @@ class QuestionResolveTests(unittest.TestCase):
             )
             self.seed_manifest(target, "raw:bench-survey-2026")
             self.seed_normalized_record(target, "raw:bench-survey-2026")
+            self.fulfill_requests(target, [(request_id, "raw:bench-survey-2026")])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1202,8 +1221,6 @@ class QuestionResolveTests(unittest.TestCase):
             # The reopened question is actionable again: it can be claimed and answered.
             self.run_claim(target, "needs-evidence", agent_id="agent-b")
 
-    # -- CR-4 T6: scope-based request -> source pairing on reopen -------------------
-    #
     # Delivery is exercised through the real chain (raw file + .provenance.yml sidecar
     # -> source_inventory.py -> normalize_sources.py) rather than a hand-written
     # manifest, because the sidecar `scope` reaching `provenance.scope` on the manifest
@@ -1248,12 +1265,7 @@ class QuestionResolveTests(unittest.TestCase):
         raise AssertionError(f"no manifest record for {raw_path}")
 
     def set_request_scope(self, target: Path, request_id: str, scope: dict) -> None:
-        """Stamp a structured scope onto an existing request record.
-
-        ``source_requests.py add --scope`` is a sibling CR-4 unit; the record shape is
-        the contract between them, so these tests write the field directly rather than
-        depending on the flag's landing order.
-        """
+        """Stamp a structured scope onto an existing request record."""
         path = target / "sources" / "source-requests.jsonl"
         lines = []
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -1282,7 +1294,7 @@ class QuestionResolveTests(unittest.TestCase):
         return heat, shade
 
     def test_reopen_pairs_scoped_requests_with_matching_sources_in_any_order(self):
-        """The CR's literal acceptance criterion: pairing is semantic, not positional."""
+        """Pairing follows declared scope regardless of argument order."""
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             heat_request, shade_request = self.two_scoped_requests_blocked(target)
@@ -1291,6 +1303,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.inventory_and_normalize(target)
             heat_source = self.source_id_for(target, "raw/papers/heat-index.html")
             shade_source = self.source_id_for(target, "raw/papers/shade-cover.html")
+            self.fulfill_requests(target, [(heat_request, heat_source), (shade_request, shade_source)])
 
             # Sources and requests are supplied in deliberately mismatched positional
             # order: zipping the two lists would pair heat with shade and vice versa.
@@ -1428,6 +1441,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.deliver_scoped_source(target, "combined-survey", None)
             self.inventory_and_normalize(target)
             source_id = self.source_id_for(target, "raw/papers/combined-survey.html")
+            self.fulfill_requests(target, [(first, source_id), (second, source_id)])
 
             def refuse_lookup(source_id_value: str) -> dict:
                 raise AssertionError(f"pairing read provenance scope for {source_id_value}")
@@ -1469,6 +1483,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.inventory_and_normalize(target)
             heat_source = self.source_id_for(target, "raw/papers/heat-index.html")
             other_source = self.source_id_for(target, "raw/papers/combined-survey.html")
+            self.fulfill_requests(target, [(scoped, heat_source), (unscoped, other_source)])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1529,6 +1544,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.inventory_and_normalize(target)
             one = self.source_id_for(target, "raw/papers/quote-one.html")
             two = self.source_id_for(target, "raw/papers/quote-two.html")
+            self.fulfill_requests(target, [(first, one), (second, two)])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1592,6 +1608,7 @@ class QuestionResolveTests(unittest.TestCase):
             self.inventory_and_normalize(target)
             stamped = self.source_id_for(target, "raw/papers/quote-one.html")
             bare = self.source_id_for(target, "raw/papers/quote-bare.html")
+            self.fulfill_requests(target, [(first, stamped), (second, bare)])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1646,6 +1663,7 @@ class QuestionResolveTests(unittest.TestCase):
                 self.source_id_for(target, f"raw/papers/quote-{name}.html")
                 for name in ("one", "two", "three")
             ]
+            self.fulfill_requests(target, list(zip((first, second, third), sources, strict=True)))
 
             args = ["reopen", "--slug", "needs-evidence", "--agent-id", "fetch-agent"]
             for source_id in sources:
@@ -1802,7 +1820,7 @@ class QuestionResolveTests(unittest.TestCase):
                 if parameter.kind is inspect.Parameter.KEYWORD_ONLY
             }
             missing = sorted(
-                name for name in seam_kwargs - b.accepted if (b.label, name) not in deliberate
+                name for name in seam_kwargs - b.supplied_keywords if (b.label, name) not in deliberate
             )
             if missing:
                 unreachable.append(f"{b.label} cannot reach {b.seam_name} keywords: {missing}")
@@ -1816,6 +1834,29 @@ class QuestionResolveTests(unittest.TestCase):
                 dropped.append(f"{b.label} accepts these and never passes them on: {lost}")
         self.assertEqual([], unreachable)
         self.assertEqual([], dropped)
+
+        # Check both sides of a renamed argument without exempting the namespace.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            facades = root / "src" / "evidence_wiki" / "_facades"
+            facades.mkdir(parents=True)
+            (facades.parent / "workspace.py").write_text("", encoding="utf-8")
+            for keywords, missing, lost in (
+                ('operation="prepare", request=command', set(), set()),
+                ('request=command', {"operation"}, set()),
+                ('operation="prepare", request={}', set(), {"command"}),
+            ):
+                with self.subTest(keywords=keywords):
+                    (facades / "probe.py").write_text(
+                        "class Probe:\n    def prepare(self, command):\n"
+                        '        return self._call("evidence_assessments", "run_operation", '
+                        f"self._root, {keywords})\n",
+                        encoding="utf-8",
+                    )
+                    with mock.patch(f"{__name__}.REPO_ROOT", root):
+                        binding, = _door_seam_bindings()
+                    self.assertEqual(missing, {"operation", "request"} - binding.supplied_keywords)
+                    self.assertEqual(lost, binding.accepted - binding.forwarded)
 
     def test_require_decisive_scope_refuses_an_undecided_pairing(self):
         """The opt-in gate: a pairing scope did not make is refused, not reported."""
@@ -1869,6 +1910,10 @@ class QuestionResolveTests(unittest.TestCase):
             self.deliver_scoped_source(target, "heat-index", {"facet_id": "heat-index"})
             self.deliver_scoped_source(target, "shade-cover", {"facet_id": "shade-cover"})
             self.inventory_and_normalize(target)
+            self.fulfill_requests(target, [
+                (heat_request, self.source_id_for(target, "raw/papers/heat-index.html")),
+                (shade_request, self.source_id_for(target, "raw/papers/shade-cover.html")),
+            ])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1907,6 +1952,8 @@ class QuestionResolveTests(unittest.TestCase):
             self.block_on_requests(target, "needs-evidence", [first, second])
             self.deliver_scoped_source(target, "combined-survey", None)
             self.inventory_and_normalize(target)
+            source_id = self.source_id_for(target, "raw/papers/combined-survey.html")
+            self.fulfill_requests(target, [(first, source_id), (second, source_id)])
 
             code, payload, stderr = self.run_resolve(
                 target,
@@ -1936,6 +1983,10 @@ class QuestionResolveTests(unittest.TestCase):
             self.deliver_scoped_source(target, "heat-index", {"facet_id": "heat-index"})
             self.deliver_scoped_source(target, "shade-cover", {"facet_id": "shade-cover"})
             self.inventory_and_normalize(target)
+            self.fulfill_requests(target, [
+                (heat_request, self.source_id_for(target, "raw/papers/heat-index.html")),
+                (shade_request, self.source_id_for(target, "raw/papers/shade-cover.html")),
+            ])
             requests_path = target / "sources" / "source-requests.jsonl"
             before = requests_path.read_bytes()
 
@@ -2221,7 +2272,7 @@ class QuestionResolveTests(unittest.TestCase):
 
 
 class QuestionResolveSeamTests(unittest.TestCase):
-    """CR-6 T9: the library seam and the CLI are one operation, audit entry included.
+    """The library seam and the CLI are one operation, audit entry included.
 
     ``tests/test_seam_conformance.py`` holds the two paths to the same *document*.
     It cannot see ``log.md``, which for a resolution is the record that a question

@@ -1,0 +1,82 @@
+# Optional, declarative overlay. Acquisition remains selected by the workspace owner.
+domain_pack:
+  name: capital-markets
+  version: 0.1.0
+  description: Qualified issuer facts, market observations, hypotheses, and contradictory evidence.
+  compatible_research_yml_contract: "0.1"
+  human_gated: true
+  taxonomy_doc: taxonomy.md
+  claims_doc: claims.md
+  coverage_templates:
+    issuer-facts: coverage-templates/issuer-facts.yml
+    market-observations: coverage-templates/market-observations.yml
+    strategy-hypotheses: coverage-templates/strategy-hypotheses.yml
+    contradictory-risk: coverage-templates/contradictory-risk.yml
+  request_kinds:
+    - id: pack:capital-markets/issuer-facts
+      label: Issuer facts
+      description: Deliver a bounded filing concept with units, fiscal periods, accession revisions, and issuer identity.
+    - id: pack:capital-markets/market-observations
+      label: Market observations
+      description: Deliver a complete bounded price slice with listing identity, universe, and adjustment qualifications.
+    - id: pack:capital-markets/strategy-hypotheses
+      label: Strategy hypotheses
+      description: Supply a falsifiable hypothesis and independently evaluated computation evidence with explicit limitations.
+    - id: pack:capital-markets/contradictory-risk
+      label: Contradictory and risk evidence
+      description: Seek disconfirming evidence, failures, uncertainty, and limits on the proposed inference.
+  policy_vocabularies:
+    evidence_paths:
+      pack:capital-markets/issuer-facts: Exact issuer facts and filing revisions.
+      pack:capital-markets/market-observations: Qualified historical market observations.
+      pack:capital-markets/strategy-hypotheses: Reproducible hypothesis evaluation and limitations.
+      pack:capital-markets/contradictory-risk: Disconfirming evidence and unresolved risks.
+    source_policy:
+      pack:capital-markets/complete-filings: Require a complete qualified filing slice.
+      pack:capital-markets/complete-prices: Require a complete qualified price slice.
+      pack:capital-markets/review-evaluation: Review independent evaluation, selection history, and scope of the conclusion.
+      pack:capital-markets/review-contradictions: Review disconfirming evidence, missing evidence, and consequences.
+    freshness_policy:
+      pack:capital-markets/filing-48h: Require a filing slice retrieved within 48 hours of the evaluation clock.
+      pack:capital-markets/price-48h: Require a price slice retrieved within 48 hours of the evaluation clock.
+      pack:capital-markets/review-validity: Review the period for which the evidence supports this question.
+    identity_policy:
+      pack:capital-markets/issuer-match: Match the requested issuer identifier to the question.
+      pack:capital-markets/listing-review: Match currency and review the entire listing universe and identity intervals.
+      pack:capital-markets/scope-review: Review hypothesis, universe, benchmark, and decision scope.
+  policy_rules:
+    pack:capital-markets/complete-filings:
+      all_of:
+        - equals: {field: record/complete, value: true}
+        - equals: {field: record/route, value: sec-company-concept}
+    pack:capital-markets/complete-prices:
+      all_of:
+        - equals: {field: record/complete, value: true}
+        - equals: {field: record/route, value: alpaca-stock-bars}
+    pack:capital-markets/filing-48h:
+      all_of:
+        - max_age: {field: record/provenance/retrieved_at, hours: 48}
+    pack:capital-markets/price-48h:
+      all_of:
+        - max_age: {field: record/provenance/retrieved_at, hours: 48}
+    pack:capital-markets/issuer-match:
+      all_of:
+        - equals: {field: record/requested/issuer_id, question_field: metadata/issuer_id}
+    pack:capital-markets/listing-review:
+      manual_review_required: true
+      all_of:
+        - equals: {field: record/requested/currency, question_field: metadata/currency}
+  applicable_source_types:
+    - market_evidence
+    - execution_evidence
+    - official_web
+    - technical_report
+  implemented_files:
+    - README.md
+    - taxonomy.md
+    - claims.md
+    - coverage-templates/issuer-facts.yml
+    - coverage-templates/market-observations.yml
+    - coverage-templates/strategy-hypotheses.yml
+    - coverage-templates/contradictory-risk.yml
+  planned_files: []

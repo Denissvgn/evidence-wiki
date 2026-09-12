@@ -72,6 +72,7 @@ ALLOWED_SOURCE_POLICIES = {
     "standards_body_primary",
     "domain_pack_allowed",
     "manual_review_required",
+    "independent_execution_pass",
 }
 ALLOWED_FRESHNESS_POLICIES = {
     "current_legal_figure",

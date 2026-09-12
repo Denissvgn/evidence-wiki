@@ -1,7 +1,7 @@
-"""Tests for author publication discovery (E35-T02).
+"""Tests for author publication discovery.
 
 `discover_sources.py authors --source-id ID --discover-publications` resolves each
-extracted author seed (E35-T01) to an OpenAlex identity and proposes that author's
+extracted author seed to an OpenAlex identity and proposes that author's
 works as `source_candidate` records of source_type `paper`. It performs network I/O
 (`network_io_executed: true`) but never downloads anything; candidates land in the
 durable store for explicit review/selection.

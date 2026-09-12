@@ -1,5 +1,6 @@
-"""Why: CR-5 opens provider registration to third-party distributions, and its second
-acceptance criterion is that a registered provider reaching outside its declared
+"""Transport enforces each registered provider's declared domains and credentials.
+
+A registered provider reaching outside its declared
 `allowed_domains` is blocked *by the package*, not by convention. The planner/executor
 split makes that enforceable: the plugin plans an HTTPS request, and
 `_acquisition_transport.execute_planned_request` is the only thing that performs it.
@@ -29,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 TRANSPORT_PATH = SCRIPTS / "_acquisition_transport.py"
 
-EXECUTOR_MODULE_NAME = "cr5_executor_acquisition_transport"
+EXECUTOR_MODULE_NAME = "provider_executor_acquisition_transport"
 DECLARED_CREDENTIAL = "KEEPA_API_KEY"
 SECRET_VALUE = "keepa-live-9f3a2b7c-do-not-log"
 

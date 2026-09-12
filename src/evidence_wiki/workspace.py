@@ -16,12 +16,16 @@ from typing import Any
 
 from . import _script_host
 from ._facades._base import call_seam
+from ._facades.assessments import AssessmentsNamespace
 from ._facades.coverage import CoverageNamespace
 from ._facades.diagnostics import DiagnosticsNamespace
 from ._facades.grounding import GroundingNamespace
 from ._facades.normalize import NormalizeNamespace
 from ._facades.orchestrate import OrchestrateNamespace
 from ._facades.questions import QuestionsNamespace
+from ._facades.snapshots import SnapshotsNamespace
+from ._facades.temporal import TemporalNamespace
+from ._facades.usage import UsageNamespace
 from .errors import ConfigError
 
 #: Marker file that makes a directory a workspace rather than an ordinary directory.
@@ -75,6 +79,10 @@ class Workspace:
         "grounding",
         "questions",
         "normalize",
+        "usage",
+        "snapshots",
+        "temporal",
+        "assessments",
         "orchestrate",
         "diagnostics",
     )
@@ -86,6 +94,10 @@ class Workspace:
         self.grounding = GroundingNamespace(self)
         self.questions = QuestionsNamespace(self)
         self.normalize = NormalizeNamespace(self)
+        self.usage = UsageNamespace(self)
+        self.snapshots = SnapshotsNamespace(self)
+        self.temporal = TemporalNamespace(self)
+        self.assessments = AssessmentsNamespace(self)
         self.orchestrate = OrchestrateNamespace(self)
         self.diagnostics = DiagnosticsNamespace(self)
 
@@ -205,6 +217,21 @@ class Workspace:
                 :class:`~evidence_wiki.errors.ConfigError`.
         """
         return call_seam(self._script, "export_answers", "run_export", self._root, status=status)
+
+    def publish_selected(
+        self, question_slugs: list[str], *, expected_revision: str | None = None,
+    ) -> dict[str, Any]:
+        """Return selected-question readiness and answers from one coherent revision.
+
+        Duplicates collapse to a sorted set. Empty or unknown selections refuse.
+        Source/configuration integrity stays global; question review and coverage
+        are scoped. Concurrent edits retry at most three times, then raise a typed
+        refusal. This call creates no files in the live workspace.
+        """
+        return call_seam(
+            self._script, "publication_readiness", "run_selected_publication", self._root,
+            question_slugs, expected_revision=expected_revision,
+        )
 
     def doctor(self) -> dict[str, Any]:
         """Diagnose this workspace's runtime, tooling, and configuration.

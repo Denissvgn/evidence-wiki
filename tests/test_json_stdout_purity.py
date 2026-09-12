@@ -28,7 +28,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
-#: The CR-5 fixture provider distribution, discoverable by putting its parent on the
+#: The fixture provider distribution, discoverable by putting its parent on the
 #: child's import path. Registration is packaging metadata, so a subcommand that only
 #: exists for registered providers is unreachable until something is registered.
 PROVIDER_PLUGIN_ROOT = REPO_ROOT / "tests" / "fixtures" / "provider-plugins"
@@ -49,7 +49,7 @@ class Case:
     argv: tuple[str, ...]
     stdout: str
     note: str = ""
-    #: Put the CR-5 fixture provider distribution on the child's import path. Off by
+    #: Put the fixture provider distribution on the child's import path. Off by
     #: default so every pre-existing case runs in exactly the environment it always did.
     plugins_installed: bool = False
 
@@ -81,6 +81,10 @@ WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
         ),
     ),
     "doctor.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
+    "evidence_assessments.py": (Case((*ROOT, "prepare", "--format", "json"), EMPTY),),
+    "evidence_snapshots.py": (Case((*ROOT, "prepare", "--format", "json"), EMPTY),),
+    "evidence_temporal.py": (Case((*ROOT, "evaluate", "--format", "json"), EMPTY),),
+    "evidence_usage.py": (Case((*ROOT, "status", "--format", "json"), EMPTY),),
     "export_answers.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
     "fetch_sources.py": (
         Case(
@@ -109,6 +113,7 @@ WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
         Case((*ROOT, "status", "--orchestration-id", "{orchestration}", "--format", "json"), DOCUMENT),
     ),
     "publication_readiness.py": (Case((*ROOT, "--format", "json"), DOCUMENT),),
+    "qualified_packet.py": (Case((*ROOT, "profiles", "--format", "json"), DOCUMENT),),
     "query_index.py": (Case((*ROOT, "retrieval", "--format", "json"), DOCUMENT),),
     "question_claim.py": (
         Case((*ROOT, "claim", "--slug", "{slug}", "--agent-id", "purity", "--format", "json"), DOCUMENT),
@@ -160,6 +165,7 @@ REPORTS_ON_A_BROKEN_WORKSPACE = {
     "doctor.py",
     "lint.py",
     "publication_readiness.py",
+    "qualified_packet.py",
     "smoke_validate_workspace.py",
     "workspace_gc.py",
     "workspace_status.py",
@@ -342,6 +348,7 @@ class JsonStdoutPurityTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(SCRIPTS / script), *self.resolve(case.argv, project_root)],
             capture_output=True,
+            input="",
             text=True,
             check=False,
             cwd=str(project_root),

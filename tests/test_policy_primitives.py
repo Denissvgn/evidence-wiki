@@ -1,6 +1,6 @@
 """`_policy_primitives.py` — what a pack may declare, and what the declaration decides.
 
-CR-9 lets a domain pack automate policies it previously could only send to a human. The
+Declarative rules let a domain pack automate deterministic evidence policies. The
 value of that trade depends entirely on two properties, and these tests exist to hold
 both.
 
@@ -34,8 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 
 
-RULES = load_script_module("cr9_policy_primitives", "_policy_primitives.py")
-POLICIES = load_script_module("cr9_policy_primitives_evidence", "_evidence_policies.py")
+RULES = load_script_module("policy_policy_primitives", "_policy_primitives.py")
+POLICIES = load_script_module("policy_policy_primitives_evidence", "_evidence_policies.py")
 
 NOW = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
 

@@ -1,6 +1,6 @@
 """A structurally perfect declaration that claims a reserved built-in provider id.
 
-CR-5 §2.4: built-in ids stay reserved and can never be shadowed. This distribution is
+Built-in ids stay reserved and can never be shadowed. This distribution is
 valid in every other respect, so a loader that rejects it is rejecting it for the id alone
 — which is the property worth pinning.
 """

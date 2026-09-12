@@ -88,7 +88,7 @@ from _workspace_module_loader import load_workspace_module
 class ExportRefusal(ScriptRefusal, SystemExit):
     """A coded export refusal, raised from inside ``build_export``.
 
-    Before CR-6 this file declared no exception at all: ``build_export`` refused
+    Before the library seam this file declared no exception at all: ``build_export`` refused
     by constructing a bare ``SystemExit`` and hanging ``error_code`` and
     ``details`` on it as ad-hoc attributes. Naming the type is the improvement;
     the envelope it produces is unchanged.
@@ -820,9 +820,12 @@ def build_question_record(
     return record
 
 
-def build_export(project_root: Path, status_filter: list[str] | None) -> dict[str, Any]:
+def build_export(
+    project_root: Path, status_filter: list[str] | None, *, question_slugs: frozenset[str] | None = None,
+) -> dict[str, Any]:
     project_root = Path(project_root).expanduser().resolve()
     config = load_config(project_root)
+    load_sibling_module("_usage_gate").require_unrestricted_legacy(project_root, config)
     question_status = load_sibling_module("question_status")
     questions_dir = question_status.questions_directory(project_root, config)
 
@@ -835,6 +838,8 @@ def build_export(project_root: Path, status_filter: list[str] | None) -> dict[st
     records: list[dict[str, Any]] = []
     if questions_dir.is_dir():
         for path in sorted(questions_dir.glob("*.md")):
+            if question_slugs is not None and path.stem not in question_slugs:
+                continue
             frontmatter = question_status.load_frontmatter(path)
             if frontmatter is None or frontmatter.get("type") != "question":
                 continue

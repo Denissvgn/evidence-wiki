@@ -22,6 +22,10 @@
 - `url`: HTTP(S) URL parsed from a raw link file.
 - `metadata.codebase_source_type`: `repo_link`, `local_repo`, or `code_archive` for optional codebase architecture evidence.
 - `metadata.codebase_output_dir`: generated artifact directory under `sources/` for codebase analysis output.
+- `metadata.execution_profile`: `execution_evidence/v1` selects the inert
+  [execution evidence contract](execution-evidence.md). Kind `execution_evidence`
+  selects the same profile automatically. Unsupported declarations refuse
+  normalization rather than falling back to a generic text reader.
 
 Future tasks may add fields such as extraction warnings or normalization status. Scripts should preserve unknown fields when practical.
 

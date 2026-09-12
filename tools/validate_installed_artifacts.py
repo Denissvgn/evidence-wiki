@@ -1,0 +1,1139 @@
+#!/usr/bin/env python3
+"""Validate built distributions the same way in CI and at release time.
+
+One validator, two callers. The CI ``package`` job and the release gate used to
+carry their own copies of the installed-wheel smoke, which had already drifted:
+the release copy probed the round-trip YAML dependency and the CI copy did not,
+and neither ever installed anything derived from the sdist. This tool is the
+single path both invoke:
+
+1. **Archive membership.** Every member of the wheel and the sdist is checked
+   against the public packaging policy: required assets must be present and
+   internal material (reports, planning documents, caches, environments, build
+   output) must be absent. The sdist's broad ``include`` list is not evidence of
+   a leak on its own; the archive is.
+2. **Installed wheel.** The wheel is installed into a fresh virtual environment
+   and exercised from there: package identity, that imports resolve inside the
+   fresh install rather than the checkout, pinned runtime dependencies and the
+   YAML round-trip behaviour this package relies on, deploy, pack refresh,
+   orchestration start/next/status, the required-asset manifest, the result
+   schema, and the managed failure/resume smoke.
+3. **Installed sdist.** The sdist is unpacked into an isolated directory, a
+   wheel is built from it, and that wheel goes through exactly the same
+   installed checks. A distribution that only works because the wheel was built
+   from the checkout fails here.
+
+The summary printed at the end records the artifact names, their SHA-256
+digests, the version, and each check's result, so a release can cite the exact
+bytes it verified.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import textwrap
+import zipfile
+from pathlib import Path, PurePosixPath
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SMOKE_TOOL = REPO_ROOT / "tools" / "smoke_installed_orchestration.py"
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from evidence_wiki import resources  # noqa: E402 - the checkout's manifest names what the archives must carry.
+
+#: Every asset the package contract requires, as archive-relative paths.
+REQUIRED_ASSET_PATHS = tuple(
+    relative for group in resources.required_asset_manifest().values() for relative in group
+)
+
+#: Members that must never ship, as path prefixes relative to the archive's
+#: project root. Matched against the sdist's members after its leading
+#: ``<name>-<version>/`` directory is stripped, and against wheel members as-is.
+FORBIDDEN_PREFIXES = (
+    ".git/",
+    ".github/",
+    ".llm-wiki/",
+    ".pytest_cache/",
+    ".research-cache/",
+    ".ruff_cache/",
+    ".venv/",
+    "build/",
+    "dist/",
+    "docs/CR/",
+    "docs/llm_wiki/",
+    "htmlcov/",
+    "pilot-workspaces/",
+    "reports/",
+    "temp/",
+    "temp_codebase_project/",
+    "temp_workspace/",
+    "venv/",
+)
+
+#: Individual top-level files that are maintainer-local and must not ship.
+FORBIDDEN_TOP_LEVEL_FILES = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "RELEASING.md",
+    ".coverage",
+    ".env",
+    ".research-handoff-secret",
+)
+
+#: Path components that mark cache or environment residue anywhere in a tree.
+FORBIDDEN_COMPONENTS = ("__pycache__", ".venv", ".research-cache")
+FORBIDDEN_SUFFIXES = (".pyc", ".pyo")
+
+#: Members every wheel must carry: the package plus every asset the contract names.
+REQUIRED_WHEEL_MEMBERS = (
+    "evidence_wiki/__init__.py",
+    "evidence_wiki/cli.py",
+    *(f"evidence_wiki/assets/{relative}" for relative in REQUIRED_ASSET_PATHS),
+)
+
+#: Members every sdist must carry: what a from-source build and its checks need,
+#: including every asset the wheel built from it will have to force-include.
+REQUIRED_SDIST_MEMBERS = (
+    "pyproject.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "src/evidence_wiki/__init__.py",
+    "tools/smoke_installed_orchestration.py",
+    "tools/validate_installed_artifacts.py",
+    "tests/_publication_fixture.py",
+    "tests/fixtures/fake_codex_cli.py",
+    "tests/fixtures/madrid-autonomo-workspace/AGENTS.md",
+    "examples/urban-heat-resilience-workspace/AGENTS.md",
+    *REQUIRED_ASSET_PATHS,
+)
+
+SDIST_ROOT_RE = re.compile(r"^[^/]+/")
+
+
+class ValidationError(SystemExit):
+    """A failed check; the message names the artifact and the reason."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(f"artifact validation failed: {message}")
+
+
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def find_artifacts(dist_dir: Path) -> tuple[Path, Path]:
+    """Return exactly one wheel and one sdist, refusing an ambiguous directory."""
+    wheels = sorted(dist_dir.glob("*.whl"))
+    sdists = sorted(dist_dir.glob("*.tar.gz"))
+    if len(wheels) != 1 or len(sdists) != 1:
+        raise ValidationError(
+            f"{dist_dir} must contain exactly one wheel and one sdist; "
+            f"found {[path.name for path in wheels]} and {[path.name for path in sdists]}"
+        )
+    return wheels[0], sdists[0]
+
+
+def wheel_members(path: Path) -> list[str]:
+    with zipfile.ZipFile(path) as archive:
+        return sorted(archive.namelist())
+
+
+def sdist_members(path: Path) -> list[str]:
+    """Members relative to the project root, with the ``<name>-<version>/`` prefix removed."""
+    with tarfile.open(path, "r:gz") as archive:
+        names = [member.name for member in archive.getmembers() if member.isfile()]
+    stripped: list[str] = []
+    for name in names:
+        if SDIST_ROOT_RE.match(name) is None:
+            raise ValidationError(f"{path.name}: sdist member is not below a root directory: {name}")
+        stripped.append(SDIST_ROOT_RE.sub("", name, count=1))
+    return sorted(stripped)
+
+
+def forbidden_members(members: list[str]) -> list[str]:
+    """Members the public packaging policy forbids, in archive order."""
+    flagged: list[str] = []
+    for member in members:
+        posix = PurePosixPath(member)
+        if member.startswith(FORBIDDEN_PREFIXES):
+            flagged.append(member)
+        elif member in FORBIDDEN_TOP_LEVEL_FILES:
+            flagged.append(member)
+        elif any(component in FORBIDDEN_COMPONENTS for component in posix.parts):
+            flagged.append(member)
+        elif posix.suffix in FORBIDDEN_SUFFIXES:
+            flagged.append(member)
+    return flagged
+
+
+def missing_members(members: list[str], required: tuple[str, ...]) -> list[str]:
+    present = set(members)
+    return [member for member in required if member not in present]
+
+
+def check_archive_membership(wheel: Path, sdist: Path) -> dict[str, object]:
+    wheel_names = wheel_members(wheel)
+    sdist_names = sdist_members(sdist)
+    problems: list[str] = []
+    for label, names, required in (
+        (wheel.name, wheel_names, REQUIRED_WHEEL_MEMBERS),
+        (sdist.name, sdist_names, REQUIRED_SDIST_MEMBERS),
+    ):
+        flagged = forbidden_members(names)
+        if flagged:
+            problems.append(f"{label} ships internal material: {', '.join(flagged[:10])}")
+        missing = missing_members(names, required)
+        if missing:
+            problems.append(f"{label} is missing required members: {', '.join(missing)}")
+    if problems:
+        raise ValidationError("; ".join(problems))
+    return {"wheel_members": len(wheel_names), "sdist_members": len(sdist_names)}
+
+
+def run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
+    process = subprocess.run(  # noqa: S603 - argv is fixed by this repository-owned validator.
+        argv,
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if process.returncode != 0:
+        raise ValidationError(
+            f"command returned {process.returncode}: {argv!r}\nstdout:\n{process.stdout}\nstderr:\n{process.stderr}"
+        )
+    return process.stdout
+
+
+def venv_python(venv: Path) -> Path:
+    if os.name == "nt":
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
+
+
+def venv_cli(venv: Path) -> Path:
+    if os.name == "nt":
+        return venv / "Scripts" / "evidence-wiki.exe"
+    return venv / "bin" / "evidence-wiki"
+
+
+def create_venv_with_wheel(root: Path, wheel: Path) -> Path:
+    venv = root / "venv"
+    run([sys.executable, "-m", "venv", str(venv)])
+    python = venv_python(venv)
+    run([str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", str(wheel)])
+    return venv
+
+
+INSTALLED_PROBE = textwrap.dedent(
+    '''
+    import json
+    import sys
+    from importlib.metadata import version
+    from io import StringIO
+    from pathlib import Path
+
+    import evidence_wiki
+    import pypdf
+    import ruamel.yaml
+    from evidence_wiki import resources
+    from evidence_wiki.orchestration import ORCHESTRATION_RESULT_SCHEMA
+
+    expected, pack_refresh_path = sys.argv[1], sys.argv[2]
+
+    if evidence_wiki.__version__ != version("evidence-wiki"):
+        raise SystemExit("Installed package metadata and module versions differ")
+    if expected and evidence_wiki.__version__ != expected:
+        raise SystemExit(
+            f"Installed wheel version {evidence_wiki.__version__!r} does not match expected version {expected!r}"
+        )
+    installed_path = Path(evidence_wiki.__file__).resolve()
+    if "site-packages" not in installed_path.parts:
+        raise SystemExit(f"EvidenceWiki was not imported from the installed wheel: {installed_path}")
+    if not pypdf.__version__.startswith("6."):
+        raise SystemExit(f"Installed wheel resolved unsupported pypdf version {pypdf.__version__!r}")
+    if not ruamel.yaml.__version__.startswith("0.19."):
+        raise SystemExit(f"Installed wheel resolved unsupported ruamel.yaml version {ruamel.yaml.__version__!r}")
+
+    round_trip_yaml = ruamel.yaml.YAML(typ="rt", pure=True)
+    round_trip_yaml.preserve_quotes = True
+    round_trip_source = '# operator note\\nquoted: "preserve me"\\n'
+    round_trip_document = round_trip_yaml.load(round_trip_source)
+    round_trip_output = StringIO()
+    round_trip_yaml.dump(round_trip_document, round_trip_output)
+    if round_trip_output.getvalue() != round_trip_source:
+        raise SystemExit("Installed ruamel.yaml dependency did not preserve YAML comments and quotes")
+
+    pack_refresh = json.loads(Path(pack_refresh_path).read_text(encoding="utf-8"))
+    if pack_refresh.get("status") != "no_changes" or pack_refresh.get("log_appended") is not False:
+        raise SystemExit(f"Installed-wheel bundled pack refresh was not a no-op: {pack_refresh!r}")
+    if not (Path(pack_refresh["target"]) / "domain-packs" / ".evidence-wiki-state.yml").is_file():
+        raise SystemExit("Installed-wheel pack initialization did not create lifecycle state")
+
+    properties = ORCHESTRATION_RESULT_SCHEMA["properties"]
+    if properties["schema_version"] != {"type": "string", "enum": ["1.0"]}:
+        raise SystemExit("Installed wheel contains an incompatible orchestration result schema")
+    if any("type" not in definition for definition in properties.values()):
+        raise SystemExit("Installed wheel result schema contains an untyped property")
+
+    with resources.assets_root() as assets:
+        missing = resources.missing_required_assets(assets)
+        if missing:
+            raise SystemExit(f"Installed wheel is missing required assets: {missing}")
+        required = (
+            "workspace-template/docs/orchestration.md",
+            "workspace-template/docs/orchestrator-handoff.md",
+            "workspace-template/docs/run-controller.md",
+            "workspace-template/scripts/_domain_pack_lifecycle.py",
+            "workspace-template/skills/research-run.md",
+            "workspace-template/skills/research-discover.md",
+            "workspace-template/skills/research-acquire.md",
+            "workspace-template/skills/research-verify.md",
+            "orchestrator/skills/research-orchestrate.md",
+        )
+        absent = [relative for relative in required if not (assets / relative).is_file()]
+        if absent:
+            raise SystemExit(f"Installed wheel is missing orchestration assets: {absent}")
+    print(json.dumps({"version": evidence_wiki.__version__, "installed_from": str(installed_path)}))
+    '''
+)
+
+
+PUBLICATION_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    import yaml
+    import evidence_wiki
+    from evidence_wiki import Workspace
+    from evidence_wiki.errors import PublicationError, RevisionError
+
+    cli, fixture_path, profile_path, target = map(Path, sys.argv[1:])
+    assert Path(evidence_wiki.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+    spec = importlib.util.spec_from_file_location("publication_fixture", fixture_path)
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    profile = yaml.safe_load(profile_path.read_text())
+    profile["workspace_init"]["target_path"] = str(target)
+    profile["workspace_init"]["questions"] = [{"id": "vendor-product-spec", "question": "What is the product spec?", "priority": "high"}]
+    local_profile = target.parent / "publication-profile.yml"
+    local_profile.write_text(yaml.safe_dump(profile))
+    subprocess.run([str(cli), "init", "--profile", str(local_profile)], check=True, capture_output=True, text=True, timeout=60)
+    fixture.write_ship_ready_vendor_fixture(target)
+    question = target / "wiki/questions/vendor-product-spec.md"
+    (question.parent / "awaiting-review.md").write_text(question.read_text().replace("status: answered", "status: human_review"))
+    def contents():
+        return {str(p.relative_to(target)): p.read_bytes() for p in target.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
+    before = contents()
+    command = [str(cli), "publication", "--target", str(target), "--format", "json", "--question"]
+    with Workspace.open(target) as workspace:
+        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            try:
+                workspace.publish_selected(["vendor-product-spec"])
+            except RevisionError as error:
+                assert error.error_code == "EVIDENCE_REVISION_UNSUPPORTED"
+            else:
+                raise AssertionError("unsupported capture was accepted")
+            result = subprocess.run([*command, "vendor-product-spec"], capture_output=True, text=True, timeout=60)
+            assert result.returncode == 2 and json.loads(result.stderr)["error_code"] == "EVIDENCE_REVISION_UNSUPPORTED"
+            outcome = "unsupported-refusal-verified"
+        else:
+            document = workspace.publish_selected(["vendor-product-spec"])
+            result = subprocess.run([*command, "vendor-product-spec"], capture_output=True, text=True, timeout=60)
+            assert result.returncode == 0, result.stderr + result.stdout
+            rendered = json.loads(result.stdout)
+            assert document["verdict"] == "ship"
+            for key in ("revision", "producer_id", "gate_scope", "question_slugs", "verdict"):
+                assert document[key] == rendered[key], key
+            assert document["export"]["questions"] == rendered["export"]["questions"]
+            try:
+                workspace.publish_selected(["absent"])
+            except PublicationError as error:
+                refusal = {key: getattr(error, key) for key in ("error_code", "message", "details", "recoverable", "remediation")}
+            else:
+                raise AssertionError("unknown question was accepted")
+            result = subprocess.run([*command, "absent"], capture_output=True, text=True, timeout=60)
+            rendered_refusal = json.loads(result.stderr)
+            assert result.returncode == 2
+            assert all(rendered_refusal.get(key, {}) == value for key, value in refusal.items())
+            outcome = "passed"
+    assert before == contents(), "publication changed the live workspace"
+    print(json.dumps({"selected_publication": outcome}))
+    '''
+)
+
+
+PACKET_PROBE = textwrap.dedent(
+    '''
+    import hashlib
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    import yaml
+    from evidence_wiki import Workspace, contract
+
+    cli, fixtures, root = map(Path, sys.argv[1:])
+    profile = "qualified_context_packet/v1"
+    record = {"id": "codebase:sample", "kind": "codebase_architecture", "raw_paths": [],
+        "raw_fingerprint": "sha256:synthetic", "metadata": {}}
+    folder = root / "sources/code_wikis/codebase--sample"
+    folder.mkdir(parents=True)
+    config = {"sources": {"manifest_path": "sources/manifest.jsonl"}, "integrations": {"codebase_analysis": {"intake_profile": profile}}}
+    (root / "research.yml").write_text(yaml.safe_dump(config))
+    (root / "sources/manifest.jsonl").write_text(json.dumps(record) + "\\n")
+    normalized = root / "sources/normalized/codebase--sample.md"
+    normalized.parent.mkdir()
+    headings = ["Citation Metadata", "Abstract", "Outline", "Extracted Text", "Figures and Tables",
+        "Links", "Raw Source Paths", "Parse Warnings"]
+    body = "\\n".join("\\n## " + heading + "\\n\\n- None recorded.\\n" for heading in headings)
+
+    def write_record(report, producer):
+        frontmatter = {"type": "normalized_source", "normalized_format": 1, "source_id": record["id"],
+            "source_kind": record["kind"], "status": "content_extracted", "evidence_usable": True,
+            "created": "2026-09-10", "updated": "2026-09-10", "raw_paths": [],
+            "manifest_path": "sources/manifest.jsonl", "raw_fingerprint": record["raw_fingerprint"],
+            "normalizer": {"name": producer, "version": "1"}, "parse_warnings": []}
+        if report is not None:
+            frontmatter["qualified_context"] = report
+        normalized.write_text("---\\n" + yaml.safe_dump(frontmatter) + "---\\n" + body)
+
+    cases = []
+    with Workspace.open(root) as workspace:
+        assert workspace.normalize.profiles() == contract()["intake_profiles"]
+        for fixture in sorted(fixtures.glob("*.json")):
+            packet = fixture.read_bytes()
+            manifest = {"schema_version": "1", "artifact_kind": "codebase_evidence", "source_id": record["id"],
+                "intake_profile": profile, "packet_path": "packet.json", "generated_at": "2026-09-10T00:00:00Z",
+                "producer": {"name": "agent-wiki-cli", "version": "1.8.0"},
+                "invocation": {"executed_by": "external_worker", "argv": ["llm-wiki", "context"],
+                    "plugins_enabled": False, "hooks_enabled": False, "network_access": False},
+                "files": [{"path": "packet.json", "size_bytes": len(packet), "sha256": hashlib.sha256(packet).hexdigest()}]}
+            (folder / "packet.json").write_bytes(packet)
+            (folder / "artifact-manifest.json").write_text(json.dumps(manifest))
+            report = workspace.normalize.validate_packet(record["id"])
+            result = subprocess.run([str(cli), "normalize", "packet", "--target", str(root), "--source-id", record["id"]],
+                capture_output=True, text=True, timeout=60)
+            assert json.loads(result.stdout) == report, result.stderr
+            if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+                assert not report["valid"] and report["reason"] == "delivery_capture_unsupported"
+                assert result.returncode == 1
+            else:
+                assert report["valid"] and report["policy_satisfied"] and result.returncode == 0, report
+                assert report["packet_id"] == json.loads(packet)["packet_id"]
+                assert report["worker_authentication"] == "not_established"
+                for producer in ["normalize_sources.py", "external-tool"]:
+                    write_record(report, producer)
+                    verification = workspace.normalize.verify()
+                    assert verification["overall_result"] == "verified", verification
+                    checked = subprocess.run([str(cli), "normalize", "verify", "--target", str(root), "--format", "json"],
+                        capture_output=True, text=True, timeout=60)
+                    assert checked.returncode == 0 and json.loads(checked.stdout)["overall_result"] == "verified", checked.stderr
+                    write_record(None, producer)
+                    assert workspace.normalize.verify()["overall_result"] == "not_verified"
+                write_record(report, "external-tool")
+            cases.append(fixture.stem)
+        config["integrations"]["codebase_analysis"]["require_live_reconciliation"] = True
+        (root / "research.yml").write_text(yaml.safe_dump(config))
+        report = workspace.normalize.validate_packet(record["id"])
+        assert not report.get("policy_satisfied")
+    assert cases, "native packet corpus is absent"
+    print(json.dumps({"qualified_packet_intake": cases, "required_live_policy": "refused"}))
+    '''
+)
+
+
+EXECUTION_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    from evidence_wiki import Workspace, contract
+
+    cli, fixture, root = map(Path, sys.argv[1:])
+    spec = importlib.util.spec_from_file_location("laboratory_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    authority = root.parent / "laboratory-authority.json"
+    data.host_policy(authority)
+    os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"] = str(authority.resolve())
+    _config, record, folder = data.workspace(root)
+    with Workspace.open(root) as workspace:
+        report = workspace.normalize.validate_execution(record["id"])
+        checked = subprocess.run([str(cli), "normalize", "execution", "--target", str(root), "--source-id", record["id"]],
+                                 capture_output=True, text=True, timeout=60)
+        cli_report = json.loads(checked.stdout)
+        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            assert not report["valid"] and checked.returncode == 1, report
+            calculation = "unsupported_capture_refused"
+        else:
+            assert report["valid"] and report["verification"]["eligible"], report
+            assert cli_report["valid"] and cli_report["verification"]["eligible"] and checked.returncode == 0, cli_report
+            assert [item["outcome"] for item in report["records"]] == ["failed", "inconclusive", "passed"]
+            files = {path.name: path.read_bytes() for path in folder.iterdir()}
+            for observation in report["records"]:
+                if observation["record_type"] == "observation":
+                    assert data.independently_recalculate(files, observation["payload"])[2] == observation["outcome"]
+            policy = json.loads(authority.read_bytes())
+            policy["revoked_keys"] = ["evaluator-key"]
+            authority.write_bytes(data.canonical(policy))
+            revoked = workspace.normalize.validate_execution(record["id"])
+            assert revoked["valid"] and not revoked["verification"]["eligible"]
+            (folder / "result.txt").write_bytes(b"changed original bytes")
+            assert not workspace.normalize.validate_execution(record["id"])["valid"]
+            calculation = "independently_recalculated"
+        assert "normalize.validate_execution" in contract()["library_api"]["surface"]
+    print(json.dumps({"execution_evidence": "validated", "calculation": calculation}))
+    '''
+)
+
+
+MARKET_PROBE = textwrap.dedent(
+    '''
+    import json
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    import yaml
+    from evidence_wiki import Workspace, contract
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    from tests._market_fixture import SOURCE_ID, example, workspace
+    checked = []
+    for route in ("sec-company-concept", "alpaca-stock-bars"):
+        root = directory / route
+        _config, _record, originals = workspace(root, example(route)[0])
+        with Workspace.open(root) as evidence:
+            report = evidence.normalize.validate_market(SOURCE_ID)
+            assert report["valid"] and report["completeness"]["complete"], report
+            assert report["authority"] == "not_evaluated"
+            values = report["data"]["observations"]
+            if route == "sec-company-concept":
+                assert values[0]["value"] == "1234567890123456789"
+            else:
+                assert values[0]["close"] == "10.1234567890123456789"
+            command = [str(cli), "normalize", "market", "--target", str(root), "--source-id", SOURCE_ID, "--format", "json"]
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            assert json.loads(result.stdout) == report
+            (originals / "page.json").write_bytes(b"{}")
+            assert not evidence.normalize.validate_market(SOURCE_ID)["valid"]
+            result = subprocess.run(command, capture_output=True, text=True)
+            assert result.returncode == 1 and not json.loads(result.stdout)["valid"]
+            checked.append(route)
+    assert "normalize.validate_market" in contract()["library_api"]["surface"]
+    target = directory / "optional-pack"
+    subprocess.run([str(cli), "init", "--target", str(target), "--project-name", "Market evidence",
+                    "--project-description", "Bounded observations", "--owner-goal", "Review evidence",
+                    "--domain-pack", "capital-markets"], capture_output=True, text=True, check=True)
+    config = yaml.safe_load((target / "research.yml").read_text())
+    for kind in ("acquisition", "discovery"):
+        assert not config["integrations"][kind]["enabled"]
+        assert not config["integrations"][kind]["providers"]
+    result = subprocess.run([str(cli), "pack", "refresh", "--target", str(target), "--path", "capital-markets",
+                             "--dry-run", "--format", "json"], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout)["status"] == "no_changes"
+    print(json.dumps({"market_evidence": "passed", "market_routes": checked, "optional_market_pack": "passed"}))
+    '''
+)
+
+
+USAGE_PROBE = textwrap.dedent(
+    '''
+    import base64
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    import yaml
+    from evidence_wiki import Workspace, contract
+    from evidence_wiki.errors import SourceError
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("usage_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+    host = data.UsageFixture(directory, Environment())
+    (host.root / "research.yml").write_text(yaml.safe_dump(host.config))
+    with Workspace.open(host.root) as workspace:
+        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            try:
+                workspace.usage.status()
+            except SourceError as exc:
+                assert exc.error_code == "EVIDENCE_USAGE_REFUSED"
+            else:
+                raise AssertionError("Unsupported host storage was accepted")
+            print(json.dumps({"evidence_usage": "unsupported_host_refused"}))
+            sys.exit(0)
+        assert workspace.usage.status()["initialized"] is False
+        command = host.command("initialize")
+        host.checkpoint = workspace.usage.transact(command)["checkpoint"]
+        body, files = host.source()
+        command = host.command("deposit", body)
+        request = {"command": command, "artifacts": {path: base64.b64encode(value).decode() for path, value in files.items()}}
+        result = subprocess.run([str(cli), "usage", "transact", "--target", str(host.root)],
+                                input=json.dumps(request), capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr
+        receipt = json.loads(result.stdout)
+        assert workspace.usage.transact(command, artifacts=files) == receipt
+        host.checkpoint = receipt["checkpoint"]
+        decision = workspace.usage.check(body["source_revision"], uses=["training", "export"],
+                                         purpose="training-snapshot", consumer="evidence-wiki")
+        assert decision["eligible"], decision
+        result = workspace.usage.materialize(body["source_revision"])
+        assert (host.root / result["path"]).read_bytes() == files["normalized.md"]
+        assert not workspace.usage.materialize(body["source_revision"])["changed"]
+        command = host.command("revoke", {"source_id": body["source_id"], "source_revision": body["source_revision"],
+                                           "scope": "revision", "reason": "owner-withdrawal"})
+        receipt = workspace.usage.transact(command)
+        assert workspace.usage.transact(command) == receipt
+        assert workspace.usage.status(request_id=command["payload"]["request_id"])["receipt"] == receipt
+        decision = workspace.usage.check(body["source_revision"], uses=["retrieval"], purpose="research", consumer="evidence-wiki")
+        assert not decision["eligible"], decision
+        assert workspace.usage.lineage(body["source_revision"])["complete"]
+        try:
+            workspace.usage.materialize(body["source_revision"])
+        except SourceError as exc:
+            assert exc.error_code == "EVIDENCE_USAGE_REFUSED"
+        else:
+            raise AssertionError("Revoked materialization was accepted")
+        assert contract()["evidence_usage"]["retention"] == ["host-managed"]
+    print(json.dumps({"evidence_usage": "validated", "revocation": "current", "command_retry": "idempotent"}))
+    '''
+)
+
+
+SNAPSHOT_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import contract, verify_snapshot
+    from evidence_wiki.errors import SourceError
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"evidence_snapshots": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("snapshot_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+    host = data.SnapshotFixture(directory, Environment())
+    body, _ = host.add_execution()
+    selection = host.selection(body)
+    raw, preparation, registration, exported = host.export(selection)
+    policy = host.policy_path.read_bytes()
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert host.workspace.snapshots.check(raw)["current_use"] == "authorized"
+    result = subprocess.run([str(cli), "snapshot", "verify", "--trust-policy", str(host.policy_path)],
+                            input=raw, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["valid"]
+    repeated = host.workspace.snapshots.export(selection, registration_request_id=registration["payload"]["request_id"])
+    assert not repeated["created"] and repeated["content_hash"] == exported["content_hash"]
+    host.revoke(host.module, host.parent)
+    assert host.workspace.snapshots.check(raw)["current_use"] == "denied"
+    try:
+        host.workspace.snapshots.export(selection, registration_request_id=registration["payload"]["request_id"])
+    except SourceError as exc:
+        assert exc.error_code == "EVIDENCE_SNAPSHOT_REFUSED"
+    else:
+        raise AssertionError("Revoked snapshot was published")
+    host.workspace.close()
+    host.root.rename(host.root.with_name("origin-moved"))
+    host.policy_path.unlink()
+    del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
+    del os.environ["EVIDENCE_WIKI_STATE_DIR"]
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert "verify_snapshot" in contract()["library_api"]["surface"]
+    print(json.dumps({"evidence_snapshots": "validated", "offline_origin": "absent", "snapshot_current_use": "revocation_denied"}))
+    '''
+)
+
+
+TEMPORAL_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import contract, verify_snapshot
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"evidence_temporal": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("temporal_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+        def setitem(self, mapping, key, value):
+            mapping[key] = value
+    host = data.TemporalFixture(directory, Environment())
+    first, _ = host.captured()
+    request = host.request()
+    original = host.evaluate(request)
+    assert original["result"]["selected"][0]["source_revision"] == first["source_revision"]
+    result = subprocess.run([str(cli), "temporal", "evaluate", "--target", str(host.root)],
+                            input=json.dumps(request).encode(), capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["result_id"] == original["result_id"]
+    host.set_time("2026-09-10T02:00:00Z")
+    host.captured(value="later correction", available="2026-09-10T01:30:00Z", supersedes=first["source_revision"])
+    assert host.evaluate(request)["result_id"] == original["result_id"]
+    body, _, selection = host.execution_source(mode="historical-available")
+    assert not host.evaluate(host.request(body["source_id"]))["result"]["complete"]
+    assert host.evaluate(host.request(body["source_id"], mode="historical-available"))["result"]["complete"]
+    raw, _, registration, exported = host.export(selection)
+    assert json.loads(raw)["schema_version"] == "evidence-snapshot/v2"
+    repeated = host.workspace.snapshots.export(selection, registration_request_id=registration["payload"]["request_id"])
+    assert not repeated["created"] and repeated["content_hash"] == exported["content_hash"]
+    result = subprocess.run([str(cli), "snapshot", "verify", "--trust-policy", str(host.policy_path)],
+                            input=raw, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["valid"]
+    host.revoke(host.module, host.parent)
+    assert host.workspace.snapshots.check(raw)["current_use"] == "denied"
+    policy = host.policy_path.read_bytes()
+    host.workspace.close()
+    host.root.rename(host.root.with_name("origin-moved"))
+    host.host.rename(host.host.with_name("host-moved"))
+    del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
+    del os.environ["EVIDENCE_WIKI_STATE_DIR"]
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert "temporal.evaluate" in contract()["library_api"]["surface"]
+    print(json.dumps({"evidence_temporal": "validated", "temporal_cli_api": "same_revision",
+                      "temporal_snapshot": "independent_offline_verification"}))
+    '''
+)
+
+
+HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import contract, verify_snapshot
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"historical_execution": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("historical_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+        def setitem(self, mapping, key, value):
+            mapping[key] = value
+    host = data.HistoricalFixture(directory, Environment())
+    body, files = host.history(mode="historical-available")
+    report, assessment = host.assessment(body, files)
+    assert assessment["eligible"], assessment
+    assert assessment["historical_inputs"]["qualified_source_cutoffs"] == 1
+    assert [item["outcome"] for item in report["records"]] == ["failed", "inconclusive", "passed"]
+    raw, _, registration, exported = host.export(host.selection(body))
+    assert json.loads(raw)["schema_version"] == "evidence-snapshot/v3"
+    policy = host.policy_path.read_bytes()
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    result = subprocess.run([str(cli), "snapshot", "verify", "--trust-policy", str(host.policy_path)],
+                            input=raw, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["valid"]
+    repeated = host.workspace.snapshots.export(host.selection(body), registration_request_id=registration["payload"]["request_id"])
+    assert not repeated["created"] and repeated["content_hash"] == exported["content_hash"]
+    host.revoke(host.module, host.parent)
+    assert host.workspace.snapshots.check(raw)["current_use"] == "denied"
+    host.workspace.close()
+    host.root.rename(host.root.with_name("origin-moved"))
+    host.host.rename(host.host.with_name("host-moved"))
+    del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
+    del os.environ["EVIDENCE_WIKI_STATE_DIR"]
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert contract()["library_api"]["version"] == "12"
+    print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
+    '''
+)
+
+
+SIMULATION_PROBE = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import contract, verify_snapshot
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"market_simulation": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("simulation_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+        def setitem(self, mapping, key, value):
+            mapping[key] = value
+    host = data.SimulationFixture(directory, Environment())
+    body, files = host.simulation(mode="historical-available")
+    report, assessment = host.assessment(body, files)
+    assert assessment["eligible"], assessment
+    simulation = report["records"][0]["market_simulation"]
+    assert simulation["calculation"]["passed"]
+    assert simulation["simulated_performance"]["net_profit"] == "-68.81"
+    raw, _, _, _ = host.export(host.selection(body))
+    assert json.loads(raw)["schema_version"] == "evidence-snapshot/v4"
+    assert json.loads(raw)["manifest"]["execution_profiles"] == ["market-simulation/v1"]
+    policy = host.policy_path.read_bytes()
+    result = subprocess.run([str(cli), "snapshot", "verify", "--trust-policy", str(host.policy_path)],
+                            input=raw, capture_output=True, timeout=60)
+    assert result.returncode == 0 and json.loads(result.stdout)["valid"], result.stderr
+    corrupt = json.loads(raw)
+    corrupt["schema_version"] = "evidence-snapshot/v3"
+    assert not verify_snapshot(data.canonical(corrupt), trust_policy_bytes=policy)["valid"]
+    host.workspace.close()
+    host.root.rename(host.root.with_name("origin-moved"))
+    host.host.rename(host.host.with_name("host-moved"))
+    del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
+    del os.environ["EVIDENCE_WIKI_STATE_DIR"]
+    assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
+    assert contract()["evidence_snapshots"]["optional_execution_profiles"] == ["market-simulation/v1"]
+    print(json.dumps({"market_simulation": "independently_recalculated", "profiled_snapshot": "independent_offline_verification"}))
+    '''
+)
+
+
+ASSESSMENT_PROBE = textwrap.dedent(
+    r'''
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+    import types
+    from pathlib import Path
+    from evidence_wiki import Workspace, contract
+    from evidence_wiki.errors import EvidenceWikiError
+
+    cli, fixture, directory = map(Path, sys.argv[1:])
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        print(json.dumps({"evidence_assessments": "unsupported_host"}))
+        sys.exit(0)
+    directory.mkdir()
+    package = types.ModuleType("tests")
+    package.__path__ = [str(fixture.parent)]
+    sys.modules["tests"] = package
+    spec = importlib.util.spec_from_file_location("assessment_fixture", fixture)
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    class Environment:
+        def setenv(self, name, value):
+            os.environ[name] = value
+    def initialize(profile):
+        result = subprocess.run([str(cli), "init", "--profile", str(profile)], capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr
+    host = data.AssessmentFixture(directory, Environment(), initialize)
+    with Workspace.open(host.root) as workspace:
+        host.checkpoint = workspace.usage.transact(host.command("initialize"))["checkpoint"]
+        body, files = host.temporal_source()
+        host.checkpoint = workspace.usage.transact(host.command("deposit", body), artifacts=files)["checkpoint"]
+        def command(operation, value):
+            result = subprocess.run([str(cli), "assessments", operation, "--target", str(host.root)],
+                                    input=json.dumps(value), capture_output=True, text=True, timeout=60)
+            assert result.returncode == 0, result.stderr
+            return json.loads(result.stdout)
+        prepared = command("prepare", host.request())
+        envelope = host.sign(prepared["registration"])
+        receipt = command("issue", envelope)
+        host.checkpoint = receipt["checkpoint"]
+        assert workspace.assessments.issue(envelope) == receipt
+        assert workspace.assessments.check(envelope)["eligible"]
+        assert command("check", envelope)["external_action_authorized"] is False
+        corrupt = json.loads(json.dumps(envelope))
+        corrupt["payload"]["body"]["assessment"]["publication"]["export"]["questions"][0]["answer_summary"] = "forged"
+        before = (host.host / "evidence-state.json").read_bytes()
+        try:
+            workspace.assessments.issue(corrupt)
+        except EvidenceWikiError as exc:
+            assert exc.error_code == "EVIDENCE_ASSESSMENT_REFUSED"
+        else:
+            raise AssertionError("altered assessment was accepted")
+        assert (host.host / "evidence-state.json").read_bytes() == before
+        revocation = {"source_id": body["source_id"], "scope": "revision", "source_revision": body["source_revision"], "reason": "owner-withdrawal"}
+        host.checkpoint = workspace.usage.transact(host.command("revoke", revocation))["checkpoint"]
+        assert not workspace.assessments.check(envelope)["eligible"]
+        refresh = workspace.assessments.plan_refresh(host.refresh())
+        assert refresh["plan"]["coverage"]["complete"] and len(refresh["plan"]["entries"]) == 1
+        application = host.sign(refresh["application"])
+        applied = command("apply-refresh", application)
+        assert workspace.assessments.apply_refresh(application) == applied
+        assert workspace.assessments.check(envelope)["reasons"] == ["assessment_invalidated"]
+        assert command("plan-refresh", host.refresh())["plan"]["entries"] == []
+        assert contract()["library_api"]["version"] == "12"
+    print(json.dumps({"evidence_assessments": "authenticated_cli_api_parity", "assessment_refresh": "revocation_and_idempotent_apply"}))
+    '''
+)
+
+
+def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
+    """Exercise one fresh installation from outside the checkout."""
+    python = venv_python(venv)
+    cli = venv_cli(venv)
+    if not cli.is_file():
+        raise ValidationError(f"{label}: the installed distribution did not provide the evidence-wiki entry point")
+    outside = scratch / "outside-checkout"
+    outside.mkdir()
+    workspace = scratch / "provider-workspace"
+    # Every command runs from a directory that is not the checkout, so a module
+    # resolved from the source tree instead of the install would be a failure here.
+    run([str(cli), "--version"], cwd=outside)
+    contract_path = scratch / "contract.json"
+    contract_path.write_text(run([str(cli), "contract"], cwd=outside), encoding="utf-8", newline="\n")
+    run(
+        [
+            str(cli),
+            "deploy",
+            "--target",
+            str(workspace),
+            "--project-name",
+            "provider-workspace",
+            "--project-description",
+            f"Installed {label} orchestration smoke",
+            "--domain-pack",
+            "general-science",
+            "--discovery-provider",
+            "arxiv",
+            "--acquisition-provider",
+            "arxiv",
+        ],
+        cwd=outside,
+    )
+    pack_refresh_path = scratch / "pack-refresh.json"
+    pack_refresh_path.write_text(
+        run(
+            [str(cli), "pack", "refresh", "--target", str(workspace), "--path", "general-science", "--format", "json"],
+            cwd=outside,
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    session = ["--target", str(workspace), "--orchestration-id", "wheel-smoke", "--agent-id", "artifact-smoke"]
+    run([str(cli), "orchestrate", "start", *session, "--format", "json"], cwd=outside)
+    run([str(cli), "orchestrate", "next", *session, "--format", "json"], cwd=outside)
+    status = json.loads(
+        run(
+            [str(cli), "orchestrate", "status", "--target", str(workspace), "--orchestration-id", "wheel-smoke", "--format", "json"],
+            cwd=outside,
+        )
+    )
+    session_document = status.get("session", status)
+    if session_document.get("pending_action_id") != "action-0001":
+        raise ValidationError(f"{label}: installed orchestration did not issue its first action: {session_document}")
+    probe = run(
+        [str(python), "-c", INSTALLED_PROBE, expected_version or "", str(pack_refresh_path)],
+        cwd=outside,
+    )
+    probe_result = json.loads(probe.strip().splitlines()[-1])
+    run([str(python), str(SMOKE_TOOL), "--cli", str(cli)], cwd=outside)
+    publication = run([
+        str(python), "-c", PUBLICATION_PROBE, str(cli),
+        str(REPO_ROOT / "tests/_publication_fixture.py"),
+        str(REPO_ROOT / "tests/fixtures/workspace-init-profile.yml"),
+        str(scratch / "publication-workspace"),
+    ], cwd=outside)
+    packets = run([
+        str(python), "-c", PACKET_PROBE, str(cli),
+        str(REPO_ROOT / "tests/fixtures/codebase-intake/native-packets"),
+        str(scratch / "packet-workspace"),
+    ], cwd=outside)
+    execution = run([
+        str(python), "-c", EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_execution_fixture.py"),
+        str(scratch / "execution-workspace"),
+    ], cwd=outside)
+    usage = run([
+        str(python), "-c", USAGE_PROBE, str(cli), str(REPO_ROOT / "tests/_usage_fixture.py"),
+        str(scratch / "usage-evidence"),
+    ], cwd=outside)
+    snapshots = run([
+        str(python), "-c", SNAPSHOT_PROBE, str(cli), str(REPO_ROOT / "tests/_snapshot_fixture.py"),
+        str(scratch / "snapshot-evidence"),
+    ], cwd=outside)
+    temporal = run([
+        str(python), "-c", TEMPORAL_PROBE, str(cli), str(REPO_ROOT / "tests/_temporal_fixture.py"),
+        str(scratch / "temporal-evidence"),
+    ], cwd=outside)
+    market = run([
+        str(python), "-c", MARKET_PROBE, str(cli), str(REPO_ROOT / "tests/_market_fixture.py"),
+        str(scratch / "market-evidence"),
+    ], cwd=outside)
+    historical = run([
+        str(python), "-c", HISTORICAL_EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_historical_fixture.py"),
+        str(scratch / "historical-execution"),
+    ], cwd=outside)
+    simulation = run([
+        str(python), "-c", SIMULATION_PROBE, str(cli), str(REPO_ROOT / "tests/_simulation_fixture.py"),
+        str(scratch / "market-simulation"),
+    ], cwd=outside)
+    assessments = run([
+        str(python), "-c", ASSESSMENT_PROBE, str(cli), str(REPO_ROOT / "tests/_assessment_fixture.py"),
+        str(scratch / "assessment-evidence"),
+    ], cwd=outside)
+    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
+            **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
+            **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
+            **json.loads(assessments)}
+
+
+def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:
+    """Unpack the sdist and build a wheel from it, away from the checkout."""
+    unpack_root = scratch / "sdist-unpacked"
+    unpack_root.mkdir()
+    with tarfile.open(sdist, "r:gz") as archive:
+        for member in archive.getmembers():
+            target = (unpack_root / member.name).resolve()
+            if unpack_root.resolve() not in target.parents:
+                raise ValidationError(f"{sdist.name}: member escapes its root directory: {member.name}")
+        archive.extractall(unpack_root)  # noqa: S202 - members were checked above.
+    roots = [child for child in unpack_root.iterdir() if child.is_dir()]
+    if len(roots) != 1:
+        raise ValidationError(f"{sdist.name}: expected one project root, found {[root.name for root in roots]}")
+    out_dir = scratch / "sdist-dist"
+    run([sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(out_dir), str(roots[0])])
+    wheels = sorted(out_dir.glob("*.whl"))
+    if len(wheels) != 1:
+        raise ValidationError(f"{sdist.name}: building from the sdist produced {[path.name for path in wheels]}")
+    return wheels[0]
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--dist-dir", type=Path, default=REPO_ROOT / "dist", help="Directory holding one wheel and one sdist.")
+    parser.add_argument("--expected-version", default=None, help="Version the installed package must report.")
+    parser.add_argument("--skip-sdist", action="store_true", help="Validate only the wheel (not for release use).")
+    parser.add_argument("--membership-only", action="store_true", help="Check archive contents without installing.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    wheel, sdist = find_artifacts(args.dist_dir.resolve())
+    checks: dict[str, object] = {}
+    summary: dict[str, object] = {
+        "wheel": {"name": wheel.name, "sha256": sha256_of(wheel)},
+        "sdist": {"name": sdist.name, "sha256": sha256_of(sdist)},
+        "expected_version": args.expected_version,
+        "checks": checks,
+    }
+    checks["membership"] = check_archive_membership(wheel, sdist)
+    if not args.membership_only:
+        with tempfile.TemporaryDirectory(prefix="evidence-wiki-artifacts-") as tmpdir:
+            scratch = Path(tmpdir)
+            wheel_scratch = scratch / "wheel"
+            wheel_scratch.mkdir()
+            checks["installed_wheel"] = validate_installed(
+                create_venv_with_wheel(wheel_scratch, wheel), wheel_scratch, args.expected_version, "wheel"
+            )
+            if not args.skip_sdist:
+                sdist_scratch = scratch / "sdist"
+                sdist_scratch.mkdir()
+                rebuilt = build_wheel_from_sdist(sdist, sdist_scratch)
+                direct_members = [name for name in wheel_members(wheel) if not name.endswith("RECORD")]
+                rebuilt_members = [name for name in wheel_members(rebuilt) if not name.endswith("RECORD")]
+                if direct_members != rebuilt_members:
+                    only_direct = sorted(set(direct_members) - set(rebuilt_members))
+                    only_rebuilt = sorted(set(rebuilt_members) - set(direct_members))
+                    raise ValidationError(
+                        "the wheel built from the sdist does not match the direct wheel; "
+                        f"only in direct: {only_direct[:10]}; only in sdist-built: {only_rebuilt[:10]}"
+                    )
+                checks["installed_sdist"] = validate_installed(
+                    create_venv_with_wheel(sdist_scratch, rebuilt), sdist_scratch, args.expected_version, "sdist"
+                )
+                checks["installed_sdist"]["rebuilt_wheel_sha256"] = sha256_of(rebuilt)
+            shutil.rmtree(scratch, ignore_errors=True)
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

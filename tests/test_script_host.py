@@ -58,5 +58,24 @@ class SharedAssetsRootTests(unittest.TestCase):
         self.assertEqual([], resources.missing_required_assets(shared))
 
 
+class LoaderHashMemoTests(unittest.TestCase):
+    def test_loader_file_is_reread_only_when_its_signature_moves(self):
+        import tempfile
+        import time
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "_workspace_module_loader.py"
+            path.write_text("VALUE = 1\n", encoding="utf-8")
+            first = _script_host._loader_content_hash(path)
+            with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("must not reread")):
+                self.assertEqual(first, _script_host._loader_content_hash(path))
+            time.sleep(0.01)
+            path.write_text("VALUE = 22\n", encoding="utf-8")
+            second = _script_host._loader_content_hash(path)
+            self.assertNotEqual(first, second)
+            self.assertEqual(second, _script_host._loader_content_hash(path))
+
+
 if __name__ == "__main__":
     unittest.main()

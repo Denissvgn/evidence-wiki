@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import math
 import os
 import re
@@ -12,7 +13,7 @@ import shutil
 import sys
 import unicodedata
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -26,9 +27,9 @@ except ImportError as exc:  # pragma: no cover - environment guard
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-# Shared containment definition (SEC-E1-T03): refuses a symlink, then requires the
+# Shared containment definition: refuses a symlink, then requires the
 # resolved path to stay inside an already-resolved root. Reused here for the
-# init/upgrade *writer* paths so the readers and writers cannot drift (SEC-E1-T04).
+# init/upgrade *writer* paths so the readers and writers cannot drift.
 from _handoff_signature import handoff_secret, sign_handoff
 from _provider_plugins import ProviderPluginError, registered_ids, require_registration
 
@@ -53,7 +54,7 @@ from _provider_registry import (
     validate_provider_ids,
 )
 from _script_errors import error_envelope, remediation_for
-from _workspace_locks import LockUnavailableError, workspace_lock
+from _workspace_locks import LockUnavailableError, workspace_lock, workspace_lock_contended
 from _workspace_module_loader import load_workspace_module
 from source_inventory import is_contained_nonsymlink
 
@@ -2561,6 +2562,177 @@ class UpgradeWriteError(OSError):
             ),
         }
         super().__init__(f"Could not write starter-managed path {path_text}: {reason}.")
+
+
+class UpgradeRefusedError(Exception):
+    """A refused upgrade that changed nothing, with a stable machine error code."""
+
+    def __init__(self, error_code: str, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.remediation = remediation_for(error_code)
+        self.details = dict(details or {})
+        self.details.setdefault(
+            "preserved",
+            "The upgrade refused before replacing any managed content; scripts, metadata, "
+            "the upgrade log, and every orchestration session are unchanged.",
+        )
+
+
+# Mirrored by ``orchestration_controller.UPGRADE_LOCK_RELATIVE``: the controller probes this
+# exact path so a driver cannot start under an upgrade that has already begun.
+UPGRADE_LOCK_RELATIVE = PurePosixPath(".locks/upgrade.lock")
+ORCHESTRATION_SESSIONS_RELATIVE = PurePosixPath("runs/orchestrations")
+ORCHESTRATION_SESSION_FILENAME = "session.json"
+ORCHESTRATION_WORK_ORDERS_DIR = "work-orders"
+ORCHESTRATION_SESSION_LOCK_RELATIVE = PurePosixPath(".locks/session.lock")
+MAX_REPORTED_UPGRADE_BLOCKERS = 20
+
+
+def upgrade_lock_path(target: Path) -> Path:
+    return target / Path(*UPGRADE_LOCK_RELATIVE.parts)
+
+
+def orchestration_session_dirs(target: Path) -> list[Path]:
+    root = target / Path(*ORCHESTRATION_SESSIONS_RELATIVE.parts)
+    if not root.is_dir():
+        return []
+    return sorted(
+        child
+        for child in root.iterdir()
+        if child.is_dir() and ((child / ORCHESTRATION_SESSION_FILENAME).is_file() or (child / ".locks").is_dir())
+    )
+
+
+def pending_order_request_ids(session_dir: Path, action_id: str) -> list[str]:
+    """Best-effort: the request ids a pending order scopes, when its work order is readable."""
+    order_path = session_dir / ORCHESTRATION_WORK_ORDERS_DIR / f"{action_id}.json"
+    try:
+        order = json.loads(order_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    scope = order.get("scope") if isinstance(order, dict) else None
+    request_ids = scope.get("request_ids") if isinstance(scope, dict) else None
+    if not isinstance(request_ids, list):
+        return []
+    return [item for item in request_ids if isinstance(item, str)][:MAX_REPORTED_UPGRADE_BLOCKERS]
+
+
+def session_upgrade_blocker(session_dir: Path) -> dict[str, Any] | None:
+    """Describe why one orchestration session forbids an upgrade, or ``None`` if it does not.
+
+    A session with a pending work order would be stranded by replacing the scripts and
+    metadata it was issued under, so it blocks. A session whose ``session.json`` cannot be
+    read blocks too: the upgrade cannot prove that no order is pending, and refusing is the
+    only answer that leaves an auditable session untouched.
+    """
+    orchestration_id = session_dir.name
+    path = session_dir / ORCHESTRATION_SESSION_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        session = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"orchestration_id": orchestration_id, "reason": "session_unreadable"}
+    if not isinstance(session, dict):
+        return {"orchestration_id": orchestration_id, "reason": "session_unreadable"}
+    action_id = session.get("pending_action_id")
+    if action_id is None:
+        return None
+    blocker: dict[str, Any] = {
+        "orchestration_id": orchestration_id,
+        "reason": "pending_order",
+        "pending_action_id": str(action_id),
+        "phase": session.get("phase") if isinstance(session.get("phase"), str) else None,
+        "status": session.get("status") if isinstance(session.get("status"), str) else None,
+    }
+    if isinstance(action_id, str) and action_id and "/" not in action_id and "\\" not in action_id:
+        blocker["request_ids"] = pending_order_request_ids(session_dir, action_id)
+    return blocker
+
+
+def describe_upgrade_blocker(blocker: dict[str, Any]) -> str:
+    orchestration_id = blocker["orchestration_id"]
+    reason = blocker["reason"]
+    if reason == "pending_order":
+        text = f"session {orchestration_id} holds pending work order {blocker['pending_action_id']}"
+        if blocker.get("phase"):
+            text += f" (phase {blocker['phase']})"
+        if blocker.get("request_ids"):
+            text += f" scoping request(s) {', '.join(blocker['request_ids'])}"
+        return text
+    if reason == "driver_active":
+        return f"session {orchestration_id} has an active driver holding its session lock"
+    return f"session {orchestration_id} has an unreadable session.json"
+
+
+def raise_upgrade_pending_order(blockers: list[dict[str, Any]], *, dry_run: bool) -> None:
+    shown = blockers[:MAX_REPORTED_UPGRADE_BLOCKERS]
+    summary = "; ".join(describe_upgrade_blocker(blocker) for blocker in shown)
+    if len(blockers) > len(shown):
+        summary += f"; and {len(blockers) - len(shown)} more"
+    prefix = "Upgrade would be refused" if dry_run else "Upgrade refused"
+    raise UpgradeRefusedError(
+        "UPGRADE_PENDING_ORDER",
+        f"{prefix}: {summary}. Replacing managed scripts and metadata under a pending order would "
+        "strand it, so drain orchestration first.",
+        details={"sessions": shown, "session_count": len(blockers), "dry_run": dry_run},
+    )
+
+
+def preflight_orchestration_dry_run(target: Path) -> None:
+    """Disclose pending orders and held driver locks without filesystem writes."""
+    blockers = []
+    for session_dir in orchestration_session_dirs(target):
+        blocker = session_upgrade_blocker(session_dir)
+        if blocker is not None:
+            blockers.append(blocker)
+        elif workspace_lock_contended(session_dir / Path(*ORCHESTRATION_SESSION_LOCK_RELATIVE.parts)):
+            blockers.append({"orchestration_id": session_dir.name, "reason": "driver_active"})
+    if blockers:
+        raise_upgrade_pending_order(blockers, dry_run=True)
+
+
+def hold_orchestration_sessions(target: Path, stack: ExitStack) -> None:
+    """Take every session lock for the rest of the upgrade, refusing what cannot be taken.
+
+    Called with the upgrade lock already held. The controller takes its session lock
+    *before* probing the upgrade lock, and this preflight takes the upgrade lock *before*
+    enumerating sessions, so every driver either finished before this enumeration (its
+    lock is free here) or will see the upgrade lock held and refuse. A session lock that
+    is contended right now belongs to a live driver that may be issuing an order, which
+    is the same hazard a pending order is, and is reported the same way.
+    """
+    blockers: list[dict[str, Any]] = []
+    holder = {
+        "command": "upgrade",
+        "agent_id": None,
+        "pid": os.getpid(),
+        "acquired_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    for session_dir in orchestration_session_dirs(target):
+        lock_path = session_dir / Path(*ORCHESTRATION_SESSION_LOCK_RELATIVE.parts)
+        try:
+            stack.enter_context(
+                workspace_lock(
+                    lock_path,
+                    timeout_seconds=0.0,
+                    purpose=f"workspace upgrade holding orchestration {session_dir.name}",
+                    holder=holder,
+                )
+            )
+        except LockUnavailableError as error:
+            if not getattr(error, "contended", False):
+                raise
+            blockers.append({"orchestration_id": session_dir.name, "reason": "driver_active"})
+            continue
+        blocker = session_upgrade_blocker(session_dir)
+        if blocker is not None:
+            blockers.append(blocker)
+    if blockers:
+        raise_upgrade_pending_order(blockers, dry_run=False)
+
+
 WORKSPACE_MARKER_FILES = ("research.yml", "workspace-system.yml")
 
 
@@ -2708,7 +2880,7 @@ def refresh_managed_path(
         # parent would otherwise redirect both the `.tmp` write and the atomic
         # `replace` below outside the workspace; a symlinked leaf would be read
         # through by `is_file()`/`read_bytes()`. is_contained_nonsymlink is the
-        # shared containment definition (SEC-E1-T03/T04).
+        # shared containment definition.
         if not is_contained_nonsymlink(destination, target_resolved):
             raise SystemExit(f"Refusing to write through symlink in workspace: {destination}")
         if destination.exists() and destination.is_dir():
@@ -2890,7 +3062,9 @@ def upgrade_workspace(
     if target == starter_root or is_relative_to(target, starter_root):
         raise SystemExit("Refusing to upgrade the reusable starter root itself.")
     validate_upgrade_compatibility(starter_root, target)
-    lock_path = target / ".locks" / "upgrade.lock"
+    if dry_run:
+        preflight_orchestration_dry_run(target)
+    lock_path = upgrade_lock_path(target)
     lock_existed = lock_path.exists()
     lock_dir_existed = lock_path.parent.exists()
     lock_context = (
@@ -2899,7 +3073,9 @@ def upgrade_workspace(
         else workspace_lock(lock_path, purpose="workspace upgrade")
     )
     try:
-        with lock_context:
+        with lock_context, ExitStack() as held_sessions:
+            if not dry_run:
+                hold_orchestration_sessions(target, held_sessions)
             validate_upgrade_compatibility(starter_root, target)
             optional_upgrade_replacements(starter_root, target, paths, force_optional)
             created_all: list[str] = []

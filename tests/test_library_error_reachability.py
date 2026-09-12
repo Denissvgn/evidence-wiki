@@ -1,4 +1,4 @@
-"""AC-2's other half: every code named here is *reached* through the live API.
+"""Every code named here is reached through the live API.
 
 ``tests/test_library_errors.py`` proves the registry is complete -- every key in
 the packaged ``_script_errors._REMEDIATIONS`` maps to a typed family, and an
@@ -38,7 +38,7 @@ own bounded wait is what a second writer actually experiences, and there is no
 supported knob to shorten it (``EVIDENCE_WIKI_SINGLE_WRITER`` bypasses the refusal
 rather than hurrying it). ``OrchestrationReachabilityTests`` spawns the deployed
 controller a few times, ~4s -- its two contended-driver cases cost about a second
-between them and wait for nothing, because CR-8 made a contended *session* lock
+between them and wait for nothing, because driver locking made a contended *session* lock
 refuse immediately instead of queueing. The ten seconds above belongs to the
 question lock and to nothing else. Everything else is sub-second.
 """
@@ -107,7 +107,7 @@ EXPECTED_FAMILY: dict[str, type[errors.EvidenceWikiError]] = {
     "GROUNDING_ANCHOR_INVALID": errors.GroundingError,
     "INTAKE_TOTAL_CAP_EXCEEDED": errors.IntakeError,
     "ORCHESTRATION_WORKSPACE_UNSAFE": errors.OrchestrationError,
-    # Split out of ORCHESTRATION_WORKSPACE_UNSAFE by CR-15d: same family, but the
+    # Split out of ORCHESTRATION_WORKSPACE_UNSAFE by error-family clarification: same family, but the
     # baseline-moved condition rather than the repair-and-retry one.
     "ORCHESTRATION_WORKSPACE_HEALTH_CHANGED": errors.OrchestrationError,
     "ORCHESTRATION_DRIVER_BUSY": errors.OrchestrationError,
@@ -133,7 +133,7 @@ def question_batch(*slugs: str) -> str:
 
 
 class ReachabilityAsserts:
-    """The three AC-2 assertions, and the CLI comparison, in one place.
+    """Check exception family, error code, process containment and CLI parity.
 
     Deliberately not a ``TestCase``: subclassing one that carried tests would
     re-run them under every child class.
@@ -537,7 +537,7 @@ class GroundingReachabilityTests(PreparedWorkspace, unittest.TestCase):
         self.agrees_with_the_cli(raised, "verify_quotes.py", self.shared, self.verify_argv("quote-me"))
 
     def test_grounding_anchor_invalid_is_reached_by_an_anchor_that_does_not_hold(self):
-        # Both anchor failures the CR-7 form distinguishes: an ``expected`` the
+        # Both anchor failures the structured grounding form distinguishes: an ``expected`` the
         # record contradicts, and a pointer that resolves to nothing. Either must
         # report the *anchor* code -- a caller told "a quote did not verify" would
         # go looking for a quote there is none of.
@@ -645,7 +645,7 @@ class LockReachabilityTests(PreparedWorkspace, unittest.TestCase):
     replace the thing being tested.
 
     The ten seconds is this lock's alone. The per-session *driver* lock runs the
-    same module against a different file, but since CR-8 it is acquired with
+    same module against a different file, but since driver locking it is acquired with
     ``timeout_seconds=0`` and refuses the moment it finds a holder, so its cases
     in ``OrchestrationReachabilityTests`` below cost nothing and report
     ``ORCHESTRATION_DRIVER_BUSY`` rather than the ``LOCK_UNAVAILABLE`` reached
@@ -701,7 +701,7 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
     symlinked-question case, which reaches the same code through the question-file
     integrity guard.
 
-    ``ORCHESTRATION_DRIVER_BUSY`` is CR-8's refusal of a second driver on one
+    ``ORCHESTRATION_DRIVER_BUSY`` is driver locking's refusal of a second driver on one
     session, and it is here rather than in ``LockReachabilityTests`` because the
     interesting part is not the lock. It is that a refusal invented in the
     *workspace's* controller, carried out of a subprocess as JSON, and never
@@ -794,7 +794,7 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
     def competing_holder(self) -> dict[str, Any]:
         """The holder block a second driver publishes beside the session lock.
 
-        The shape CR-8 settled on: who is holding (``agent_id``), which OS process
+        The shape driver locking settled on: who is holding (``agent_id``), which OS process
         is holding (``pid``, ``hostname``), what it is doing (``command``) and
         since when (``acquired_at``). Every field is here because a host that has
         just been refused wants to report the holder to an operator, and a block
@@ -852,11 +852,11 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
         return ContendedSession(target, session)
 
     def test_orchestration_driver_busy_is_reached_by_next_while_a_second_driver_holds_the_session(self):
-        """CR-8's contention refusal, reached through the library rather than a shell.
+        """Driver locking's contention refusal, reached through the library rather than a shell.
 
         The code is minted by the workspace's deployed controller, which builds
         its own remediation at the raise site, and reaches a host only because
-        ``error_class_for`` maps the ``ORCHESTRATION_`` prefix. (CR-14 added a
+        ``error_class_for`` maps the ``ORCHESTRATION_`` prefix. (error contracts added a
         matching ``_script_errors._REMEDIATIONS`` entry, but that entry is a
         fallback the controller never consults.) That is precisely the
         arrangement this module
@@ -870,7 +870,7 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
 
         # Contention is the one orchestration refusal a host is *supposed* to
         # retry. ``ORCHESTRATION_WORKSPACE_UNSAFE`` above is the one it must not,
-        # and before CR-8 both arrived under codes that could not tell them apart.
+        # and before driver locking both arrived under codes that could not tell them apart.
         self.assertTrue(raised.recoverable)
         # The holder block survives the JSON envelope the subprocess boundary
         # forces it through. Compared whole rather than key by key: a field that
@@ -886,7 +886,7 @@ class OrchestrationReachabilityTests(ReachabilityAsserts, unittest.TestCase):
     def test_the_controllers_new_exit_status_classifies_nothing_and_does_not_reach_the_exception(self):
         """Exit 6 is invisible to the facade: on purpose in one direction, by accident in the other.
 
-        CR-8 gave contention its own process exit status -- ``EXIT_DRIVER_BUSY``,
+        driver locking gave contention its own process exit status -- ``EXIT_DRIVER_BUSY``,
         6 -- the first status this package's orchestration path had ever seen from
         the controller. Two questions follow, with different answers.
 
@@ -958,7 +958,7 @@ class MatrixTests(unittest.TestCase):
     def test_every_declared_code_is_one_the_package_documents(self):
         # The controller source is the second disjunct because a code may be
         # emitted by the deployed controller without appearing in the asset's
-        # remediation table. CR-14 gave every controller code a table entry, so
+        # remediation table. error contracts gave every controller code a table entry, so
         # the disjunct is currently redundant; it stays because the table is
         # hand-maintained and the next new code will land in the script first.
         script_errors = _script_host.load_packaged_script(_script_host.shared_assets_root(), "_script_errors")

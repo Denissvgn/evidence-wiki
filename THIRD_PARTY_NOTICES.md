@@ -33,3 +33,11 @@ Poppler is an optional system dependency used only by the explicit
 bundle or install Poppler; the repository Containerfile installs Debian's
 `poppler-utils` package into the runtime image. Poppler and that
 operating-system package retain their own upstream copyright and license terms.
+
+The `_packet_vendor_services_*.py` modules contain the offline qualified-context
+packet validation closure from `agent-wiki-cli` 1.8.0, copyright 2026 Denis
+Sivagin, under the MIT license. Each module carries the complete permission and
+copyright notice and the original source digest. Local adaptation removes
+unreachable producer operations and rewrites imports to the isolated modules;
+the selected validation implementations are preserved. The pinned source and
+symbol inventory is `tools/packet-validator-spec.json`.
