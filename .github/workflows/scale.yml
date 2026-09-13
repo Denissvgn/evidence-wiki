@@ -21,6 +21,7 @@ on:
         options:
           - standard
           - near-partition
+          - both
   pull_request:
     types: [labeled, synchronize, reopened]
 
@@ -63,11 +64,15 @@ jobs:
         env:
           REQUESTED_PROFILE: ${{ inputs.profile }}
         run: |
-          # Scheduled runs measure both frozen profiles; a dispatch measures the
-          # one it asked for; a labelled pull request measures the standard one.
+          # Scheduled runs and an explicit "both" dispatch measure both frozen
+          # profiles; a labelled pull request measures the standard one.
           case "$GITHUB_EVENT_NAME" in
             schedule) profiles="standard near-partition" ;;
-            workflow_dispatch) profiles="${REQUESTED_PROFILE:-standard}" ;;
+            workflow_dispatch)
+              case "${REQUESTED_PROFILE:-standard}" in
+                both) profiles="standard near-partition" ;;
+                *) profiles="${REQUESTED_PROFILE:-standard}" ;;
+              esac ;;
             *) profiles="standard" ;;
           esac
           status=0

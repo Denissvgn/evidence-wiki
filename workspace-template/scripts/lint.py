@@ -87,6 +87,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load
 
 _script_errors = load_workspace_module(_SCRIPT_DIR, "_script_errors")
 emit_error = _script_errors.emit_error
@@ -366,7 +367,7 @@ def load_frontmatter(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if closing_index is None:
         return None, "unterminated YAML frontmatter"
     try:
-        frontmatter = yaml.safe_load("\n".join(lines[1:closing_index])) or {}
+        frontmatter = safe_load("\n".join(lines[1:closing_index])) or {}
     except yaml.YAMLError as exc:
         return None, f"invalid YAML frontmatter: {exc}"
     if not isinstance(frontmatter, dict):
