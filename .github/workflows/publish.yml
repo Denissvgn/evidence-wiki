@@ -51,7 +51,10 @@ jobs:
           import pathlib
           import re
           import subprocess
-          import tomllib
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
 
           root = pathlib.Path.cwd()
           commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -311,7 +314,10 @@ jobs:
           import hashlib
           import json
           from pathlib import Path
-          import tomllib
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
 
           candidate = Path("release-candidate")
           report = json.loads((candidate / "artifact-validation.json").read_text(encoding="utf-8"))

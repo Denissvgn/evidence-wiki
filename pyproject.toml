@@ -34,6 +34,7 @@ dev = [
   "coverage[toml]==7.15.0",
   "ruff==0.15.17",
   "pytest==9.0.3",
+  "tomli==2.4.1",
 ]
 
 [project.scripts]

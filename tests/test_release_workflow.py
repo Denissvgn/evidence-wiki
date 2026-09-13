@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -115,7 +116,10 @@ def run_inline_python(code: str) -> None:
 
 
 @pytest.mark.parametrize("defect", [None, "commit", "tag", "name", "version", "changelog"])
-def test_release_identity_checks_run_against_the_event_commit(tmp_path, monkeypatch, defect):
+@pytest.mark.parametrize("use_backport", [False, True], ids=["default-parser", "tomli-backport"])
+def test_release_identity_checks_run_against_the_event_commit(tmp_path, monkeypatch, defect, use_backport):
+    if use_backport:
+        monkeypatch.setitem(sys.modules, "tomllib", None)
     project = "other-project" if defect == "name" else "evidence-wiki"
     (tmp_path / "pyproject.toml").write_text(f'[project]\nname = "{project}"\nversion = "0.7.1"\n')
     package = tmp_path / "src/evidence_wiki"
@@ -140,7 +144,10 @@ def test_release_identity_checks_run_against_the_event_commit(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("defect", [None, "bytes", "name", "version", "missing", "extra", "duplicate"])
-def test_promoted_distributions_are_exactly_the_validated_bytes(tmp_path, monkeypatch, defect):
+@pytest.mark.parametrize("use_backport", [False, True], ids=["default-parser", "tomli-backport"])
+def test_promoted_distributions_are_exactly_the_validated_bytes(tmp_path, monkeypatch, defect, use_backport):
+    if use_backport:
+        monkeypatch.setitem(sys.modules, "tomllib", None)
     (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.7.1"\n')
     candidate = tmp_path / "release-candidate"
     dist = candidate / "dist"
