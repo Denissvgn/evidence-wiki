@@ -35,9 +35,10 @@ class AssessmentFixture(UsageFixture):
         self.normalized_path = self.root / "sources/normalized/web--vendor-official-product-spec.md"
         self.raw_path = self.root / "raw/web/vendor-product.html"
 
-    def temporal_source(self, *, expires="2026-12-01T00:00:00Z", supersedes=None, normalized=None):
+    def temporal_source(self, *, expires="2026-12-01T00:00:00Z", supersedes=None, normalized=None, evidence=None):
         body, files = self.source(SOURCE_ID, normalized=normalized or self.normalized_path.read_bytes(),
-                                  evidence={"raw/web/vendor-product.html": self.raw_path.read_bytes()})
+                                  evidence=evidence if evidence is not None else
+                                  {"raw/web/vendor-product.html": self.raw_path.read_bytes()})
         descriptor = json.loads(files["source-record.json"])
         def claim(value):
             return {"value": value, "basis": "source-declared" if value else "unknown"}

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 import evidence_wiki
 from evidence_wiki.cli import main
@@ -69,6 +70,31 @@ def test_prepare_issue_and_consume_nonfinancial_assessment(host):
         plan = workspace.assessments.plan_refresh(host.refresh())["plan"]
         assert plan["entries"] == []
         assert plan["coverage"]["complete"]
+
+
+@pytest.mark.parametrize("layout", ["sidecar", "directory"])
+def test_assessment_accepts_approved_raw_layouts(host, layout):
+    manifest = host.root / "sources/manifest.jsonl"
+    record = json.loads(manifest.read_text())
+    capture = host.raw_path
+    if layout == "directory":
+        capture = host.raw_path.with_suffix("")
+        capture.mkdir()
+        (capture / "index.html").write_bytes(host.raw_path.read_bytes())
+        host.raw_path.unlink()
+        record["raw_paths"] = [capture.relative_to(host.root).as_posix()]
+    sidecar = capture.with_name(capture.name + ".provenance.yml")
+    sidecar.write_text(yaml.safe_dump(record["provenance"]))
+    record["provenance"]["sidecar_path"] = sidecar.relative_to(host.root).as_posix()
+    members = list(capture.rglob("*")) if capture.is_dir() else [capture]
+    evidence = {path.relative_to(host.root).as_posix(): path.read_bytes() for path in [*members, sidecar]}
+    body, files = host.temporal_source(supersedes=host.body["source_revision"], evidence=evidence)
+    host.transact(USAGE, "deposit", body, files)
+    record["usage_revision_id"] = body["source_revision"]
+    manifest.write_text(json.dumps(record) + "\n")
+    with evidence_wiki.Workspace.open(host.root) as workspace:
+        envelope = issue(host, workspace)
+        assert workspace.assessments.check(envelope)["eligible"]
 
 
 def test_whole_envelope_tampering_and_unknown_capabilities_preserve_state(host, subtests):

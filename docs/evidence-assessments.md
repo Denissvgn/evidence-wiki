@@ -49,6 +49,12 @@ with evidence_wiki.Workspace.open("research") as ws:
 
 Preparation uses one coherent selected-publication capture. Before private materialization it qualifies exact sanitized raw and normalized bytes against host-owned source closures and checks retrieval/export authority for both publication and the requested use. Coverage is explicitly `all_workspace_sources`: global publication gates depend on all declared workspace sources. Unregistered raw files, ambiguous byte-to-revision matches or missing dependencies refuse. When identical normalized bytes belong to multiple accepted revisions, an exact `usage_revision_id` in the source manifest disambiguates them. Ordinary selected publication retains its existing usage restrictions outside the private authorized capture.
 
+Raw source paths may name files or directories. Directory captures must match
+their complete approved file subtree. Canonical provenance sidecars and exact
+sidecar paths declared by primary or additional provenance are checked against
+the same approved revision. Missing, altered or additional unapproved bytes
+refuse before materialization.
+
 Expiry is no later than the earliest required source, effective-interval, permission, scrub-authentication or policy limit; the request may shorten it. Unknown source validity remains explicit with no current-use eligibility. Pending/rejected review and historical replay can be recorded when their inputs can be qualified, but cannot pass current consumption. `current` uses the host clock. `historical-audit` and `historical-available` require an explicit cutoff and retain the [temporal qualifications](temporal-evidence.md).
 
 Consumption requires the exact registered authenticated envelope, current authority, approved review, known unexpired validity and unchanged selected answers and dependencies. It rechecks current policy, source-use permissions, corrections and invalidations even when no notification arrived. An accepted correction never revives its predecessor merely because the correction was withdrawn or expired. Missing or ambiguous correction history is ineligible. Global input changes can conservatively invalidate multiple question scopes; an unrelated question edit with unchanged inputs and selected results need not invalidate them.

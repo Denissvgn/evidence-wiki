@@ -70,7 +70,7 @@ from _script_errors import ScriptRefusal, emit_refusal, handle_system_exit, json
 from _usage_gate import require_unrestricted_legacy
 from _usage_query import query_authorized
 from _workspace_locks import workspace_lock
-from _yaml_safe import safe_load
+from _yaml_safe import safe_load, split_frontmatter_block
 
 # Field weights for lexical scoring. Titles, headings, and source IDs are
 # stronger signals than body text.
@@ -387,18 +387,9 @@ def tokenize(text: str) -> list[str]:
 
 
 def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = text.split("\n")
-    # Frontmatter must open with a line that is exactly `---`.
-    if not lines or lines[0].strip() != "---":
-        return {}, text
-    # Close on the first subsequent line that is exactly `---`, so a horizontal
-    # rule (`----`) or a `---`-prefixed value inside the block does not truncate it.
-    closing_index = next((index for index in range(1, len(lines)) if lines[index].strip() == "---"), None)
-    if closing_index is None:
-        return {}, text
-    block = "\n".join(lines[1:closing_index])
-    body = "\n".join(lines[closing_index + 1 :])
+    block, body = split_frontmatter_block(text)
+    if block is None:
+        return {}, body
     try:
         data = safe_load(block)
     except yaml.YAMLError:

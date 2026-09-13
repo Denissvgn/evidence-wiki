@@ -18,7 +18,7 @@ from _publication_context import captured_config, captured_view
 from _record_artifacts import artifact_path
 from _script_errors import ScriptRefusal
 from _windows_files import read_legacy_file
-from _yaml_safe import safe_load
+from _yaml_safe import safe_load, split_frontmatter_block
 
 
 class UsageRefusal(ScriptRefusal, SystemExit):
@@ -178,8 +178,10 @@ def bytes_have_claims(relative: str, data: bytes, config: dict[str, Any]) -> boo
                         if any(key.encode() in line for key in markers):
                             raise EvidenceInvalid("usage_declarations_unreadable") from None
         else:
-            pieces = data.decode("utf-8").split("---", 2)
-            documents = [safe_load(pieces[1])] if len(pieces) == 3 and not pieces[0] else []
+            block, _body = split_frontmatter_block(data.decode("utf-8"))
+            if block is None and any(key.encode() in data for key in markers):
+                raise EvidenceInvalid("usage_declarations_unreadable")
+            documents = [safe_load(block)] if block is not None else []
         return claims(documents, ["retrieval", "export"])[2] or requires_authority(documents)
     except (ValueError, yaml.YAMLError, RecursionError) as exc:
         if any(key.encode() in data for key in markers):

@@ -201,6 +201,81 @@ def test_protected_queries_never_reuse_cache_or_read_unapproved_wiki(host, capsy
     assert not (fixture.root / ".research-cache").exists()
 
 
+@pytest.mark.parametrize("restriction", [
+    {"retrieval_eligible": False},
+    {"metadata": {"retrieval_eligible": False}},
+    {"provenance": {"retrieval_eligible": False}},
+    {"retrieval_eligible": "true"},
+])
+def test_protected_queries_enforce_configured_manifest_restrictions(host, capsys, restriction):
+    fixture, _module = host
+    body, _files = deposited(host)
+    Workspace.open(fixture.root).usage.materialize(body["source_revision"])
+    fixture.config["sources"] = {"manifest_path": "sources/custom-manifest.jsonl"}
+    (fixture.root / "research.yml").write_text(yaml.safe_dump(fixture.config))
+    manifest = fixture.root / "sources/custom-manifest.jsonl"
+    manifest.write_bytes(canonical({"id": body["source_id"], **restriction}))
+    query = load_isolated_module("manifest_usage_query", SCRIPTS / "query_index.py")
+    assert query.main(["laboratory", "--project-root", str(fixture.root), "--format", "json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["results"] == []
+    assert result["usage"]["excluded_source_count"] == 1
+
+
+def test_protected_query_uses_manifest_revision_to_disambiguate_identical_normalized_bytes(host, capsys):
+    fixture, module = host
+    first, files = deposited(host)
+    selected, originals = fixture.source(parents=[first["source_revision"]], normalized=files["normalized.md"])
+    fixture.transact(module, "deposit", selected, originals)
+    Workspace.open(fixture.root).usage.materialize(selected["source_revision"])
+    manifest = fixture.root / "sources/manifest.jsonl"
+    manifest.write_bytes(canonical({"id": selected["source_id"], "usage_revision_id": selected["source_revision"]}))
+    query = load_isolated_module("manifest_revision_query", SCRIPTS / "query_index.py")
+    args = ["laboratory", "--project-root", str(fixture.root), "--format", "json"]
+    assert query.main(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["result_count"] == 1
+    assert result["usage"]["excluded_source_count"] == 0
+    manifest.write_bytes(canonical({"id": selected["source_id"], "usage_revision_id": "sha256:" + "0" * 64}))
+    assert query.main(args) == 0
+    assert json.loads(capsys.readouterr().out)["results"] == []
+
+
+@pytest.mark.parametrize("content", [b"{invalid\n", b"[]\n", b'{"id":"lab:sample"}\n{"id":"lab:sample"}\n'])
+def test_protected_query_refuses_unreadable_or_ambiguous_manifest(host, capsys, content):
+    fixture, _module = host
+    body, _files = deposited(host)
+    Workspace.open(fixture.root).usage.materialize(body["source_revision"])
+    (fixture.root / "sources/manifest.jsonl").write_bytes(content)
+    query = load_isolated_module("invalid_manifest_query", SCRIPTS / "query_index.py")
+    assert query.main(["laboratory", "--project-root", str(fixture.root), "--format", "json"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err)["error_code"] == "EVIDENCE_USAGE_REFUSED"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_protected_query_rechecks_manifest_at_the_read_boundary(host, monkeypatch, capsys, existing):
+    fixture, _module = host
+    body, _files = deposited(host)
+    Workspace.open(fixture.root).usage.materialize(body["source_revision"])
+    manifest = fixture.root / "sources/manifest.jsonl"
+    if existing:
+        manifest.write_bytes(canonical({"id": body["source_id"]}))
+    query = load_isolated_module("changing_manifest_query", SCRIPTS / "query_index.py")
+    rank = query.rank_documents
+
+    def restrict_during_ranking(*args, **kwargs):
+        manifest.write_bytes(canonical({"id": body["source_id"], "retrieval_eligible": False}))
+        return rank(*args, **kwargs)
+
+    monkeypatch.setattr(query, "rank_documents", restrict_during_ranking)
+    assert query.main(["laboratory", "--project-root", str(fixture.root), "--format", "json"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err)["details"]["reason"] == "usage_workspace_changed"
+
+
 @pytest.mark.parametrize("stem,args", [
     ("normalize_sources", ["--all", "--format", "json"]),
     ("source_inventory", ["--format", "json"]),
@@ -216,7 +291,8 @@ def test_legacy_intake_refuses_before_any_package_write(host, stem, args, capsys
     assert "protected_capture_requires_host_sanitization" in capsys.readouterr().err
 
 
-def test_explicit_legacy_restriction_cannot_enter_export_or_cache(tmp_path, monkeypatch):
+@pytest.mark.parametrize("title", ["Ordinary title", "Ordinary --- title", '"--- quoted title"'])
+def test_explicit_legacy_restriction_cannot_enter_export_or_cache(tmp_path, monkeypatch, capsys, title):
     monkeypatch.delenv("EVIDENCE_WIKI_STATE_DIR", raising=False)
     root = tmp_path / "legacy"
     root.mkdir()
@@ -225,13 +301,15 @@ def test_explicit_legacy_restriction_cannot_enter_export_or_cache(tmp_path, monk
     assert workspace.export_answers()["questions"] == []
     target = root / "sources/normalized/restricted.md"
     target.parent.mkdir(parents=True)
-    target.write_text("---\nsource_id: restricted\nexport_eligible: false\n---\nRestricted content.\n")
+    target.write_text(f"---\nsource_id: restricted\ntitle: {title}\nexport_eligible: false\n---\nRestricted content.\n")
     with pytest.raises(SourceError):
         workspace.export_answers()
     query = load_isolated_module("legacy_usage_cache", SCRIPTS / "query_index.py")
     with pytest.raises(SystemExit):
         query.write_fts_index(root, {}, "all", root / "index.sqlite")
     assert not (root / "index.sqlite").exists()
+    assert query.main(["restricted", "--project-root", str(root), "--format", "json"]) == 2
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize("operation", ["publication", "start", "next", "submit"])

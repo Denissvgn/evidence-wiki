@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.7.1 - 2026-09-13
+
+- Usage restrictions remain effective when frontmatter values contain `---`.
+  Protected retrieval also honors manifest restrictions and exact revision
+  selections, and refuses a manifest that changes during the query.
+- Assessments accept approved provenance sidecars and directory sources while
+  requiring every declared artifact to match its host-authorized bytes.
+- Repeated frontmatter reads use PyYAML's safe LibYAML parser when available,
+  with a safe Python fallback.
+
 ## 0.7.0 - 2026-09-12
 
 - **Windows workspace operations preserve portable file semantics.** Legacy

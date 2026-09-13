@@ -43,6 +43,8 @@ def consumers(reader, monkeypatch):
     "source_id: sample\ndefaults: &policy {export_eligible: false}\nmetadata: {<<: *policy}\n",
     "source_id: sample\nprovenance: {retrieval_eligible: false}\n",
     "source_id: sample\nmarket_profile: demo\nsummary: |\n  First line.\n  Second line.\n",
+    "source_id: sample\ntitle: Ordinary --- title\nexport_eligible: false\n",
+    'source_id: sample\ntitle: "--- quoted title"\nretrieval_eligible: false\n',
 ])
 def test_frontmatter_values_and_usage_claims_match_portable_yaml(reader, consumers, tmp_path, block):
     lint, query, status, gate = consumers
@@ -56,6 +58,15 @@ def test_frontmatter_values_and_usage_claims_match_portable_yaml(reader, consume
     assert status.load_frontmatter(path) == expected
     present = gate.claims([expected], ["retrieval", "export"])[2] or gate.requires_authority([expected])
     assert gate.bytes_have_claims("sources/normalized/sample.md", text.encode(), {}) is present
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_indented_yaml_delimiters_cannot_hide_usage_restrictions(consumers, newline):
+    _lint, query, _status, gate = consumers
+    text = "---\nsource_id: sample\nsummary: |\n  ---\n  Source summary.\nexport_eligible: false\n---\nBody.\n"
+    text = text.replace("\n", newline)
+    assert query.split_frontmatter(text)[0]["export_eligible"] is False
+    assert gate.bytes_have_claims("sources/normalized/sample.md", text.encode(), {})
 
 
 @pytest.mark.parametrize("block", [

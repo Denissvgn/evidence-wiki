@@ -10,11 +10,37 @@ from _evidence_authority import EvidenceInvalid, bounded_list, name
 from _record_artifacts import artifact_path, json_document
 from _snapshot_verifier import ClaimLoader
 from _usage_gate import claims, normalized_relative, resolve_revision
+from _yaml_safe import split_frontmatter_block
 
 
 def require(condition, reason):
     if not condition:
         raise EvidenceInvalid(reason)
+
+
+def qualify_raw_files(files, source, original):
+    """Match declared captures and provenance against complete approved file closures."""
+    prefix = original["descriptor"]["evidence_root"]
+    require(prefix is not None, "assessment_approved_raw_closure_missing")
+    approved = {path[len(prefix) + 1:]: data for path, data in original["files"].items()
+                if path.startswith(prefix + "/")}
+    available = files.keys() | approved.keys()
+    selected = set()
+    for raw in bounded_list(source.get("raw_paths"), minimum=1):
+        raw = artifact_path(raw)
+        members = {raw} if raw in available else {path for path in available if path.startswith(raw + "/")}
+        require(bool(members), "assessment_raw_revision_mismatch")
+        selected.update(members)
+        sidecar = raw + ".provenance.yml"
+        if sidecar in available:
+            selected.add(sidecar)
+    provenance = [source.get("provenance"), *bounded_list(source.get("additional_provenance", []))]
+    for entry in provenance:
+        if isinstance(entry, dict) and "sidecar_path" in entry:
+            selected.add(artifact_path(entry["sidecar_path"]))
+    for path in selected:
+        require(path in files and path in approved and files[path] == approved[path], "assessment_raw_revision_mismatch")
+    return {path: files[path] for path in selected}
 
 
 def qualify_capture(files, config, view, *, purpose, consumer):
@@ -38,9 +64,9 @@ def qualify_capture(files, config, view, *, purpose, consumer):
         require(source_id not in selected, "assessment_source_identity_duplicate")
         relative = normalized_relative(config, source_id)
         require(relative in files, "assessment_normalized_input_missing")
-        parts = files[relative].decode("utf-8").split("---", 2)
-        require(len(parts) == 3 and not parts[0], "assessment_normalized_metadata_missing")
-        metadata = yaml.load(parts[1], Loader=ClaimLoader)  # noqa: S506 -- restricted SafeLoader subclass
+        block, _body = split_frontmatter_block(files[relative].decode("utf-8"))
+        require(block is not None, "assessment_normalized_metadata_missing")
+        metadata = yaml.load(block, Loader=ClaimLoader)  # noqa: S506 -- restricted SafeLoader subclass
         require(isinstance(metadata, dict) and metadata.get("source_id") == source_id,
                 "assessment_normalized_source_mismatch")
         reasons, claimed, _present = claims([source, metadata], ["retrieval", "export"])
@@ -51,15 +77,7 @@ def qualify_capture(files, config, view, *, purpose, consumer):
             require(decision["eligible"] and decision["complete"],
                     decision["reasons"][0] if decision["reasons"] else "assessment_use_incomplete")
             ancestry.update(decision["ancestors"])
-        raw_paths = bounded_list(source.get("raw_paths"), minimum=1)
-        prefix = original["descriptor"]["evidence_root"]
-        require(prefix is not None, "assessment_approved_raw_closure_missing")
-        for raw in raw_paths:
-            raw = artifact_path(raw)
-            require(raw in files and original["files"].get(prefix + "/" + raw) == files[raw],
-                    "assessment_raw_revision_mismatch")
-            require(raw not in approved_raw or approved_raw[raw] == files[raw], "assessment_raw_binding_ambiguous")
-            approved_raw[raw] = files[raw]
+        approved_raw.update(qualify_raw_files(files, source, original))
         approved_normalized.add(relative)
         selected[source_id] = revision
     for relative in files:

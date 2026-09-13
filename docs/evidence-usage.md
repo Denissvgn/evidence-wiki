@@ -151,6 +151,11 @@ approved normalized bytes in memory. They exclude unapproved wiki content and
 bypass persistent indexes, external retrieval providers, and enrichment.
 Normalized evidence and coverage also check current authority and all ancestors.
 Local permission labels may restrict use but cannot grant authority.
+Protected retrieval checks matching records in the configured source manifest,
+including nested metadata and provenance restrictions and exact revision
+selections. An absent manifest remains compatible with host-only materialized
+sources; an unreadable or ambiguous manifest refuses. A manifest change during
+retrieval also refuses before returning results.
 
 ## Revocation, lineage, and reconciliation
 
