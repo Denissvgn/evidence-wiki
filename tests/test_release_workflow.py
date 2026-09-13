@@ -1,6 +1,11 @@
+import hashlib
 import io
 import itertools
+import json
+import os
 import shlex
+import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -54,6 +59,127 @@ def test_publish_job_is_downstream_of_the_release_gate() -> None:
     assert not any(use.startswith("pypa/gh-action-pypi-publish@") for use in step_uses(release_gate))
 
 
+def test_release_checks_fan_out_from_identity_and_all_gate_promotion() -> None:
+    jobs = load_workflow()["jobs"]
+    producers = {"release-tests", "release-artifacts", "release-scale"}
+    for producer in producers:
+        assert jobs[producer]["needs"] == "release-identity"
+    assert set(jobs["release-gate"]["needs"]) == producers | {"release-identity"}
+    assert jobs["publish-to-pypi"]["needs"] == "release-gate"
+    for key, job in jobs.items():
+        assert "if" not in job and not job.get("continue-on-error", False)
+        assert job.get("permissions", {}).get("id-token") is None or key == "publish-to-pypi"
+        for step in job["steps"]:
+            assert not step.get("continue-on-error", False)
+            if "actions/checkout@" in step.get("uses", ""):
+                assert step["with"]["ref"] == "${{ github.sha }}"
+                assert step["with"]["persist-credentials"] is False
+    publisher = jobs["publish-to-pypi"]
+    assert not any("run" in step or "actions/checkout@" in step.get("uses", "") for step in publisher["steps"])
+
+
+def test_release_shards_are_complete_and_retries_keep_diagnostics() -> None:
+    jobs = load_workflow()["jobs"]
+    test, gate = jobs["release-tests"], jobs["release-gate"]
+    assert test["strategy"] == {"fail-fast": False, "max-parallel": 3, "matrix": {"shard": [1, 2, 3]}}
+    run = next(step for step in test["steps"] if "tools/run_test_groups.py" in step.get("run", ""))
+    assert run["run"] == ".venv/bin/python tools/run_test_groups.py --shard-count 3 --shard-index ${{ matrix.shard }}"
+    uploads = [step for step in test["steps"] if "actions/upload-artifact@" in step.get("uses", "")]
+    manifest = next(step for step in uploads if step["with"]["path"] == "suite-evidence/manifest.json")
+    diagnostics = next(step for step in uploads if step["with"]["path"] == "suite-evidence/")
+    assert "if" not in manifest
+    assert manifest["with"]["if-no-files-found"] == "error" and manifest["with"]["overwrite"] is True
+    assert "github.run_id" in manifest["with"]["name"] and "github.run_attempt" not in manifest["with"]["name"]
+    assert diagnostics["if"] == "always()" and "overwrite" not in diagnostics["with"]
+    assert "github.run_attempt" in diagnostics["with"]["name"] and "matrix.shard" in diagnostics["with"]["name"]
+    assert diagnostics["with"]["retention-days"] == 90
+    steps = gate["steps"]
+    download = next(step for step in steps if "pattern" in step.get("with", {}))
+    verify = next(step for step in steps if "tools.verify_test_shards" in step.get("run", ""))
+    promote = next(step for step in steps if step["name"] == "Store verified distributions")
+    assert download["with"]["pattern"] == manifest["with"]["name"].replace("${{ matrix.shard }}", "*")
+    assert steps.index(download) < steps.index(verify) < steps.index(promote)
+    assert verify["env"] == {"SUITE_COMMIT": "${{ github.sha }}", "SUITE_RUN_ID": "${{ github.run_id }}"}
+    command = shlex.split(verify["run"].replace("\\\n", " "))
+    assert command[command.index("--shard-count") + 1] == "3"
+    assert command[command.index("--platform") + 1] == "Linux/X64/3.12"
+
+
+def inline_python(job_name: str, step_name: str) -> str:
+    steps = load_workflow()["jobs"][job_name]["steps"]
+    command = next(step["run"] for step in steps if step["name"] == step_name)
+    return command.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+
+def run_inline_python(code: str) -> None:
+    exec(compile(code, str(WORKFLOW_PATH), "exec"), {})  # noqa: S102 - exercise the checked-in workflow guard.
+
+
+@pytest.mark.parametrize("defect", [None, "commit", "tag", "name", "version", "changelog"])
+@pytest.mark.parametrize("use_backport", [False, True], ids=["default-parser", "tomli-backport"])
+def test_release_identity_checks_run_against_the_event_commit(tmp_path, monkeypatch, defect, use_backport):
+    if use_backport:
+        monkeypatch.setitem(sys.modules, "tomllib", None)
+    project = "other-project" if defect == "name" else "evidence-wiki"
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nname = "{project}"\nversion = "0.7.1"\n')
+    package = tmp_path / "src/evidence_wiki"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text('__version__ = "0.7.2"\n' if defect == "version" else '__version__ = "0.7.1"\n')
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n" if defect == "changelog" else "## 0.7.1 - 2026-09-13\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RELEASE_TAG", "v0.7.2" if defect == "tag" else "v0.7.1")
+    monkeypatch.setenv("RELEASE_COMMIT", "a" * 40)
+
+    def checkout_commit(command, **kwargs):
+        assert command == ["git", "rev-parse", "HEAD"] and kwargs == {"text": True}
+        return ("b" if defect == "commit" else "a") * 40 + "\n"
+
+    monkeypatch.setattr(subprocess, "check_output", checkout_commit)
+    code = inline_python("release-identity", "Validate release identity")
+    if defect:
+        with pytest.raises(SystemExit):
+            run_inline_python(code)
+    else:
+        run_inline_python(code)
+
+
+@pytest.mark.parametrize("defect", [None, "bytes", "name", "version", "missing", "extra", "duplicate"])
+@pytest.mark.parametrize("use_backport", [False, True], ids=["default-parser", "tomli-backport"])
+def test_promoted_distributions_are_exactly_the_validated_bytes(tmp_path, monkeypatch, defect, use_backport):
+    if use_backport:
+        monkeypatch.setitem(sys.modules, "tomllib", None)
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.7.1"\n')
+    candidate = tmp_path / "release-candidate"
+    dist = candidate / "dist"
+    dist.mkdir(parents=True)
+    payloads = {"wheel": ("evidence_wiki-0.7.1-py3-none-any.whl", b"validated wheel"),
+                "sdist": ("evidence_wiki-0.7.1.tar.gz", b"validated source archive")}
+    report = {"expected_version": "0.7.1"}
+    for kind, (name, content) in payloads.items():
+        (dist / name).write_bytes(content)
+        report[kind] = {"name": name, "sha256": hashlib.sha256(content).hexdigest()}
+    if defect == "bytes":
+        (dist / payloads["wheel"][0]).write_bytes(b"replaced wheel")
+    elif defect == "name":
+        report["wheel"]["name"] = "different.whl"
+    elif defect == "version":
+        report["expected_version"] = "0.7.2"
+    elif defect == "missing":
+        (dist / payloads["sdist"][0]).unlink()
+    elif defect == "extra":
+        (dist / "internal-report.json").write_text("{}")
+    elif defect == "duplicate":
+        (dist / "another.whl").write_bytes(b"extra wheel")
+    (candidate / "artifact-validation.json").write_text(json.dumps(report))
+    monkeypatch.chdir(tmp_path)
+    code = inline_python("release-gate", "Verify the exact distribution bytes before promotion")
+    if defect:
+        with pytest.raises(SystemExit):
+            run_inline_python(code)
+    else:
+        run_inline_python(code)
+
+
 def test_release_gate_checks_identity_quality_and_runs_the_shared_artifact_gate() -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
 
@@ -76,6 +202,7 @@ def test_release_gate_checks_identity_quality_and_runs_the_shared_artifact_gate(
     # The inline copies are gone: the workflow must not carry its own smoke again.
     assert "pip install dist/*.whl" not in text
     assert "import pypdf" not in text
+    assert "--skip-sdist" not in text and "--membership-only" not in text
 
 
 def test_ci_runs_the_same_shared_artifact_gate_as_the_release() -> None:
@@ -321,15 +448,54 @@ def test_release_gate_measures_the_standard_profile_and_stores_it() -> None:
 
 def test_release_failure_diagnostics_do_not_admit_failed_distributions() -> None:
     workflow = load_workflow()
-    steps = workflow["jobs"]["release-gate"]["steps"]
-    collector = next(step for step in steps if "tools/collect_release_diagnostics.py" in step.get("run", ""))
-    upload = next(step for step in steps if step.get("with", {}).get("path", "").startswith("release-diagnostics/"))
+    jobs = workflow["jobs"]
+    for job, report in (("release-artifacts", "artifact-validation.json"),
+                        ("release-scale", "scale-benchmark-standard.json")):
+        steps = jobs[job]["steps"]
+        collector = next(step for step in steps if "tools/collect_release_diagnostics.py" in step.get("run", ""))
+        upload = next(step for step in steps if step.get("with", {}).get("path", "").startswith("release-diagnostics/"))
+        assert collector["if"] == upload["if"] == "always()"
+        assert collector["run"].endswith("--report " + report)
+        assert collector["env"] == {"RELEASE_GATE_STATUS": "${{ job.status }}"}
+        assert all(token in upload["with"]["name"] for token in ("github.sha", "runner.arch", "github.run_attempt"))
+        assert "dist/" not in upload["with"]["path"] and "overwrite" not in upload["with"]
+    steps = jobs["release-gate"]["steps"]
+    candidate = next(step for step in jobs["release-artifacts"]["steps"]
+                     if step["name"] == "Store candidate distributions and their validation report")
+    candidate_download = next(step for step in steps if step["name"] == "Download the validated candidate distributions")
+    assert "if" not in candidate
+    assert candidate["with"]["overwrite"] is True
+    assert candidate["with"]["if-no-files-found"] == "error"
+    assert candidate_download["with"] == {"name": candidate["with"]["name"], "path": "release-candidate/"}
     distributions = next(step for step in steps if step["name"] == "Store verified distributions")
-    assert collector["if"] == upload["if"] == "always()"
-    assert "github.sha" in upload["with"]["name"] and "runner.arch" in upload["with"]["name"]
-    assert "dist/" not in upload["with"]["path"]
+    verify = next(step for step in steps if step["name"] == "Verify the exact distribution bytes before promotion")
+    assert steps.index(verify) < steps.index(distributions)
     assert "if" not in distributions
-    assert "if" not in workflow["jobs"]["publish-to-pypi"]
+    assert distributions["with"]["path"].splitlines() == ["release-candidate/dist/*.whl", "release-candidate/dist/*.tar.gz"]
+    assert distributions["with"]["overwrite"] is True
+    assert distributions["with"]["if-no-files-found"] == "error"
+    publisher_download = jobs["publish-to-pypi"]["steps"][0]
+    assert publisher_download["with"] == {"name": distributions["with"]["name"], "path": "dist"}
+    assert "if" not in jobs["publish-to-pypi"]
+
+
+def test_publisher_receives_only_flat_distribution_files(tmp_path):
+    jobs = load_workflow()["jobs"]
+    upload = next(step for step in jobs["release-gate"]["steps"] if step["name"] == "Store verified distributions")
+    download = jobs["publish-to-pypi"]["steps"][0]
+    dist = tmp_path / "release-candidate/dist"
+    dist.mkdir(parents=True)
+    names = {"evidence_wiki-9.9.9-py3-none-any.whl", "evidence_wiki-9.9.9.tar.gz"}
+    for name in names:
+        (dist / name).write_bytes(b"validated distribution payload")
+    (dist.parent / "artifact-validation.json").write_text("{}")
+    (tmp_path / "scale-benchmark-standard.json").write_text("{}")
+    selected = [path for pattern in upload["with"]["path"].splitlines() for path in tmp_path.glob(pattern)]
+    assert len(selected) == 2
+    # upload-artifact preserves paths relative to the selected paths' common root.
+    artifact_root = Path(os.path.commonpath([path.parent for path in selected]))
+    delivered = {Path(download["with"]["path"]) / path.relative_to(artifact_root) for path in selected}
+    assert delivered == {Path("dist") / name for name in names}
 
 
 def test_coverage_measures_subprocesses_and_folds_copied_scripts_onto_the_template() -> None:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evidence-wiki"
-version = "0.7.1"
+version = "0.7.2"
 description = "Verifiable autonomous research workspaces: agent-driven research where every answer cites provenance-tracked sources or blocks with a structured evidence request."
 readme = "README.md"
 license = { text = "MIT" }
@@ -34,6 +34,7 @@ dev = [
   "coverage[toml]==7.15.0",
   "ruff==0.15.17",
   "pytest==9.0.3",
+  "tomli==2.4.1",
 ]
 
 [project.scripts]

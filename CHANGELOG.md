@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.7.2 - 2026-09-13
+
+- Independent release checks run concurrently against one pinned commit.
+  Publication waits for complete verification and rechecks the distribution
+  hashes.
+- The PyPI handoff contains only flat wheel and source-archive files.
+  Diagnostic JSON is retained separately, preventing `InvalidDistribution`
+  errors during publication.
+- Release diagnostics are retained per job and attempt. Failed jobs can be
+  rerun while keeping successful verification from the same commit and run.
+
 ## 0.7.1 - 2026-09-13
 
 - Usage restrictions remain effective when frontmatter values contain `---`.

@@ -1,7 +1,11 @@
 """Budget refusal preserves real measurements without changing the gate result."""
 
 import json
+import subprocess
+import sys
 from dataclasses import replace
+
+import pytest
 
 from tests._script_loader import load_module
 from tests.test_release_workflow import REPO_ROOT
@@ -38,3 +42,36 @@ def test_partial_report_is_retained_without_claiming_validity(tmp_path):
     result = DIAGNOSTICS.collect(tmp_path, tmp_path / "diagnostics")
     assert result["reports"][0]["status"] == "invalid-json"
     assert (tmp_path / "diagnostics/artifact-validation.json").read_bytes() == b'{"partial":'
+
+
+@pytest.mark.parametrize("name", DIAGNOSTICS.REPORT_NAMES)
+def test_parallel_job_only_reports_its_own_expected_output(tmp_path, monkeypatch, name):
+    monkeypatch.setenv("GITHUB_JOB", "release-artifacts" if name == "artifact-validation.json" else "release-scale")
+    (tmp_path / name).write_text('{"outcome":"recorded"}\n')
+    output = tmp_path / "diagnostics"
+    result = DIAGNOSTICS.collect(tmp_path, output, [name])
+    assert result["context"]["GITHUB_JOB"]
+    assert len(result["reports"]) == 1
+    assert result["reports"][0]["path"] == name
+    assert result["reports"][0]["status"] == "available"
+    assert {path.name for path in output.iterdir()} == {name, "manifest.json"}
+
+
+@pytest.mark.parametrize("reports", [[], ["../outside.json"], ["unknown.json"],
+                                   ["artifact-validation.json", "artifact-validation.json"]])
+def test_invalid_report_selection_refuses_before_writing(tmp_path, reports):
+    output = tmp_path / "diagnostics"
+    with pytest.raises(ValueError, match="supported release report"):
+        DIAGNOSTICS.collect(tmp_path, output, reports)
+    assert not output.exists()
+
+
+def test_scoped_diagnostics_cli_accepts_the_workflow_report_option(tmp_path):
+    name = "artifact-validation.json"
+    (tmp_path / name).write_text('{"result":"recorded"}\n')
+    output = tmp_path / "diagnostics"
+    subprocess.run([sys.executable, str(REPO_ROOT / "tools/collect_release_diagnostics.py"),
+                    "--root", str(tmp_path), "--output", str(output), "--report", name], check=True)
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert [entry["path"] for entry in manifest["reports"]] == [name]
+    assert manifest["reports"][0]["status"] == "available"
