@@ -92,6 +92,11 @@ the tag, version, changelog heading, and built wheel before uploading. PyPI
 uploads are intentionally unavailable from pull requests, tag pushes, and manual
 workflow dispatches; only a published GitHub Release can start that workflow.
 
+Release checks run concurrently against the commit recorded by the release
+event. The final gate verifies complete execution evidence and the exact
+distribution hashes before making the wheel and source archive available to
+the publisher. Diagnostic reports remain separate from those packages.
+
 ## Documentation
 
 Update documentation whenever public behavior changes. Common destinations are:
