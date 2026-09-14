@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.3 - 2026-09-15
+
 - HTML and CSV/TSV normalization use bounded input reads while preserving
   truncation warnings and original raw files. Inventory also bounds the text
   samples used to recognize URL lists and LaTeX entrypoints.
