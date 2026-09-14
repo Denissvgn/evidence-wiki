@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- HTML and CSV/TSV normalization use bounded input reads while preserving
+  truncation warnings and original raw files. Inventory also bounds the text
+  samples used to recognize URL lists and LaTeX entrypoints.
+- Web-capture guidance makes host-owned destination validation explicit;
+  built-in origin identity policies do not validate `final_url` or redirects.
+
 ## 0.7.2 - 2026-09-13
 
 - Independent release checks run concurrently against one pinned commit.

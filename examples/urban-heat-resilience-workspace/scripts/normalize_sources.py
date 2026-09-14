@@ -43,8 +43,8 @@ PDF_EXTRACTION_TIMEOUT_SECONDS = 120
 PDF_MAX_INPUT_BYTES = 100 * 1024 * 1024
 PDF_MAX_PAGES = 2_000
 PDF_MAX_OUTPUT_CHARS = 20_000_000
-# HTML extraction reads at most this many bytes; larger pages are truncated
-# with a parse warning. No JS rendering, no remote asset fetching.
+# HTML extraction consumes at most this many bytes; the reader uses one extra
+# byte to detect truncation. No JS rendering, no remote asset fetching.
 HTML_MAX_BYTES = 2_000_000
 HTML_EXTENSIONS = {".html", ".htm", ".xhtml"}
 HTML_SKIP_TAGS = {"script", "style", "nav", "noscript", "template", "svg", "iframe"}
@@ -56,8 +56,8 @@ HTML_BLOCK_TAGS = {
 }
 HTML_MAX_OUTLINE_ENTRIES = 80
 HTML_MAX_LINKS = 100
-# Tabular extraction caps: bytes read from a CSV/TSV file and sample rows
-# rendered into the normalized record.
+# Tabular extraction caps: input bytes (plus one byte to detect truncation)
+# and sample rows rendered into the normalized record.
 TABLE_MAX_BYTES = 5_000_000
 TABLE_SAMPLE_ROWS = 20
 TABLE_MAX_CELL_CHARS = 80
@@ -2723,7 +2723,8 @@ def strip_html_tags(text: str) -> str:
 def read_html_text(html_path: Path, relative_path: str) -> tuple[str, list[str]]:
     warnings: list[str] = []
     try:
-        data = html_path.read_bytes()
+        with html_path.open("rb") as handle:
+            data = handle.read(HTML_MAX_BYTES + 1)
     except OSError as exc:
         return "", [f"{relative_path}: cannot read HTML file: {exc}"]
     if len(data) > HTML_MAX_BYTES:
@@ -2843,7 +2844,8 @@ def infer_table_delimiter(sample: str, suffix: str) -> str:
 def read_table_text(table_path: Path, relative_path: str) -> tuple[str, bool, list[str]]:
     warnings: list[str] = []
     try:
-        data = table_path.read_bytes()
+        with table_path.open("rb") as handle:
+            data = handle.read(TABLE_MAX_BYTES + 1)
     except OSError as exc:
         return "", False, [f"{relative_path}: cannot read table file: {exc}"]
     truncated = len(data) > TABLE_MAX_BYTES

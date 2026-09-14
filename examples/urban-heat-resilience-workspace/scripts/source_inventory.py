@@ -370,7 +370,8 @@ def looks_like_link_file(path: Path, raw_root: Path) -> bool:
     if path.suffix.lower() != ".txt":
         return False
     try:
-        sample = path.read_text(encoding="utf-8", errors="ignore")[:8192].splitlines()
+        with path.open(encoding="utf-8", errors="ignore") as handle:
+            sample = handle.read(8192).splitlines()
     except OSError:
         return False
     non_empty = [line.strip() for line in sample if line.strip()]
@@ -541,7 +542,8 @@ def fallback_entrypoint(bundle_dir: Path) -> tuple[str | None, str | None]:
     documentclass_candidates: list[str] = []
     for path in sorted(bundle_dir.glob("*.tex"), key=lambda value: value.name):
         try:
-            sample = path.read_text(encoding="utf-8", errors="ignore")[:20000]
+            with path.open(encoding="utf-8", errors="ignore") as handle:
+                sample = handle.read(20000)
         except OSError:
             continue
         if DOCUMENTCLASS_RE.search(sample):

@@ -567,6 +567,22 @@ class EvidencePolicyHelperTests(unittest.TestCase):
         self.assertEqual("pass", identity.verdict)
         self.assertTrue(any("official domain" in reason.lower() for reason in identity.reasons))
 
+    def test_official_domain_identity_does_not_validate_the_final_destination(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            helper, inputs = self.load_inputs(self.write_workspace(Path(tmpdir)))
+
+        inputs.provenance_by_source_id["web:seg-social-cuota"].update(
+            {
+                "final_url": "https://blocked.example/redirected-page",
+                "redirect_chain": ["https://blocked.example/redirected-page"],
+            }
+        )
+        inputs.jurisdiction_profiles["destination-boundary"] = {"blocked_domains": ["blocked.example"]}
+        identity = helper.evaluate_identity_policy("official_domain_match", ["web:seg-social-cuota"], inputs)
+
+        self.assertEqual("pass", identity.verdict)
+        self.assertTrue(any("origin host seg-social.es" in reason for reason in identity.reasons))
+
     def test_non_legal_official_profile_passes_without_using_transport_allowlist_as_trust(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = self.write_workspace(Path(tmpdir))
