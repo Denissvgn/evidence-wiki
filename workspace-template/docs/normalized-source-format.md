@@ -325,6 +325,10 @@ Sources classified as `html` (`.html`, `.htm`, `.xhtml`) are normalized with `ex
 
 Boundaries: extraction is deterministic and local-only. There is no JavaScript rendering and no remote asset fetching; a page that requires JS to render its content yields whatever static text is present. Files larger than 2 MB (`HTML_MAX_BYTES`) are truncated with a parse warning. Malformed markup degrades to body-text-with-warnings, never a crash. Single-file pages and arXiv HTML-format papers are both supported.
 
+The extraction reader uses a bounded read with one extra byte to detect
+truncation. The raw HTML file stays intact; fingerprinting still covers its
+complete contents.
+
 ## Tabular Records (CSV/TSV)
 
 Manifest `table` records with `.csv`/`.tsv` extensions are normalized with `extraction_method: table_text` using the standard-library `csv` module:
@@ -335,6 +339,10 @@ Manifest `table` records with `.csv`/`.tsv` extensions are normalized with `extr
 - ragged rows (column count differing from the header) produce a parse warning naming the first offending line.
 
 Files larger than 5 MB (`TABLE_MAX_BYTES`) are scanned only up to the cap, with a parse warning and the row count reported as a lower bound. Excel, Parquet, and Feather files remain classified-only: they get manifest records but no normalized record, because reading them would require new dependencies.
+
+The extraction reader uses a bounded read with one extra byte to detect
+truncation, then drops any incomplete final line at the cap. The raw CSV/TSV
+file stays intact and remains fully covered by its fingerprint.
 
 A clean table also gets a **structured-view sidecar**, emitted from the same parse that renders the sample: every row, uncapped and uncollapsed, so a claim can anchor at `rows/41/price` instead of quoting a line that happened to survive the 20-row sample. Emission is fail-closed — a torn, ragged, or ambiguously-headed table gets no sidecar at all. See "Structured View Sidecar" for the shape and the exact skip conditions.
 

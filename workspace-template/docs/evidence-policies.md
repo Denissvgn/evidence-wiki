@@ -460,6 +460,16 @@ installation can decide it without a human.
 | `registry_entry_matches_product_requirement` | The registry entry links to the declared product category, legal act, OJEU/harmonised reference, or equivalent requirement metadata. |
 | `none` | No additional identity check is required beyond the accepted source record. |
 
+`official_domain_match` and `origin_url_matches_candidate` evaluate the source
+origin. They do not validate the destination recorded in `provenance.final_url`
+or the redirect chain. An allowed origin can therefore pass these policies
+even when its recorded final destination is on a blocked domain. A host that
+requires destination identity must obtain trustworthy navigation observations
+and validate the destination and redirects against its acquisition policy
+before accepting the capture. When those observations are unavailable, it
+must refuse captures that require that guarantee. Preserving `final_url` in
+inventory and normalization does not perform this validation.
+
 ## Artifact Kinds
 
 | Value | Meaning |

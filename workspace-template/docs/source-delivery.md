@@ -159,6 +159,13 @@ the file, not changing it: a companion that was already in the workspace when
 the order was issued is immutable raw evidence like any other, and editing it
 inside the order is refused.
 
+For web captures, `final_url` may record an independently observed final
+destination. Inventory preserves this field in provenance, which normalization
+carries into the source record. Hosts own destination and redirect validation:
+the built-in origin policies do not enforce either from this metadata. See
+[Identity Policies](evidence-policies.md#identity-policies) before accepting a
+capture that requires a verified destination identity.
+
 All fields are optional strings (validated when present), except `license` may
 be explicit YAML `null` to record known uncertainty, `publication_year` may
 be an integer or four-digit string, `date_metadata` is a scalar mapping,
