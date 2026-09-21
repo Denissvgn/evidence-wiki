@@ -60,6 +60,7 @@ _ROWS = (
 )
 
 _CLI_ONLY = (
+    ("evidence.strict", "evidence-wiki strict schemas / check / prepare-review / review / export", "read-only checks and claim export; authenticated review appends to private host state"),
     ("workspace.create", "evidence-wiki init / deploy", "workspace lifecycle and installation"),
     ("workspace.upgrade", "evidence-wiki upgrade", "workspace lifecycle and pending-order guards"),
     ("pack.lifecycle", "evidence-wiki pack validate / adopt / refresh", "pack lifecycle and transaction recovery"),

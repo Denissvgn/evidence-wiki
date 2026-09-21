@@ -20,7 +20,12 @@ _key = "_evidence_wiki_capture_scope_" + hashlib.sha256(
 ).hexdigest()
 _holder = ModuleType(_key)
 _holder.active = ContextVar(_key, default=None)
-_active = sys.modules.setdefault(_key, _holder).active
+_holder.strict_internal = ContextVar(_key + "_strict", default=frozenset())
+_holder.strict_host = ContextVar(_key + "_host", default=None)
+_shared = sys.modules.setdefault(_key, _holder)
+_active = _shared.active
+strict_internal = _shared.strict_internal
+strict_host = _shared.strict_host
 
 
 def captured_view(root, config):

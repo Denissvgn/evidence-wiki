@@ -30,6 +30,19 @@ Use `workspace-system.yml` for:
 Do not hardcode wiki folders, page types, raw source roots, or lifecycle statuses when the config provides them.
 Keep `workspace-system.yml` domain-neutral. Project-specific and domain-pack settings belong in `research.yml` or domain guidance files.
 
+The current trusted caller can conduct research directly through the workspace
+scripts without starting another model. Caller, managed-worker and external-host
+authority are distinct; see `docs/agent-contracts.md`. A managed work order never
+promotes its worker to the caller/parent role. Reuse existing task permission for
+routine local decisions, preserve active evidence criteria, and ask only for
+material scope or authority that the task does not establish.
+
+When `strict_evidence` is configured, follow `docs/strict-evidence.md`:
+coverage, grounding and authenticated independent review are mandatory. Treat
+draft pages and proposals as unaccepted until the controlled export passes.
+Never disable policy, forge reviewer/receipt metadata or bypass the host's final
+delivery path. Keep unresolved claims and reviewer/source limitations explicit.
+
 ## Research Knowledge Model
 
 The workspace has three knowledge layers:

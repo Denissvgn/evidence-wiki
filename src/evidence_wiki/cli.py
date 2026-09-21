@@ -468,6 +468,8 @@ def _run_publication(args: list[str]) -> int:
         document = _handle(parsed.project_root).publish_selected(parsed.question, expected_revision=parsed.expected_revision)
     except EvidenceWikiError as exc:
         return _refuse(exc, json_mode=True)
+    if parsed.output and document.get("schema_version") == "evidence-strict-publication/v1":
+        return _emit_refusal(_packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery"), json_mode=True)
     rendered = script.render(document)
     if parsed.output:
         Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
@@ -486,7 +488,14 @@ def _run_questions_export(forwarded: list[str]) -> int:
         return _refuse(exc, json_mode=json_mode)
     # ``jsonl`` is the same document reshaped by the script's own renderer, and
     # ``--output`` only chooses where the rendered bytes go.
-    rendered = script.render_output(document, parsed.format)
+    try:
+        if parsed.output and document.get("schema_version") == "evidence-strict-publication/v1":
+            raise _packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery")
+        rendered = script.render_output(document, parsed.format)
+    except Exception as exc:
+        if _packaged_script("_script_errors").is_refusal(exc):
+            return _emit_refusal(exc, json_mode=json_mode)
+        raise
     if parsed.output:
         Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
     else:
@@ -679,6 +688,7 @@ def _print_help() -> None:
         "  evidence-wiki doctor [--target PATH] [--format text|json]\n"
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
+        "  evidence-wiki strict schemas|check|prepare-review|review|export [options]\n"
         "  evidence-wiki orchestrate start|next|submit|status|retire|cleanup-claims [options]\n"
         f"  evidence-wiki orchestrate run|resume --runner {managed_runners} [options]\n"
         "  evidence-wiki contract\n"
@@ -774,6 +784,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_temporal(args)
     if command == "assessments":
         return _run_assessments(args)
+    if command == "strict":
+        return int(_packaged_script("strict_evidence").main(args))
     if command == "serve-mcp":
         return _run_serve_mcp(args)
     if command == "orchestrate":

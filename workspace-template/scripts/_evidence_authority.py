@@ -19,6 +19,7 @@ from typing import Any
 
 from _evidence_revision import canonical_bytes, content_id, observation
 from _qualified_packet import strict_json
+from _workspace_module_loader import load_workspace_module
 
 TRUST_SCHEMA = "evidence-trust-policy/v1"
 AUTH_SCHEMA = "evidence-authentication/v1"
@@ -26,7 +27,8 @@ TRUST_ENV = "EVIDENCE_WIKI_AUTHORITY_FILE"
 MAX_TRUST_BYTES = 1024 * 1024
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
-ROLES = frozenset({"generator", "evaluator", "usage", "scrubber", "assessment", "availability", "revocation"})
+ROLES = frozenset({"generator", "evaluator", "usage", "scrubber", "assessment", "availability", "revocation", "human-review"})
+_STRICT_CACHE = {}
 
 
 class EvidenceInvalid(ValueError):
@@ -125,7 +127,7 @@ def load_trust(project_root: Path, config: dict[str, Any], now: datetime) -> dic
         policy = exact_object(strict_json(raw), {
             "schema_version", "policy_id", "policy_revision", "not_before", "expires_at",
             "principals", "revoked_keys", "revoked_envelopes",
-        })
+        }, {"strict_workspaces"})
     except ValueError as exc:
         raise EvidenceInvalid("invalid_host_trust_policy") from exc
     if (policy["schema_version"] != TRUST_SCHEMA
@@ -160,6 +162,14 @@ def load_trust(project_root: Path, config: dict[str, Any], now: datetime) -> dic
         name(key_id)
     for identifier in bounded_list(policy["revoked_envelopes"], maximum=4096):
         digest(identifier)
+    scopes = policy.get("strict_workspaces", {})
+    if not isinstance(scopes, dict) or len(scopes) > 128:
+        raise EvidenceInvalid("strict_host_scope_invalid")
+    if scopes:
+        strict = load_workspace_module(Path(__file__).resolve().parent, "_strict_contract", cache=_STRICT_CACHE)
+        for binding, selection in scopes.items():
+            digest(binding)
+            strict.policy_document(selection)
     return {"policy": policy, "content_hash": "sha256:" + hashlib.sha256(raw).hexdigest()}
 
 

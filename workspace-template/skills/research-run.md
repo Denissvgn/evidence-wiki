@@ -2,6 +2,18 @@
 
 Canonical unattended research cycle: drive the question backlog from claimed work to a `complete` or `blocked_on_sources` verdict in one bounded, auditable run.
 
+The current trusted caller can drive this loop using its selected workspace
+interpreter; a secondary model or parent orchestration session is optional.
+Direct caller work has no package-managed worker isolation guarantee. A worker
+with an issued order keeps every scope and parent-control restriction below.
+See `docs/agent-contracts.md` for roles, task authority and setup boundaries.
+
+For strict workspaces, use `docs/strict-evidence.md` to check the claim inventory,
+obtain required independent review and export through the controlled owner.
+The resolver enforces the policy even when flags are omitted. A matching quote,
+successful tool call or self-authored verification field does not establish
+acceptance; keep unsupported and contested work explicit.
+
 ## Use When
 
 Use this skill when an orchestrator or human asks for an unattended pass over the backlog: "work the backlog", "run the research loop", "process the open questions until done or blocked". For interactive single-question work, use `research-answer` directly; this skill wraps it with claiming, budgets, and run reporting.

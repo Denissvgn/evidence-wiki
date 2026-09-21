@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Strict evidence policy makes coverage, grounding and independent review
+  mandatory for accepted claims, with current source/review checks and controlled
+  exports. New request schemas require explicit strict-policy selection.
+- A macOS tool host isolates draft workers, denies protected data/control access
+  and process spawning, and routes reviewed answers through the existing owners.
+
+- The installation contract exposes individually retrievable onboarding schemas
+  with bounded JSON decoding, stable refusal codes and canonical content digests.
+- Agent guidance distinguishes direct callers, managed workers and external
+  hosts, including task authority and conservative setup recovery requirements.
+
 ## 0.7.3 - 2026-09-15
 
 - HTML and CSV/TSV normalization use bounded input reads while preserving

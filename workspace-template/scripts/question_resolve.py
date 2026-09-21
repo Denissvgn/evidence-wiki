@@ -1480,6 +1480,7 @@ def resolution_fields(
     frontmatter: dict[str, Any],
 ) -> dict[str, Any]:
     if args.command == "answer":
+        load_sibling_module("_strict_evidence").enforce_resolution(project_root, config, args, frontmatter)
         source_ids = validate_source_ids(project_root, config, unique_nonempty(args.source_id, "--source-id"))
         if not source_ids and not getattr(args, "allow_uncited", False):
             raise ResolveError(

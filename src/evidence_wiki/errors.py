@@ -7,13 +7,16 @@ exception hierarchy those envelopes map onto, so a host can catch a family
 (``except CoverageError``) or dispatch on the exact code, and always has the
 original code, remediation, and recoverability in hand.
 
-The authoritative code vocabulary lives in the packaged asset
+The workspace-script code vocabulary lives in the packaged asset
 ``workspace-template/scripts/_script_errors.py``. That file is an asset rather
 than an importable module, so this module deliberately declares the mapping
 itself and never imports the asset at import time; ``tests/test_library_errors.py``
 loads the asset and proves the two agree. Codes this version has never seen --
 a newer workspace, a newer domain pack -- degrade to the base class with the
 code preserved rather than raising, so an older host keeps working.
+
+Package-owned onboarding codes and their default exit/retry semantics are
+declared in this module, independently of the workspace-script vocabulary.
 """
 
 from __future__ import annotations
@@ -84,20 +87,41 @@ _NON_RECOVERABLE_CODES = frozenset(
 # exited with", so every workspace-script refusal that exits with something else
 # belongs here — omitting one makes the two doors disagree about the same failure.
 _EXIT_CODE_OVERRIDES: dict[str, int] = {
+    "STRICT_HOST_BUSY": EXIT_DRIVER_BUSY,
     "CLAIM_HELD": EXIT_CONFLICT,
     "CLAIM_NOT_STALE": EXIT_CONFLICT,
     "DOMAIN_PACK_REFRESH_CONFLICT": EXIT_CONFLICT,
     "ORCHESTRATION_DRIVER_BUSY": EXIT_DRIVER_BUSY,
 }
 
+# Package-owned artifact/setup codes; workspace-script codes retain their own
+# mirrored vocabulary above. Reserved setup codes do not advertise an executor.
+ONBOARDING_ERROR_CONTRACTS: dict[str, tuple[int, bool]] = {
+    "ONBOARDING_RESOURCE_UNKNOWN": (EXIT_INVALID, False),
+    "ONBOARDING_INVALID": (EXIT_INVALID, False),
+    "ONBOARDING_LIMIT": (EXIT_INVALID, False),
+    "ONBOARDING_VERSION_UNSUPPORTED": (EXIT_INVALID, False),
+    "ONBOARDING_ENVIRONMENT_INCOMPATIBLE": (EXIT_INVALID, False),
+    "ONBOARDING_PLAN_STALE": (EXIT_CONFLICT, False),
+    "ONBOARDING_OWNERSHIP_CONFLICT": (EXIT_CONFLICT, False),
+    "ONBOARDING_TARGET_CONFLICT": (EXIT_CONFLICT, False),
+    "ONBOARDING_WRITE_FAILED": (EXIT_INVALID, True),
+    "ONBOARDING_CHECK_FAILED": (EXIT_INVALID, True),
+    "ONBOARDING_LOCK_BUSY": (EXIT_DRIVER_BUSY, True),
+}
+
 
 def default_recoverable(error_code: str) -> bool:
     """Return whether retrying is meaningful for a code, absent an explicit flag."""
+    if error_code in ONBOARDING_ERROR_CONTRACTS:
+        return ONBOARDING_ERROR_CONTRACTS[error_code][1]
     return error_code not in _NON_RECOVERABLE_CODES
 
 
 def default_exit_code(error_code: str) -> int:
-    """Return the process exit status a workspace script uses for a code."""
+    """Return the process exit status for a script or package-owned code."""
+    if error_code in ONBOARDING_ERROR_CONTRACTS:
+        return ONBOARDING_ERROR_CONTRACTS[error_code][0]
     return _EXIT_CODE_OVERRIDES.get(error_code, EXIT_INVALID)
 
 
@@ -197,6 +221,8 @@ class RevisionError(EvidenceWikiError):
 
 
 ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
+    "STRICT_HOST_BUSY": LockError,
+    "STRICT_": ConfigError,
     "PUBLICATION_": PublicationError,
     "EVIDENCE_REVISION_": RevisionError,
     # Workspace / runtime preconditions.
@@ -317,6 +343,7 @@ ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     "QUERY_MISSING": UsageError,
     "VALUE_INVALID": UsageError,
     "NOT_IMPLEMENTED": UsageError,
+    "ONBOARDING_": UsageError,
 }
 
 

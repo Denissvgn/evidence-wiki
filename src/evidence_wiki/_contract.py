@@ -271,6 +271,7 @@ def contract() -> dict:
     import yaml
 
     from . import orchestration
+    from .onboarding_schemas import contract_index
     from .orchestration_schemas import public_orchestration_schema_documents
 
     # ``shared_assets_root()``, not a private ``with assets_root()`` block. A
@@ -291,6 +292,7 @@ def contract() -> dict:
     if not isinstance(workspace_system, dict):
         workspace_system = {}
     initializer = load_packaged_script(root, "init_research_workspace")
+    strict_contract = load_packaged_script(root, "_strict_contract")
     status_module = load_packaged_script(root, "workspace_status")
     intake_module = load_packaged_script(root, "intake_questions")
     export_module = load_packaged_script(root, "export_answers")
@@ -333,6 +335,26 @@ def contract() -> dict:
         "starter_schema_version": workspace_system.get("schema_version"),
         "compatible_research_yml_contract": workspace_system.get("compatible_research_yml_contract"),
         "profile_schema_versions": [initializer.PROFILE_SCHEMA_VERSION],
+        "onboarding_contract": contract_index(),
+        "strict_evidence": {
+            "capability": "strict-evidence/v1",
+            "schemas": sorted(strict_contract.schema_documents()),
+            "schema_command": "evidence-wiki strict schemas --schema-id ID",
+            "commands": ["strict check", "strict prepare-review", "strict review", "strict export"],
+            "default_new_request": "onboarding/research_request/v2",
+            "assurance_modes": ["artifact_checked", "host_enforced"],
+            "host_api": "evidence_wiki.strict_host.StrictResearchHost",
+            "host_operations": ["draft", "answer", "release"],
+            "parent_work_orders": {"supported": False, "reason": "protected_parent_intake_unavailable"},
+            "worker_processes": "single process; spawning and detached children denied",
+            "host_backend": {"id": "darwin-sbpl", "availability": "requires successful live probe"},
+            "review_authority": "existing external host trust policy and evidence event store; POSIX storage",
+            "review_actions": ["register-strict-review", "register-strict-human-review"],
+            "unsupported_checks": ["declarative_computation", "automatic_semantic_truth_verification"],
+            "limits": {"artifact_bytes": strict_contract.MAX_BYTES, "claims": strict_contract.MAX_CLAIMS,
+                       "questions": 100, "evidence_per_claim": 16, "worker_seconds": 600},
+            "contract_document": "docs/strict-evidence.md",
+        },
         "upgrade_compatibility": {
             "workspace_schema_versions": list(initializer.SUPPORTED_WORKSPACE_SCHEMA_VERSIONS),
             "research_yml_contract_versions": list(initializer.SUPPORTED_RESEARCH_YML_CONTRACTS),

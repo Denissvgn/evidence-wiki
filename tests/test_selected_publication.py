@@ -85,8 +85,8 @@ class SelectedPublicationTests(unittest.TestCase):
                 question = self.root / "wiki/questions" / f"{self.slug}.md"
                 question.write_text(question.read_text().replace("status: answered", "status: human_review"))
             return original_export(root, *args, **kwargs)
-        def load_for_evaluation(root, name):
-            return exporter if name == "export_answers" else original_load(root, name)
+        def load_for_evaluation(root, name, **kwargs):
+            return exporter if name == "export_answers" else original_load(root, name, **kwargs)
         with patch.object(SELECTED, "load_workspace_module", side_effect=load_for_evaluation), patch.object(exporter, "build_export", side_effect=edit_then_export):
             document = self.run_selected()
         self.assertEqual(2, len(invocations))
