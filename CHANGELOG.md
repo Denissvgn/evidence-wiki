@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add local pack specifications, deterministic scaffolding, pinned revisions and
+  specializations, immutable case/assessment records, qualified catalog selection
+  and setup-plan resumption. Manual policy namespaces now match their owning pack;
+  structural and synthetic-case outcomes remain separate from domain approval.
+
 - Add read-only research setup planning with lossless question accounting,
   owner-validated profiles and coverage, frozen policy/computation identities,
   explicit access and review blockers, and immutable saved-plan revalidation.

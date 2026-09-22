@@ -64,6 +64,8 @@ def main(operation: str, argv: list[str]) -> int:
             parser.add_argument("--from-file", required=True)
     elif operation == "schemas":
         parser.add_argument("--schema-id")
+    elif operation == "guide":
+        parser.add_argument("--topic", choices=("selection", "authoring", "specification", "references"), default="selection")
     parser.add_argument("--format", choices=("json", "text"), default="json")
     try:
         args = parser.parse_args(argv)
@@ -71,13 +73,24 @@ def main(operation: str, argv: list[str]) -> int:
         if operation == "guide":
             from ._script_host import shared_assets_root
 
-            content = read_file(shared_assets_root(), "workspace-template/docs/pack-selection.md").decode()
+            relative = {"selection": "pack-selection.md", "authoring": "pack-authoring.md",
+                        "specification": "pack-authoring-example.json", "references": "pack-assessment-references.json"}[args.topic]
+            content = read_file(shared_assets_root(), "workspace-template/docs/" + relative).decode()
             if args.format == "text":
                 print(content, end="")
                 return 0
             result = {"schema_version": "evidence-pack-guide/v1", "content": content}
         elif operation == "schemas":
-            result = schema_document(args.schema_id) if args.schema_id else contract_index()
+            from .pack_authoring_contracts import contract_index as authoring_index
+            from .pack_authoring_contracts import schema_document as authoring_schema
+            from .pack_authoring_contracts import schemas as authoring_schemas
+
+            if args.schema_id:
+                result = authoring_schema(args.schema_id) if args.schema_id in authoring_schemas() else schema_document(args.schema_id)
+            else:
+                result = contract_index()
+                result["authoring"] = authoring_index()
+                result["schema_ids"].extend(authoring_schemas())
         elif operation == "show":
             row, _ = select(args.selector, target=args.target, catalog=args.catalog, path=args.path, resource=args.resource)
             result = {"schema_version": "evidence-pack-inspection/v1", "pack": row}

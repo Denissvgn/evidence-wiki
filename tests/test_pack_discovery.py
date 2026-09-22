@@ -208,6 +208,9 @@ def test_legacy_portable_pack_names_and_invalid_metadata(local_pack):
     value = yaml.safe_load(overlay.read_text())
     value["domain_pack"]["name"] = path.name
     del value["domain_pack"]["selection"]
+    # The portable-name case is independent of foreign policy declarations.
+    # This renamed legacy pack uses built-in policies only.
+    value["domain_pack"].pop("policy_vocabularies", None)
     overlay.write_text(yaml.safe_dump(value))
     assert select(path=path)[0]["state"] == "available"
     assert pack_discovery.validate_snapshot(path)[1]["ok"]

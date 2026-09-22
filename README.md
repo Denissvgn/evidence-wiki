@@ -85,6 +85,10 @@ setup plan with original question mappings, evidence criteria, source routes and
 explicit assurance blockers. Save with `--output` and recheck input identities
 with `agent plan-check`. See [research planning](workspace-template/docs/research-planning.md).
 
+Use `evidence-wiki pack guide --topic authoring` to scaffold or derive local
+guidance, freeze assessment cases, qualify a revision and resume setup planning.
+Structural and arithmetic checks retain separate domain-review requirements.
+
 Add a question using the [question API][question-api]:
 
 ```bash

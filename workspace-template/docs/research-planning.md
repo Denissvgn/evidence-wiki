@@ -113,6 +113,15 @@ specific and remain in a plan even when setup is ready. Framework qualification
 is bound to the selected version and mode; local access is not probed and bridge
 acknowledgments are not computed or research output.
 
+## Local pack authoring
+
+For justified reusable guidance, `decisions.pack_authoring` carries a fit decision
+plus a specification or derivation. The plan returns an inert authoring action
+only for explicit guidance gaps; specification requirement IDs must cover them.
+`pack resume` feeds a qualified local catalog revision into this same compiler,
+binding its assessment identity and retaining independent domain review as a
+release blocker. See [local pack authoring](pack-authoring.md).
+
 ## Replay and limits
 
 The saved identity binds the normalized request, expanded configuration, proposed

@@ -247,12 +247,21 @@ def select(selector: str | None = None, *, target=None, catalog=None, path=None,
 
 
 def checker_identity() -> str:
+    import importlib.metadata
+
     import yaml
 
     digest = hashlib.sha256()
     digest.update(canonical([__version__, platform.python_implementation(), platform.python_version(), yaml.__version__]))
+    for dependency in ("ruamel.yaml", "tzdata"):
+        try:
+            version = importlib.metadata.version(dependency)
+        except importlib.metadata.PackageNotFoundError:
+            version = None
+        digest.update(canonical([dependency, version]))
     package = Path(__file__).parent
-    for name in ("domain_pack_validator.py", "pack_discovery.py", "_pack_io.py"):
+    for name in ("domain_pack_validator.py", "pack_discovery.py", "pack_catalog.py", "pack_decisions.py", "_pack_io.py", "pack_authoring.py", "pack_authoring_store.py",
+                 "pack_authoring_contracts.py", "pack_assessment.py", "pack_qualification.py", "pack_acceptance.py"):
         digest.update(name.encode() + b"\0" + hashlib.sha256((package / name).read_bytes()).digest())
     template = shared_assets_root() / "workspace-template"
     for path in sorted(template.rglob("*")):
@@ -262,11 +271,11 @@ def checker_identity() -> str:
     return digest.hexdigest()
 
 
-def validate_snapshot(path: Path, expected: str | None = None) -> tuple[dict, dict]:
+def validation_observation(path: Path, expected: str | None = None):
+    """Run the canonical validator on captured bytes and retain failed findings."""
     snapshot = capture_pack(path)
     if expected is not None and expected != snapshot.tree_sha256:
         refuse("pack_revision_changed", "ONBOARDING_PLAN_STALE")
-    metadata = snapshot_metadata(snapshot)
     checker = checker_identity()
     with tempfile.TemporaryDirectory(prefix="evidence-wiki-pack-validation-") as temporary:
         candidate = Path(temporary) / snapshot.root.name
@@ -274,8 +283,14 @@ def validate_snapshot(path: Path, expected: str | None = None) -> tuple[dict, di
         report = domain_pack_validator.validate_domain_pack(str(candidate), root=shared_assets_root())
     if capture_pack(path).tree_sha256 != snapshot.tree_sha256 or checker_identity() != checker:
         refuse("pack_changed_during_validation", "ONBOARDING_PLAN_STALE")
+    return snapshot, report, checker
+
+
+def validate_snapshot(path: Path, expected: str | None = None) -> tuple[dict, dict]:
+    snapshot, report, checker = validation_observation(path, expected)
     if not report["ok"]:
         refuse("pack_canonical_validation_failed")
+    metadata = snapshot_metadata(snapshot)
     receipt = {"schema_version": "evidence-pack-validation/v1", "tree_sha256": snapshot.tree_sha256,
                "overlay_sha256": metadata["identity"]["overlay_sha256"], "checker_sha256": checker,
                "ok": True, "checks": [{"id": row["id"], "status": row["status"]} for row in report["checks"]],

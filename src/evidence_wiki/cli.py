@@ -639,6 +639,7 @@ def _print_pack_help() -> None:
         "  evidence-wiki pack schemas [--schema-id ID]\n"
         "  evidence-wiki pack guide [--format json|text]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
+        "  evidence-wiki pack scaffold|derive|qualify|freeze-cases|assess|accept|resume [authoring options]\n"
         "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [--dry-run] [--format text|json]\n"
         "      [--keep-local TARGET]... [--accept-pack TARGET]...\n"
         "  evidence-wiki pack adopt --target PATH [--dry-run] [--accept-local-overrides]\n"
@@ -655,6 +656,10 @@ def _run_pack(args: list[str]) -> int:
         _print_pack_help()
         return 0
     subcommand = args.pop(0)
+    if subcommand in {"scaffold", "derive", "qualify", "freeze-cases", "assess", "accept", "resume"}:
+        from .pack_authoring_commands import main as authoring_main
+
+        return authoring_main(subcommand, args)
     if subcommand in {"list", "show", "catalog", "decide", "schemas", "guide"}:
         from .pack_commands import main as pack_main
 

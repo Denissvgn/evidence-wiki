@@ -23,6 +23,17 @@ def compile_plan(raw):
     payload, decisions = request["request"]["payload"], request["decisions"]
     blockers = []
     rows = intent(request, blockers)
+    from .planning_authoring import authoring_action
+
+    authoring = authoring_action(decisions["pack_authoring"], blockers)
+    accepted = None
+    if decisions["accepted_pack"] is not None:
+        from .pack_acceptance import selection
+
+        if decisions["pack_authoring"] is not None:
+            refuse("/decisions/accepted_pack_conflicts_with_authoring")
+        _, accepted = selection(decisions["accepted_pack"], payload["domain"])
+        blockers.append(blocker("local_pack_domain_review_not_verified", questions=[row["id"] for row in rows], stage="release"))
     target, target_before = target_basis(payload["target"])
     payload["target"] = target_before["target"]
     allowed_roots = payload["authority"]["writable_roots"]
@@ -71,6 +82,8 @@ def compile_plan(raw):
     source_check = source_plan(request, config, [])
     if source_check != sources:
         refuse("planning_source_inputs_changed", "ONBOARDING_PLAN_STALE")
+    if accepted is not None and selection(decisions["accepted_pack"], payload["domain"])[1] != accepted:
+        refuse("planning_accepted_pack_changed", "ONBOARDING_PLAN_STALE")
     steps = [
         {"id": "initialize", "operation": "initialize", "owner": "init_research_workspace", "depends_on": [],
          "mutations": ["target starter tree", "research.yml", "docs/research-requirements.json", "project guidance", "selected domain pack"]},
@@ -88,10 +101,10 @@ def compile_plan(raw):
     result = {"schema_version": PLAN, "plan_id": "0" * 64, "request": request, "request_sha256": digest(request),
         "decision_basis": basis, "bindings": {**installed_before, "target": target_before,
             "pack": {"selection": payload["domain"]["pack"], "tree_sha256": pack.tree_sha256} if pack else None,
-            "inputs": sources["local_inputs"]}, "profile": profile,
+            "inputs": sources["local_inputs"], "accepted_pack": accepted}, "profile": profile,
         "initialization": {"dry_run": "passed", "effective_config": config, "config_sha256": digest(config), "writes": False},
         "questions": questions, "coverage": coverage, "sources": sources, "strict": strict, "computation": computation,
-        "framework": framework, "steps": steps, "blockers": blockers,
+        "framework": framework, "steps": steps, "blockers": blockers, "authoring_action": authoring,
         "setup_ready": not any(row["stage"] == "setup" for row in blockers), "research_ready": False, "actions_executed": False,
         "assumptions": payload["assumptions"], "open_decisions": payload["open_decisions"],
         "limitations": ["Read-only plan; no initializer writes, acquisition, checker execution, model calls, or accepted evidence.",

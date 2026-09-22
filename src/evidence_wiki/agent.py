@@ -32,6 +32,9 @@ OPERATIONS = (
     ("pack schemas", "read", False), ("pack guide", "read", False),
     ("pack catalog init", "write", False), ("pack catalog register", "write", False),
     ("pack catalog list", "read", False), ("pack decide", "temporary_write", False),
+    ("pack scaffold", "write", False), ("pack derive", "write", False), ("pack qualify", "write", False),
+    ("pack freeze-cases", "write", False), ("pack assess", "write", False), ("pack accept", "write", False),
+    ("pack resume", "depends_on_options", False),
     ("agent inspect", "depends_on_options", False), ("agent routes", "depends_on_options", False),
     ("agent source-status", "temporary_write", True), ("agent capture", "write", True),
     ("agent source-schemas", "read", False), ("agent source-guide", "read", False),
@@ -111,6 +114,7 @@ def _negotiate(summary: dict, requirements: list[str], assurance: str) -> None:
     supported.add("pack-discovery/v1")
     supported.add("source-usability/v1")
     supported.add("research-planning/v1")
+    supported.add("pack-authoring/v1")
     for key in ("strict", "computation"):
         if summary[key]["checker"]["available"]:
             supported.add(summary[key]["capability"])

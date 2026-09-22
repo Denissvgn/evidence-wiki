@@ -403,13 +403,22 @@ def domain_pack_policy_vocabularies(config: dict[str, Any]) -> dict[str, dict[st
             "CONFIG_INVALID",
             f"domain_pack.policy_vocabularies contains unknown section(s): {', '.join(unknown)}",
         )
-    return {
+    vocabularies = {
         field: normalize_policy_vocabulary_declarations(
             raw_vocabularies.get(field),
             label=f"domain_pack.policy_vocabularies.{field}",
         )
         for field in POLICY_VOCABULARY_FIELDS
     }
+    name = domain_pack.get("name")
+    if isinstance(name, str) and name.strip():
+        prefix = "pack:" + name.strip() + "/"
+        for declarations in vocabularies.values():
+            for policy_id in declarations:
+                if not policy_id.startswith(prefix):
+                    raise CoverageManifestError("CONFIG_INVALID", "Declared policy namespace must match domain_pack.name",
+                        details={"policy_id": policy_id, "pack_name": name.strip()})
+    return vocabularies
 
 
 def merged_policy_vocabularies(config: dict[str, Any] | None = None) -> dict[str, dict[str, str]]:

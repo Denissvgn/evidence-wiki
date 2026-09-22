@@ -1299,6 +1299,65 @@ PLANNING_PROBE = textwrap.dedent(r'''
 ''')
 
 
+PACK_AUTHORING_PROBE = textwrap.dedent(r'''
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    cli, root, request_path = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+    root.mkdir()
+    def command(*args, expected=0):
+        result = subprocess.run([str(cli),*map(str,args)],cwd=root,text=True,capture_output=True)
+        assert result.returncode == expected, result.stdout + result.stderr
+        return json.loads(result.stdout)
+    spec = json.loads(command('pack','guide','--topic','specification')['content'])
+    spec['unresolved'] = []
+    source = root/'spec.json'
+    source.write_text(json.dumps(spec))
+    draft = root/'draft'
+    created = command('pack','scaffold','--from-file',source,'--output',draft)
+    observed = command('pack','qualify','--draft',draft)
+    assert observed['validation']['ok'] and observed['validation']['semantic_adequacy'] == 'not_evaluated'
+    rows = []
+    for scenario,region,question,outcome in [('adequate','north','north','pass'),('missing',None,'north','fail'),
+            ('conflicting','south','north','fail'),('wrong_scope','north','east','fail')]:
+        rows.append({'id':scenario,'requirement_ids':['region'],'scenario':scenario,'kind':'policy',
+            'target':'pack:'+spec['name']+'/region-match',
+            'inputs':{'structured':{} if region is None else {'region':region},'question':{'metadata':{'region':question}},
+                'provenance':{},'origin_host':None,'provider_ids':[],'as_of':'2026-09-22T12:00:00Z'},
+            'expected':{'status':'observed','outcome':outcome,'human_review_required':True},'rationale':'Frozen region-equality outcome'})
+    suite={'schema_version':'evidence-pack-cases/v1','draft_id':created['draft_id'],'cases':rows,'exceptions':[],
+        'limitations':['Synthetic reference values; independent domain review remains required']}
+    cases=root/'cases.json';cases.write_text(json.dumps(suite))
+    assert not command('pack','freeze-cases','--draft',draft,'--from-file',cases)['gaps']
+    assessment=command('pack','assess','--draft',draft)
+    assert not assessment['assessment']['gaps'] and assessment['assessment']['mechanical_cases_passed']
+    assert assessment['assessment']['independent_review']=='not_verified'
+    assert all(row['passed'] for row in assessment['assessment']['reference_basis']['arithmetic_observations'])
+    catalog=root/'catalog'
+    command('pack','catalog','init','--catalog',catalog,'--root','drafts='+str(root))
+    accepted=command('pack','accept','--draft',draft,'--assessment-id',assessment['record']['sha256'],
+        '--catalog',catalog,'--root-id','drafts','--id','scoped-one','--scope','Scoped synthetic measurements')
+    assert accepted['semantic_adequacy']=='not_certified'
+    original=json.loads(request_path.read_text())
+    original['request']['payload']['target']={'writable_root':str(root),'relative_path':'workspace'}
+    original['request']['payload']['authority']['writable_roots']=[str(root)]
+    original['request']['payload']['scope'].append({'name':'region','value':'north'})
+    request=root/'research.json';request.write_text(json.dumps(original))
+    saved=root/'plan.json'
+    plan=command('pack','resume','--from-file',request,'--catalog',catalog,'--id','scoped-one','--output',saved)
+    assert plan['setup_ready'] and not plan['research_ready'] and not (root/'workspace').exists()
+    assert plan['bindings']['accepted_pack']['assessment_sha256']==assessment['record']['sha256']
+    assert command('agent','plan-check','--from-file',saved)['status']=='current'
+    Path(created['candidate'],'taxonomy.md').write_text('Changed guidance')
+    command('agent','plan-check','--from-file',saved,expected=3)
+    print(json.dumps({'local_pack_scaffold':'passed','frozen_pack_cases':'passed','canonical_pack_qualification':'passed',
+        'independent_arithmetic_references':'passed','qualified_local_registration':'passed','qualified_plan_resume':'passed',
+        'pack_domain_certification':False}))
+''')
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -1407,11 +1466,13 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
     sources = run([str(python), "-c", SOURCE_PROBE, str(cli), str(scratch / "source-workspace")], cwd=outside)
     planning = run([str(python), "-c", PLANNING_PROBE, str(cli), str(scratch / "research-planning")], cwd=outside)
+    authoring = run([str(python), "-c", PACK_AUTHORING_PROBE, str(cli), str(scratch / "pack-authoring"),
+        str(scratch / "research-planning/request.json")], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
-            **json.loads(planning)}
+            **json.loads(planning), **json.loads(authoring)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

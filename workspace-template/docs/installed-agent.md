@@ -36,12 +36,12 @@ same command without `--dry-run` within existing authorization. Initialization
 persists the workspace; requested validations are still pending until run.
 Inspect nonempty targets; `--force` is not a recovery protocol.
 
-Choose generic or project-local guidance when sufficient, an existing pack when
-its evidence criteria fit, or a local candidate for reusable gaps. Read
-[pack authoring](guide/pack-authoring/v1) for create/revise decisions and use
-`evidence-wiki pack validate --path CANDIDATE` before deployment. Review domain adequacy and human gates separately from structural validity.
-Apply an accepted same-name revision through `pack refresh` at a safe boundary;
-first attachment or a pack identity switch requires a separate migration.
+Choose generic, project-local or existing pack guidance when sufficient. For
+reusable gaps, read [pack authoring](guide/pack-authoring/v1) and
+`pack guide --topic authoring`. Scaffold or derive a new candidate; qualify, freeze cases, assess and
+register it explicitly. `pack resume` returns a bound setup plan. Domain review
+remains separate. Use `pack refresh` for same-name workspace revisions; first
+attachment or identity changes need migration.
 
 Use `agent inspect --target WORKSPACE` for scoped capability/source observations
 and `agent source-guide` for routing and capture instructions. Run

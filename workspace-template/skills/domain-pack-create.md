@@ -28,6 +28,21 @@ Inputs:
 
 ## Workflow
 
+The installed authoring route can generate the pack from a bounded specification:
+read `evidence-wiki pack guide --topic authoring` and retrieve an editable example
+with `pack guide --topic specification --format text`. Use `pack scaffold` for a
+new pack or `pack derive` for a digest-bound revision/specialization. These commands
+create a new caller-owned container with pack files and separate external records.
+They do not overwrite installed packs, publish guidance or enable integrations.
+
+Run `pack qualify`, freeze requirements/cases with `pack freeze-cases`, then run
+`pack assess`. The canonical validator owns structural checks. Mechanical cases
+use the existing policy/computation engines; declared semantic judgments remain
+unverified, with synthetic reference limits retained. `pack accept` rechecks the
+candidate and observations before local catalog registration. `pack resume`
+selects that exact revision and invokes the setup compiler without creating a
+workspace. Source gaps alone do not justify authoring new guidance.
+
 ### 1. Inspect Context
 
 Read the brief and project-local guidance. Retrieve the installed bootstrap with

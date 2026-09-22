@@ -1,0 +1,117 @@
+{
+  "claim_fields": [
+    {
+      "description": "Observed region",
+      "name": "region",
+      "required": false,
+      "type": "string"
+    }
+  ],
+  "claim_types": [
+    "factual"
+  ],
+  "computation": null,
+  "coverage_templates": {
+    "scoped-observation": {
+      "coverage_profile": "scoped-observation",
+      "optional_facets": [],
+      "required_facets": [
+        {
+          "description": "Applicable measurement",
+          "evidence_path": "official_guidance",
+          "facet_id": "region",
+          "freshness_policy": "no_staleness_check",
+          "identity_policy": "pack:scoped-measurements/region-match",
+          "min_sources": 1,
+          "source_policy": "official_primary"
+        }
+      ]
+    }
+  },
+  "description": "Illustrative guidance for explicitly scoped measurements",
+  "exclusions": [
+    "No universal agronomy conclusions"
+  ],
+  "extraction_targets": [
+    "region",
+    "measurement",
+    "units"
+  ],
+  "filing_rules": [
+    "Retain region and observation dates"
+  ],
+  "human_gated": true,
+  "intended_users": [
+    "Researchers"
+  ],
+  "name": "scoped-measurements",
+  "outputs": [
+    "Comparison table"
+  ],
+  "policies": {
+    "identity_policy": {
+      "pack:scoped-measurements/region-match": "Region equals the caller-selected region"
+    }
+  },
+  "policy_rules": {
+    "pack:scoped-measurements/region-match": {
+      "all_of": [
+        {
+          "equals": {
+            "field": "record/region",
+            "question_field": "metadata/region"
+          }
+        }
+      ],
+      "manual_review_required": true
+    }
+  },
+  "question_classes": [
+    "Which observations apply to the selected region?"
+  ],
+  "recommended_providers": {
+    "acquisition": [],
+    "discovery": []
+  },
+  "request_kinds": [
+    {
+      "description": "Retained scoped measurement",
+      "id": "pack:scoped-measurements/measurement",
+      "label": "Measurement report"
+    }
+  ],
+  "required_scope_inputs": [
+    {
+      "description": "Region to compare",
+      "id": "region"
+    }
+  ],
+  "requirements": [
+    {
+      "id": "region",
+      "meaning": "policy",
+      "text": "Require matching region while keeping meaning review manual"
+    }
+  ],
+  "review_requirements": [
+    "Review source suitability and region meaning"
+  ],
+  "scaffolds": {
+    "observation": "# Observation\n\nRetain region, units, evidence and limitations.\n"
+  },
+  "schema_version": "evidence-pack-authoring-spec/v1",
+  "scope": "Illustrative regional measurement comparison; select and review actual domain constraints before use.",
+  "source_classes": [
+    "measurement report"
+  ],
+  "taxonomy": {
+    "observations": {
+      "description": "Scoped observations",
+      "page_type": "observation"
+    }
+  },
+  "unresolved": [
+    "Confirm actual domain scope and the interpretation of region identity."
+  ],
+  "version": "0.1.0"
+}

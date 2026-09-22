@@ -75,7 +75,7 @@ def _read(root: Path):
                 refuse("catalog_root_invalid")
         for key, row in value["revisions"].items():
             _id(key)
-            if (set(row) != {"root_id", "path", "name", "version", "identity", "scope", "derived_from", "receipt"}
+            if (set(row) - {"assessment"} != {"root_id", "path", "name", "version", "identity", "scope", "derived_from", "receipt"}
                     or row["root_id"] not in value["roots"] or not isinstance(row["scope"], str) or not 1 <= len(row["scope"]) <= 1024):
                 refuse("catalog_revision_invalid")
             safe_name(row["name"])
@@ -87,6 +87,8 @@ def _read(root: Path):
             for item in row["identity"].values():
                 _hash(item)
             _hash(row["receipt"])
+            if "assessment" in row:
+                _hash(row["assessment"])
             _derivation(row["derived_from"])
         return value
     except (ValueError, TypeError, KeyError, AttributeError):
@@ -186,13 +188,18 @@ def resolve_entry(path: Path, revision: str) -> Path:
     return _candidate(value, value["revisions"][revision])
 
 
-def register(path: Path, *, revision: str, root_id: str, relative: str, scope: str, derived_from=None) -> dict:
+def register(path: Path, *, revision: str, root_id: str, relative: str, scope: str, derived_from=None,
+             authoring_root=None, assessment_id=None) -> dict:
     from .pack_discovery import owner, validate_snapshot
 
     _id(revision)
     _id(root_id)
     relative_path(relative)
     _derivation(derived_from)
+    if (authoring_root is None) != (assessment_id is None):
+        refuse("catalog_assessment_options")
+    if assessment_id is not None:
+        _hash(assessment_id)
     if not isinstance(scope, str) or not 1 <= len(scope.strip()) <= 1024:
         refuse("catalog_scope_invalid")
     _outside_assets(path)
@@ -213,6 +220,13 @@ def register(path: Path, *, revision: str, root_id: str, relative: str, scope: s
             locator = {"root_id": root_id, "path": relative}
             candidate = _candidate(value, locator)
             metadata, receipt = validate_snapshot(candidate)
+            assessment = None
+            if authoring_root is not None:
+                from .pack_acceptance import revalidate
+
+                assessment = revalidate(authoring_root, assessment_id, candidate)
+                if assessment["identity"] != metadata["identity"] or assessment["checker_sha256"] != receipt["checker_sha256"]:
+                    refuse("catalog_assessment_binding_mismatch")
             receipt_bytes = canonical(receipt)
             receipt_id = hashlib.sha256(receipt_bytes).hexdigest()
             name = "receipt-" + receipt_id + ".json"
@@ -223,6 +237,11 @@ def register(path: Path, *, revision: str, root_id: str, relative: str, scope: s
                     refuse("catalog_receipt_collision")
             value["revisions"][revision] = {**locator, "name": metadata["name"], "version": metadata["version"],
                 "identity": metadata["identity"], "scope": scope, "derived_from": derived_from, "receipt": receipt_id}
+            if assessment is not None:
+                from .pack_authoring_store import publish
+
+                publish(directory, "assessment-" + assessment_id + ".json", canonical(assessment))
+                value["revisions"][revision]["assessment"] = assessment_id
             # Recheck candidate bytes and root binding before the single catalog commit.
             if capture_pack(_candidate(value, locator)).tree_sha256 != receipt["tree_sha256"]:
                 refuse("catalog_candidate_changed")
@@ -236,7 +255,8 @@ def register(path: Path, *, revision: str, root_id: str, relative: str, scope: s
             if (now.st_dev, now.st_ino) != (held_root.st_dev, held_root.st_ino):
                 refuse("catalog_directory_changed")
             return {"schema_version": SCHEMA, "status": "registered", "selector": "local:" + revision,
-                    "identity": metadata["identity"], "validation_receipt": receipt_id, "providers_enabled": False}
+                    "identity": metadata["identity"], "validation_receipt": receipt_id, "providers_enabled": False,
+                    **({"assessment": assessment_id, "semantic_adequacy": "not_certified", "independent_review": "not_verified"} if assessment is not None else {})}
     except Exception as error:
         if getattr(error, "error_code", None) == "LOCK_UNAVAILABLE":
             refuse("catalog_lock_busy" if getattr(error, "contended", False) else "catalog_lock_unavailable",
@@ -286,10 +306,21 @@ def entries(path: Path, *, only: str | None = None) -> list[dict]:
                     row["validation"]["state"] = "matching_observation"
                 else:
                     row["validation"]["state"] = "checker_changed"
+                if "assessment" in record:
+                    from .pack_acceptance import registered_assessment
+
+                    assessment = registered_assessment(path, record)
+                    current = assessment["checker_sha256"] == checker and row["validation"]["state"] == "matching_observation"
+                    row["assessment"] = {"sha256": record["assessment"], "state": "matching_observation" if current else "checker_changed",
+                        "suite_sha256": assessment["suite_sha256"], "semantic_adequacy": "not_certified",
+                        "independent_review": "not_verified", "limitations": assessment["limitations"]}
+                    if not current:
+                        row.update(state="assessment_stale", reason="catalog_assessment_checker_changed")
                 if capture_pack(_candidate(value, record)).tree_sha256 != record["identity"]["tree_sha256"]:
                     row.update(state="mutated", reason="catalog_candidate_changed")
                     row["validation"]["state"] = "not_current"
         except (EvidenceWikiError, OSError, ValueError, TypeError, KeyError) as error:
+            row["state"] = "unavailable"
             row["reason"] = getattr(error, "details", {}).get("field", "catalog_entry_unavailable")
             row["validation"]["state"] = "not_current"
         result.append(row)

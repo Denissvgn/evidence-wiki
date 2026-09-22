@@ -54,6 +54,7 @@ def schemas() -> dict:
     receipt = obj(schema_version={"const": "evidence-pack-validation/v1"}, tree_sha256=hashed, overlay_sha256=hashed,
                   checker_sha256=hashed, ok={"const": True}, checks=array(obj(id=text(128), status={"const": "pass"}), 128, 1),
                   authority={"const": "caller_local_structural_observation"}, semantic_adequacy={"const": "not_evaluated"})
+    catalog["properties"]["revisions"]["additionalProperties"]["properties"]["assessment"] = hashed
     result = obj(schema_version={"const": "evidence-pack-decision-result/v1"}, request_id=ident, decision_sha256=hashed,
                  decision=decision, choice=choice, status={"enum": ["valid", "partial", "needs_scope", "proposed", "deferred", "unsupported"]},
                  mapping_assurance={"const": "caller_declared"}, semantic_adequacy={"const": "not_evaluated"},
@@ -103,7 +104,8 @@ def _pointer(document, pointer):
         refuse("pack_basis_unknown")
 
 
-def decide(raw: bytes, *, target=None, catalog=None) -> dict:
+def decision_document(raw: bytes) -> dict:
+    """Validate declarative requirement accounting without loading candidates."""
     value = json_document(raw)
     _matches(value, schema_document(SCHEMA))
     requirements = [row["id"] for row in value["requirements"]]
@@ -114,6 +116,13 @@ def decide(raw: bytes, *, target=None, catalog=None) -> dict:
         refuse("pack_requirement_mapping_incomplete")
     if any(row["requirement_id"] not in requirements for row in value["gaps"]):
         refuse("pack_gap_requirement_unknown")
+    return value
+
+
+def decide(raw: bytes, *, target=None, catalog=None) -> dict:
+    value = decision_document(raw)
+    requirements = [row["id"] for row in value["requirements"]]
+    mapping = value["mapping"]
     result = {"schema_version": "evidence-pack-decision-result/v1", "request_id": value["request_id"],
               "decision_sha256": hashlib.sha256(canonical(value)).hexdigest(), "choice": value["choice"],
               "decision": value,

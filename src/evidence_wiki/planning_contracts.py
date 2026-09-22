@@ -53,6 +53,8 @@ def schemas():
         host_token_limit=nullable({"type": "integer", "minimum": 1, "maximum": 1_000_000_000}),
         codebase=nullable(obj(provider=string(128), question_ids=array(ident, 100, 1))),
         project_local=nullable(opaque),
+        pack_authoring=nullable(obj(decision=opaque, specification=nullable(opaque), derivation=nullable(opaque))),
+        accepted_pack=nullable(obj(catalog=string(4096), revision=string(64), assessment_sha256={**string(64), "pattern": r"^[a-f0-9]{64}$"})),
     )
     decisions["required"] = []
     request = obj(schema_version={"const": REQUEST},
@@ -65,6 +67,7 @@ def schemas():
         blockers=array(opaque, 4096), setup_ready={"type": "boolean"}, research_ready={"const": False},
         actions_executed={"const": False}, assumptions=array(string(4096), 64), open_decisions=array(string(4096), 64),
         limitations=array(string(), 16))
+    plan["properties"]["authoring_action"] = nullable(opaque)
     return {key: {"$schema": "https://json-schema.org/draft/2020-12/schema", **value} for key, value in ((REQUEST, request), (PLAN, plan))}
 
 
@@ -94,6 +97,7 @@ def normalize(value):
         "question_plans": [], "computation": None, "framework": None, "discovery": [], "acquisition": [],
         "allowed_domains": [], "source_requirements": [], "host_tools": {"schema_version": HOST_TOOLS, "tools": []},
         "host_token_limit": None, "codebase": None, "project_local": None,
+        "pack_authoring": None, "accepted_pack": None,
     }
     basis = {"caller_fields": sorted(choices), "default_fields": sorted(set(defaults) - set(choices)),
              "authority_basis": "caller_declaration_only"}
