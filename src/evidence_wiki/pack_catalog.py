@@ -30,9 +30,10 @@ def _hash(value):
     return value
 
 
-def _outside_assets(path: Path | int):
+def _outside_assets(path: Path | int, *, additional_roots=()):
     assets = shared_assets_root().resolve()
     protected_paths = [assets / name for name in ("workspace-template", "domain-packs", "orchestrator")]
+    protected_paths.extend(Path(root).resolve() for root in additional_roots)
     if type(path) is int:
         protected_ids = {(item.stat().st_dev, item.stat().st_ino) for item in protected_paths if item.is_dir()}
         descriptor = os.dup(path)

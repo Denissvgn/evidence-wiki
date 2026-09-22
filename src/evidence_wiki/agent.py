@@ -35,6 +35,8 @@ OPERATIONS = (
     ("agent inspect", "depends_on_options", False), ("agent routes", "depends_on_options", False),
     ("agent source-status", "temporary_write", True), ("agent capture", "write", True),
     ("agent source-schemas", "read", False), ("agent source-guide", "read", False),
+    ("agent plan", "depends_on_options", False), ("agent plan-check", "read", False),
+    ("agent plan-schemas", "read", False), ("agent plan-guide", "read", False),
     ("doctor", "temporary_write", True), ("status", "depends_on_options", True), ("questions add", "write", True),
     ("strict check", "read", True), ("strict prepare-review", "read", True),
     ("strict review", "write", True), ("strict export", "read", True),
@@ -108,6 +110,7 @@ def _negotiate(summary: dict, requirements: list[str], assurance: str) -> None:
     supported.add("installed-agent/v1")
     supported.add("pack-discovery/v1")
     supported.add("source-usability/v1")
+    supported.add("research-planning/v1")
     for key in ("strict", "computation"):
         if summary[key]["checker"]["available"]:
             supported.add(summary[key]["capability"])
@@ -201,6 +204,10 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv and argv[0] in {"plan", "plan-check", "plan-schemas", "plan-guide"}:
+        from .planning_commands import main as planning_main
+
+        return planning_main(argv[0], argv[1:])
     if argv and argv[0] in {"inspect", "routes", "source-status", "capture", "source-schemas", "source-guide"}:
         from .source_commands import main as source_main
 

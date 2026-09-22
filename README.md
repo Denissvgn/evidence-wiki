@@ -80,6 +80,11 @@ capabilities from configured access and source usability. Select source IDs with
 route choices and remediation. Inspection does not activate providers or run
 normalization. See [source usability](workspace-template/docs/source-usability.md).
 
+Use `evidence-wiki agent plan --from-file request.json` to compile a read-only
+setup plan with original question mappings, evidence criteria, source routes and
+explicit assurance blockers. Save with `--output` and recheck input identities
+with `agent plan-check`. See [research planning](workspace-template/docs/research-planning.md).
+
 Add a question using the [question API][question-api]:
 
 ```bash

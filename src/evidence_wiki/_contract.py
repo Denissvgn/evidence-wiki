@@ -274,6 +274,7 @@ def contract() -> dict:
     from .onboarding_schemas import contract_index
     from .orchestration_schemas import public_orchestration_schema_documents
     from .pack_commands import contract_index as pack_contract_index
+    from .planning_contracts import contract_index as planning_contract_index
     from .source_contracts import contract_index as source_contract_index
 
     # ``shared_assets_root()``, not a private ``with assets_root()`` block. A
@@ -341,6 +342,7 @@ def contract() -> dict:
         "onboarding_contract": contract_index(),
         "pack_discovery": pack_contract_index(),
         "source_usability": source_contract_index(),
+        "research_planning": planning_contract_index(),
         "installed_agent": {
             "capability": "installed-agent/v1", "bootstrap_command": "evidence-wiki agent --format json",
             "summary_command": "evidence-wiki agent summary --format json",

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add read-only research setup planning with lossless question accounting,
+  owner-validated profiles and coverage, frozen policy/computation identities,
+  explicit access and review blockers, and immutable saved-plan revalidation.
+
 - Add scoped capability/source inspection, declared host-tool contracts and
   requirement-accounted source routing. Explicit Markdown/text captures retain
   original bytes, origin, completeness and rights qualifications through native

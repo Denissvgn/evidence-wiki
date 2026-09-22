@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -90,6 +91,8 @@ PROFILE_CONFIG_SECTIONS = (
     "outputs",
     "integrations",
     "computation",
+    "strict_evidence",
+    "evidence_trust",
 )
 ALLOWED_PACK_FILE_SUFFIXES = {".csv", ".json", ".md", ".txt", ".yaml", ".yml"}
 FORBIDDEN_PACK_PATH_CHARACTERS = '<>:"|?*\\'
@@ -128,9 +131,12 @@ PROFILE_ALLOWED_KEYS = frozenset(
         "outputs",
         "integrations",
         "computation",
+        "strict_evidence",
+        "evidence_trust",
         "research_yml",
         "init_report",
         "handoff",
+        "frozen_requirements",
     )
 )
 PROFILE_REQUIRED_PROJECT_FIELDS = ("name", "description", "owner_goal", "language")
@@ -755,7 +761,7 @@ def validate_provider_list(
             # Deployment must not authorize what this environment cannot supply, so the
             # accepted set is the built-ins plus whatever is actually installed here.
             # With nothing installed this is ``()`` and the old universe is unchanged.
-            registered=safe_registered_ids(phase),
+            registered=selected_registration_ids(value, phase),
         )
     except ProviderNotRegisteredError as exc:
         raise provider_registration_exit(
@@ -766,6 +772,16 @@ def validate_provider_list(
     except ProviderListError as exc:
         raise SystemExit(f"{label} {exc}") from exc
     return list(validated.providers)
+
+
+def selected_registration_ids(value: Any, phase: str) -> tuple[str, ...]:
+    """Avoid importing unrelated plugins for a built-in-only configuration."""
+    builtins = DISCOVERY_ACCEPTED_IDS if phase == "discovery" else ACQUISITION_PROVIDER_IDS
+    if value is None or isinstance(value, list) and all(
+        isinstance(item, str) and item.strip() in builtins for item in value
+    ):
+        return ()
+    return safe_registered_ids(phase)
 
 
 def validate_command_value(value: Any, label: str) -> None:
@@ -1024,6 +1040,26 @@ def validate_profile(profile: dict[str, Any]) -> None:
     validate_profile_config_sections(profile)
     validate_profile_core_keys(profile)
     normalize_seed_questions(profile)
+    frozen_requirements_bytes(profile)
+
+
+def frozen_requirements_bytes(profile: dict[str, Any]) -> bytes | None:
+    """Serialize bounded inert caller requirements, without approval semantics."""
+    if "frozen_requirements" not in profile:
+        return None
+    value = profile["frozen_requirements"]
+    if (not isinstance(value, dict) or set(value) != {"schema_version", "request", "decisions"}
+            or value["schema_version"] != "evidence-research-requirements/v1"
+            or not isinstance(value["request"], dict) or not isinstance(value["decisions"], dict)):
+        raise SystemExit("setup profile frozen_requirements has an invalid data envelope")
+    try:
+        raw = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
+        if len(raw) > 1_048_576:
+            raise ValueError("bound")
+        load_workspace_module(_SCRIPT_DIR, "_record_artifacts").json_document(raw)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise SystemExit("setup profile frozen_requirements exceeds the bounded JSON contract") from None
+    return raw
 
 
 def slug_from_path(path: Path) -> str:
@@ -1164,7 +1200,7 @@ def normalize_cli_provider_flags(values: Any, *, phase: str, label: str) -> tupl
             values,
             phase=phase,
             require_non_empty=True,
-            registered=safe_registered_ids(phase),
+            registered=selected_registration_ids(values, phase),
         )
     except ProviderNotRegisteredError as exc:
         raise provider_registration_exit(
@@ -1737,6 +1773,17 @@ def build_config(options: InitOptions, domain_pack: DomainPackSelection | None) 
     config["project"] = project_config
     if domain_pack is not None:
         config = normalize_domain_pack_paths(config, domain_pack.target_relative)
+    frozen = frozen_requirements_bytes(options.profile)
+    if frozen is not None and isinstance(config.get("strict_evidence"), dict):
+        policy = config["strict_evidence"]
+        instructions = policy.get("instructions")
+        if not isinstance(instructions, dict):
+            raise SystemExit("Invalid strict_evidence instructions")
+        expected = "sha256:" + hashlib.sha256(frozen).hexdigest()
+        path = "docs/research-requirements.json"
+        if path in instructions and instructions[path] != expected:
+            raise SystemExit("Frozen requirements instruction identity mismatch")
+        instructions[path] = expected
     validate_config_paths(config)
     return config
 
@@ -1795,6 +1842,19 @@ def config_list(value: Any, label: str) -> list[str]:
 
 
 def validate_config_paths(config: dict[str, Any]) -> None:
+    if "strict_evidence" in config:
+        try:
+            load_workspace_module(_SCRIPT_DIR, "_strict_contract").policy_document(config["strict_evidence"])
+        except (ValueError, TypeError, KeyError):
+            raise SystemExit("Invalid strict_evidence policy") from None
+    if "evidence_trust" in config:
+        authority = load_workspace_module(_SCRIPT_DIR, "_evidence_authority")
+        try:
+            selection = authority.exact_object(config["evidence_trust"], {"policy_id", "policy_revision"})
+            for value in selection.values():
+                authority.name(value)
+        except (ValueError, TypeError, KeyError):
+            raise SystemExit("Invalid evidence_trust selection") from None
     if config.get("computation") is not None:
         try:
             load_workspace_module(_SCRIPT_DIR, "_computation_runtime").load_definition(config)
@@ -2447,6 +2507,9 @@ def render_log(config: dict[str, Any], options: InitOptions, domain_pack: Domain
 
 def write_workspace_files(target: Path, config: dict[str, Any], options: InitOptions, domain_pack: DomainPackSelection | None) -> None:
     seed_questions = normalize_seed_questions(options.profile)
+    frozen = frozen_requirements_bytes(options.profile)
+    if frozen is not None:
+        write_private_text(target / "docs/research-requirements.json", frozen.decode("utf-8"), target)
     write_yaml(
         target / "research.yml",
         config,

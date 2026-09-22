@@ -63,6 +63,7 @@ REQUIRED_STARTER_ASSETS = (
     "docs/agent-contracts.md",
     "docs/pack-selection.md",
     "docs/source-usability.md",
+    "docs/research-planning.md",
     "docs/strict-evidence.md",
     "docs/declarative-computation.md",
     "docs/orchestration.md",

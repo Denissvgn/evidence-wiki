@@ -864,8 +864,15 @@ def load_template(
         raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", f"Cannot read coverage template {path_value}: {exc}") from exc
     except yaml.YAMLError as exc:
         raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", f"Invalid YAML in coverage template {path_value}: {exc}") from exc
+    return normalize_template_document(document, policy_vocabularies=policy_vocabularies)
+
+
+def normalize_template_document(
+    document: Any, *, policy_vocabularies: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Validate an inert in-memory template with the same rules as file intake."""
     if not isinstance(document, dict):
-        raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", f"coverage template must be a YAML mapping: {path_value}")
+        raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "coverage template must be a YAML mapping")
     unknown = set(document) - TEMPLATE_FIELDS
     if unknown:
         raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", f"coverage template has unknown fields: {', '.join(sorted(unknown))}")

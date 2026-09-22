@@ -1237,6 +1237,68 @@ SOURCE_PROBE = textwrap.dedent(r'''
 ''')
 
 
+PLANNING_PROBE = textwrap.dedent(r'''
+    import hashlib
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    import yaml
+    from evidence_wiki.pack_discovery import owner
+    from evidence_wiki.planning import compile_plan
+
+    cli, root = Path(sys.argv[1]), Path(sys.argv[2])
+    root.mkdir()
+    text = '¿Qué muestra la evidencia?\n第二行'
+    original = {'schema_version':'2.0','kind':'research_request','request_id':'installed-research','payload':{
+        'goal':'Answer using retained evidence','questions':[{'id':'q1','text':text}], 'derived_questions':[],
+        'target':{'writable_root':str(root),'relative_path':'workspace'},'outputs':['json'],
+        'scope':[{'name':'jurisdiction','value':'Spain'}],
+        'domain':{'mode':'none','pack':None,'rationale':'Generic research guidance is sufficient'},
+        'sources':[],'host_tools':[], 'authority':{'role':'caller','reference':'local setup',
+            'allowed_actions':['local_setup'],'source_scope':[],'writable_roots':[str(root)],'credential_references':[]},
+        'budgets':{'questions':5,'source_requests':0,'downloads':0,'bytes':0,'seconds':60},
+        'assumptions':[],'open_decisions':[],
+        'strict_evidence':{'mode':'strict','assurance':'artifact_checked','policy_id':'installed-policy','policy_revision':'1'}}}
+    facet = {'facet_id':'primary','description':'Retained primary evidence','required':True,'evidence_path':'official_guidance',
+        'source_policy':'official_primary','freshness_policy':'no_staleness_check','identity_policy':'official_domain_match','min_sources':1}
+    criterion = {'facet_id':'primary','source_classes':['official guidance'],'required_scope':['jurisdiction'],
+        'time':'Keep observation dates','units':'Keep source units','counterevidence':'Retain contrary evidence',
+        'stopping':'Support or explicit gaps for all facets','inference':'Label all derivations','quantitative':None}
+    request = {'schema_version':'evidence-research-setup/v1','request':original,
+        'decisions':{'question_plans':[{'question_id':'q1','template':None,'facets':[facet],'criteria':[criterion]}]}}
+    request_file, saved = root/'request.json', root/'plan.json'
+    request_file.write_text(json.dumps(request,ensure_ascii=False))
+    def command(*args, expected=0):
+        result = subprocess.run([str(cli),'agent',*map(str,args)],cwd=root,text=True,capture_output=True)
+        assert result.returncode == expected, result.stdout + result.stderr
+        return json.loads(result.stdout)
+    plan = command('plan','--from-file',request_file,'--output',saved)
+    assert plan['setup_ready'] and not plan['research_ready'] and not plan['actions_executed']
+    assert plan['questions']['rows'][0]['original_text'] == text
+    assert not (root/'workspace').exists()
+    assert compile_plan(json.dumps(plan['request']).encode())['plan_id'] == plan['plan_id']
+    assert command('plan-check','--from-file',saved)['status'] == 'current'
+    command('plan','--from-file',request_file,'--output',saved,expected=3)
+    assert command('plan-guide')['content'].startswith('# Plan a research workspace')
+    assert 'evidence-research-setup/v1' in command('plan-schemas')['schema_ids']
+    profile = root/'profile.yml'
+    profile.write_text(yaml.safe_dump(plan['profile'],allow_unicode=True))
+    deployed = subprocess.run([str(cli),'init','--profile',str(profile)],cwd=root,text=True,capture_output=True)
+    assert deployed.returncode == 0, deployed.stdout + deployed.stderr
+    target = root/'workspace'
+    config = yaml.safe_load((target/'research.yml').read_text())
+    assert config == plan['initialization']['effective_config']
+    frozen = (target/'docs/research-requirements.json').read_bytes()
+    assert config['strict_evidence']['instructions']['docs/research-requirements.json'] == 'sha256:' + hashlib.sha256(frozen).hexdigest()
+    intake = owner('intake_questions').run_intake_document(target,plan['questions']['batch'],dry_run=True,from_file_label='saved-plan')
+    assert intake['counts']['created'] == 1
+    command('plan-check','--from-file',saved,expected=3)
+    print(json.dumps({'research_planning':'passed','plan_readonly_replay':'passed','plan_staleness':'passed',
+        'initializer_frozen_requirements':'passed','planned_question_intake':'passed'}))
+''')
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -1344,10 +1406,12 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     ], cwd=outside)
     computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
     sources = run([str(python), "-c", SOURCE_PROBE, str(cli), str(scratch / "source-workspace")], cwd=outside)
+    planning = run([str(python), "-c", PLANNING_PROBE, str(cli), str(scratch / "research-planning")], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
-            **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources)}
+            **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
+            **json.loads(planning)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:
