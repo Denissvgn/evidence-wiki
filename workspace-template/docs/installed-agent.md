@@ -43,11 +43,12 @@ its evidence criteria fit, or a local candidate for reusable gaps. Read
 Apply an accepted same-name revision through `pack refresh` at a safe boundary;
 first attachment or a pack identity switch requires a separate migration.
 
-Run `evidence-wiki doctor --target WORKSPACE`, then the copied smoke and lint
-scripts with the caller-selected Python interpreter. Follow the initialization
-guide for their arguments. Doctor probes temporary writes; pack validation uses
-a temporary workspace. Read [execution contracts](guide/contracts/v1) for interpreter and recovery rules.
-Automated inspect/plan/apply commands are unavailable.
+Use `agent inspect --target WORKSPACE` for scoped capability/source observations
+and `agent source-guide` for routing and capture instructions. Run
+`doctor --target WORKSPACE` and copied smoke/lint scripts for workspace checks.
+Doctor loads registered providers and probes writes; pack validation uses a
+temporary workspace. Read [execution contracts](guide/contracts/v1) for interpreter and recovery rules.
+Plan/apply remain unavailable.
 
 ## Select strict evidence before research
 

@@ -25,8 +25,12 @@ imports, or network access. Operational Python and MCP onboarding are separate
 surfaces; schema access does not imply that they exist.
 
 `onboarding_contract.workflow_commands` lists the read-only `agent` bootstrap,
-summary, resource index and content retrieval commands. `agent inspect`,
-`agent plan`, `agent apply`, and pack scaffold commands are not available.
+summary, resource index and content retrieval commands. `agent plan`,
+`agent apply`, and pack scaffold commands are not available.
+The separate `source_usability` contract provides `agent inspect`, source
+readiness/routing and explicit host capture delivery. Read
+[source-usability.md](source-usability.md); default inspection runs no plugins,
+external tools or network requests, while explicit probes disclose their effects.
 The separate `pack_discovery` contract provides pack inspection, caller-local
 catalogs and caller-declared fit decisions. Retrieve its schemas with
 `pack schemas` and guidance with `pack guide`; see [pack-selection.md](pack-selection.md).

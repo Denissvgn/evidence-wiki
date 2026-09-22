@@ -107,6 +107,15 @@ REQUIRED_WHEEL_MEMBERS = (
     "evidence_wiki/pack_commands.py",
     "evidence_wiki/pack_decisions.py",
     "evidence_wiki/pack_discovery.py",
+    "evidence_wiki/source_commands.py",
+    "evidence_wiki/source_contracts.py",
+    "evidence_wiki/source_delivery.py",
+    "evidence_wiki/source_inputs.py",
+    "evidence_wiki/source_inspection.py",
+    "evidence_wiki/source_probe.py",
+    "evidence_wiki/source_readiness.py",
+    "evidence_wiki/source_routing.py",
+    "evidence_wiki/host_capabilities.py",
     "evidence_wiki/agent_resources.py",
     "evidence_wiki/_agent_catalog.py",
     "evidence_wiki/onboarding_schemas.py",
@@ -1125,6 +1134,109 @@ PACK_PROBE = textwrap.dedent(r'''
 ''')
 
 
+SOURCE_PROBE = textwrap.dedent(r'''
+    import base64
+    import hashlib
+    import json
+    import os
+    import pathlib
+    import subprocess
+    import sys
+    import sysconfig
+    import yaml
+
+    cli, location = sys.argv[1:]
+    root = pathlib.Path(location)
+    def command(*args, expected=0):
+        result = subprocess.run([cli, 'agent', *map(str, args)], capture_output=True, text=True)
+        assert result.returncode == expected and not result.stderr, result.stdout + result.stderr
+        return json.loads(result.stdout)
+    assert command('inspect', '--target', root)['target']['state'] == 'absent'
+    assert command('source-guide')['content'].startswith('# Inspect capabilities')
+    schemas = command('source-schemas')['schema_ids']
+    assert 'evidence-host-delivery/v1' in schemas and 'evidence-source-inspection/v1' in schemas
+    subprocess.run([cli, 'init', '--target', str(root), '--project-name', 'source-observation',
+                    '--project-description', 'Observe selected retained text.', '--domain-pack', 'general-science'],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    content = b'A retained source reports a measured reflectance of 0.74.\n'
+    profile = {'schema_version':'evidence-host-capture/v1','capture_id':'retained','tool_id':'browser','tool_version':'1',
+        'origin_url':'https://example.org/study','title':'Retained observation','retrieved_at':'2026-09-22T10:00:00Z',
+        'capture_method':'browser_visible_text','content_format':'markdown','content_kind':'primary','completeness':'complete',
+        'completeness_note':'Supplied complete text.','rights':{'status':'allowed','license':'CC0-1.0','terms_url':None,'note':'Fixture declaration.'},
+        'scope':{},'request_id':None,'content_sha256':'sha256:'+hashlib.sha256(content).hexdigest(),'content_bytes':len(content)}
+    request = root.parent / 'capture.json'
+    request.write_text(json.dumps({'schema_version':'evidence-host-delivery/v1','capture':profile,'content_base64':base64.b64encode(content).decode()}))
+    if os.name == 'posix':
+        result = command('capture', '--target', root, '--path', 'raw/web/retained.md', '--from-file', request)
+        assert result['status'] == 'delivered' and not result['request_fulfilled']
+        assert command('capture', '--target', root, '--path', 'raw/web/retained.md', '--from-file', request)['status'] == 'already_present'
+    else:
+        raw = root / 'raw/web/retained.md'
+        raw.write_bytes(content)
+        raw.with_name(raw.name+'.provenance.yml').write_text(json.dumps({'host_capture':profile,'checksum':profile['content_sha256'],
+            'origin_url':profile['origin_url'],'retrieved_at':profile['retrieved_at'],'license':profile['rights']['license']}))
+    subprocess.run([sys.executable, str(root/'scripts/source_inventory.py'), '--project-root', str(root)], check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    record = json.loads((root/'sources/manifest.jsonl').read_text().splitlines()[0])
+    subprocess.run([sys.executable, str(root/'scripts/normalize_sources.py'), '--project-root', str(root), '--source-id', record['id']],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    status = command('source-status', '--target', root, '--source-id', record['id'])
+    assert status['sources'][0]['usability'] == 'usable', status
+    assert status['strict']['effective_assurance'] is None and not status['research_ready']
+    assert (root/'raw/web/retained.md').read_bytes() == content
+    tools = {'schema_version':'evidence-host-tools/v1','tools':[{'id':'browser','version':'1','kind':'browser','operations':['capture'],
+        'scope':[{'kind':'uri_prefix','value':'https://example.org'}],'formats':['markdown'],'credential_refs':[],
+        'limits':{'max_requests':2,'max_bytes':10000,'max_cost_usd':'0'},'authorization':'declared','claims':['sandbox'],'basis':'declared'}]}
+    tool_file = root.parent / 'host-tools.json'; tool_file.write_text(json.dumps(tools))
+    assert command('inspect','--target',root,'--host-tools',tool_file)['host_tools'][0]['host_protection'] == 'not_verified'
+    # Publish only a local fixture registration in this disposable installation.
+    site = pathlib.Path(sysconfig.get_path('purelib'))
+    (site/'source_observation_fixture.py').write_text('\n'.join([
+        'import os', "assert 'SOURCE_FIXTURE_TOKEN' not in os.environ", 'class Capabilities:',
+        " allowed_domains=('example.org',)", " terms_urls=('https://example.org/terms',)", " license_inference='none'",
+        ' captures_raw=True', ' quarantine_on_incomplete=True', ' rate_limit=None',
+        " credentials=('SOURCE_FIXTURE_TOKEN',)", " request_kinds=('structured_data',)", 'class Provider:',
+        " id='observed-provider'", ' provider_api_version=1', ' capabilities=Capabilities()',
+        ' def validate_request(self, request):',
+        "  if request.get('symbol') != 'OBSERVATION': raise ValueError('request refused')", '  return dict(request)',
+        " def plan_fetch(self, request): raise AssertionError('fetch must not run')",
+        " def interpret(self, responses): raise AssertionError('interpret must not run')", '']))
+    metadata = site/'source_observation_fixture-1.0.dist-info'; metadata.mkdir()
+    (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: source-observation-fixture\nVersion: 1.0\n')
+    (metadata/'entry_points.txt').write_text('[evidence_wiki.acquisition_providers]\nEntryMarker = source_observation_fixture:Provider\n')
+    os.environ['SOURCE_FIXTURE_TOKEN']='never-emit-this-fixture-credential'
+    observed = command('inspect','--target',root,'--probe-provider','acquisition:source-observation-fixture/EntryMarker')
+    provider = next(row for row in observed['providers'] if row['id']=='observed-provider')
+    assert provider['probe']['loaded'] and provider['probe']['capabilities']['credentials']==['SOURCE_FIXTURE_TOKEN'], provider
+    assert 'never-emit-this-fixture-credential' not in json.dumps(observed)
+    config = yaml.safe_load((root/'research.yml').read_text())
+    config['integrations']['acquisition']={'enabled':True,'providers':['observed-provider']}
+    (root/'research.yml').write_text(yaml.safe_dump(config))
+    (root/'provider-request.json').write_text(json.dumps({'symbol':'OBSERVATION'}))
+    route = {'schema_version':'evidence-source-routes/v1','request_id':'observe','requirements':[{
+        'id':'rows','question_ids':['question'],'kind':'structured_data','query_or_identifier':'OBSERVATION','source_request_id':None,
+        'scope':{},'output_format':'csv','content_kinds':['primary'],'needs_complete':True,'source_ids':[]}],
+        'budget':{'max_requests':1,'max_bytes':10000,'max_cost_usd':'0'},'preferred_tools':[],
+        'registered_requests':[{'requirement_id':'rows','phase':'acquisition','provider_id':'observed-provider',
+            'registration':'source-observation-fixture/EntryMarker','request':{'symbol':'OBSERVATION'},'request_path':'provider-request.json'}]}
+    route_file = root.parent/'routes.json'; route_file.write_text(json.dumps(route))
+    planned = command('routes','--target',root,'--from-file',route_file,'--probe-provider','acquisition:source-observation-fixture/EntryMarker')
+    selected = next(row for row in planned['routes'] if row['kind']=='registered_provider')
+    assert selected['state']=='ready_to_attempt' and selected['request_validation']=='passed', selected
+    assert not selected['network_executed'] and not planned['research_ready']
+    route['registered_requests'][0]['request']={'symbol':'REFUSED'}
+    (root/'provider-request.json').write_text(json.dumps({'symbol':'REFUSED'})); route_file.write_text(json.dumps(route))
+    refused = command('routes','--target',root,'--from-file',route_file,'--probe-provider','acquisition:source-observation-fixture/EntryMarker')
+    assert next(row for row in refused['routes'] if row['kind']=='registered_provider')['state']=='blocked'
+    for path in metadata.iterdir():
+        path.unlink()
+    metadata.rmdir()
+    (site/'source_observation_fixture.py').unlink()
+    print(json.dumps({'source_inspection':'passed','host_capture_pipeline':'passed','source_readiness':'passed',
+                      'registered_request_probe':'passed','source_routes':'passed','declared_authority_not_promoted':'passed'}))
+''')
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -1231,10 +1343,11 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(scratch / "assessment-evidence"),
     ], cwd=outside)
     computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
+    sources = run([str(python), "-c", SOURCE_PROBE, str(cli), str(scratch / "source-workspace")], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
-            **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe)}
+            **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

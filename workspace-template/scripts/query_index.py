@@ -48,7 +48,7 @@ MAX_QUERY_LIMIT = 100
 # Used only to estimate how much discovered evidence is not yet searchable; keep
 # in sync with normalize_sources.normalization_method. `table` records are
 # normalizable only for delimited text files (CSV/TSV), checked per record.
-NORMALIZABLE_KINDS = frozenset({"paper", "pdf", "web_link", "repo_link", "codebase_architecture", "html"})
+NORMALIZABLE_KINDS = frozenset({"paper", "pdf", "web_link", "repo_link", "codebase_architecture", "html", "host_capture"})
 TABLE_NORMALIZABLE_EXTENSIONS = (".csv", ".tsv")
 MAX_REPORTED_UNNORMALIZED = 25
 DEFAULT_INDEX_PATH = ".research-cache/query-index.sqlite3"

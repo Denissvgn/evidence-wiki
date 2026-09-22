@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add scoped capability/source inspection, declared host-tool contracts and
+  requirement-accounted source routing. Explicit Markdown/text captures retain
+  original bytes, origin, completeness and rights qualifications through native
+  normalization; optional probes stay separate from ordinary inspection.
+
 - Add explicit bundled/local/installed pack discovery, bounded caller-local
   revision catalogs and requirement-based fit decisions. Optional selection
   metadata preserves unknowns in older packs; content-bound structural observations

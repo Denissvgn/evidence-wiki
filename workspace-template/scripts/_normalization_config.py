@@ -61,6 +61,7 @@ NATIVE_SOURCE_KINDS = frozenset(
         "codebase_architecture",
         "execution_evidence",
         "market_evidence",
+        "host_capture",
     }
 )
 

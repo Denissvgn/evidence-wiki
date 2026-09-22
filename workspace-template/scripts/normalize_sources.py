@@ -216,6 +216,7 @@ from _script_errors import ScriptRefusal, emit_error, emit_refusal, handle_syste
 from _structured_view import content_hash as structured_view_content_hash
 from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
+from _workspace_module_loader import load_workspace_module
 from source_failure_taxonomy import unusable_evidence_reasons as delivery_unusable_evidence_reasons
 
 
@@ -265,6 +266,7 @@ class NormalizedSource:
     # record's structured-view sidecar; `None` means the record binds no sidecar, which
     # is every source that is not structured evidence.
     structured: dict[str, Any] | None = None
+    capture_status: str | None = None
 
 
 @dataclass
@@ -857,6 +859,8 @@ def normalization_method(
     this package extracts itself, so an adapter fills a gap rather than shadowing a
     built-in extractor. Callers that pass no adapters get the pre-adapter behaviour.
     """
+    if record.get("kind") == "host_capture":
+        return "host_text"
     try:
         execution_profile = _execution_evidence.profile_for(record)
     except _execution_evidence.EvidenceInvalid:
@@ -996,6 +1000,8 @@ def normalize_selected_record(
 ) -> NormalizedSource:
 
     require_host_intake(config, [item.record])
+    if item.method == "host_text":
+        return normalize_host_capture_record(project_root, item.record)
     if pdftotext_path is not None:
         if pdf_extractor is not None:
             raise TypeError("pass pdf_extractor or pdftotext_path, not both")
@@ -1029,6 +1035,33 @@ def record_raw_paths(record: dict[str, Any]) -> list[str]:
     if not isinstance(value, list):
         return []
     return [path for path in value if isinstance(path, str) and path]
+
+
+def normalize_host_capture_record(project_root: Path, record: dict[str, Any]) -> NormalizedSource:
+    capture = load_workspace_module(_SCRIPT_DIR, "_host_capture")
+    metadata = record.setdefault("metadata", {})
+    warnings = manifest_warnings(record)
+    try:
+        inspected = capture.inspect_record(project_root, record)
+        profile = inspected["profile"]
+        metadata["host_capture"] = profile
+        if inspected["unusable_reasons"]:
+            set_record_unusable_evidence(record, inspected["unusable_reasons"])
+        content = inspected["content"]
+        status = "failed" if not content.strip() else "content_extracted" if inspected["complete"] else "partial"
+        title, url = profile["title"], profile["origin_url"]
+        warnings.append("Host origin, scope, completeness and rights are caller declarations; captured bytes are checked independently.")
+        if not inspected["complete"]:
+            warnings.append("The capture is not a complete primary document: " + profile["content_kind"] + "/" + profile["completeness"] + ".")
+    except (ValueError, TypeError, KeyError):
+        metadata["host_capture"] = None
+        set_record_unusable_evidence(record, ["host_capture_invalid"])
+        content, status, title, url = "", "failed", record_id(record), None
+        warnings.append("Host capture bytes or provenance are invalid; restore the original capture and re-inventory this source.")
+    return NormalizedSource(record=record, extraction_method="host_text", title=title, authors=[],
+        abstract="Host-provided text with explicit capture qualifications.", outline=[], extracted_text=content,
+        media=[], links=[url] if url else [], bibliography_files=[], included_paths=[], warnings=unique_values(warnings),
+        capture_status=status)
 
 
 def normalize_adapter_record(
@@ -3612,6 +3645,8 @@ def raw_paths(record: dict[str, Any], included_paths: list[str]) -> list[str]:
 
 
 def status_for(source: NormalizedSource) -> str:
+    if source.capture_status is not None:
+        return source.capture_status
     if source.adapter_status is not None:
         # The adapter's own verdict wins. Status is inferred from the body everywhere
         # else, but a rendering that capped or dropped payload content looks complete
@@ -3750,6 +3785,7 @@ def frontmatter_for(
         "normalized_format": NORMALIZED_FORMAT_VERSION,
         "source_id": record.get("id"),
         "source_kind": record.get("kind"),
+        **({"host_capture": metadata.get("host_capture")} if source.extraction_method == "host_text" else {}),
         "status": status_for(source),
         "evidence_usable": not unusable_reasons,
         "unusable_evidence_reasons": unusable_reasons or None,
@@ -4229,6 +4265,8 @@ def normalization_report_summary(summary: dict[str, int | str]) -> dict[str, Any
     method_keys = ("latex", "pdf", "links", "html", "tables", "codebase", "adapter", "execution")
     if "market" in summary:
         method_keys += ("market",)
+    if "host_text" in summary:
+        method_keys += ("host_text",)
     skipped_existing = int(summary["skipped_existing"])
     skipped_unsupported = int(summary["skipped_unsupported"])
     return {

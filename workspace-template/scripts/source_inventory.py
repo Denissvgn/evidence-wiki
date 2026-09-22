@@ -75,6 +75,7 @@ PROVENANCE_SIDECAR_SUFFIX = ".provenance.yml"
 #                          the manifest would hand it the authority that nesting withheld.
 PROVENANCE_RECOGNIZED_ONLY_FIELDS = frozenset({"provider_capabilities", "provider_metadata"})
 PROVENANCE_FIELDS = (
+    "host_capture",
     "url",
     "final_url",
     "origin_url",
@@ -217,6 +218,7 @@ PROVENANCE_COMPANION_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 #: on. A declaration the fingerprint could not carry would be a promise -- edit this and
 #: normalization re-runs -- that the record has no way to keep.
 RAW_FINGERPRINT_CAPTURE_SUFFIXES = {
+    "host_capture": {".md", ".markdown", ".mdown", ".txt"},
     "pdf": PDF_EXTENSIONS,
     "html": HTML_EXTENSIONS,
     "table": TABLE_TEXT_EXTENSIONS,
@@ -230,6 +232,9 @@ ACQUISITION_LOCK_RELATIVE = ("raw", ".locks", "acquisition.lock")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _host_capture import CaptureInvalid
+from _host_capture import inspect_record as inspect_host_capture
+from _host_capture import validate as validate_host_capture
 from _request_scope import normalize_scope
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _usage_gate import require_host_intake
@@ -1606,6 +1611,13 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
         if field not in document:
             continue
         value = document[field]
+        if field == "host_capture":
+            try:
+                data[field] = validate_host_capture(value)
+            except (CaptureInvalid, TypeError, KeyError):
+                data[field] = {"invalid": True}
+                warnings.append(f"{relative_path}: host capture declaration is invalid")
+            continue
         if field == "license" and value is None:
             data[field] = None
             continue
@@ -2321,6 +2333,29 @@ def revalidate_enumerated_raw_files(project_root: Path, paths: list[Path]) -> tu
     return safe, warnings
 
 
+def apply_host_captures(project_root: Path, records: list[dict[str, Any]]) -> None:
+    """Qualify explicitly declared host captures without upgrading bare Markdown."""
+    for record in records:
+        provenance = record.get("provenance")
+        if not isinstance(provenance, dict) or "host_capture" not in provenance:
+            continue
+        record["kind"] = "host_capture"
+        metadata = ensure_metadata(record)
+        try:
+            inspected = inspect_host_capture(project_root, record)
+            metadata["host_capture_complete"] = inspected["complete"]
+            reasons = inspected["unusable_reasons"]
+        except (CaptureInvalid, ValueError, TypeError, KeyError):
+            reasons = ["host_capture_invalid"]
+            append_record_warning(record, "Host capture bytes or provenance could not be qualified; redeliver an intact capture.")
+        if reasons:
+            record["evidence_usable"] = False
+            record["unusable_evidence_reasons"] = unique_values([*record.get("unusable_evidence_reasons", []), *reasons])
+            metadata["evidence_usable"] = False
+            metadata["review_required"] = True
+            metadata["unusable_evidence_reasons"] = unique_values([*metadata.get("unusable_evidence_reasons", []), *reasons])
+
+
 def _build_records_unlocked(
     project_root: Path,
     config: dict[str, Any],
@@ -2456,6 +2491,7 @@ def _build_records_unlocked(
     warnings.extend(sidecar_warnings)
     warnings.extend(apply_provenance_sidecars(project_root, records, sidecars))
     apply_unusable_evidence_flags(records)
+    apply_host_captures(project_root, records)
     for record in records:
         fingerprint = compute_raw_fingerprint(project_root, record)
         if fingerprint:

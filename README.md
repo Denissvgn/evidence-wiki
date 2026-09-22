@@ -74,6 +74,12 @@ exclusions and review requirements. Use `evidence-wiki pack guide --format text`
 for explicit local catalogs and requirement-based selection; see
 [pack selection](workspace-template/docs/pack-selection.md).
 
+Use `evidence-wiki agent inspect --target WORKSPACE` to distinguish installed
+capabilities from configured access and source usability. Select source IDs with
+`agent source-status`; `agent source-guide --format text` explains host captures,
+route choices and remediation. Inspection does not activate providers or run
+normalization. See [source usability](workspace-template/docs/source-usability.md).
+
 Add a question using the [question API][question-api]:
 
 ```bash

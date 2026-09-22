@@ -325,6 +325,7 @@ class NativeKindDriftTests(unittest.TestCase):
             "codebase_architecture": {"id": "code:c", "kind": "codebase_architecture"},
             "execution_evidence": {"id": "execution:c", "kind": "execution_evidence"},
             "market_evidence": {"id": "market:c", "kind": "market_evidence"},
+            "host_capture": {"id": "raw:c", "kind": "host_capture"},
         }
 
     def test_every_declared_native_kind_is_actually_normalized(self):

@@ -252,8 +252,10 @@ the one record the request needs:
 
 - An already-inventoried URL: capture the page itself under `raw/web/` rather than
   listing the URL a second time. The capture has to be `.html`, `.htm`, or `.xhtml`
-  with the canonical `<name>.html.provenance.yml` sidecar; an `.mhtml`, `.txt`, or
-  reader-mode Markdown capture inventories as a kind nothing normalizes, and an
+  with the canonical `<name>.html.provenance.yml` sidecar. Explicit
+  [host text captures](source-usability.md) may instead retain Markdown/text
+  with the versioned capture declaration. Bare reader-mode text/Markdown needs
+  that declaration or a reviewed adapter; `.mhtml` remains unsupported. An
   un-normalized source cannot fulfil a request.
 - An arXiv bundle: deliver it under a directory name that is **not** the
   `arxiv-<id>` form — a different `arxiv-<other-id>` name is still that form and
