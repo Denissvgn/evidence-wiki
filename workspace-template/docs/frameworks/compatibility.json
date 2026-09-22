@@ -1,0 +1,272 @@
+{
+  "schema_version": "evidence-framework-compatibility/v1",
+  "observed_at": "2026-09-22",
+  "frameworks": [
+    {
+      "id": "pi",
+      "version": "0.87.0",
+      "commit": "16787ad5b2dc748047f314ca1bfe7708f30f54f3",
+      "package": "@earendil-works/pi-coding-agent",
+      "package_integrity": "sha512-S9JJVGHya/h0e0M+zwPTB6RkPe7PmLLqfBUTssFYW5mxAti6oZEILn4jvaUImENRC3U9RwXAB6H4gw8xj2J0GQ==",
+      "source_basis": [
+        "https://github.com/earendil-works/pi/blob/16787ad5b2dc748047f314ca1bfe7708f30f54f3/packages/coding-agent/README.md",
+        "https://github.com/earendil-works/pi/blob/16787ad5b2dc748047f314ca1bfe7708f30f54f3/packages/coding-agent/docs/skills.md",
+        "https://github.com/earendil-works/pi/blob/16787ad5b2dc748047f314ca1bfe7708f30f54f3/packages/coding-agent/docs/rpc.md",
+        "https://github.com/earendil-works/pi/blob/16787ad5b2dc748047f314ca1bfe7708f30f54f3/packages/coding-agent/docs/sdk.md"
+      ],
+      "platforms_observed": [
+        "darwin-arm64"
+      ],
+      "modes": {
+        "canonical_fixture": {
+          "status": "supported",
+          "basis": "actual pinned harness process with deterministic loopback provider; independent retained fixtures",
+          "observed": [
+            "installed-guide discovery",
+            "closed schema retrieval",
+            "exact Decimal 0.1 + 0.2 = 0.3",
+            "unreviewed strict abstention",
+            "authenticated reviewed strict export"
+          ],
+          "observation_sha256": "2e044282e7132246e901cf87c31226481a4eb3d3228098df2e054b984bfc7fd8"
+        },
+        "live_model": {
+          "status": "untested",
+          "basis": "no live-model/provider qualification"
+        },
+        "host_enforced": {
+          "status": "unsupported",
+          "basis": "ordinary harness output is outside protected strict delivery"
+        },
+        "protected_parent": {
+          "status": "unsupported",
+          "basis": "canonical parent owner refuses protected intake"
+        },
+        "rpc_transport": {
+          "status": "supported",
+          "basis": "actual pinned RPC with optional native binding and deterministic local provider",
+          "observed": {
+            "native_tool": "passed",
+            "reviewed_export": "passed",
+            "rpc_settled": "passed",
+            "session_replacement": "refused",
+            "accepted_then_failed": "passed",
+            "cancellation": "passed",
+            "native_tool_collision": "refused",
+            "external_compaction": "completed; transport requires requalification",
+            "transport_host_enforced": false,
+            "transport_evidence_acceptance": "not_evaluated"
+          },
+          "observation_sha256": "f2edea2cce0f178f06fc63ca9f3101337878ba1de6d95c470693014072a9eadd"
+        },
+        "skill_discovery": {
+          "status": "supported",
+          "basis": "actual installed resource loader; portable bundle validated independently",
+          "observed": {
+            "portable_discovery": "passed",
+            "exit_code": 0,
+            "collision_precedence": "first selected path; diagnostic retained"
+          },
+          "observation_sha256": "96f6eede5858f935e0c3ba5bfa253bac87efe194b6b850b21f974a24d2330db2"
+        },
+        "sdk_session": {
+          "status": "untested",
+          "basis": "documented embedding seam; no agent-session SDK conformance claim"
+        },
+        "mcp": {
+          "status": "unsupported",
+          "basis": "Pi has no native MCP; optional extensions require separate qualification"
+        }
+      },
+      "interfaces": {
+        "terminal": true,
+        "skills": "Agent Skills; host-specific precedence and consent",
+        "rpc_sdk": "Pi JSONL RPC and in-process SDK",
+        "mcp": "extension only; not native",
+        "session": "harness-owned; EvidenceWiki state remains canonical"
+      },
+      "limits": [
+        "Exact version/mode qualification only.",
+        "Model credentials and provider access are separate.",
+        "Out-of-band compaction and session/cwd replacement require new transport qualification.",
+        "RPC/host state is ephemeral; prompts are never automatically replayed."
+      ],
+      "assurance": {
+        "artifact_checked": "canonical owner decides each result",
+        "host_enforced": "unqualified external harness",
+        "final_conversation": "uncontrolled"
+      },
+      "python_observed": "3.14",
+      "node_observed": "24.18.0"
+    },
+    {
+      "id": "opencode",
+      "version": "1.18.32",
+      "commit": "545f51d26cc39a907d2867492d498d9607ea5fa4",
+      "package": "opencode-ai",
+      "package_integrity": "sha512-SCrZWdq44y/EoH2+fE4HLcXS+DzpVqHPzmXk3p2RrufYy8LWvpfhRhKtijb5ktvx8r94ScqToqwHxR0BwS65OQ==",
+      "source_basis": [
+        "https://github.com/anomalyco/opencode/blob/545f51d26cc39a907d2867492d498d9607ea5fa4/packages/web/src/content/docs/cli.mdx",
+        "https://github.com/anomalyco/opencode/blob/545f51d26cc39a907d2867492d498d9607ea5fa4/packages/web/src/content/docs/skills.mdx",
+        "https://github.com/anomalyco/opencode/blob/545f51d26cc39a907d2867492d498d9607ea5fa4/packages/web/src/content/docs/config.mdx",
+        "https://github.com/anomalyco/opencode/blob/545f51d26cc39a907d2867492d498d9607ea5fa4/packages/web/src/content/docs/sdk.mdx"
+      ],
+      "platforms_observed": [
+        "darwin-arm64"
+      ],
+      "modes": {
+        "canonical_fixture": {
+          "status": "supported",
+          "basis": "actual pinned harness process with deterministic loopback provider; independent retained fixtures",
+          "observed": [
+            "installed-guide discovery",
+            "closed schema retrieval",
+            "exact Decimal 0.1 + 0.2 = 0.3",
+            "unreviewed strict abstention",
+            "authenticated reviewed strict export"
+          ],
+          "observation_sha256": "5b22bc2236bc919e16eed22a163ebc9d998253e6eab7cced2c930077a7306857"
+        },
+        "live_model": {
+          "status": "untested",
+          "basis": "no live-model/provider qualification"
+        },
+        "host_enforced": {
+          "status": "unsupported",
+          "basis": "ordinary harness output is outside protected strict delivery"
+        },
+        "protected_parent": {
+          "status": "unsupported",
+          "basis": "canonical parent owner refuses protected intake"
+        },
+        "skill_discovery": {
+          "status": "supported",
+          "basis": "actual installed resource loader; portable bundle validated independently",
+          "observed": {
+            "portable_discovery": "passed",
+            "exit_code": 0
+          },
+          "observation_sha256": "09541856fb1c28a9ae04424f9b3a4ad7a89b7d7f48e49dc8c2ed84047ca19df2"
+        },
+        "sdk_session": {
+          "status": "untested",
+          "basis": "documented embedding seam; no agent-session SDK conformance claim"
+        },
+        "mcp": {
+          "status": "untested",
+          "basis": "documented optional client; no MCP session conformance claim"
+        }
+      },
+      "interfaces": {
+        "terminal": true,
+        "skills": "Agent Skills; host-specific precedence and consent",
+        "rpc_sdk": "HTTP server and SDK",
+        "mcp": "optional native client",
+        "session": "harness-owned; EvidenceWiki state remains canonical"
+      },
+      "limits": [
+        "Exact version/mode qualification only.",
+        "Model credentials and provider access are separate."
+      ],
+      "assurance": {
+        "artifact_checked": "canonical owner decides each result",
+        "host_enforced": "unqualified external harness",
+        "final_conversation": "uncontrolled"
+      },
+      "python_observed": "3.14",
+      "node_observed": "24.18.0"
+    },
+    {
+      "id": "gemini",
+      "version": "0.60.0",
+      "commit": "733edcb597ce690ac2e2fe3b3b3690b60a4c8f27",
+      "package": "@google/gemini-cli",
+      "package_integrity": "sha512-bp6aLytN+beto8sTHIzMyK5Y6Ry5mMZrBdNGx3EiAjqIpS99B8c/Elha6xyYRIabgFs0Q75/xDauNRAqHGY34w==",
+      "source_basis": [
+        "https://github.com/google-gemini/gemini-cli/blob/733edcb597ce690ac2e2fe3b3b3690b60a4c8f27/docs/cli/headless.md",
+        "https://github.com/google-gemini/gemini-cli/blob/733edcb597ce690ac2e2fe3b3b3690b60a4c8f27/docs/cli/skills.md",
+        "https://github.com/google-gemini/gemini-cli/blob/733edcb597ce690ac2e2fe3b3b3690b60a4c8f27/docs/cli/trusted-folders.md",
+        "https://github.com/google-gemini/gemini-cli/blob/733edcb597ce690ac2e2fe3b3b3690b60a4c8f27/docs/reference/configuration.md"
+      ],
+      "platforms_observed": [
+        "darwin-arm64"
+      ],
+      "modes": {
+        "canonical_fixture": {
+          "status": "supported",
+          "basis": "actual pinned harness process with deterministic loopback provider; independent retained fixtures",
+          "observed": [
+            "installed-guide discovery",
+            "closed schema retrieval",
+            "exact Decimal 0.1 + 0.2 = 0.3",
+            "unreviewed strict abstention",
+            "authenticated reviewed strict export"
+          ],
+          "observation_sha256": "a492cd033b3391fa3b3a79a940d0216f46eebdeaaf6d3db9d3d05f88e40c44cd"
+        },
+        "live_model": {
+          "status": "untested",
+          "basis": "no live-model/provider qualification"
+        },
+        "host_enforced": {
+          "status": "unsupported",
+          "basis": "ordinary harness output is outside protected strict delivery"
+        },
+        "protected_parent": {
+          "status": "unsupported",
+          "basis": "canonical parent owner refuses protected intake"
+        },
+        "skill_discovery": {
+          "status": "supported",
+          "basis": "actual installed resource loader; portable bundle validated independently",
+          "observed": {
+            "portable_discovery": "passed",
+            "exit_code": 0,
+            "untrusted_project": "skills withheld before explicit fixture-folder trust"
+          },
+          "observation_sha256": "9e5ec846c387d3ef028911aa2bffd449584d2b0f55e5cebc022e2aec1c89fe62"
+        },
+        "sdk_session": {
+          "status": "untested",
+          "basis": "documented embedding seam; no agent-session SDK conformance claim"
+        },
+        "mcp": {
+          "status": "untested",
+          "basis": "documented optional client; no MCP session conformance claim"
+        }
+      },
+      "interfaces": {
+        "terminal": true,
+        "skills": "Agent Skills; host-specific precedence and consent",
+        "rpc_sdk": "headless JSON/JSONL; no Pi RPC",
+        "mcp": "optional native client",
+        "session": "harness-owned; EvidenceWiki state remains canonical"
+      },
+      "limits": [
+        "Exact version/mode qualification only.",
+        "Model credentials and provider access are separate.",
+        "Retired model aliases can remap; observe returned model identity. Fixture runs reported gemini-3.5-flash.",
+        "Pinned trust documentation and installed default differ; qualification uses explicit trust settings in an isolated root."
+      ],
+      "assurance": {
+        "artifact_checked": "canonical owner decides each result",
+        "host_enforced": "unqualified external harness",
+        "final_conversation": "uncontrolled"
+      },
+      "python_observed": "3.14",
+      "node_observed": "24.18.0"
+    }
+  ],
+  "requalification": [
+    "harness version or startup/resource precedence changes",
+    "binding, guide, tool schema or canonical owner changes",
+    "platform, model/provider, extension or permission mode changes"
+  ],
+  "qualification_boundary": "Actual pinned harnesses with deterministic local cases are distinct from live-model instruction-following or sandbox qualification.",
+  "binding_identity": {
+    "src/evidence_wiki/frameworks.py": "1ca67c2f1e4a402c03f47a7c7a4492bcf951b9d96cd6e5879c3d2176a648c357",
+    "src/evidence_wiki/pi_bridge.py": "cd33235f1e4933e90e18fd000138a3b38b4944f1d2b3cc8d86a42bdfe36d6886",
+    "src/evidence_wiki/orchestration.py": "b41b9ee2a2535301ccb838b83e438419508aef69b3764ece047e811fcc115dfe",
+    "workspace-template/docs/frameworks/pi.js": "6947b6be92824b1065fef8054e32d53ab4bd3786388c8a3166a1bb67419754a9"
+  }
+}

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add versioned framework compatibility, portable skill/tool bundles, and an
+  optional bounded Pi RPC bridge. Native calls retain canonical owner results;
+  transport completion stays separate from evidence acceptance and host isolation.
+
 - Add a read-only installed-agent bootstrap with compact capability negotiation,
   closed versioned resources and explicit strict-assurance boundaries. Guides,
   schemas and examples can be retrieved without creating a workspace.

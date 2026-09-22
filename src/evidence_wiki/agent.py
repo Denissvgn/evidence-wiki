@@ -25,6 +25,7 @@ SUMMARY_BYTES = 32_768
 OPERATIONS = (
     ("agent", "read", False), ("agent summary", "read", False), ("agent resources", "read", False),
     ("agent resource", "read", False), ("contract", "read", False),
+    ("agent frameworks", "read", False), ("agent bundle", "depends_on_options", False), ("agent invoke", "read", True),
     ("init", "depends_on_options", False), ("deploy", "depends_on_options", False),
     ("pack validate", "temporary_write", False), ("pack refresh", "depends_on_options", True),
     ("doctor", "temporary_write", True), ("status", "depends_on_options", True), ("questions add", "write", True),
@@ -59,6 +60,9 @@ def capabilities() -> dict:
     installation = installation_metadata()
     if installation["package_version"] != __version__:
         _refuse("installation_catalog_version_mismatch")
+    from .frameworks import compatibility
+
+    matrix = compatibility()
     return {
         "installation": installation, "resources": index["resources"],
         "schema_ids": [entry["id"] for entry in index["resources"] if entry["media_type"] == "application/schema+json"],
@@ -78,7 +82,10 @@ def capabilities() -> dict:
             "clock": "explicit as_of; tzdata version and zone bytes pinned in results; explicit DST ambiguity policy",
             "evidence_limit": "arithmetic and lineage do not prove source truth, units or semantic support",
         },
-        "frameworks": {"qualified": [], "basis": "no framework interoperability qualification in this resource"},
+        "frameworks": {"qualified": [row["id"] + "/" + row["version"] + "/" + platform_id + "/" + name for row in matrix["frameworks"]
+                                      for platform_id in row["platforms_observed"]
+                                      for name, mode in row["modes"].items() if mode["status"] == "supported"],
+                       "basis": "per-version and per-mode observed conformance only; retrieve framework/compatibility/v1"},
         "limits": {"summary_bytes": SUMMARY_BYTES, "resource_bytes": 1_048_576},
     }
 
@@ -175,7 +182,7 @@ def bootstrap(target: str = ".", *, requirements: list[str] | None = None,
             "reason": "template selected only; existing policy, authority and protected host not inspected",
         },
         "limitations": ["Bootstrap does not initialize, validate readiness, run research or confer execution authority.",
-                        "No truth guarantee or framework qualification; host enforcement requires live protected execution."],
+                        "No truth guarantee; framework modes need separate qualification and host enforcement needs protected execution."],
     }
 
 
@@ -185,7 +192,12 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _Parser(prog="evidence-wiki agent", description=__doc__)
+    if argv and argv[0] in {"frameworks", "bundle", "invoke"}:
+        from .frameworks import main as frameworks_main
+
+        return frameworks_main(argv)
+    parser = _Parser(prog="evidence-wiki agent", description=__doc__,
+                     epilog="Integrations: agent frameworks; agent bundle [--target NEW_DIRECTORY]; agent invoke --target WORKSPACE (JSON stdin).")
     parser.add_argument("operation", nargs="?", default="bootstrap", choices=("bootstrap", "summary", "resources", "resource"))
     parser.add_argument("resource_id", nargs="?")
     parser.add_argument("--format", choices=("text", "json"), default="text")

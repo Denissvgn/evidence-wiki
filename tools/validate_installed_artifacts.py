@@ -100,6 +100,8 @@ REQUIRED_WHEEL_MEMBERS = (
     "evidence_wiki/__init__.py",
     "evidence_wiki/cli.py",
     "evidence_wiki/agent.py",
+    "evidence_wiki/frameworks.py",
+    "evidence_wiki/pi_bridge.py",
     "evidence_wiki/agent_resources.py",
     "evidence_wiki/_agent_catalog.py",
     "evidence_wiki/onboarding_schemas.py",
@@ -1017,6 +1019,7 @@ AGENT_PROBE = textwrap.dedent(r'''
     from evidence_wiki.agent_resources import resource_document, resource_index
     from evidence_wiki.onboarding_contract import decode_document
     from evidence_wiki.onboarding_schemas import schema_document, schema_ids
+    from evidence_wiki.frameworks import compatibility, export_bundle, invoke, validate_bundle
     from evidence_wiki._script_host import load_packaged_script, shared_assets_root
 
     cli = sys.argv[1]
@@ -1032,8 +1035,22 @@ AGENT_PROBE = textwrap.dedent(r'''
     assert summary.returncode == 0, summary.stderr + summary.stdout
     value = decode_document('onboarding/capabilities/v1', summary.stdout.encode())['payload']
     assert len(summary.stdout.encode()) < value['limits']['summary_bytes']
-    assert not value['frameworks']['qualified'] and value['strict']['host_probe'] == 'not_run'
+    assert all('host_enforced' not in mode for mode in value['frameworks']['qualified'])
+    assert value['strict']['host_probe'] == 'not_run'
     assert value['installation']['package_version'] != ''
+    matrix = compatibility()
+    assert {row['id'] for row in matrix['frameworks']} == {'pi', 'opencode', 'gemini'}
+    assert all(row['modes']['host_enforced']['status'] != 'supported' for row in matrix['frameworks'])
+    bundle = json.loads(resource_document('framework/bundle/v1')['content'])
+    validate_bundle(bundle)
+    if sys.platform != 'win32':
+        assert export_bundle(pathlib.Path.cwd() / 'portable-bundle')['status'] == 'created'
+    call = {'schema_version':'evidence-framework-call/v1','request_id':'installed-resource',
+            'instruction_sha256':bootstrap['guide']['sha256'],'operation':'resource',
+            'parameters':{'resource_id':'evidence-framework-call/v1'}}
+    native = invoke(json.dumps(call).encode(), target=pathlib.Path.cwd())
+    assert native['status'] == 'completed' and native['evidence_acceptance'] == 'not_evaluated'
+    assert json.loads(native['result_json'])['payload']['id'] == 'evidence-framework-call/v1'
     for entry in resource_index()['resources']:
         document = resource_document(entry['id'])
         assert hashlib.sha256(document['content'].encode()).hexdigest() == entry['sha256']
@@ -1047,7 +1064,7 @@ AGENT_PROBE = textwrap.dedent(r'''
     assert refused.returncode == 2 and not refused.stderr
     assert json.loads(refused.stdout)['details']['field'] == 'host_enforcement_not_verified'
     print(json.dumps({'installed_agent_bootstrap': 'passed', 'closed_resources': 'passed',
-                      'schema_owner_parity': 'passed'}))
+                      'schema_owner_parity': 'passed', 'portable_framework_bundle':'passed', 'canonical_native_call':'passed'}))
 ''')
 
 

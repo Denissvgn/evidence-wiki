@@ -135,12 +135,19 @@ Start with your current agent and terminal, before creating a workspace:
 evidence-wiki agent
 evidence-wiki agent summary --format json
 evidence-wiki agent resource guide/pack-authoring/v1
+evidence-wiki agent frameworks
 ```
 
 Bootstrap is read-only and includes the installed operating guide, versioned
 resource references and a strict-policy template. It requires no secondary model
 CLI. Resource access does not apply policy or establish host enforcement; the
 guide explains configuration, independent review and explicit evidence gaps.
+
+Portable skills and an optional Pi native tool/RPC bridge reuse these contracts.
+Inspect exact framework versions and qualified modes before use, then create a
+caller-local bundle with `evidence-wiki agent bundle --target NEW_DIRECTORY`.
+No global agent settings or trust choices are changed. See the installed
+`guide/frameworks/v1` resource for Pi, OpenCode and Gemini CLI recipes and limits.
 
 EvidenceWiki supports agent harnesses at three levels:
 

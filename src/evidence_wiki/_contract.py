@@ -346,6 +346,10 @@ def contract() -> dict:
             "bootstrap_schema": "onboarding/bootstrap/v2", "resource_schema": "onboarding/resource/v2",
             "summary_schema": "onboarding/capabilities/v1", "guide": "guide/bootstrap/v1",
             "maximum_summary_bytes": 32768, "workspace_required": False,
+            "framework_matrix": "framework/compatibility/v1", "portable_bundle": "framework/bundle/v1",
+            "tool_schemas": ["evidence-framework-call/v1", "evidence-framework-result/v1"],
+            "pi_bridge": {"api": "evidence_wiki.pi_bridge.PiRpcBridge", "managed_runner": False,
+                          "host_enforced": False, "automatic_replay": False},
         },
         "strict_evidence": {
             "capability": "strict-evidence/v1",

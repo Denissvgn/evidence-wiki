@@ -18,6 +18,7 @@ from evidence_wiki import __version__  # noqa: E402
 from evidence_wiki._agent_catalog import CATALOG_PATH, resource_paths  # noqa: E402
 from evidence_wiki._contract import LIBRARY_API_VERSION  # noqa: E402
 from evidence_wiki._script_host import load_packaged_script  # noqa: E402
+from evidence_wiki.frameworks import portable_bundle, tool_schemas, validate_bundle  # noqa: E402
 from evidence_wiki.onboarding_schemas import schema_document, schema_ids  # noqa: E402
 
 
@@ -34,7 +35,13 @@ def exports() -> dict[str, bytes]:
     schemas = {key: schema_document(key) for key in schema_ids()}
     schemas.update(strict.schema_documents())
     schemas.update(computation.schemas())
+    schemas.update(tool_schemas())
     output = {paths[key]: encoded(value) for key, value in schemas.items()}
+    guide_bytes = (ROOT / paths["guide/bootstrap/v1"]).read_bytes()
+    bundle = portable_bundle({"content": guide_bytes.decode(), "sha256": hashlib.sha256(guide_bytes).hexdigest()},
+                             (ROOT / "workspace-template/docs/frameworks/pi.js").read_text(), (ROOT / "LICENSE").read_text())
+    validate_bundle(bundle)
+    output[paths["framework/bundle/v1"]] = encoded(bundle)
     policy = {
         "schema_version": strict.POLICY_SCHEMA, "policy_id": "reviewed-evidence", "revision": "1",
         "assurance": "artifact_checked", "claims_path": "claims.json",

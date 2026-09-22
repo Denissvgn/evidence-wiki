@@ -108,7 +108,7 @@ def required_asset_manifest() -> dict[str, list[str]]:
             for relative in REQUIRED_DOMAIN_PACK_ASSETS
         ],
         "orchestrator": [f"{ORCHESTRATOR_DIR}/{relative}" for relative in REQUIRED_ORCHESTRATOR_ASSETS],
-        "agent": [CATALOG_PATH, *sorted(set(resource_paths().values()))],
+        "agent": [CATALOG_PATH, "workspace-template/docs/frameworks/pi.js", *sorted(set(resource_paths().values()))],
     }
 
 

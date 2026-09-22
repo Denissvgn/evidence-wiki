@@ -670,6 +670,7 @@ def _print_help() -> None:
         "evidence-wiki: deploy source-grounded research workspaces\n\n"
         "Usage:\n"
         "  evidence-wiki agent [summary|resources|resource ID] [--format text|json]\n"
+        "  evidence-wiki agent frameworks|bundle|invoke [integration options]\n"
         "  evidence-wiki init [initializer options]\n"
         "  evidence-wiki deploy [initializer options]\n"
         "  evidence-wiki upgrade [upgrade options]\n"

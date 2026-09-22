@@ -177,7 +177,7 @@ def test_compact_summary_negotiates_without_full_contract(capsys):
     assert len(raw) < agent.SUMMARY_BYTES
     assert summary["strict"]["checker"]["available"]
     assert summary["strict"]["host_probe"] == "not_run"
-    assert not summary["frameworks"]["qualified"]
+    assert all("host_enforced" not in value for value in summary["frameworks"]["qualified"])
     effects = {row["name"]: row["effect"] for row in summary["operations"]}
     assert effects["doctor"] == effects["pack validate"] == "temporary_write"
     assert effects["strict export"] == "read"

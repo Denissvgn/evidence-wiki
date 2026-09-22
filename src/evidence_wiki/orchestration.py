@@ -789,6 +789,8 @@ def _execute_bounded(
     timeout_seconds: int,
     capture_limit: int = MAX_CAPTURE_BYTES,
     environment: dict[str, str] | None = None,
+    inherit_environment: bool = True,
+    preserve_stdout: bool = False,
 ) -> ProcessResult:
     """Run fixed argv while bounding retained stdout and stderr diagnostics."""
     popen_kwargs: dict[str, Any] = {}
@@ -796,7 +798,7 @@ def _execute_bounded(
         popen_kwargs["start_new_session"] = True
     elif os.name == "nt":  # pragma: no cover - exercised on Windows CI
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    runner_environment = dict(os.environ)
+    runner_environment = dict(os.environ) if inherit_environment else {}
     runner_environment["PYTHONDONTWRITEBYTECODE"] = "1"
     if environment is not None:
         runner_environment.update(environment)
@@ -854,7 +856,13 @@ def _execute_bounded(
         stdin_thread.join(timeout=5)
         stdout_thread.join(timeout=5)
         stderr_thread.join(timeout=5)
-    stdout, stdout_truncated = _bounded_capture_text(stdout_capture)
+    if preserve_stdout:
+        # Native data transports need exact UTF-8 protocol bytes. Diagnostic
+        # callers retain the existing redaction/truncation presentation.
+        stdout = bytes(stdout_capture.buffer).decode("utf-8")
+        stdout_truncated = stdout_capture.total > stdout_capture.limit
+    else:
+        stdout, stdout_truncated = _bounded_capture_text(stdout_capture)
     stderr, stderr_truncated = _bounded_capture_text(stderr_capture)
     return ProcessResult(
         returncode=int(process.returncode or 0),
