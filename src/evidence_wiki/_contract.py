@@ -273,6 +273,7 @@ def contract() -> dict:
     from . import orchestration
     from .onboarding_schemas import contract_index
     from .orchestration_schemas import public_orchestration_schema_documents
+    from .pack_commands import contract_index as pack_contract_index
 
     # ``shared_assets_root()``, not a private ``with assets_root()`` block. A
     # library caller polls the contract or rebuilds it per workspace handle, and
@@ -337,6 +338,7 @@ def contract() -> dict:
         "compatible_research_yml_contract": workspace_system.get("compatible_research_yml_contract"),
         "profile_schema_versions": [initializer.PROFILE_SCHEMA_VERSION],
         "onboarding_contract": contract_index(),
+        "pack_discovery": pack_contract_index(),
         "installed_agent": {
             "capability": "installed-agent/v1", "bootstrap_command": "evidence-wiki agent --format json",
             "summary_command": "evidence-wiki agent summary --format json",

@@ -131,6 +131,10 @@ def _matches(value: Any, schema: dict[str, Any], field: str = "/") -> None:
         _refuse("INVALID", field)
     if isinstance(value, dict):
         properties = schema.get("properties", {})
+        if len(value) > schema.get("maxProperties", LIMITS["object_properties"]):
+            _refuse("LIMIT", field)
+        if len(value) < schema.get("minProperties", 0):
+            _refuse("INVALID", field)
         if any(key not in value for key in schema.get("required", [])):
             _refuse("INVALID", field)
         if schema.get("additionalProperties") is False and value.keys() - properties.keys():
@@ -138,6 +142,9 @@ def _matches(value: Any, schema: dict[str, Any], field: str = "/") -> None:
         for key, child_schema in properties.items():
             if key in value:
                 _matches(value[key], child_schema, field.rstrip("/") + "/" + key)
+        if isinstance(schema.get("additionalProperties"), dict):
+            for key in value.keys() - properties.keys():
+                _matches(value[key], schema["additionalProperties"], field.rstrip("/") + "/*")
     elif isinstance(value, list):
         if len(value) > schema.get("maxItems", LIMITS["array_items"]):
             _refuse("LIMIT", field)

@@ -31,6 +31,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 # resolved path to stay inside an already-resolved root. Reused here for the
 # init/upgrade *writer* paths so the readers and writers cannot drift.
 from _handoff_signature import handoff_secret, sign_handoff
+from _pack_selection import selection_metadata
 from _provider_plugins import ProviderPluginError, registered_ids, require_registration
 
 
@@ -1490,6 +1491,10 @@ def validate_domain_pack_data_model(document: dict[str, Any]) -> None:
             "research.overlay.yml must use JSON-compatible YAML values for lifecycle tracking: "
             + issue
         )
+    try:
+        selection_metadata(document.get("domain_pack"))
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
 
 
 def validate_domain_pack_tree(source_path: Path) -> None:

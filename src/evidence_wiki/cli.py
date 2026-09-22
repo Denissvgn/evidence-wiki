@@ -629,6 +629,15 @@ def _print_pack_help() -> None:
     print(
         "evidence-wiki pack: domain pack utilities\n\n"
         "Usage:\n"
+        "  evidence-wiki pack list [--target PATH] [--catalog DIR] [--limit N] [--origin bundled|local|installed]\n"
+        "  evidence-wiki pack show [SELECTOR | --path PATH | --resource ID] [--target PATH] [--catalog DIR]\n"
+        "  evidence-wiki pack catalog init --catalog DIR --root ID=PATH [--root ID=PATH]...\n"
+        "  evidence-wiki pack catalog register --catalog DIR --id REV --root-id ID --path RELATIVE --scope TEXT\n"
+        "      [--derived-from SELECTOR --derived-sha256 HASH]\n"
+        "  evidence-wiki pack catalog list --catalog DIR\n"
+        "  evidence-wiki pack decide --from-file JSON [--target PATH] [--catalog DIR]\n"
+        "  evidence-wiki pack schemas [--schema-id ID]\n"
+        "  evidence-wiki pack guide [--format json|text]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
         "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [--dry-run] [--format text|json]\n"
         "      [--keep-local TARGET]... [--accept-pack TARGET]...\n"
@@ -646,6 +655,10 @@ def _run_pack(args: list[str]) -> int:
         _print_pack_help()
         return 0
     subcommand = args.pop(0)
+    if subcommand in {"list", "show", "catalog", "decide", "schemas", "guide"}:
+        from .pack_commands import main as pack_main
+
+        return pack_main(subcommand, args)
     if subcommand not in {"validate", "refresh", "adopt"}:
         parser = argparse.ArgumentParser(prog="evidence-wiki pack")
         parser.error(f"unknown pack subcommand: {subcommand}")
@@ -684,6 +697,7 @@ def _print_help() -> None:
         "  evidence-wiki snapshot verify --trust-policy PATH\n"
         "  evidence-wiki publication [--target PATH] --question SLUG [--question SLUG ...]\n"
         "  evidence-wiki normalize verify [--target PATH] [--source-id ID] [--format json|text]\n"
+        "  evidence-wiki pack list|show|catalog|decide|schemas|guide [options]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
         "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [options]\n"
         "  evidence-wiki pack adopt --target PATH [options]\n"

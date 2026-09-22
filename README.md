@@ -68,6 +68,12 @@ while OpenAlex can use `OPENALEX_API_KEY` from the process environment. See
 discovery][source-discovery], and [acquisition][acquisition] for the full
 contracts.
 
+Inspect guidance before selecting it with `evidence-wiki pack list` and
+`evidence-wiki pack show bundled:general-science`. Packs expose scope inputs,
+exclusions and review requirements. Use `evidence-wiki pack guide --format text`
+for explicit local catalogs and requirement-based selection; see
+[pack selection](workspace-template/docs/pack-selection.md).
+
 Add a question using the [question API][question-api]:
 
 ```bash

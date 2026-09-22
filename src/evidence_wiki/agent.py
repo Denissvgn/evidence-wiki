@@ -28,6 +28,10 @@ OPERATIONS = (
     ("agent frameworks", "read", False), ("agent bundle", "depends_on_options", False), ("agent invoke", "read", True),
     ("init", "depends_on_options", False), ("deploy", "depends_on_options", False),
     ("pack validate", "temporary_write", False), ("pack refresh", "depends_on_options", True),
+    ("pack list", "depends_on_options", False), ("pack show", "depends_on_options", False),
+    ("pack schemas", "read", False), ("pack guide", "read", False),
+    ("pack catalog init", "write", False), ("pack catalog register", "write", False),
+    ("pack catalog list", "read", False), ("pack decide", "temporary_write", False),
     ("doctor", "temporary_write", True), ("status", "depends_on_options", True), ("questions add", "write", True),
     ("strict check", "read", True), ("strict prepare-review", "read", True),
     ("strict review", "write", True), ("strict export", "read", True),
@@ -99,6 +103,7 @@ def _negotiate(summary: dict, requirements: list[str], assurance: str) -> None:
         _refuse("assurance_unsupported")
     supported = {row["name"] for row in summary["operations"]} | set(summary["schema_ids"])
     supported.add("installed-agent/v1")
+    supported.add("pack-discovery/v1")
     for key in ("strict", "computation"):
         if summary[key]["checker"]["available"]:
             supported.add(summary[key]["capability"])

@@ -36,6 +36,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from _pack_selection import selection_metadata
 from _workspace_locks import workspace_lock
 from _workspace_module_loader import load_workspace_module
 
@@ -273,6 +274,10 @@ def _load_overlay_content(content: bytes, label: str) -> dict[str, Any]:
     for key in ("name", "version", "compatible_research_yml_contract"):
         if not isinstance(pack.get(key), str) or not pack[key].strip():
             raise LifecycleFailure("DOMAIN_PACK_INVALID", f"domain_pack.{key} must be a non-empty string")
+    try:
+        selection_metadata(pack)
+    except ValueError as error:
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", str(error)) from None
     return document
 
 

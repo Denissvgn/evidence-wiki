@@ -102,6 +102,11 @@ REQUIRED_WHEEL_MEMBERS = (
     "evidence_wiki/agent.py",
     "evidence_wiki/frameworks.py",
     "evidence_wiki/pi_bridge.py",
+    "evidence_wiki/_pack_io.py",
+    "evidence_wiki/pack_catalog.py",
+    "evidence_wiki/pack_commands.py",
+    "evidence_wiki/pack_decisions.py",
+    "evidence_wiki/pack_discovery.py",
     "evidence_wiki/agent_resources.py",
     "evidence_wiki/_agent_catalog.py",
     "evidence_wiki/onboarding_schemas.py",
@@ -1068,6 +1073,58 @@ AGENT_PROBE = textwrap.dedent(r'''
 ''')
 
 
+PACK_PROBE = textwrap.dedent(r'''
+    import json
+    import os
+    import pathlib
+    import shutil
+    import subprocess
+    import sys
+    from evidence_wiki._script_host import shared_assets_root
+    from evidence_wiki.onboarding_contract import _matches
+    from evidence_wiki.pack_decisions import schema_document
+
+    cli, directory = sys.argv[1:]
+    scratch = pathlib.Path(directory)
+    scratch.mkdir()
+    def command(*args, expected=0):
+        result = subprocess.run([cli, 'pack', *map(str, args)], capture_output=True, text=True)
+        assert result.returncode == expected and not result.stderr, result.stdout + result.stderr
+        return json.loads(result.stdout)
+    before = sorted(scratch.rglob('*'))
+    listing = command('list')
+    assert listing['bounds'] == {'total': 5, 'returned': 5, 'truncated': False}
+    assert sorted(scratch.rglob('*')) == before
+    row = command('show', 'bundled:general-science')['pack']
+    assert row['state'] == 'available' and row['metadata']['selection']['unknown_fields'] == []
+    guide = command('guide')['content']
+    value = json.loads(guide.split('```json\n', 1)[1].split('```', 1)[0])
+    value['selections'][0]['tree_sha256'] = row['identity']['tree_sha256']
+    decision = scratch / 'decision.json'
+    decision.write_text(json.dumps(value), encoding='utf-8')
+    result = command('decide', '--from-file', decision)
+    _matches(result, schema_document('evidence-pack-decision-result/v1'))
+    assert result['status'] == 'valid' and not result['research_ready']
+    catalog_status = 'unsupported_platform'
+    if os.name == 'posix':
+        assets = scratch / 'packs'
+        assets.mkdir()
+        candidate = assets / 'general-science'
+        shutil.copytree(shared_assets_root() / 'domain-packs/general-science', candidate)
+        catalog = scratch / 'catalog'
+        assert command('catalog', 'init', '--catalog', catalog, '--root', 'local=' + str(assets))['status'] == 'created'
+        assert command('catalog', 'register', '--catalog', catalog, '--id', 'science', '--root-id', 'local',
+                       '--path', 'general-science', '--scope', 'Caller scope')['status'] == 'registered'
+        local = command('show', 'local:science', '--catalog', catalog)['pack']
+        assert local['validation']['state'] == 'matching_observation'
+        command('show', 'general-science', '--catalog', catalog, expected=2)
+        (candidate / 'taxonomy.md').write_text('Changed local guidance.\n', encoding='utf-8')
+        assert command('show', 'local:science', '--catalog', catalog, expected=1)['pack']['state'] == 'mutated'
+        catalog_status = 'passed'
+    print(json.dumps({'pack_discovery': 'passed', 'pack_fit': 'passed', 'pack_catalog': catalog_status}))
+''')
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -1081,6 +1138,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     # resolved from the source tree instead of the install would be a failure here.
     run([str(cli), "--version"], cwd=outside)
     agent_probe = run([str(python), "-c", AGENT_PROBE, str(cli)], cwd=outside)
+    pack_probe = run([str(python), "-c", PACK_PROBE, str(cli), str(scratch / "pack-discovery")], cwd=outside)
     contract_path = scratch / "contract.json"
     contract_path.write_text(run([str(cli), "contract"], cwd=outside), encoding="utf-8", newline="\n")
     run(
@@ -1176,7 +1234,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
-            **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe)}
+            **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

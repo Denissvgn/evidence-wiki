@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add explicit bundled/local/installed pack discovery, bounded caller-local
+  revision catalogs and requirement-based fit decisions. Optional selection
+  metadata preserves unknowns in older packs; content-bound structural observations
+  remain separate from human review, provider authorization and workspace state.
+
 - Add versioned framework compatibility, portable skill/tool bundles, and an
   optional bounded Pi RPC bridge. Native calls retain canonical owner results;
   transport completion stays separate from evidence acceptance and host isolation.

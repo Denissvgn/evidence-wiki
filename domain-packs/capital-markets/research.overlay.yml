@@ -4,6 +4,23 @@ domain_pack:
   version: 0.1.0
   description: Qualified issuer facts, market observations, hypotheses, and contradictory evidence.
   compatible_research_yml_contract: "0.1"
+  selection:
+    schema_version: '1.0'
+    typical_questions:
+    - Which retained issuer facts and market observations support this question?
+    - What independent evaluation and counterevidence qualify the hypothesis?
+    exclusions:
+    - No assurance of future returns.
+    - Guidance does not authorize trading or substitute for individualized advice.
+    required_scope_inputs:
+    - id: issuer_or_universe
+      description: Issuer, listing identity or explicit investment universe.
+    - id: time_scope
+      description: Observation period and decision cutoff.
+    - id: units_currency
+      description: Units, currency and adjustment conventions.
+    review_requirements:
+    - Retain human gates, disconfirming evidence, selection history and evaluation limitations.
   human_gated: true
   taxonomy_doc: taxonomy.md
   claims_doc: claims.md

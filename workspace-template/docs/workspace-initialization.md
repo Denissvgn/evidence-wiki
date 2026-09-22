@@ -18,6 +18,12 @@ evidence-wiki init \
 
 Create a workspace with a reusable domain pack:
 
+Inspect available guidance first with `evidence-wiki pack list` and
+`evidence-wiki pack show bundled:llm-research`. [Pack selection](pack-selection.md)
+also covers local catalogs and requirement-based fit decisions. The initializer
+continues to accept a bundled name or an explicit filesystem path; catalog
+registration does not install a pack or authorize providers.
+
 ```bash
 evidence-wiki init \
   --target ../llm-research-workspace \

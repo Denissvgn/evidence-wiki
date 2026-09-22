@@ -13,6 +13,23 @@ domain_pack:
   version: 0.1.0
   description: Domain guidance for official-source legal, tax, regulatory, administrative, and public-policy research.
   compatible_research_yml_contract: "0.1"
+  selection:
+    schema_version: '1.0'
+    typical_questions:
+    - Which official rule applies to this jurisdiction and period?
+    - What source supports the current fee, deadline or procedure?
+    exclusions:
+    - A reusable pack is not a professional legal opinion.
+    - Rules from another jurisdiction or period cannot be substituted silently.
+    required_scope_inputs:
+    - id: jurisdiction
+      description: Applicable jurisdiction and issuing authority.
+    - id: effective_date
+      description: Date or period for which the rule must apply.
+    - id: subject_scope
+      description: Affected entity, activity and relevant eligibility facts.
+    review_requirements:
+    - Review official source authority, effective dates and material interpretive uncertainty.
   taxonomy_doc: taxonomy.md
   claims_doc: claims.md
   coverage_templates:

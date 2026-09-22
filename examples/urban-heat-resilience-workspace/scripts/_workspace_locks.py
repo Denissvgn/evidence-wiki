@@ -139,6 +139,33 @@ class WorkspaceLockHandle:
     single_writer: bool = False
 
 
+@contextmanager
+def descriptor_lock(descriptor: int, *, timeout_seconds: float = 10.0) -> Iterator[None]:
+    """Lock an already anchored regular file without reopening a mutable path.
+
+    The caller owns the descriptor and namespace identity checks. This route
+    requires a native POSIX advisory lock and never uses the single-writer hatch.
+    """
+    observed = os.fstat(descriptor)
+    if fcntl is None or not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+        raise LockUnavailableError("Native descriptor locking is unavailable.")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as error:
+            if error.errno not in _CONTENDED_ERRNOS:
+                raise LockUnavailableError("Native descriptor locking is unavailable.") from None
+            if time.monotonic() >= deadline:
+                raise LockUnavailableError("The descriptor lock is held by another writer.", contended=True) from None
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
+    try:
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
 @dataclass
 class _AcquiredBackend:
     name: str
