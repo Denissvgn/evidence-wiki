@@ -24,9 +24,14 @@ structural validation perform no filesystem writes, subprocesses, provider
 imports, or network access. Operational Python and MCP onboarding are separate
 surfaces; schema access does not imply that they exist.
 
-`onboarding_contract.workflow_commands` is empty in this implementation.
-`agent`, `agent inspect`, `agent plan`, `agent apply`, and pack catalog/scaffold
-commands are not available. The setup protocol below defines requirements for
+`onboarding_contract.workflow_commands` lists the read-only `agent` bootstrap,
+summary, resource index and content retrieval commands. `agent inspect`,
+`agent plan`, `agent apply`, and pack catalog/scaffold commands are not available.
+`evidence-wiki agent` works before initialization; retrieve its bounded summary
+with `agent summary --format json` and exact resource content with
+`agent resource ID --format json`. Bootstrap and resource responses use v2
+envelopes; their v1 schemas remain available. Summary and index use v1 envelopes.
+The setup protocol below defines requirements for
 an apply executor; it does not describe recovery provided by the existing
 `init` command. Use the existing initialization and research operations below.
 

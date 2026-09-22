@@ -99,6 +99,11 @@ FORBIDDEN_SUFFIXES = (".pyc", ".pyo")
 REQUIRED_WHEEL_MEMBERS = (
     "evidence_wiki/__init__.py",
     "evidence_wiki/cli.py",
+    "evidence_wiki/agent.py",
+    "evidence_wiki/agent_resources.py",
+    "evidence_wiki/_agent_catalog.py",
+    "evidence_wiki/onboarding_schemas.py",
+    "evidence_wiki/onboarding_contract.py",
     *(f"evidence_wiki/assets/{relative}" for relative in REQUIRED_ASSET_PATHS),
 )
 
@@ -113,6 +118,7 @@ REQUIRED_SDIST_MEMBERS = (
     "src/evidence_wiki/__init__.py",
     "tools/smoke_installed_orchestration.py",
     "tools/validate_installed_artifacts.py",
+    "tools/sync_agent_resources.py",
     "tests/_publication_fixture.py",
     "tests/fixtures/fake_codex_cli.py",
     "tests/fixtures/madrid-autonomo-workspace/AGENTS.md",
@@ -1002,6 +1008,49 @@ COMPUTATION_PROBE = textwrap.dedent(r'''
 ''')
 
 
+AGENT_PROBE = textwrap.dedent(r'''
+    import hashlib
+    import json
+    import pathlib
+    import subprocess
+    import sys
+    from evidence_wiki.agent_resources import resource_document, resource_index
+    from evidence_wiki.onboarding_contract import decode_document
+    from evidence_wiki.onboarding_schemas import schema_document, schema_ids
+    from evidence_wiki._script_host import load_packaged_script, shared_assets_root
+
+    cli = sys.argv[1]
+    before = sorted(str(path) for path in pathlib.Path.cwd().rglob('*'))
+    result = subprocess.run([cli, 'agent', '--format', 'json'], capture_output=True, text=True)
+    assert result.returncode == 0 and not result.stderr, result.stderr + result.stdout
+    bootstrap = decode_document('onboarding/bootstrap/v2', result.stdout.encode())['payload']
+    assert bootstrap['workspace'] == 'absent'
+    assert bootstrap['strict_selection']['effective_assurance'] is None
+    assert before == sorted(str(path) for path in pathlib.Path.cwd().rglob('*'))
+    summary = subprocess.run([cli, 'agent', 'summary', '--format', 'json', '--require', 'strict-evidence/v1',
+                              '--require', 'declarative-computation/v1'], capture_output=True, text=True)
+    assert summary.returncode == 0, summary.stderr + summary.stdout
+    value = decode_document('onboarding/capabilities/v1', summary.stdout.encode())['payload']
+    assert len(summary.stdout.encode()) < value['limits']['summary_bytes']
+    assert not value['frameworks']['qualified'] and value['strict']['host_probe'] == 'not_run'
+    assert value['installation']['package_version'] != ''
+    for entry in resource_index()['resources']:
+        document = resource_document(entry['id'])
+        assert hashlib.sha256(document['content'].encode()).hexdigest() == entry['sha256']
+    for key in schema_ids():
+        assert json.loads(resource_document(key)['content']) == schema_document(key)
+    for stem, method in (('_strict_contract', 'schema_documents'), ('_computation_contract', 'schemas')):
+        for key, schema in getattr(load_packaged_script(shared_assets_root(), stem), method)().items():
+            assert json.loads(resource_document(key)['content']) == schema
+    refused = subprocess.run([cli, 'agent', '--format', 'json', '--assurance', 'host_enforced'],
+                             capture_output=True, text=True)
+    assert refused.returncode == 2 and not refused.stderr
+    assert json.loads(refused.stdout)['details']['field'] == 'host_enforcement_not_verified'
+    print(json.dumps({'installed_agent_bootstrap': 'passed', 'closed_resources': 'passed',
+                      'schema_owner_parity': 'passed'}))
+''')
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -1014,6 +1063,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     # Every command runs from a directory that is not the checkout, so a module
     # resolved from the source tree instead of the install would be a failure here.
     run([str(cli), "--version"], cwd=outside)
+    agent_probe = run([str(python), "-c", AGENT_PROBE, str(cli)], cwd=outside)
     contract_path = scratch / "contract.json"
     contract_path.write_text(run([str(cli), "contract"], cwd=outside), encoding="utf-8", newline="\n")
     run(
@@ -1109,7 +1159,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
-            **json.loads(assessments), **json.loads(computation)}
+            **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

@@ -116,6 +116,29 @@ _RESOURCE = _object(
     id=_text(128), version=_text(32), media_type=_enum("application/schema+json", "text/markdown", "application/json"),
     sha256=_HASH, content=_text(LIMITS["string_characters"]),
 )
+_RESOURCE_METADATA = _object(**{key: value for key, value in _RESOURCE["properties"].items() if key != "content"})
+_RESOURCE_METADATA["properties"]["media_type"] = _enum(
+    "application/schema+json", "text/markdown", "application/json", "text/x-python",
+)
+_RESOURCE_V2 = _object(**_RESOURCE_METADATA["properties"], content=_text(LIMITS["string_characters"]))
+_CHECKER = _object(available=_BOOL, basis=_text(), runtime_verified={"const": False})
+_SUMMARY = _object(
+    installation=_VERSIONS, resources=_array(_RESOURCE_METADATA, LIMITS["resources"]),
+    schema_ids=_array(_text(128), LIMITS["resources"]),
+    operations=_array(_object(name=_text(128), effect=_enum("read", "write", "temporary_write", "depends_on_options"), workspace_required=_BOOL)),
+    strict=_object(
+        capability=_text(), schemas=_array(_text(128)), checker=_CHECKER,
+        default_request_schema=_text(), assurance_modes=_array(_text(64)),
+        host_api=_text(), host_platform=_text(), host_probe={"const": "not_run"},
+        protected_parent_orders={"const": False}, semantic_truth_guarantee={"const": False},
+    ),
+    computation=_object(
+        capability=_text(), schemas=_array(_text(128)), checker=_CHECKER,
+        numeric_wire=_text(), clock=_text(), evidence_limit=_text(),
+    ),
+    frameworks=_object(qualified=_array(_text()), basis=_text()),
+    limits=_object(summary_bytes=_integer(1_048_576), resource_bytes=_integer(1_048_576)),
+)
 _ROUTE = _object(
     question_ids=_array(_ID, LIMITS["questions"], 1), source_id=_ID,
     provider_id=_nullable(_text(128)), host_tool_id=_nullable(_ID),
@@ -148,6 +171,8 @@ _INTERPRETER = _object(
 )
 
 _PAYLOADS = {
+    "capabilities": _SUMMARY,
+    "resources": _object(resources=_array(_RESOURCE_METADATA, LIMITS["resources"]), bounds=_BOUNDS),
     "error": {**_object(
         schema_version={"const": SCHEMA_VERSION},
         error_code=_enum(*ONBOARDING_ERROR_CONTRACTS),
@@ -251,7 +276,8 @@ def _document(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def schema_ids() -> tuple[str, ...]:
     """Return the closed public resource inventory, without probing assets."""
-    return (*tuple(f"onboarding/{kind}/v1" for kind in _PAYLOADS), "onboarding/research_request/v2")
+    return (*tuple(f"onboarding/{kind}/v1" for kind in _PAYLOADS), "onboarding/research_request/v2",
+            "onboarding/bootstrap/v2", "onboarding/resource/v2")
 
 
 def schema_document(resource_id: str) -> dict[str, Any]:
@@ -264,6 +290,27 @@ def schema_document(resource_id: str) -> dict[str, Any]:
         )
     kind = resource_id.split("/")[1]
     result = deepcopy(_document(kind, _PAYLOADS[kind]))
+    if resource_id.endswith("/v2"):
+        result["$id"] = f"urn:evidence-wiki:onboarding:{kind}:2"
+        result["properties"]["schema_version"] = {"const": "2.0"}
+    if resource_id == "onboarding/resource/v2":
+        result["properties"]["payload"] = deepcopy(_RESOURCE_V2)
+    if resource_id == "onboarding/bootstrap/v2":
+        payload = result["properties"]["payload"]
+        extra = {
+            "resources": _array(_RESOURCE_METADATA, LIMITS["resources"]),
+            "environment": _object(implementation=_text(64), platform=_text(64),
+                                   workspace_version=_nullable(_text(64)), workspace_schema_version=_nullable(_text(64)),
+                                   observation=_text()),
+            "strict_selection": _object(
+                mode={"const": "strict"}, requested_assurance=_enum("artifact_checked", "host_enforced"),
+                effective_assurance={"const": None}, selection_scope={"const": "new_workspace_template"},
+                policy_id=_ID, policy_revision=_ID, policy_sha256=_HASH,
+                instruction=_RESOURCE_METADATA, route=_text(), reason=_text(),
+            ),
+        }
+        payload["properties"].update(deepcopy(extra))
+        payload["required"].extend(extra)
     if resource_id == "onboarding/research_request/v2":
         result["$id"] = "urn:evidence-wiki:onboarding:research_request:2"
         result["properties"]["schema_version"] = {"const": "2.0"}
@@ -285,7 +332,7 @@ def contract_index() -> dict[str, Any]:
         "schema_accessor": "evidence_wiki.onboarding_schemas.schema_document",
         "decoder": "evidence_wiki.onboarding_contract.decode_document",
         "limits": deepcopy(LIMITS),
-        "workflow_commands": [],
+        "workflow_commands": ["agent", "agent summary", "agent resources", "agent resource"],
         "decoder_error_exit_code": 2,
         "error_codes": {code: {"exit_code": exit_code, "recoverable": recoverable}
                         for code, (exit_code, recoverable) in ONBOARDING_ERROR_CONTRACTS.items()},

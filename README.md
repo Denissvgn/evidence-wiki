@@ -129,6 +129,19 @@ sidecars and atomic delivery.
 
 ## Drive It With An Agent
 
+Start with your current agent and terminal, before creating a workspace:
+
+```bash
+evidence-wiki agent
+evidence-wiki agent summary --format json
+evidence-wiki agent resource guide/pack-authoring/v1
+```
+
+Bootstrap is read-only and includes the installed operating guide, versioned
+resource references and a strict-policy template. It requires no secondary model
+CLI. Resource access does not apply policy or establish host enforcement; the
+guide explains configuration, independent review and explicit evidence gaps.
+
 EvidenceWiki supports agent harnesses at three levels:
 
 - **Managed adapters:** Codex and Claude Code are the registered runners for

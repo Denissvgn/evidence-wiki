@@ -669,6 +669,7 @@ def _print_help() -> None:
     print(
         "evidence-wiki: deploy source-grounded research workspaces\n\n"
         "Usage:\n"
+        "  evidence-wiki agent [summary|resources|resource ID] [--format text|json]\n"
         "  evidence-wiki init [initializer options]\n"
         "  evidence-wiki deploy [initializer options]\n"
         "  evidence-wiki upgrade [upgrade options]\n"
@@ -719,6 +720,8 @@ def _print_help() -> None:
         "is set; forced replacements are preserved under .replaced/<path>.\n\n"
         "Contract prints the supported contract and schema versions as JSON so\n"
         "orchestrators can negotiate compatibility before deploy or upgrade.\n\n"
+        "Agent provides a read-only guide and compact resource/capability negotiation\n"
+        "before a workspace exists. Start here: evidence-wiki agent\n\n"
         "Doctor checks local runtime dependencies, optional tools, workspace\n"
         "write permissions, contract metadata, and which external normalizer\n"
         "adapters a workspace is authorized to execute, before an unattended run.\n\n"
@@ -757,6 +760,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     command = args.pop(0)
+    if command == "agent":
+        from .agent import main as agent_main
+
+        return agent_main(args)
     if command in {"init", "deploy"}:
         return _run_initializer(args)
     if command == "upgrade":

@@ -98,6 +98,8 @@ REQUIRED_ORCHESTRATOR_ASSETS = (
 
 def required_asset_manifest() -> dict[str, list[str]]:
     """Return stable source-relative anchors every distribution must contain."""
+    from ._agent_catalog import CATALOG_PATH, resource_paths
+
     return {
         "starter": [f"{STARTER_DIR}/{relative}" for relative in REQUIRED_STARTER_ASSETS],
         "domain_packs": [
@@ -106,6 +108,7 @@ def required_asset_manifest() -> dict[str, list[str]]:
             for relative in REQUIRED_DOMAIN_PACK_ASSETS
         ],
         "orchestrator": [f"{ORCHESTRATOR_DIR}/{relative}" for relative in REQUIRED_ORCHESTRATOR_ASSETS],
+        "agent": [CATALOG_PATH, *sorted(set(resource_paths().values()))],
     }
 
 

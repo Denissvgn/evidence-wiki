@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a read-only installed-agent bootstrap with compact capability negotiation,
+  closed versioned resources and explicit strict-assurance boundaries. Guides,
+  schemas and examples can be retrieved without creating a workspace.
+
 - Add declarative grouped aggregation, Decimal formula graphs, invariants and
   explicit-clock schedules through shared package and standalone entry points.
   Results retain source, rule and execution identities; explicit output/intake/

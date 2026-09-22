@@ -2,6 +2,22 @@
 
 Generic playbook for creating or preparing a new research workspace with minimal user configuration.
 
+## Before a workspace exists
+
+Start with `evidence-wiki agent`. Retrieve the profile contract using
+`evidence-wiki agent resource guide/init-profile/v1` and a complete editable
+example using `evidence-wiki agent resource example/init-profile/v1`. Choose a
+caller-owned writable directory for the profile, candidate packs and workspace;
+never write into installed assets. No source checkout or secondary model CLI is
+required. Use the selected task interpreter for copied scripts; examples using
+`python3` below do not select an environment for you.
+
+The package validates structure; the caller supplies domain and research judgment.
+Bootstrap does not enable policy: read `guide/strict-evidence/v1`, configure the
+complete selected policy and retain uncertainty and independent review. Initialization
+and question/source/run operations persist state; previews and resource retrieval
+are read-only. State readiness only after observing the owning checks.
+
 ## Use When
 
 Use this skill when the user asks to start a new research project, apply the workspace system to a research scope, instantiate a template, prepare a domain pack, or reduce setup questions before research begins.
@@ -97,7 +113,7 @@ If no pack matches and local guidance is useful:
 - keep the generic workspace configuration,
 - set `domain_guidance.mode: project_local` in the setup profile,
 - include concise extraction targets, source priorities, claim types, output scaffolds, filing rules, and promotion notes,
-- do not create a reusable domain pack unless the user asks for a pack.
+- create a local reusable candidate when the authorized task has a reusable guidance gap; keep assumptions and evidence limits explicit.
 
 The initializer renders project-local guidance into the created workspace. See `docs/domain-guidance-generator.md` for the generated document workflow and promotion threshold.
 

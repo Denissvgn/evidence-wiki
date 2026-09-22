@@ -337,6 +337,16 @@ def contract() -> dict:
         "compatible_research_yml_contract": workspace_system.get("compatible_research_yml_contract"),
         "profile_schema_versions": [initializer.PROFILE_SCHEMA_VERSION],
         "onboarding_contract": contract_index(),
+        "installed_agent": {
+            "capability": "installed-agent/v1", "bootstrap_command": "evidence-wiki agent --format json",
+            "summary_command": "evidence-wiki agent summary --format json",
+            "resource_index_command": "evidence-wiki agent resources --format json",
+            "resource_command": "evidence-wiki agent resource ID --format json",
+            "resource_accessor": "evidence_wiki.agent_resources.resource_document",
+            "bootstrap_schema": "onboarding/bootstrap/v2", "resource_schema": "onboarding/resource/v2",
+            "summary_schema": "onboarding/capabilities/v1", "guide": "guide/bootstrap/v1",
+            "maximum_summary_bytes": 32768, "workspace_required": False,
+        },
         "strict_evidence": {
             "capability": "strict-evidence/v1",
             "schemas": sorted(strict_contract.schema_documents()),
