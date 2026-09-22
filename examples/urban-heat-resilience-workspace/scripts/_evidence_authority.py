@@ -35,6 +35,25 @@ class EvidenceInvalid(ValueError):
     """A bounded, content-free reason that an evidence contract cannot be used."""
 
 
+def observed_execution(*, operation: str, basis: dict[str, Any], result: dict[str, Any],
+                       started_at: str, finished_at: str, exit_code: int) -> dict[str, Any]:
+    """Describe a measured local check without minting authenticated authority.
+
+    Setup and other local callers retain this recomputable observation outside
+    claim acceptance. Authentication still requires verify_attestation and the
+    protected host policy; a stored success field cannot supply it.
+    """
+    name(operation)
+    if timestamp(finished_at) < timestamp(started_at) or type(exit_code) is not int:
+        raise EvidenceInvalid("execution_observation_invalid")
+    value = {"schema_version": "evidence-execution-observation/v1", "operation": operation,
+             "basis": basis, "result": result, "started_at": started_at, "finished_at": finished_at,
+             "exit_code": exit_code, "trust": "local_observation", "authenticated": False}
+    if len(canonical_bytes(value)) > 65000:
+        raise EvidenceInvalid("execution_observation_bound")
+    return {**value, "observation_id": content_id(value["schema_version"], value)}
+
+
 def timestamp(value: Any) -> datetime:
     if not isinstance(value, str) or len(value) > 40 or not re.fullmatch(
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})", value

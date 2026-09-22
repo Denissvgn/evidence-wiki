@@ -14,8 +14,10 @@ evidence-wiki agent plan-check --from-file setup-plan.json
 
 The output file is optional, must be new and must have an existing parent outside
 the target and installed assets. Publication is exclusive and atomic on POSIX.
-Planning without `--output` makes no target writes. There is no `agent apply`
-command. A current plan is data for the caller to review, not execution approval.
+Planning without `--output` makes no target writes. Apply an authorized saved plan
+with `evidence-wiki agent apply --from-file setup-plan.json`; the executor rechecks
+its inputs under a target lock. See [application and recovery](workspace-application.md).
+A current plan alone does not confer execution authority.
 
 ## Request and decisions
 

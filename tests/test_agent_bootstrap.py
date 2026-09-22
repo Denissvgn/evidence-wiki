@@ -154,7 +154,7 @@ def test_workspace_observation_is_bounded_and_not_a_readiness_claim(tmp_path, ma
 
 @pytest.mark.parametrize("arguments,field", [
     (["plan"], "arguments"), (["resource"], "arguments"), (["--unknown"], "arguments"),
-    (["--format", "xml"], "arguments"), (["--require", "agent apply"], "unsupported_requirement/0"),
+    (["--format", "xml"], "arguments"), (["--require", "agent unavailable-operation"], "unsupported_requirement/0"),
     (["--require", "onboarding/research_request/v99"], "unsupported_requirement/0"),
     (["--require", "pi"], "unsupported_requirement/0"),
     (["--assurance", "host_enforced"], "host_enforcement_not_verified"),

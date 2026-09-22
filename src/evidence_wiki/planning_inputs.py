@@ -17,19 +17,29 @@ from .pack_discovery import owner, snapshot_metadata
 from .planning_contracts import digest, refuse
 
 
-def target_basis(selection):
+def target_basis(selection, *, owned_basis=None):
     root = Path(selection["writable_root"]).expanduser().resolve(strict=True)
     if not root.is_dir():
         refuse("/request/payload/target/writable_root")
     relative = relative_path(selection["relative_path"])
+    if ".evidence-wiki" in Path(relative).parts:
+        refuse("target_reserved_setup_state")
     owner("init_research_workspace").validate_workspace_relative_path(relative, "target.relative_path")
     target = root / relative
     _outside_assets(target, additional_roots=(Path(__file__).parent,))
+    if any((parent / "research.yml").is_file() and (parent / "workspace-system.yml").is_file() for parent in target.parents):
+        refuse("target_inside_existing_workspace", "ONBOARDING_TARGET_CONFLICT")
     for path in reversed([target, *list(target.parents)[:len(Path(relative).parts) - 1]]):
         if path.is_symlink():
             refuse("target_symlink_forbidden")
     if not target.parent.is_dir():
         refuse("target_parent_missing")
+    if owned_basis is not None:
+        if (owned_basis["target"] != {"writable_root": str(root), "relative_path": relative}
+                or identity(root) != owned_basis["root_identity"]
+                or identity(target.parent) != owned_basis["parent_identity"]):
+            refuse("setup_parent_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
+        return target, owned_basis
     state = "absent"
     directory = None
     if target.exists():
@@ -72,6 +82,37 @@ def tree_identity(root):
     return {"sha256": digest(sorted(rows, key=lambda row: row["path"])), "files": len(rows), "bytes": size}
 
 
+def dependency_implementations():
+    """Bind required distribution bytes, including data used by timezone checks."""
+    import importlib.metadata
+
+    from .source_inspection import DEPENDENCIES
+
+    result, total = [], 0
+    for name in DEPENDENCIES:
+        try:
+            distribution = importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            result.append({"distribution": name, "state": "missing", "sha256": None})
+            continue
+        rows = []
+        files = distribution.files
+        if files is None or len(files) > 4096:
+            refuse("dependency_implementation_unavailable", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
+        for item in sorted(files):
+            if item.suffix in {".pyc", ".pyo"} or "__pycache__" in item.parts:
+                continue
+            relative_path(str(item))
+            path = Path(distribution.locate_file(item)).absolute()
+            raw = read_file(path.parent, path.name, 16_777_216)
+            total += len(raw)
+            if total > 67_108_864:
+                refuse("dependency_implementation_bytes_bound", "ONBOARDING_LIMIT")
+            rows.append({"path": str(item), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)})
+        result.append({"distribution": name, "state": "observed", "sha256": digest(rows), "files": len(rows)})
+    return result
+
+
 def installation_basis():
     executable = Path(sys.executable).resolve(strict=True)
     raw = read_file(executable.parent, executable.name, 67_108_864)
@@ -80,9 +121,10 @@ def installation_basis():
     return {"installation": installation_metadata(),
         "starter": tree_identity(shared_assets_root() / "workspace-template"),
         "package_code": tree_identity(Path(__file__).parent),
-        "interpreter": {"path": str(executable), "sha256": hashlib.sha256(raw).hexdigest(),
+        "interpreter": {"path": str(executable), "invocation": str(Path(sys.executable).absolute()),
+                        "prefix": sys.prefix, "sha256": hashlib.sha256(raw).hexdigest(),
                         "version": platform.python_version(), "implementation": platform.python_implementation()},
-        "dependencies": dependencies()}
+        "dependencies": dependencies(), "dependency_implementations": dependency_implementations()}
 
 
 def selected_pack(domain):
@@ -113,12 +155,23 @@ def selected_pack(domain):
 def local_input(locator, scopes, *, remaining=33_554_432):
     """Observe explicit file hints only inside caller-declared local read scopes."""
     path = Path(locator).expanduser().absolute()
-    roots = [Path(value).expanduser().resolve(strict=True) for value in scopes if "://" not in value and Path(value).is_absolute()]
-    selected = [root for root in roots if root.is_dir() and path != root and root in path.parents]
+    selected = []
+    for value in scopes:
+        if "://" in value or not Path(value).is_absolute():
+            continue
+        declared = Path(value).expanduser().absolute()
+        root = declared.resolve(strict=True)
+        if not root.is_dir():
+            continue
+        # An explicitly selected root can use a system spelling alias. Rebase
+        # only its lexical descendant, then reject every symlink below it.
+        for spelling in (declared, root):
+            if path != spelling and spelling in path.parents:
+                selected.append((len(spelling.parts), root, path.relative_to(spelling).as_posix()))
     if not selected:
         return {"path": str(path), "state": "outside_declared_scope", "sha256": None}
-    root = max(selected, key=lambda item: len(item.parts))
-    relative = path.relative_to(root).as_posix()
+    _, root, relative = max(selected, key=lambda item: item[0])
+    path = root / relative
     relative_path(relative)
     for part in [path, *path.parents]:
         if part == root:

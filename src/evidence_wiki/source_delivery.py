@@ -152,3 +152,57 @@ def deliver(raw, *, target, path, host_tools=None):
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def deliver_local(*, target, input, path, source_id, question_ids):
+    """Copy a selected observed original, preserving bytes and local provenance."""
+    from ._pack_io import identity
+    from .planning_contracts import digest
+
+    relative_path(path)
+    view = SourceView(target)
+    roots = view.config.get("raw", {}).get("source_roots", [])
+    if (view.workspace != "present" or not any(path.startswith(root.rstrip("/") + "/") for root in roots)
+            or path.startswith("raw/links/") or input["state"] != "present"):
+        refuse("local_delivery_scope_invalid")
+    root = Path(input["root"])
+    if identity(root) != input["root_identity"]:
+        refuse("local_delivery_root_changed", "ONBOARDING_PLAN_STALE")
+    raw = read_file(root, input["path"], 16_777_216)
+    if len(raw) != input["bytes"] or hashlib.sha256(raw).hexdigest() != input["sha256"]:
+        refuse("local_delivery_input_changed", "ONBOARDING_PLAN_STALE")
+    sidecar = {"checksum": "sha256:" + input["sha256"], "retrieved_by": "local_setup",
+               "title": Path(input["path"]).name, "source_type": "local_file",
+               "setup_input": {"source_id": source_id, "question_ids": question_ids,
+                               "input_identity": digest(input), "origin": str(root / input["path"])},
+               "terms_note": "Caller-selected local original; rights and semantic adequacy are not verified."}
+    record = {"raw_paths": [path], "provenance": sidecar}
+    owner("_usage_gate").require_host_intake(view.config, [record])
+    directory = os.open(view.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptors = [directory]
+    try:
+        _outside_assets(directory)
+        if identity(directory) != view.root_identity:
+            refuse("local_delivery_target_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
+        locks = _directory(directory, "raw/.locks")
+        descriptors.append(locks)
+        lock = os.open("acquisition.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=locks)
+        descriptors.append(lock)
+        with owner("_workspace_locks").descriptor_lock(lock, timeout_seconds=0):
+            _check_lock(locks, lock)
+            view.finish()
+            parent = _directory(directory, str(Path(path).parent))
+            descriptors.append(parent)
+            name = Path(path).name
+            # No adoption of an unexplained existing pair, even with identical bytes.
+            _publish(parent, name, raw)
+            _publish(parent, name + ".provenance.yml", canonical(sidecar))
+            _check_lock(locks, lock)
+            view.finish()
+            if read_file(root, input["path"], 16_777_216) != raw or identity(root) != input["root_identity"]:
+                refuse("local_delivery_input_changed", "ONBOARDING_PLAN_STALE")
+        return {"source_id": source_id, "question_ids": question_ids, "path": path,
+                "sha256": input["sha256"], "bytes": len(raw), "provenance": "caller_selected_local_original"}
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)

@@ -1358,6 +1358,39 @@ PACK_AUTHORING_PROBE = textwrap.dedent(r'''
 ''')
 
 
+SETUP_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'")] + textwrap.dedent(r'''
+    result = command('apply','--from-file',saved)
+    assert result['status'] == 'ready' and result['setup_ready'] and result['evidence_empty'], result
+    assert not result['research_complete'] and not result['strict']['reviewer_authenticated']
+    assert result['strict']['effective_assurance'] == 'artifact_checked'
+    assert command('setup-guide')['content'].startswith('# Apply and recover')
+    assert 'evidence-setup-result/v1' in command('setup-schemas')['schema_ids']
+    target = root/'workspace'
+    before = {str(path.relative_to(target)):path.read_bytes() for path in target.rglob('*') if path.is_file()}
+    replay = command('apply','--from-file',saved)
+    assert replay['transaction_id'] == result['transaction_id']
+    assert before == {str(path.relative_to(target)):path.read_bytes() for path in target.rglob('*') if path.is_file()}
+    assert yaml.safe_load((target/'wiki/questions/q1.md').read_text().split('---')[1])['metadata']['original_text'] == text
+    original['payload']['target']['relative_path'] = 'sources-workspace'
+    original['payload']['budgets']['bytes'] = 100000
+    original['payload']['authority']['source_scope'] = [str(root)]
+    source = root/'original.html'
+    source.write_text('<html><head><title>Retained observations</title></head><body><h1>Retained observations</h1><p>Relevant measured evidence with dates, population and units.</p></body></html>')
+    original['payload']['sources'] = [{'id':'original','kind':'local_file','locator':str(source),'question_ids':['q1']}]
+    request['decisions']['source_requirements'] = [{'source_id':'original','output_format':'html','needs_complete':True,'scope':{'jurisdiction':'Spain'}}]
+    request_file.write_text(json.dumps(request,ensure_ascii=False))
+    source_plan = root/'source-plan.json'
+    command('plan','--from-file',request_file,'--output',source_plan)
+    observed = command('apply','--from-file',source_plan)
+    assert observed['status'] == 'ready' and observed['sources'][0]['usable'], observed
+    assert not observed['claims_verified'] and observed['usable_source_count'] == 1
+    (target/'user-note.txt').write_text('User changes are retained')
+    assert command('apply','--from-file',saved,expected=3)['error_code'] == 'ONBOARDING_OWNERSHIP_CONFLICT'
+    assert (target/'user-note.txt').read_text() == 'User changes are retained'
+    print(json.dumps({'workspace_application':'passed','setup_replay':'passed','local_source_observation':'passed','setup_conflict_preservation':'passed'}))
+''')
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -1466,13 +1499,14 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
     sources = run([str(python), "-c", SOURCE_PROBE, str(cli), str(scratch / "source-workspace")], cwd=outside)
     planning = run([str(python), "-c", PLANNING_PROBE, str(cli), str(scratch / "research-planning")], cwd=outside)
+    setup = run([str(python), "-c", SETUP_PROBE, str(cli), str(scratch / "workspace-application")], cwd=outside)
     authoring = run([str(python), "-c", PACK_AUTHORING_PROBE, str(cli), str(scratch / "pack-authoring"),
         str(scratch / "research-planning/request.json")], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
-            **json.loads(planning), **json.loads(authoring)}
+            **json.loads(planning), **json.loads(authoring), **json.loads(setup)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

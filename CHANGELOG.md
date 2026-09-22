@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add plan-bound local workspace application with observed checks, selected source
+  delivery, private checkpoints and conservative recovery.
+
 - Add local pack specifications, deterministic scaffolding, pinned revisions and
   specializations, immutable case/assessment records, qualified catalog selection
   and setup-plan resumption. Manual policy namespaces now match their owning pack;

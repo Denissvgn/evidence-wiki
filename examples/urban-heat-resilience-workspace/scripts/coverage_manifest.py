@@ -1461,7 +1461,23 @@ def run_init(project_root: Path, config: dict[str, Any], args: argparse.Namespac
         if args.template
         else None
     )
-    document = build_manifest(slug, args.coverage_profile, template)
+    return run_init_document(project_root, config, slug=slug, template=template,
+                             coverage_profile=args.coverage_profile, force=args.force)
+
+
+def run_init_document(project_root: Path, config: dict[str, Any], *, slug: str,
+                      template: dict[str, Any] | None, coverage_profile: str | None = None,
+                      force: bool = False) -> dict[str, Any]:
+    """Materialize an inline template through the same coverage owner as the CLI."""
+    slug = validate_slug(slug)
+    ensure_question_exists(project_root, config, slug)
+    path = manifest_path(project_root, config, slug)
+    if path.exists() and not force:
+        raise CoverageManifestError("COVERAGE_MANIFEST_EXISTS", "Coverage manifest already exists.", details={"slug": slug})
+    policy_vocabularies = merged_policy_vocabularies(config)
+    if template is not None:
+        template = normalize_template_document(template, policy_vocabularies=policy_vocabularies)
+    document = build_manifest(slug, coverage_profile, template)
     validate_manifest(document, expected_slug=slug, policy_vocabularies=policy_vocabularies)
     write_manifest(path, document)
     return report("init", project_root, path, document, created=True)

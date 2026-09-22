@@ -31,8 +31,8 @@ def canonical(value) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
-def identity(path: Path) -> dict:
-    value = path.stat()
+def identity(path: Path | int) -> dict:
+    value = os.fstat(path) if isinstance(path, int) else path.stat()
     return {"device": str(value.st_dev), "inode": str(value.st_ino)}
 
 

@@ -18,7 +18,7 @@ def plan_identity(plan):
     return digest(value)
 
 
-def compile_plan(raw):
+def compile_plan(raw, *, _owned_target=None):
     request, basis = normalize(decode(raw))
     payload, decisions = request["request"]["payload"], request["decisions"]
     blockers = []
@@ -34,7 +34,7 @@ def compile_plan(raw):
             refuse("/decisions/accepted_pack_conflicts_with_authoring")
         _, accepted = selection(decisions["accepted_pack"], payload["domain"])
         blockers.append(blocker("local_pack_domain_review_not_verified", questions=[row["id"] for row in rows], stage="release"))
-    target, target_before = target_basis(payload["target"])
+    target, target_before = target_basis(payload["target"], owned_basis=_owned_target)
     payload["target"] = target_before["target"]
     allowed_roots = payload["authority"]["writable_roots"]
     from pathlib import Path
@@ -50,7 +50,7 @@ def compile_plan(raw):
         for scope in required:
             if scope["id"] not in supplied:
                 blockers.append(blocker("pack_required_scope_missing", questions=[row["id"] for row in rows], field="/request/payload/scope/" + scope["id"]))
-    profile, config, policy = compile_profile(request, target, pack, blockers)
+    profile, config, policy = compile_profile(request, target, pack, blockers, _owned_target=_owned_target is not None)
     questions = intake_plan(rows, config, blockers)
     strict = strict_plan(policy, decisions, profile, pack, blockers, [row["id"] for row in rows])
     computation = computation_plan(config)
@@ -74,7 +74,7 @@ def compile_plan(raw):
         strict["pack_manual_policies"] = metadata["human_review_policies"]
     if policy and policy["human_review"]:
         blockers.append(blocker("human_review_required", questions=[row["id"] for row in rows], stage="release"))
-    if target_basis(payload["target"])[1] != target_before or installation_basis() != installed_before:
+    if target_basis(payload["target"], owned_basis=_owned_target)[1] != target_before or installation_basis() != installed_before:
         refuse("planning_target_or_installation_changed", "ONBOARDING_PLAN_STALE")
     after_pack, _ = selected_pack(payload["domain"])
     if pack and after_pack.tree_sha256 != pack.tree_sha256:
@@ -84,20 +84,16 @@ def compile_plan(raw):
         refuse("planning_source_inputs_changed", "ONBOARDING_PLAN_STALE")
     if accepted is not None and selection(decisions["accepted_pack"], payload["domain"])[1] != accepted:
         refuse("planning_accepted_pack_changed", "ONBOARDING_PLAN_STALE")
-    steps = [
-        {"id": "initialize", "operation": "initialize", "owner": "init_research_workspace", "depends_on": [],
-         "mutations": ["target starter tree", "research.yml", "docs/research-requirements.json", "project guidance", "selected domain pack"]},
-        {"id": "intake", "operation": "question_intake", "owner": "intake_questions", "depends_on": ["initialize"],
-         "mutations": ["wiki/questions", "index.md", "log.md"]},
-        {"id": "coverage", "operation": "coverage_setup", "owner": "coverage_manifest", "depends_on": ["intake"],
-         "mutations": ["sources/coverage", "question coverage metadata"]},
-        {"id": "sources", "operation": "source_request_intake_and_delivery", "owner": "source_requests", "depends_on": ["coverage"],
-         "mutations": ["sources/source-requests.jsonl", "selected raw roots"], "requires_current_source_authority": True},
-        {"id": "inventory", "operation": "inventory", "owner": "source_inventory", "depends_on": ["sources"], "mutations": ["sources/manifest.jsonl"]},
-        {"id": "normalize", "operation": "normalize", "owner": "normalize_sources", "depends_on": ["inventory"], "mutations": ["sources/normalized"]},
-        {"id": "validate", "operation": "doctor_smoke_lint", "owner": "workspace_checks", "depends_on": ["coverage", "normalize"],
-         "mutations": [], "state": "not_run"},
-    ]
+    from .setup_worker import MUTATIONS, REQUIRED, STEPS
+
+    owners = {"initialize": "init_research_workspace", "intake": "intake_questions", "coverage": "coverage_manifest",
+              "sources": "source_delivery", "inventory": "source_inventory", "normalize": "normalize_sources",
+              "doctor": "doctor", "smoke": "smoke_validate_workspace", "lint": "lint", "source_status": "source_readiness",
+              "computation": "_computation_service", "strict": "_strict_evidence"}
+    steps = [{"id": key, "operation": key, "owner": owners[key], "depends_on": list(STEPS[index-1:index]),
+              "mutations": ["owned workspace files"] if key in MUTATIONS else [],
+              "required": key in MUTATIONS or key in REQUIRED or key == "strict", "state": "not_run"}
+             for index, key in enumerate(STEPS)]
     result = {"schema_version": PLAN, "plan_id": "0" * 64, "request": request, "request_sha256": digest(request),
         "decision_basis": basis, "bindings": {**installed_before, "target": target_before,
             "pack": {"selection": payload["domain"]["pack"], "tree_sha256": pack.tree_sha256} if pack else None,
@@ -109,7 +105,7 @@ def compile_plan(raw):
         "assumptions": payload["assumptions"], "open_decisions": payload["open_decisions"],
         "limitations": ["Read-only plan; no initializer writes, acquisition, checker execution, model calls, or accepted evidence.",
             "Caller decisions and references do not authenticate authority, reviewer independence, source truth, or access.",
-            "Readiness is for setup only; all research/release blockers remain. No apply executor is exposed.",
+            "Readiness is for setup only; explicit agent apply rechecks the plan before local effects. Research/release blockers remain.",
             "Inputs are rechecked local observations, not a protected atomic host snapshot.",
             "Host must enforce aggregate bytes, wall-clock and tokens and revalidate current authority before execution."]}
     _no_secret_values(result)

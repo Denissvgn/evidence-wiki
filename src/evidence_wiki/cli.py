@@ -690,6 +690,8 @@ def _print_help() -> None:
         "  evidence-wiki agent [summary|resources|resource ID] [--format text|json]\n"
         "  evidence-wiki agent frameworks|bundle|invoke [integration options]\n"
         "  evidence-wiki agent inspect|routes|source-status|capture|source-schemas|source-guide [source options]\n"
+        "  evidence-wiki agent apply --from-file PLAN [--format json|text]\n"
+        "  evidence-wiki agent setup-guide|setup-schemas [options]\n"
         "  evidence-wiki agent plan|plan-check|plan-schemas|plan-guide [planning options]\n"
         "  evidence-wiki init [initializer options]\n"
         "  evidence-wiki deploy [initializer options]\n"

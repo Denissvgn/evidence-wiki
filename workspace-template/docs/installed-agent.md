@@ -27,14 +27,16 @@ Preserve original questions and outcomes. Infer routine defaults; clarify materi
 scope, access, spending or authority. Choose a writable task directory for profiles,
 packs and outputs. Never edit installed assets or put credentials in research text.
 
-Read [initialization](guide/initialization/v1) and the
-[profile contract](guide/init-profile/v1), then obtain the
-[profile example](example/init-profile/v1). An example is editable input, not an
-approved setup. Set its target and scope to the caller's directory. Preview with
-`evidence-wiki init --profile PROFILE --scope-root ROOT --dry-run`, then run the
-same command without `--dry-run` within existing authorization. Initialization
-persists the workspace; requested validations are still pending until run.
-Inspect nonempty targets; `--force` is not a recovery protocol.
+Read [initialization](guide/initialization/v1), the
+[profile contract](guide/init-profile/v1) and [profile example](example/init-profile/v1).
+Compile with `agent plan --from-file REQUEST --output PLAN`, then apply the
+authorized plan with `agent apply --from-file PLAN`. The same command resumes
+unchanged owned state and reruns checks. `agent setup-guide` explains locking,
+observed readiness and partial-write conflicts; those require inspection.
+Direct `init --profile PROFILE --scope-root ROOT --dry-run` previews initialization;
+remove `--dry-run` to create it. Direct init has no recovery journal. Inspect
+nonempty targets; never force initialization to recover. Setup does not establish
+claim truth, independent review or host enforcement.
 
 Choose generic, project-local or existing pack guidance when sufficient. For
 reusable gaps, read [pack authoring](guide/pack-authoring/v1) and
@@ -48,8 +50,7 @@ and `agent source-guide` for routing and capture instructions. Run
 `doctor --target WORKSPACE` and copied smoke/lint scripts for workspace checks.
 Doctor loads registered providers and probes writes; pack validation uses a
 temporary workspace. Read [execution contracts](guide/contracts/v1) for interpreter and recovery rules.
-Use `agent plan --from-file REQUEST` for read-only setup planning; see `agent plan-guide`.
-Save with `--output PLAN`; recheck with `agent plan-check --from-file PLAN`. Apply is unavailable.
+Use `agent plan-guide` for planning details; `agent plan-check` rechecks unused plans.
 
 ## Select strict evidence before research
 

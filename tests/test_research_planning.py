@@ -451,3 +451,32 @@ def test_local_delivery_retains_known_byte_budget_gap(tmp_path):
     assert result["sources"]["routes"][0]["state"] == "blocked"
     assert "local_delivery_byte_budget_exceeded" in reasons(result)
     assert not (tmp_path / "workspace").exists()
+
+
+def test_explicit_source_root_alias_keeps_below_root_symlinks_forbidden(tmp_path):
+    from evidence_wiki.planning_inputs import local_input
+
+    root = tmp_path/'originals'
+    root.mkdir()
+    alias = tmp_path/'declared-source-root'
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+    except OSError:
+        pytest.skip("This filesystem does not permit directory symlink fixtures.")
+    (root/'data.html').write_text('Retained original')
+    observed = local_input(str(alias/'data.html'), [str(alias)])
+    assert observed['state'] == 'present' and observed['root'] == str(root.resolve())
+    (root/'redirect.html').symlink_to(root/'data.html')
+    with pytest.raises(UsageError):
+        local_input(str(alias/'redirect.html'), [str(alias)])
+
+
+def test_setup_refuses_missing_native_lock_before_journal_writes(tmp_path, monkeypatch):
+    from evidence_wiki.setup_application import apply_plan
+
+    plan = build(request(tmp_path))
+    monkeypatch.setattr(owner('_workspace_locks'), 'available_lock_backends', lambda: ())
+    with pytest.raises(UsageError) as caught:
+        apply_plan(canonical(plan))
+    assert caught.value.error_code == 'ONBOARDING_ENVIRONMENT_INCOMPATIBLE'
+    assert not list(tmp_path.iterdir())

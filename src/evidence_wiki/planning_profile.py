@@ -13,7 +13,7 @@ from .pack_discovery import owner
 from .planning_contracts import blocker, digest, owned_call, refuse
 
 
-def compile_profile(request, target, pack, blockers):
+def compile_profile(request, target, pack, blockers, *, _owned_target=False):
     payload, decisions = request["request"]["payload"], request["decisions"]
     init = owner("init_research_workspace")
     owned_call("/decisions/raw_roots", init.validate_source_roots, decisions["raw_roots"], "raw.source_roots")
@@ -114,8 +114,9 @@ def compile_profile(request, target, pack, blockers):
     if policy is not None and merged_policy != policy:
         profile["strict_evidence"] = owned_call("/profile/strict_evidence", owner("_strict_contract").policy_document, merged_policy)
         policy = profile["strict_evidence"]
-    with redirect_stdout(io.StringIO()):
-        owned_call("/profile/initializer_dry_run", init.initialize_workspace, options)
+    if not _owned_target:
+        with redirect_stdout(io.StringIO()):
+            owned_call("/profile/initializer_dry_run", init.initialize_workspace, options)
     return {"workspace_init": profile}, config, policy
 
 

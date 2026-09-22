@@ -64,6 +64,7 @@ REQUIRED_STARTER_ASSETS = (
     "docs/pack-selection.md",
     "docs/source-usability.md",
     "docs/research-planning.md",
+    "docs/workspace-application.md",
     "docs/pack-authoring.md",
     "docs/pack-authoring-example.json",
     "docs/pack-assessment-references.json",

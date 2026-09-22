@@ -87,6 +87,9 @@ with `agent plan-check`. See [research planning](workspace-template/docs/researc
 
 Use `evidence-wiki pack guide --topic authoring` to scaffold or derive local
 guidance, freeze assessment cases, qualify a revision and resume setup planning.
+Apply a saved plan with `evidence-wiki agent apply --from-file PLAN`.
+[Workspace application](workspace-template/docs/workspace-application.md) describes
+local delivery, observed readiness, locking and conservative recovery.
 Structural and arithmetic checks retain separate domain-review requirements.
 
 Add a question using the [question API][question-api]:

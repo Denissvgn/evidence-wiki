@@ -25,8 +25,10 @@ imports, or network access. Operational Python and MCP onboarding are separate
 surfaces; schema access does not imply that they exist.
 
 `onboarding_contract.workflow_commands` lists the read-only `agent` bootstrap,
-summary, resource index and content retrieval commands. `agent plan`,
-`agent apply`, and pack scaffold commands are not available.
+summary, resource index and content retrieval commands. Separate
+`research_planning`, `workspace_application` and `pack_authoring` contracts expose
+`agent plan`, `agent apply` and local pack creation with their own schemas and
+mutation boundaries.
 The separate `source_usability` contract provides `agent inspect`, source
 readiness/routing and explicit host capture delivery. Read
 [source-usability.md](source-usability.md); default inspection runs no plugins,
@@ -38,9 +40,10 @@ catalogs and caller-declared fit decisions. Retrieve its schemas with
 with `agent summary --format json` and exact resource content with
 `agent resource ID --format json`. Bootstrap and resource responses use v2
 envelopes; their v1 schemas remain available. Summary and index use v1 envelopes.
-The setup protocol below defines requirements for
-an apply executor; it does not describe recovery provided by the existing
-`init` command. Use the existing initialization and research operations below.
+The setup protocol below is implemented by `agent apply` for local POSIX setup.
+See [application and recovery](workspace-application.md) for supported assurance,
+observed results and conservative interruption boundaries. Direct `init` has no
+setup journal. Supplemental result/checkpoint schemas use `agent setup-schemas`.
 
 ### Public artifacts
 
@@ -336,8 +339,7 @@ the named dependency into the selected environment when task authority permits,
 then inspect and replan. No installation is performed by this refusal. Version,
 input or interpreter drift returns `ONBOARDING_PLAN_STALE` (exit 3): regenerate
 the plan from the preserved request; do not edit the digest or resume across it.
-These executor codes are reserved protocol requirements, not emitted by the
-structural decoder. They are already accepted by the error schema and listed
+These executor codes are emitted by apply, not by the structural decoder. They are already accepted by the error schema and listed
 with exit/retry semantics in `onboarding_contract.error_codes`, so an eventual
 executor does not need to change the envelope. Error decoding rejects a
 recoverability flag that conflicts with its code. Write/check failures and busy
