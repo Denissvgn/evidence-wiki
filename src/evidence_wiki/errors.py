@@ -88,6 +88,7 @@ _NON_RECOVERABLE_CODES = frozenset(
 # belongs here — omitting one makes the two doors disagree about the same failure.
 _EXIT_CODE_OVERRIDES: dict[str, int] = {
     "STRICT_HOST_BUSY": EXIT_DRIVER_BUSY,
+    "COMPUTATION_BUSY": EXIT_DRIVER_BUSY,
     "CLAIM_HELD": EXIT_CONFLICT,
     "CLAIM_NOT_STALE": EXIT_CONFLICT,
     "DOMAIN_PACK_REFRESH_CONFLICT": EXIT_CONFLICT,
@@ -223,6 +224,8 @@ class RevisionError(EvidenceWikiError):
 ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     "STRICT_HOST_BUSY": LockError,
     "STRICT_": ConfigError,
+    "COMPUTATION_BUSY": LockError,
+    "COMPUTATION_": ConfigError,
     "PUBLICATION_": PublicationError,
     "EVIDENCE_REVISION_": RevisionError,
     # Workspace / runtime preconditions.

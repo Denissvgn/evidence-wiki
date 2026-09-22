@@ -1,0 +1,22 @@
+{
+  "records": [
+    {
+      "id": "a",
+      "model": "sample-model",
+      "score": {
+        "decimal": "0.8"
+      },
+      "latency_ms": 30,
+      "status": "completed"
+    },
+    {
+      "id": "b",
+      "model": "sample-model",
+      "score": {
+        "decimal": "1.0"
+      },
+      "latency_ms": 20,
+      "status": "completed"
+    }
+  ]
+}

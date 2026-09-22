@@ -293,6 +293,7 @@ def contract() -> dict:
         workspace_system = {}
     initializer = load_packaged_script(root, "init_research_workspace")
     strict_contract = load_packaged_script(root, "_strict_contract")
+    computation_contract = load_packaged_script(root, "_computation_contract")
     status_module = load_packaged_script(root, "workspace_status")
     intake_module = load_packaged_script(root, "intake_questions")
     export_module = load_packaged_script(root, "export_answers")
@@ -350,10 +351,32 @@ def contract() -> dict:
             "host_backend": {"id": "darwin-sbpl", "availability": "requires successful live probe"},
             "review_authority": "existing external host trust policy and evidence event store; POSIX storage",
             "review_actions": ["register-strict-review", "register-strict-human-review"],
-            "unsupported_checks": ["declarative_computation", "automatic_semantic_truth_verification"],
+            "unsupported_checks": ["automatic_semantic_truth_verification"],
             "limits": {"artifact_bytes": strict_contract.MAX_BYTES, "claims": strict_contract.MAX_CLAIMS,
                        "questions": 100, "evidence_per_claim": 16, "worker_seconds": 600},
             "contract_document": "docs/strict-evidence.md",
+        },
+        "computation": {
+            "capability": "declarative-computation/v1",
+            "schemas": sorted(computation_contract.schemas()),
+            "schema_accessor": "evidence_wiki.computation.schema_document",
+            "python_api": "evidence_wiki.computation.execute",
+            "read_operations": ["schemas", "check", "aggregate", "evaluate", "verify", "schedule"],
+            "write_operations": ["write", "apply-warnings", "dispatch"],
+            "script_entrypoints": ["aggregate_records.py", "evaluate_formulas.py", "verify_assertions.py", "schedule_milestones.py"],
+            "execution_owner": "shared packaged or copied workspace helpers",
+            "mutation_preconditions": ["explicit invocation", "current result identity", "idempotent request identity", "supported workspace lock"],
+            "platform_requirements": "descriptor-relative no-follow workspace capture and publication; unavailable primitives refuse",
+            "numeric_wire": "finite decimal strings; bounded control integers",
+            "expression_functions": sorted(computation_contract.FUNCTIONS),
+            "strict_claim_schema": "evidence-strict-claims/v2",
+            "error_codes": {"COMPUTATION_REFUSED": {"exit_code": 2}, "COMPUTATION_BUSY": {"exit_code": 6}},
+            "invariant_failure_exit_code": 3,
+            "limits": {"artifact_bytes": computation_contract.MAX_BYTES, "records": computation_contract.MAX_RECORDS,
+                       "sources": computation_contract.MAX_SOURCES, "groups": computation_contract.MAX_GROUPS},
+            "contract_document": "docs/declarative-computation.md",
+            "example_candidates": sorted(path.relative_to(starter_root).as_posix()
+                                         for path in (starter_root / "docs/computation-examples").glob("*") if path.is_dir()),
         },
         "upgrade_compatibility": {
             "workspace_schema_versions": list(initializer.SUPPORTED_WORKSPACE_SCHEMA_VERSIONS),

@@ -830,6 +830,8 @@ def build_export(
         if status_filter:
             raise strict.refusal("strict_status_filter_requires_selected_publication")
         return strict.publication(project_root)
+    if "computation" in config:
+        load_sibling_module("_computation_service").required(project_root, config)
     load_sibling_module("_usage_gate").require_unrestricted_legacy(project_root, config)
     question_status = load_sibling_module("question_status")
     questions_dir = question_status.questions_directory(project_root, config)
@@ -912,7 +914,7 @@ def build_export(
 
 
 def render_output(document: dict[str, Any], output_format: str) -> str:
-    if document.get("schema_version") == "evidence-strict-publication/v1":
+    if document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
         strict = load_sibling_module("_strict_evidence")
         strict.bounded_result(document)
         values = [document] if output_format == "json" else [
@@ -975,7 +977,7 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = json_mode_requested(argv, default_json=True)
     try:
         document = run_export(args.project_root, status=args.status)
-        if args.output and document.get("schema_version") == "evidence-strict-publication/v1":
+        if args.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
             raise load_sibling_module("_strict_evidence").refusal("strict_output_requires_host_delivery")
         rendered = render_output(document, args.format)
     except ScriptRefusal as refusal:

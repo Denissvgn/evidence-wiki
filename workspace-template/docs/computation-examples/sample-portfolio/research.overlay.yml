@@ -1,0 +1,104 @@
+domain_pack:
+  name: sample-portfolio
+  version: 1.0.0
+  compatible_research_yml_contract: '0.1'
+  human_gated: true
+computation:
+  version: '1.0'
+  arithmetic:
+    mode: exact
+    precision: 64
+    scale: 2
+    rounding: ROUND_HALF_EVEN
+  clock:
+    as_of: '2026-09-21T12:00:00Z'
+    timezone: UTC
+    ambiguous: refuse
+    nonexistent: refuse
+    search_days: 366
+  tables: {}
+  aggregations:
+    positions:
+      description: Synthetic observations
+      selector:
+        source_glob: sources/normalized/*.md
+        records_pointer: /records
+        row_key: /id
+        allow_empty: false
+      filter: null
+      group_by:
+      - record.asset_class
+      metrics:
+        exposure:
+          op: sum
+          expr: record.notional
+          denominator: null
+          unit: units
+        pnl:
+          op: sum
+          expr: record.pnl
+          denominator: null
+          unit: units
+      output_target: null
+  graphs:
+    portfolio:
+      description: Synthetic worksheet
+      inputs:
+        exposure:
+          kind: aggregation
+          id: positions
+          metric: exposure
+          group: null
+          reduce: sum
+        pnl:
+          kind: aggregation
+          id: positions
+          metric: pnl
+          group: null
+          reduce: sum
+      constants:
+        limit:
+          value: '1000000'
+          unit: units
+      nodes:
+        utilization:
+          expr: exposure / constants.limit
+          unit: ratio
+      output_mapping:
+        exposure: exposure
+        pnl: pnl
+        utilization: utilization
+      output_page: null
+  invariants:
+    limit:
+      description: Declared synthetic constraint
+      target: computed
+      selector: null
+      inputs:
+        exposure:
+          kind: aggregation
+          id: positions
+          metric: exposure
+          group: null
+          reduce: sum
+      filter: null
+      assertion: exposure <= 1000000
+      severity: error
+      failure_message: Declared constraint requires review.
+  cadence:
+    review:
+      description: Synthetic event rule
+      trigger:
+        type: condition
+        expression: exposure > 1000000
+        inputs:
+          exposure:
+            kind: aggregation
+            id: positions
+            metric: exposure
+            group: null
+            reduce: sum
+      lead_alerts: []
+      action:
+        kind: check_invariants
+        target: limit

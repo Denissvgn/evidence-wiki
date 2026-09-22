@@ -803,6 +803,7 @@ def run_intake_document(
     *,
     dry_run: bool,
     from_file_label: str,
+    _observed_at: datetime | None = None,
 ) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
     config = load_config(project_root)
@@ -835,7 +836,9 @@ def run_intake_document(
         item["item_index"] = item_index
     validate_against_config(config, items, init)
     new_items, duplicates = partition_new_questions(items, existing_texts, existing_metadata_texts)
-    now = datetime.now(timezone.utc)
+    now = _observed_at or datetime.now(timezone.utc)
+    if not isinstance(now, datetime) or now.tzinfo is None:
+        raise IntakeValidationError("The intake event time must have an explicit offset.")
     enforce_intake_limits(
         project_root=project_root,
         config=config,
@@ -849,7 +852,7 @@ def run_intake_document(
     for item in new_items:
         page_question = dict(item)
         page_question["intro"] = INTAKE_PAGE_INTRO
-        rendered_pages[item["slug"]] = init.render_question_page(page_question)
+        rendered_pages[item["slug"]] = init.render_question_page(page_question, observed_at=now)
 
     try:
         questions_dir_label = questions_dir.relative_to(project_root).as_posix()

@@ -955,6 +955,53 @@ ASSESSMENT_PROBE = textwrap.dedent(
 )
 
 
+COMPUTATION_PROBE = textwrap.dedent(r'''
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    import yaml
+    from evidence_wiki import contract
+    from evidence_wiki.computation import evaluate, execute, schema_document
+
+    cli, root = sys.argv[1], Path(sys.argv[2])
+    deployed = subprocess.run([cli, "deploy", "--target", str(root), "--project-name", "computed-evidence",
+                               "--project-description", "Declared arithmetic", "--domain-pack", "general-science"],
+                              check=False, capture_output=True, text=True)
+    assert deployed.returncode == 0, deployed.stderr
+    path = root / "research.yml"
+    config = yaml.safe_load(path.read_text())
+    config["computation"] = {
+        "version": "1.0", "arithmetic": {"mode": "exact", "precision": 64, "scale": 2, "rounding": "ROUND_HALF_EVEN"},
+        "clock": {"as_of": "2026-09-21T00:00:00Z", "timezone": "UTC", "ambiguous": "refuse", "nonexistent": "refuse", "search_days": 366},
+        "tables": {}, "aggregations": {}, "invariants": {}, "cadence": {},
+        "graphs": {"worksheet": {"description": "Declared arithmetic", "constants": {}, "inputs": {},
+            "nodes": {"total": {"expr": "0.1 + 0.2", "unit": "units"}}, "output_mapping": {"total": "total"},
+            "output_page": "wiki/outputs/computed.md"}}
+    }
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    expected = evaluate(root)
+    assert expected["graphs"]["worksheet"]["outputs"]["total"]["value"] == "0.3"
+    assert expected["graphs"]["worksheet"]["outputs"]["total"]["formatted"] == "0.30"
+    assert schema_document(expected["schema_version"])["additionalProperties"] is False
+    assert contract()["computation"]["capability"] == "declarative-computation/v1"
+    for script in ("aggregate_records.py", "evaluate_formulas.py", "verify_assertions.py", "schedule_milestones.py"):
+        completed = subprocess.run([sys.executable, str(root / "scripts" / script), "--target", str(root)],
+                                   check=True, capture_output=True, text=True)
+        assert json.loads(completed.stdout) == expected
+    rendered = subprocess.run([cli, "computation", "check", "--target", str(root)],
+                              check=True, capture_output=True, text=True)
+    assert json.loads(rendered.stdout) == expected
+    receipt = execute(root, "write", expected_result_id=expected["result_id"], request_id="installed-output")
+    assert receipt["dry_run"] is False
+    assert "0.30" in (root / "wiki/outputs/computed.md").read_text()
+    assert execute(root, "write", expected_result_id=expected["result_id"], request_id="installed-output")["replayed"] is True
+    for candidate in ("sample-benchmark", "sample-portfolio", "sample-filing"):
+        assert (root / "docs/computation-examples" / candidate / "research.overlay.yml").is_file()
+    print(json.dumps({"declarative_computation": "passed", "copied_computation_scripts": "passed"}))
+''')
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -1058,10 +1105,11 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         str(python), "-c", ASSESSMENT_PROBE, str(cli), str(REPO_ROOT / "tests/_assessment_fixture.py"),
         str(scratch / "assessment-evidence"),
     ], cwd=outside)
+    computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
     return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
-            **json.loads(assessments)}
+            **json.loads(assessments), **json.loads(computation)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

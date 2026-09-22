@@ -185,7 +185,13 @@ that method and must not forward raw worker text around it. Other tools or chat
 outside this host are outside its guarantee. The host is not a blanket sandbox
 claim about arbitrary agent applications, plugins or the host process itself.
 
+For declarative calculation evidence, follow [the computation contract](declarative-computation.md)
+and select the v2 claim/review/result/publication resources. Current computations,
+invariants, values, units and rounding are checked through their shared owner;
+review snapshots retain the complete calculation basis. Existing v1 resources
+remain available for strict workspaces without computation.
+
 Deterministic retained-evidence and reference-case checks have a defined scope.
 Production domains still need independently calibrated rubrics and appropriate
-reviewers. Declarative computation and automatic semantic truth verification are
-not supplied by this contract; report required unavailable checks explicitly.
+reviewers. Automatic semantic truth verification is unavailable; required
+unavailable checks must remain explicit.

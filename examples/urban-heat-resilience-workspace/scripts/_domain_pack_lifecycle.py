@@ -37,6 +37,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from _workspace_locks import workspace_lock
+from _workspace_module_loader import load_workspace_module
 
 STATE_SCHEMA_VERSION = "1.0"
 REFRESH_SCHEMA_VERSION = "1.0"
@@ -58,6 +59,25 @@ RESTRICTIVE_FILE_MODE = 0o600
 RESTRICTIVE_DIR_MODE = 0o700
 
 _MISSING = object()
+_COMPUTATION_CACHE = {}
+
+
+def _validate_computation(document: Mapping[str, Any], text: str | None = None) -> None:
+    if "computation" not in document:
+        return
+    try:
+        contract = load_workspace_module(_SCRIPT_DIR, "_computation_contract", cache=_COMPUTATION_CACHE)
+        if text is not None:
+            contract.validate_yaml(text)
+        if document.get("computation") is not None:
+            if text is not None:
+                definition = contract.declaration(_plain(document["computation"]))
+                load_workspace_module(_SCRIPT_DIR, "_computation_schedule", cache=_COMPUTATION_CACHE).validate_clock(definition)
+            else:
+                runtime = load_workspace_module(_SCRIPT_DIR, "_computation_runtime", cache=_COMPUTATION_CACHE)
+                runtime.load_definition(_plain(document))
+    except (ValueError, TypeError, KeyError):
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Computation configuration is invalid.") from None
 
 
 class LifecycleFailure(RuntimeError):
@@ -246,6 +266,7 @@ def _load_overlay_content(content: bytes, label: str) -> dict[str, Any]:
         raise LifecycleFailure("DOMAIN_PACK_INVALID", f"Invalid domain-pack overlay at {label}: {exc}") from exc
     if not isinstance(document, dict):
         raise LifecycleFailure("DOMAIN_PACK_INVALID", "research.overlay.yml must contain a mapping")
+    _validate_computation(document, content.decode("utf-8"))
     pack = document.get("domain_pack")
     if not isinstance(pack, dict):
         raise LifecycleFailure("DOMAIN_PACK_INVALID", "research.overlay.yml must declare domain_pack")
@@ -2421,6 +2442,7 @@ def plan_refresh(
         )
         _raise_conflicts(report)
 
+    _validate_computation(document)
     config_text = _render_round_trip(document)
     config_dirty = config_text != original_config_text
     next_state = copy.deepcopy(state)

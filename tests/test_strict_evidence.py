@@ -74,7 +74,7 @@ def review(host, *, verdict="pass", generator="runner", reviewer="evaluator", ch
     prepared = CORE.prepare_review(host.root, claim_id)
     result = prepared["result"]
     row = next(row for row in result["claims"] if row["claim"]["id"] == claim_id)
-    payload = {"schema_version": CONTRACT.REVIEW_SCHEMA, "basis_id": result["basis_id"], "claim_id": claim_id,
+    payload = {"schema_version": prepared["review_schema"], "basis_id": result["basis_id"], "claim_id": claim_id,
         "generator": authenticate({"schema_version": "evidence-strict-authorship/v1", "basis_id": result["basis_id"],
                                     "claim_id": claim_id}, generator, "generator"),
         "verdicts": dict.fromkeys(CONTRACT.CHECKS, verdict), "rationale": "Judgment against the frozen synthetic reference rubric.",

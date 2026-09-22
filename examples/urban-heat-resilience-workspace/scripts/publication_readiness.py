@@ -875,7 +875,7 @@ def render(document: dict[str, Any]) -> str:
         rendered = json.dumps(document, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
         strict.require(len(rendered.encode()) <= strict.MAX_BYTES, "strict_output_bound_exceeded")
         return rendered
-    if document.get("schema_version") == "evidence-strict-publication/v1":
+    if document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
         load_sibling_module("_strict_evidence").bounded_result(document)
         return json.dumps(document, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
     return json.dumps(document, indent=2, sort_keys=False) + "\n"
@@ -935,7 +935,7 @@ def main(argv: list[str] | None = None) -> int:
             return emit_refusal(exc, json_mode=json_mode)
         raise
 
-    if args.output and (document.get("schema_version") == "evidence-strict-publication/v1" or "strict_evidence" in document):
+    if args.output and (document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"} or "strict_evidence" in document):
         return emit_refusal(load_sibling_module("_strict_evidence").refusal("strict_output_requires_host_delivery"), json_mode=True)
     try:
         output = render(document)

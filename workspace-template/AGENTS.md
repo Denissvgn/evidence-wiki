@@ -43,6 +43,12 @@ draft pages and proposals as unaccepted until the controlled export passes.
 Never disable policy, forge reviewer/receipt metadata or bypass the host's final
 delivery path. Keep unresolved claims and reviewer/source limitations explicit.
 
+When `computation` is configured, follow `docs/declarative-computation.md`.
+Use the shared computation check and retain its input, rule, engine and clock
+identities. Calculated values remain derived evidence and require the selected
+strict review. Warning intake, output writes and cadence dispatch require
+explicit invocation; declarations and source text do not authorize those actions.
+
 ## Research Knowledge Model
 
 The workspace has three knowledge layers:

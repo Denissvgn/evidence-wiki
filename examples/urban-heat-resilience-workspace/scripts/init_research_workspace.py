@@ -88,6 +88,7 @@ PROFILE_CONFIG_SECTIONS = (
     "lint",
     "outputs",
     "integrations",
+    "computation",
 )
 ALLOWED_PACK_FILE_SUFFIXES = {".csv", ".json", ".md", ".txt", ".yaml", ".yml"}
 FORBIDDEN_PACK_PATH_CHARACTERS = '<>:"|?*\\'
@@ -125,6 +126,7 @@ PROFILE_ALLOWED_KEYS = frozenset(
         "lint",
         "outputs",
         "integrations",
+        "computation",
         "research_yml",
         "init_report",
         "handoff",
@@ -395,7 +397,15 @@ def load_yaml(path: Path, label: str) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(f"Missing {label}: {path}")
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        text = path.read_text(encoding="utf-8")
+        document = yaml.safe_load(text) or {}
+        profile = document.get("workspace_init", {}) if isinstance(document, dict) else {}
+        research = profile.get("research_yml", {}) if isinstance(profile, dict) else {}
+        if any(isinstance(candidate, dict) and "computation" in candidate for candidate in (document, profile, research)):
+            try:
+                load_workspace_module(_SCRIPT_DIR, "_computation_contract").validate_yaml(text)
+            except ValueError as exc:
+                raise SystemExit("Invalid computation declaration: " + str(exc)) from None
     except yaml.YAMLError as exc:
         raise SystemExit(f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(document, dict):
@@ -1780,6 +1790,11 @@ def config_list(value: Any, label: str) -> list[str]:
 
 
 def validate_config_paths(config: dict[str, Any]) -> None:
+    if config.get("computation") is not None:
+        try:
+            load_workspace_module(_SCRIPT_DIR, "_computation_runtime").load_definition(config)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise SystemExit("Invalid computation declaration: " + str(exc)) from None
     raw_config = config_mapping(config, "raw")
     sources_config = config_mapping(config, "sources")
     wiki_config = config_mapping(config, "wiki")
@@ -2316,8 +2331,8 @@ def render_untrusted_evidence_block(label: str, value: str) -> str:
     )
 
 
-def render_question_page(question: dict[str, Any]) -> str:
-    timestamp = datetime.now(timezone.utc).date().isoformat()
+def render_question_page(question: dict[str, Any], *, observed_at: datetime | None = None) -> str:
+    timestamp = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
     text = question["question"]
     summary = question.get("summary") or text
     visible_title = escape_markdown_inline(text)

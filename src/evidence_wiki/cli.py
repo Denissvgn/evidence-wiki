@@ -468,7 +468,7 @@ def _run_publication(args: list[str]) -> int:
         document = _handle(parsed.project_root).publish_selected(parsed.question, expected_revision=parsed.expected_revision)
     except EvidenceWikiError as exc:
         return _refuse(exc, json_mode=True)
-    if parsed.output and document.get("schema_version") == "evidence-strict-publication/v1":
+    if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
         return _emit_refusal(_packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery"), json_mode=True)
     rendered = script.render(document)
     if parsed.output:
@@ -489,7 +489,7 @@ def _run_questions_export(forwarded: list[str]) -> int:
     # ``jsonl`` is the same document reshaped by the script's own renderer, and
     # ``--output`` only chooses where the rendered bytes go.
     try:
-        if parsed.output and document.get("schema_version") == "evidence-strict-publication/v1":
+        if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
             raise _packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery")
         rendered = script.render_output(document, parsed.format)
     except Exception as exc:
@@ -689,6 +689,7 @@ def _print_help() -> None:
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
         "  evidence-wiki strict schemas|check|prepare-review|review|export [options]\n"
+        "  evidence-wiki computation schemas|check|aggregate|evaluate|verify|schedule|write|apply-warnings|dispatch [options]\n"
         "  evidence-wiki orchestrate start|next|submit|status|retire|cleanup-claims [options]\n"
         f"  evidence-wiki orchestrate run|resume --runner {managed_runners} [options]\n"
         "  evidence-wiki contract\n"
@@ -786,6 +787,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_assessments(args)
     if command == "strict":
         return int(_packaged_script("strict_evidence").main(args))
+    if command == "computation":
+        return int(_packaged_script("_computation_cli").main(args))
     if command == "serve-mcp":
         return _run_serve_mcp(args)
     if command == "orchestrate":

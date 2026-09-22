@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
+from pathlib import Path
 
 from _evidence_authority import bounded_list, digest, exact_object, timestamp
 from _evidence_revision import canonical_bytes, content_id
 from _record_artifacts import artifact_path, json_document
 from _temporal_contract import require
+from _workspace_module_loader import load_workspace_module
 
 POLICY_SCHEMA = "evidence-strict-policy/v1"
 CLAIMS_SCHEMA = "evidence-strict-claims/v1"
 REVIEW_SCHEMA = "evidence-strict-review/v1"
 RESULT_SCHEMA = "evidence-strict-result/v1"
+CLAIMS_SCHEMA_V2 = "evidence-strict-claims/v2"
+REVIEW_SCHEMA_V2 = "evidence-strict-review/v2"
+RESULT_SCHEMA_V2 = "evidence-strict-result/v2"
+_COMPUTATION_CACHE = {}
 MAX_BYTES = 1_048_576
 MAX_CLAIMS = 100
 CHECKS = ("support", "source_suitability", "scope", "time", "units", "counterevidence")
@@ -23,6 +30,8 @@ FIELDS = {
     CLAIMS_SCHEMA: {"schema_version", "questions", "claims"},
     REVIEW_SCHEMA: {"schema_version", "basis_id", "claim_id", "generator", "verdicts", "rationale", "reviewed_at", "observation", "snapshot"},
 }
+FIELDS[CLAIMS_SCHEMA_V2] = FIELDS[CLAIMS_SCHEMA]
+FIELDS[REVIEW_SCHEMA_V2] = FIELDS[REVIEW_SCHEMA]
 
 
 def text(value, maximum=4096):
@@ -47,7 +56,8 @@ def document(value, schema):
         nodes += 1
         require(depth <= 16 and nodes <= 65536, "strict_tree_bound_exceeded")
         if isinstance(item, dict):
-            require(len(item) <= 128 and all(isinstance(key, str) for key in item), "strict_object_bound_exceeded")
+            require(len(item) <= (4096 if schema == REVIEW_SCHEMA_V2 else 128)
+                    and all(isinstance(key, str) for key in item), "strict_object_bound_exceeded")
             pending.extend((part, depth + 1) for pair in item.items() for part in pair)
         elif isinstance(item, list):
             require(len(item) <= 4096, "strict_array_bound_exceeded")
@@ -90,7 +100,9 @@ def policy_document(value):
 
 
 def claims_document(value):
-    value = document(value, CLAIMS_SCHEMA)
+    schema = value.get("schema_version") if type(value) is dict else None
+    require(schema in {CLAIMS_SCHEMA, CLAIMS_SCHEMA_V2}, "strict_schema_unsupported")
+    value = document(value, schema)
     questions = bounded_list(value["questions"], maximum=100, minimum=1)
     slugs = set()
     for question in questions:
@@ -102,8 +114,14 @@ def claims_document(value):
         slugs.add(slug)
     ids = set()
     for claim in bounded_list(value["claims"], maximum=MAX_CLAIMS):
-        exact_object(claim, {"id", "question_slug", "qualification", "text", "scope", "time", "units",
-                             "evidence", "premises", "derivation", "limitations"})
+        fields = {"id", "question_slug", "qualification", "text", "scope", "time", "units", "evidence", "premises", "derivation", "limitations"}
+        exact_object(claim, fields | ({"calculations"} if schema == CLAIMS_SCHEMA_V2 else set()))
+        if claim.get("calculations"):
+            require(claim["qualification"] == "inference", "strict_computation_requires_inference")
+            for calculation in claim["calculations"]:
+                digest(calculation["result_id"])
+                text(calculation["expected"], 512)
+                text(calculation["unit"], 128)
         identifier(claim["id"])
         require(claim["id"] not in ids, "strict_duplicate_claim")
         ids.add(claim["id"])
@@ -145,7 +163,9 @@ def claims_document(value):
 
 
 def review_document(value):
-    value = document(value, REVIEW_SCHEMA)
+    schema = value.get("schema_version") if type(value) is dict else None
+    require(schema in {REVIEW_SCHEMA, REVIEW_SCHEMA_V2}, "strict_schema_unsupported")
+    value = document(value, schema)
     digest(value["basis_id"])
     identifier(value["claim_id"])
     exact_object(value["generator"], {"payload", "authentication"})
@@ -266,6 +286,24 @@ def schema_documents():
         snapshot=obj(policy=policy, claim=claim, question=question, metadata={"type": "object"},
                      premises=array(claim, 32), source_revisions={"type": "object", "additionalProperties": hashed, "maxProperties": 64})), RESULT_SCHEMA: result,
         "evidence-strict-publication/v1": publication, "evidence-strict-action/v1": action}
+    computation = load_workspace_module(Path(__file__).resolve().parent, "_computation_contract", cache=_COMPUTATION_CACHE)
+    calculation = obj(result_id=hashed, pointer={**string(512), "pattern": r"^/(graphs/[A-Za-z][A-Za-z0-9_]*/outputs/[A-Za-z][A-Za-z0-9_]*|aggregations/[A-Za-z][A-Za-z0-9_]*/groups/[0-9]+/metrics/[A-Za-z][A-Za-z0-9_]*)$"},
+                      expected=string(512), form={"enum": ["value", "formatted"]}, unit=string(128), rounded=boolean)
+    claim_v2 = obj(**claim["properties"], calculations=array(calculation, 16))
+    claims_v2 = obj(schema_version={"const": CLAIMS_SCHEMA_V2}, questions=array(question, 100, 1), claims=array(claim_v2))
+    review_v2 = deepcopy(documents[REVIEW_SCHEMA])
+    review_v2["properties"]["schema_version"] = {"const": REVIEW_SCHEMA_V2}
+    snapshot = review_v2["properties"]["snapshot"]
+    snapshot["properties"].update(claim=claim_v2, premises=array(claim_v2, 32), computation=nullable(computation.schemas()[computation.RESULT_SCHEMA]))
+    snapshot["required"].append("computation")
+    result_v2 = deepcopy(result)
+    result_v2["properties"]["schema_version"] = {"const": RESULT_SCHEMA_V2}
+    result_v2["properties"]["claims"]["items"]["properties"]["claim"] = claim_v2
+    publication_v2 = deepcopy(publication)
+    publication_v2["properties"]["schema_version"] = {"const": "evidence-strict-publication/v2"}
+    publication_v2["properties"]["questions"]["items"]["properties"]["claims"]["items"] = obj(**claim_v2["properties"], verification=obj(observation=observation, review=review))
+    documents.update({CLAIMS_SCHEMA_V2: claims_v2, REVIEW_SCHEMA_V2: review_v2, RESULT_SCHEMA_V2: result_v2,
+                      "evidence-strict-publication/v2": publication_v2})
     return {key: {"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "urn:" + key.replace("/", ":"),
                   "x-evidence-wiki-limits": {"bytes": MAX_BYTES, "claims": MAX_CLAIMS, "depth": 16, "nodes": 65536},
                   **value} for key, value in documents.items()}

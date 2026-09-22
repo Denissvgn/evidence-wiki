@@ -1,0 +1,130 @@
+domain_pack:
+  name: sample-filing
+  version: 1.0.0
+  compatible_research_yml_contract: '0.1'
+  human_gated: true
+computation:
+  version: '1.0'
+  arithmetic:
+    mode: exact
+    precision: 64
+    scale: 2
+    rounding: ROUND_HALF_EVEN
+  clock:
+    as_of: '2026-09-21T12:00:00Z'
+    timezone: UTC
+    ambiguous: refuse
+    nonexistent: refuse
+    search_days: 366
+  tables: {}
+  aggregations:
+    sales:
+      description: Synthetic observations
+      selector:
+        source_glob: sources/normalized/*.md
+        records_pointer: /records
+        row_key: /id
+        allow_empty: false
+      filter: record.kind == 'sale'
+      group_by: []
+      metrics:
+        base:
+          op: sum
+          expr: record.base
+          denominator: null
+          unit: synthetic_currency
+        withheld:
+          op: sum
+          expr: record.withheld
+          denominator: null
+          unit: synthetic_currency
+      output_target: null
+    expenses:
+      description: Synthetic observations
+      selector:
+        source_glob: sources/normalized/*.md
+        records_pointer: /records
+        row_key: /id
+        allow_empty: false
+      filter: record.kind == 'expense'
+      group_by: []
+      metrics:
+        deductible:
+          op: sum
+          expr: record.deductible
+          denominator: null
+          unit: synthetic_currency
+      output_target: null
+  graphs:
+    filing:
+      description: Synthetic worksheet
+      inputs:
+        income:
+          kind: aggregation
+          id: sales
+          metric: base
+          group: []
+          reduce: null
+        costs:
+          kind: aggregation
+          id: expenses
+          metric: deductible
+          group: []
+          reduce: null
+        withheld:
+          kind: aggregation
+          id: sales
+          metric: withheld
+          group: []
+          reduce: null
+      constants:
+        rate:
+          value: '0.20'
+          unit: ratio
+      nodes:
+        net_profit:
+          expr: income - costs
+          unit: synthetic_currency
+        gross_due:
+          expr: max(0, net_profit * constants.rate)
+          unit: synthetic_currency
+        final_due:
+          expr: gross_due - withheld
+          unit: synthetic_currency
+      output_mapping:
+        box_income: income
+        box_costs: costs
+        box_profit: net_profit
+        box_gross: gross_due
+        box_withheld: withheld
+        box_due: final_due
+      output_page: null
+  invariants:
+    nonnegative:
+      description: Declared synthetic constraint
+      target: computed
+      selector: null
+      inputs:
+        due:
+          kind: graph
+          id: filing
+          output: box_due
+      filter: null
+      assertion: due >= 0
+      severity: warning
+      failure_message: Declared constraint requires review.
+  cadence:
+    review:
+      description: Synthetic interval
+      trigger:
+        type: elapsed_units
+        anchor: '2026-09-01T00:00:00Z'
+        amount: 30
+        unit: days
+        calendar_policy: clamp
+      lead_alerts:
+      - amount: 2
+        unit: days
+      action:
+        kind: status_flag
+        target: review_due

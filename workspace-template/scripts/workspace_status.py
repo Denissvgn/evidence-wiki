@@ -1120,6 +1120,8 @@ def lint_section(
     issue_counts = stats.get("issue_counts") if isinstance(stats.get("issue_counts"), dict) else {}
     section["issue_counts"] = issue_counts
     section["pages_checked"] = results.get("pages_checked", 0)
+    if "computation" in results:
+        section["computation"] = results["computation"]
     return section
 
 
@@ -2395,6 +2397,7 @@ def build_status_document(
         "candidates": candidates,
         "sources": sources,
         "lint": lint,
+        **({"computation": lint["computation"]} if "computation" in lint else {}),
         "readiness": readiness,
         "workspace_health": workspace_health,
     }

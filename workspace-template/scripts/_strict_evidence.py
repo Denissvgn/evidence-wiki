@@ -15,7 +15,18 @@ from _evidence_revision import capture_workspace, content_id, observation, read_
 from _publication_context import authorized_capture, strict_host, strict_internal
 from _record_artifacts import json_document
 from _script_errors import ScriptRefusal
-from _strict_contract import MAX_BYTES, RESULT_SCHEMA, artifact_id, claims_document, policy_document, review_document
+from _strict_contract import (
+    CLAIMS_SCHEMA_V2,
+    MAX_BYTES,
+    RESULT_SCHEMA,
+    RESULT_SCHEMA_V2,
+    REVIEW_SCHEMA,
+    REVIEW_SCHEMA_V2,
+    artifact_id,
+    claims_document,
+    policy_document,
+    review_document,
+)
 from _workspace_module_loader import load_workspace_module
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -126,11 +137,16 @@ def host_delivery(root):
         strict_host.reset(token)
 
 
-def selection_inputs(root, config, policy):
+def selection_inputs(root, config, policy, *, view=None, computation=None):
     capture = capture_workspace(root)
+    if "computation" in config:
+        sibling("_computation_contract").validate_yaml(capture.files["research.yml"].decode("utf-8"))
     path = policy["claims_path"]
     require(path in capture.files and len(capture.files[path]) <= MAX_BYTES, "strict_claims_missing_or_large")
     claims = claims_document(json_document(capture.files[path]))
+    require(config.get("computation") is None or claims["schema_version"] == CLAIMS_SCHEMA_V2, "strict_computation_claim_schema_required")
+    if config.get("computation") is not None and computation is None:
+        computation = sibling("_computation_service").required(root, config, view=view)
     for relative, expected in policy["instructions"].items():
         require(relative in capture.files and "sha256:" + hashlib.sha256(capture.files[relative]).hexdigest() == expected,
                 "strict_instructions_changed")
@@ -146,8 +162,11 @@ def selection_inputs(root, config, policy):
             fm, body = sibling("verify_quotes").split_page(data.decode("utf-8"))
             originals[Path(name).stem] = {"question": fm.get("question") or fm.get("summary"),
                                         "metadata": fm.get("metadata"), "body": body}
-    identity = content_id("evidence-strict-basis/v1", {"files": evidence, "claims": claims,
-        "policy": policy, "questions": originals, "producer": sibling("_selected_publication").producer_identity()})
+    material = {"files": evidence, "claims": claims, "policy": policy, "questions": originals,
+                "producer": sibling("_selected_publication").producer_identity()}
+    if computation is not None:
+        material["computation_id"] = computation["result_id"]
+    identity = content_id("evidence-strict-basis/v1", material)
     return capture, claims, identity
 
 
@@ -196,7 +215,8 @@ def review_result(root, config, policy, basis, claim, view, now, observation):
 def evaluate(root, config, policy, *, view=None):
     """Recompute retained evidence and checks; never infer review from source prose."""
     now = datetime.now(timezone.utc) if view is None else view.now
-    capture, manifest, basis = selection_inputs(root, config, policy)
+    computation = sibling("_computation_service").required(root, config, view=view) if config.get("computation") is not None else None
+    capture, manifest, basis = selection_inputs(root, config, policy, view=view, computation=computation)
     if view is None:
         sibling("_usage_gate").require_unrestricted_legacy(root, config)
     else:
@@ -261,6 +281,21 @@ def evaluate(root, config, policy, *, view=None):
                 reasons.append("strict_grounding_failed")
             if not set(claim["premises"]) <= accepted:
                 reasons.append("strict_premise_not_accepted")
+            for calculation in claim.get("calculations", []):
+                if computation is None or calculation["result_id"] != computation["result_id"]:
+                    reasons.append("strict_computation_missing_or_stale")
+                    continue
+                resolved = sibling("_structured_view").resolve_pointer(computation, calculation["pointer"])
+                value = resolved.value if resolved.ok else None
+                if (not isinstance(value, dict) or value.get("type") != "decimal"
+                        or value.get(calculation["form"]) != calculation["expected"]
+                        or value.get("unit") != calculation["unit"] or value.get("rounded") != calculation["rounded"]):
+                    reasons.append("strict_computation_value_mismatch")
+                    continue
+                sources = {computation["lineage"][identifier]["source_id"] for identifier in value["lineage"]
+                           if "source_id" in computation["lineage"][identifier]}
+                if not sources <= {item["source_id"] for item in claim["evidence"]}:
+                    reasons.append("strict_computation_source_missing")
             observation = {"basis_id": basis, "claim_id": claim["id"],
                            "producer_id": sibling("_selected_publication").producer_identity(), "reasons": sorted(set(reasons))}
             effective = {**policy, "human_review": policy["human_review"] or human}
@@ -271,8 +306,9 @@ def evaluate(root, config, policy, *, view=None):
                 accepted.add(claim["id"])
             rows.append({"claim": claim, "accepted": not reasons, "reasons": sorted(set(reasons)), "review": review,
                          "required_review_role": "human-review" if effective["human_review"] else "evaluator", "observation": observation})
-    require(selection_inputs(root, config, policy)[2] == basis, "strict_inputs_changed")
-    result = {"schema_version": RESULT_SCHEMA, "basis_id": basis, "policy_id": artifact_id(policy),
+    require(selection_inputs(root, config, policy, view=view)[2] == basis, "strict_inputs_changed")
+    result = {"schema_version": RESULT_SCHEMA_V2 if manifest["schema_version"] == CLAIMS_SCHEMA_V2 else RESULT_SCHEMA,
+            "basis_id": basis, "policy_id": artifact_id(policy),
             "evaluated_at": now.isoformat(), "producer_id": sibling("_selected_publication").producer_identity(),
             "assurance": "host_enforced" if strict_host.get() == str(root) else "artifact_checked",
             "questions": manifest["questions"], "claims": rows,
@@ -349,7 +385,7 @@ def publication(root, slugs=None, *, view=None, expected_revision=None):
                 closing = evaluate(root, config, policy, view=current)
                 require(released_ids <= {row["claim"]["id"] for row in closing["claims"] if row["accepted"]},
                         "strict_review_changed_during_release")
-        require(capture_workspace(root).revision_id == before and selection_inputs(root, config, policy)[2] == result["basis_id"], "strict_inputs_changed")
+        require(capture_workspace(root).revision_id == before and selection_inputs(root, config, policy, view=current)[2] == result["basis_id"], "strict_inputs_changed")
         require(resolve_policy(root, config) == policy, "strict_policy_changed")
         originals = []
         by_slug = {row["slug"]: row for row in records}
@@ -358,7 +394,8 @@ def publication(root, slugs=None, *, view=None, expected_revision=None):
             originals.append({"original_id": original, "question_slugs": derived,
                 "accepted": all(slug in by_slug and by_slug[slug]["accepted"] for slug in derived),
                 "unselected_question_slugs": [slug for slug in derived if slug not in by_slug]})
-        return bounded_result({"schema_version": "evidence-strict-publication/v1", "basis_id": result["basis_id"],
+        return bounded_result({"schema_version": "evidence-strict-publication/v2" if result["schema_version"] == RESULT_SCHEMA_V2 else "evidence-strict-publication/v1",
+            "basis_id": result["basis_id"],
             "policy_id": result["policy_id"], "producer_id": result["producer_id"], "evaluated_at": result["evaluated_at"],
             "assurance": result["assurance"], "verdict": "ship" if all(r["accepted"] for r in records) else "blocked_on_sources",
             "questions": records, "limitations": result["limits"], "original_outcomes": originals,
@@ -366,7 +403,8 @@ def publication(root, slugs=None, *, view=None, expected_revision=None):
 
 
 def review_snapshot(root, config, policy, view, claim_id, expected_basis):
-    capture, manifest, basis = selection_inputs(root, config, policy)
+    computation = sibling("_computation_service").required(root, config, view=view) if config.get("computation") is not None else None
+    capture, manifest, basis = selection_inputs(root, config, policy, view=view, computation=computation)
     require(basis == expected_basis, "strict_review_basis_changed")
     claims = {claim["id"]: claim for claim in manifest["claims"]}
     require(claim_id in claims, "strict_claim_unknown")
@@ -375,8 +413,11 @@ def review_snapshot(root, config, policy, view, claim_id, expected_basis):
     path = sibling("question_status").questions_directory(root, config) / (question["slug"] + ".md")
     metadata, _body = sibling("verify_quotes").split_page(capture.files[path.relative_to(root).as_posix()].decode())
     inputs = sibling("_publication_usage").qualify_capture(capture.files, config, view, purpose="qa-export", consumer="evidence-wiki")
-    return {"policy": policy, "claim": claim, "question": question, "metadata": metadata.get("metadata") or {},
-            "premises": [claims[name] for name in claim["premises"]], "source_revisions": inputs["selected"]}
+    snapshot = {"policy": policy, "claim": claim, "question": question, "metadata": metadata.get("metadata") or {},
+                "premises": [claims[name] for name in claim["premises"]], "source_revisions": inputs["selected"]}
+    if manifest["schema_version"] == CLAIMS_SCHEMA_V2:
+        snapshot["computation"] = computation
+    return snapshot
 
 
 @typed
@@ -392,6 +433,7 @@ def prepare_review(root, claim_id):
         row = next(r for r in result["claims"] if r["claim"]["id"] == claim_id)
         snapshot = review_snapshot(root, config, policy, view, claim_id, result["basis_id"])
         return {"result": result, "rubric": policy["rubric"], "snapshot": snapshot,
+                "review_schema": REVIEW_SCHEMA_V2 if result["schema_version"] == RESULT_SCHEMA_V2 else REVIEW_SCHEMA,
                 "registration": {"schema_version": "evidence-usage-command/v1", "state_id": view.state.state_id,
                     "workspace_binding": view.state.binding, "request_id": None, "expected_checkpoint": view.state.checkpoint,
                     "action": "register-strict-human-review" if row["required_review_role"] == "human-review" else "register-strict-review",
@@ -402,7 +444,7 @@ def validate_review(root, config, envelope, view):
     policy = resolve_policy(root, config)
     require(policy is not None, "strict_policy_missing")
     payload = review_document(envelope["payload"]["body"]["review"])
-    _capture, claims, basis = selection_inputs(root, config, policy)
+    _capture, claims, basis = selection_inputs(root, config, policy, view=view)
     require(payload["basis_id"] == basis and payload["claim_id"] in {c["id"] for c in claims["claims"]}, "strict_review_basis_changed")
     report = evaluate(root, config, policy, view=view)
     row = next(row for row in report["claims"] if row["claim"]["id"] == payload["claim_id"])
@@ -436,6 +478,9 @@ def render_markdown(result):
             lines.extend("  Limitation: " + escape(note) for note in claim["limitations"])
             if claim["qualification"] == "inference":
                 lines += ["  Premises: " + ", ".join(claim["premises"]), "  Derivation: " + escape(claim["derivation"])]
+            for calculation in claim.get("calculations", []):
+                lines += ["  Calculated value: " + escape(calculation["expected"]) + " " + escape(calculation["unit"])
+                          + (" (rounded)" if calculation["rounded"] else " (exact arithmetic)") + "; result: " + calculation["result_id"]]
         lines.append("")
     lines += ["## Qualifications", "", *["- " + note for note in result["limitations"]]]
     rendered = "\n".join(lines) + "\n"

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add declarative grouped aggregation, Decimal formula graphs, invariants and
+  explicit-clock schedules through shared package and standalone entry points.
+  Results retain source, rule and execution identities; explicit output/intake/
+  dispatch operations preserve ownership and support bounded replay.
+- Strict v2 claim and review resources bind derived values to current computation
+  results, units and rounding while retaining independent semantic review.
+
 - Strict evidence policy makes coverage, grounding and independent review
   mandatory for accepted claims, with current source/review checks and controlled
   exports. New request schemas require explicit strict-policy selection.

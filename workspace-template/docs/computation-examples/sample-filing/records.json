@@ -1,0 +1,21 @@
+{
+  "records": [
+    {
+      "id": "a",
+      "kind": "sale",
+      "base": 600,
+      "withheld": 30
+    },
+    {
+      "id": "b",
+      "kind": "sale",
+      "base": 400,
+      "withheld": 20
+    },
+    {
+      "id": "c",
+      "kind": "expense",
+      "deductible": 200
+    }
+  ]
+}

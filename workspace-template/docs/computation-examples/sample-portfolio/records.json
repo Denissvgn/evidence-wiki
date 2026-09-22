@@ -1,0 +1,16 @@
+{
+  "records": [
+    {
+      "id": "a",
+      "asset_class": "class-a",
+      "notional": 225000,
+      "pnl": 1000
+    },
+    {
+      "id": "b",
+      "asset_class": "class-b",
+      "notional": 175000,
+      "pnl": -250
+    }
+  ]
+}
