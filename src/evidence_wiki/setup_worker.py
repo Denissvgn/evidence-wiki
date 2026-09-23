@@ -163,7 +163,7 @@ def main():
             raise ValueError("setup_worker_basis_changed")
         # Owners may print source-derived diagnostics. Only the explicit result
         # leaves this process; bounded parent pipes do not retain raw source text.
-        with open(__import__("os").devnull, "w") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+        with open(__import__("os").devnull, "w", encoding="utf-8", newline="\n") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             result = execute(request["operation"], request["plan"], request["clock"])
         raw = canonical(result)
         if len(raw) > 60000:

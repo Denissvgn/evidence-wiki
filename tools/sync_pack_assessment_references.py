@@ -15,17 +15,17 @@ TARGET = ROOT / "workspace-template/docs/pack-assessment-references.json"
 
 
 def content():
-    tree = ast.parse((ROOT / "tests/test_computation_examples.py").read_text())
+    tree = ast.parse((ROOT / "tests/test_computation_examples.py").read_text(encoding="utf-8"))
     expected = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
                     and any(isinstance(target, ast.Name) and target.id == "EXPECTED" for target in node.targets))
     examples = ROOT / "workspace-template/docs/computation-examples"
     arithmetic = {}
     for name, values in expected.items():
-        arithmetic[name] = {"definition": yaml.safe_load((examples / name / "research.overlay.yml").read_text())["computation"],
-            "records": json.loads((examples / name / "records.json").read_text()), "expected_graphs": values,
+        arithmetic[name] = {"definition": yaml.safe_load((examples / name / "research.overlay.yml").read_text(encoding="utf-8"))["computation"],
+            "records": json.loads((examples / name / "records.json").read_text(encoding="utf-8")), "expected_graphs": values,
             "meaning": "Synthetic arithmetic example; formula, score/percentile labels, filing rules and thresholds require independent domain review."}
     value = {"schema_version": "evidence-pack-assessment-references/v1",
-        "semantic": json.loads((ROOT / "tests/fixtures/strict-evidence/review-cases.json").read_text()),
+        "semantic": json.loads((ROOT / "tests/fixtures/strict-evidence/review-cases.json").read_text(encoding="utf-8")),
         "arithmetic": arithmetic,
         "limitations": ["Existing synthetic reference judgments, not expert-reviewed production-domain cases.",
             "Arithmetic expectations are independently specified; matching them qualifies engine behavior on these inputs only.",

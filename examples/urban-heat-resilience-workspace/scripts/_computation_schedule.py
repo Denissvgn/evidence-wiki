@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Explicit-clock schedule evaluation; returned actions are inert descriptors."""
 
 from __future__ import annotations

@@ -84,7 +84,10 @@ def qualify_capture(files, config, view, *, purpose, consumer):
         if relative.startswith(normalized_dir + "/") and PurePosixPath(relative).suffix == ".md":
             require(relative in approved_normalized, "assessment_unapproved_normalized_input")
         if any(relative == root or relative.startswith(root + "/") for root in raw_roots):
-            require(relative in approved_raw or PurePosixPath(relative).name == ".gitkeep" and not files[relative].strip(),
+            # The acquisition owner keeps an empty coordination inode in raw/.
+            # No other lock-named file, or content in this inode, is evidence-exempt.
+            coordination = relative == "raw/.locks/acquisition.lock" and files[relative] == b""
+            require(relative in approved_raw or coordination or PurePosixPath(relative).name == ".gitkeep" and not files[relative].strip(),
                     "assessment_unapproved_raw_input")
     ancestry.update(selected.values())
     require(len(ancestry) <= 128 and all(revision in view.state.revisions for revision in ancestry),

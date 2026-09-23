@@ -72,6 +72,7 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/_caller_context.py",
     "docs/pack-authoring.md",
     "docs/pack-revisions.md",
+    "docs/upgrade-adoption.md",
     "docs/pack-authoring-example.json",
     "docs/pack-assessment-references.json",
     "docs/strict-evidence.md",

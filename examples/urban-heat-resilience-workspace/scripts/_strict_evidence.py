@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Policy-owned resolution and claim-only release over existing evidence owners."""
 
 from __future__ import annotations
@@ -377,7 +378,9 @@ def publication(root, slugs=None, *, view=None, expected_revision=None):
                            for r in rows if r["accepted"]] if eligible else [],
                 "unresolved_claims": [{"id": r["claim"]["id"], "qualification": r["claim"]["qualification"], "reasons": r["reasons"]}
                                       for r in rows if not r["accepted"]],
-                "gaps": sorted({reason for r in rows for reason in r["reasons"]} | (set() if eligible else {"strict_release_not_eligible"}))})
+                "gaps": sorted({reason for r in rows for reason in r["reasons"]}
+                    | {"publication_" + category for category, reasons in legacy_results[question["slug"]]["readiness"]["reasons"].items() if reasons and not eligible}
+                    | (set() if eligible else {"strict_release_not_eligible"}))})
         if current is not None:
             current.revalidate(root, config)
             released_ids = {claim["id"] for record in records for claim in record["claims"]}

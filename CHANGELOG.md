@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Record local-source observation time, distinguish local HTML from web
+  acquisitions, preserve strict refusal envelopes in copied scripts and report
+  publication blockers by category. Retain the acquisition coordination inode
+  without treating it as source content.
+
 - Add same-pack revision plans, bounded research-impact mapping and explicit
   coverage migration with archived answers and fresh review requirements.
   Freeze active pack/computation criteria and refuse rebinding legacy actions.

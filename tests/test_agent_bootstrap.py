@@ -1,7 +1,6 @@
 """Qualify pre-workspace discovery, installed identity and content boundaries."""
 
 import hashlib
-import importlib.util
 import json
 import re
 import shutil
@@ -21,6 +20,7 @@ from evidence_wiki.errors import UsageError
 from evidence_wiki.onboarding_contract import decode_document, encode_document
 from evidence_wiki.onboarding_schemas import schema_document, schema_ids
 from evidence_wiki.resources import missing_required_assets, required_asset_manifest
+from tests._script_loader import load_module
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,9 +30,7 @@ def envelope(kind, version, payload):
 
 
 def test_exports_match_owners_and_all_resources_remain_usable():
-    spec = importlib.util.spec_from_file_location("resource_export", ROOT / "tools/sync_agent_resources.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_module("resource_export", ROOT / "tools/sync_agent_resources.py")
     assert all((ROOT / path).read_bytes() == content for path, content in module.exports().items())
     entries = agent_resources.resource_index()["resources"]
     assert 1 <= len(entries) <= 64

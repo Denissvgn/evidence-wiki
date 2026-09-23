@@ -1891,7 +1891,8 @@ def is_automated_provenance(provenance: dict[str, Any]) -> bool:
 
 def is_web_curation_record(record: dict[str, Any], provenance: dict[str, Any]) -> bool:
     kind = record.get("kind")
-    return kind in WEB_CURATION_KINDS and is_automated_provenance(provenance)
+    local_copy = provenance.get("retrieved_by") == "local_setup" and provenance.get("source_type") == "local_file"
+    return kind in WEB_CURATION_KINDS and is_automated_provenance(provenance) and not local_copy
 
 
 def has_license_or_terms_status(provenance: dict[str, Any]) -> bool:

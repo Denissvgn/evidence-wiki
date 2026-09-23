@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Read-only revision boundaries shared by pack, run and computation owners."""
 
 from __future__ import annotations

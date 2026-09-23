@@ -1,0 +1,167 @@
+{
+  "schema_version": "evidence-journey-cases/v1",
+  "trials": 3,
+  "grading_basis": "Frozen synthetic source statements and existing strict reference judgments; no production-domain expert certification.",
+  "thresholds": {
+    "unsupported_claim_escapes": 0,
+    "unnecessary_refusals": 0,
+    "original_question_omissions": 0,
+    "policy_violations": 0,
+    "operator_setting_explanations": 0
+  },
+  "cases": [
+    {
+      "id": "scientific",
+      "source_mode": "local",
+      "subject": "synthetic laboratory observations",
+      "outcomes": [
+        "supported",
+        "inference",
+        "contested",
+        "insufficient_evidence"
+      ],
+      "quantitative": null,
+      "release_expected": [
+        true,
+        true,
+        false,
+        false
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    },
+    {
+      "id": "official",
+      "source_mode": "local",
+      "subject": "a synthetic authority publication",
+      "outcomes": [
+        "attributed"
+      ],
+      "quantitative": null,
+      "release_expected": [
+        true
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    },
+    {
+      "id": "local-only",
+      "source_mode": "local",
+      "subject": "a retained local record",
+      "outcomes": [
+        "supported"
+      ],
+      "quantitative": null,
+      "release_expected": [
+        true
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    },
+    {
+      "id": "host-capture",
+      "source_mode": "host",
+      "subject": "an explicitly captured source",
+      "outcomes": [
+        "supported"
+      ],
+      "quantitative": null,
+      "release_expected": [
+        true
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    },
+    {
+      "id": "unsupported-domain",
+      "source_mode": "unavailable",
+      "subject": "an unfamiliar jurisdiction whose scope and authority have not been supplied",
+      "outcomes": [
+        "insufficient_evidence"
+      ],
+      "quantitative": null,
+      "release_expected": [
+        false
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    },
+    {
+      "id": "mixed-scope",
+      "source_mode": "local",
+      "subject": "observations limited to the northern area",
+      "outcomes": [
+        "supported",
+        "insufficient_evidence"
+      ],
+      "quantitative": null,
+      "release_expected": [
+        true,
+        false
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    },
+    {
+      "id": "quantitative",
+      "source_mode": "local",
+      "subject": "retained decimal observations",
+      "outcomes": [
+        "supported",
+        "inference"
+      ],
+      "quantitative": "passed",
+      "release_expected": [
+        true,
+        true
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    },
+    {
+      "id": "missing-data",
+      "source_mode": "unavailable",
+      "subject": "a required measurement record that has not been delivered",
+      "outcomes": [
+        "insufficient_evidence"
+      ],
+      "quantitative": "missing",
+      "release_expected": [
+        false
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    },
+    {
+      "id": "invariant-error",
+      "source_mode": "local",
+      "subject": "measurements that violate a declared bound",
+      "outcomes": [
+        "insufficient_evidence"
+      ],
+      "quantitative": "error",
+      "release_expected": [
+        false
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    },
+    {
+      "id": "warning-and-due",
+      "source_mode": "local",
+      "subject": "measurements with a warning and a due local action",
+      "outcomes": [
+        "supported"
+      ],
+      "quantitative": "warning",
+      "release_expected": [
+        false
+      ],
+      "release_reason": "An unresolved invariant warning requires publication review; a due local flag does not resolve it."
+    },
+    {
+      "id": "authored-revision",
+      "source_mode": "local",
+      "subject": "a reusable evidence requirement that is revised after answering",
+      "outcomes": [
+        "supported"
+      ],
+      "quantitative": null,
+      "release_expected": [
+        true
+      ],
+      "release_reason": "Release only source-supported and independently reviewed outcomes; retain all other originals as gaps."
+    }
+  ]
+}

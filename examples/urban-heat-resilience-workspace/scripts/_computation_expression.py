@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Bounded interpretation of inert expressions with isolated decimal arithmetic."""
 
 from __future__ import annotations

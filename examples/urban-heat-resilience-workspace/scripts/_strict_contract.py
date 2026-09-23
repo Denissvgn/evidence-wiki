@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Closed data contracts for evidence policy, claims and independent review."""
 
 from __future__ import annotations

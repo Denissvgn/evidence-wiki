@@ -21,9 +21,13 @@ COMBINED_MODULES = (
 
 
 def source_identity(root: Path) -> dict:
-    files = sorted(path for name in ("src/evidence_wiki", "workspace-template/scripts", "tests", "tools")
-                   for path in (root / name).rglob("*.py"))
-    return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+    roots = ("src/evidence_wiki", "workspace-template", "domain-packs", "tests", "tools", ".github")
+    ignored = {"__pycache__", ".pytest_cache", ".ruff_cache"}
+    files = {path for name in roots for path in (root / name).rglob("*")
+             if path.is_file() and not ignored.intersection(path.relative_to(root).parts)
+             and path.suffix not in {".pyc", ".pyo"}}
+    files.update(root / name for name in ("pyproject.toml", "README.md", "CHANGELOG.md") if (root / name).is_file())
+    return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(files)}
 
 
 def groups(nodes: list[str], limit: int) -> list[list[str]]:

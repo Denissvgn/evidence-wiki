@@ -1381,7 +1381,7 @@ def verify_pending_trusted_static_inputs(
         raise OrchestrationControllerError(
             "ORCHESTRATION_LEGACY_ACTION_UNBOUND",
             "legacy pending action has no original trusted-input binding",
-            recoverable=True,
+            recoverable=False,
             remediation=(
                 "Preserve this action and its evidence. Explicitly retire the session, then start new work "
                 "under current reviewed requirements; replay cannot reconstruct the original criteria."
@@ -6310,6 +6310,7 @@ def finish_session(
 
 
 def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    load_sibling_module("_usage_gate").require_host_intake(load_config(project_root))
     load_sibling_module("_evidence_revision").capture_workspace(project_root)
     with workspace_lock(project_root / ".locks/domain-pack-refresh.lock", purpose="session requirement binding"):
         return start_bound_session(project_root, args)

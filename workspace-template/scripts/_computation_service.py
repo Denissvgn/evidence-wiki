@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Shared public operations and acceptance adapters for computed evidence."""
 
 from __future__ import annotations

@@ -51,16 +51,21 @@ def run_operation(root, operation, *, claim_id=None, envelope=None):
         raise refusal("strict_input_invalid_or_unreadable") from None
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise refusal("strict_arguments_invalid")
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _Parser(description=__doc__)
     parser.add_argument("operation", choices=("schemas", "check", "prepare-review", "review", "export"))
     parser.add_argument("--target", "--project-root", dest="target", default=".")
     parser.add_argument("--claim-id")
     parser.add_argument("--schema-id")
     parser.add_argument("--from-file")
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
-    args = parser.parse_args(argv)
     try:
+        args = parser.parse_args(argv)
         if args.operation == "schemas":
             schemas = schema_documents()
             if args.schema_id is not None and args.schema_id not in schemas:

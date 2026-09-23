@@ -79,3 +79,10 @@ coverage migration alone cannot establish a successful research outcome. Future
 projects can explicitly select the registered revision without changing any other
 workspace or publishing a pack. All local records are artifact observations, not
 protection against a caller who can edit the workspace or a guarantee of truth.
+
+## Refusals and recovery
+
+| Error code | Meaning | Action |
+| --- | --- | --- |
+| `COVERAGE_REVISION_REQUIRED` | The question still depends on superseded pack criteria. | Inspect `pack revision-status` and explicitly migrate affected coverage before a new answer and review cycle. |
+| `DOMAIN_PACK_REVISION_CONFLICT` | Pending work, changed inputs or an unresolved local conflict prevents revision. | Preserve the original work and criteria, finish or explicitly abandon it through its owner, and replan against current inputs. |

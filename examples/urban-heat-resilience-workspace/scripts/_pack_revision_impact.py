@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Bounded structural differences and conservative research dependency mapping."""
 
 from __future__ import annotations

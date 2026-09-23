@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Explicit coverage migration with immutable evidence history and current checks."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Explicit, recoverable derived writes and local dispatch over existing owners."""
 
 from __future__ import annotations

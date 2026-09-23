@@ -155,4 +155,16 @@ jobs:
       - name: Validate the built wheel and sdist through the shared installed-artifact gate
         shell: bash
         run: |
-          .venv/bin/python tools/validate_installed_artifacts.py --dist-dir dist
+          .venv/bin/python tools/validate_installed_artifacts.py --dist-dir dist --evidence-dir reports/installed-artifacts
+
+      - name: Retain installed qualification diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            reports/installed-artifacts/summary.json
+            reports/installed-artifacts/*/journeys/*.json
+            reports/installed-artifacts/*/qualification-inputs/inputs.json
+          if-no-files-found: warn
+          retention-days: 90

@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ._pack_io import canonical, read_file, relative_path
@@ -172,6 +173,7 @@ def deliver_local(*, target, input, path, source_id, question_ids):
     if len(raw) != input["bytes"] or hashlib.sha256(raw).hexdigest() != input["sha256"]:
         refuse("local_delivery_input_changed", "ONBOARDING_PLAN_STALE")
     sidecar = {"checksum": "sha256:" + input["sha256"], "retrieved_by": "local_setup",
+               "retrieved_at": datetime.now(timezone.utc).isoformat(),
                "title": Path(input["path"]).name, "source_type": "local_file",
                "setup_input": {"source_id": source_id, "question_ids": question_ids,
                                "input_identity": digest(input), "origin": str(root / input["path"])},

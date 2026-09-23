@@ -68,6 +68,10 @@ def enrolled_scripts() -> set[str]:
 # scripts whose sub-parsers do not accept it, so that is explicit too.
 ROOT = ("--project-root", "{ws}")
 WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
+    "strict_evidence.py": (
+        Case((*ROOT, "check", "--format", "json"), DOCUMENT, "Strict-policy absence is a JSON stdout refusal."),
+        Case(("schemas", "--format", "json"), DOCUMENT),
+    ),
     "coverage_manifest.py": (Case((*ROOT, "validate", "--slug", "{slug}", "--format", "json"), DOCUMENT),),
     "discover_sources.py": (
         Case((*ROOT, "--format", "json", "candidates", "list"), DOCUMENT),
@@ -162,6 +166,7 @@ WORKSPACE_CASES: dict[str, tuple[Case, ...]] = {
 # shared envelope; the reporters below describe the broken workspace instead, which is
 # their job and still exactly one document.
 REPORTS_ON_A_BROKEN_WORKSPACE = {
+    "strict_evidence.py",
     "doctor.py",
     "lint.py",
     "publication_readiness.py",

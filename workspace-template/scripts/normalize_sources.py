@@ -2776,9 +2776,9 @@ def html_unusable_evidence_reasons(title: str, body_text: str, raw_html: str) ->
 
     if re.search(r"\b404\b|page not found|not found", haystack):
         reasons.append("html_error_page:not_found")
-    elif len(visible) < 1000 and re.search(
-        r"service unavailable|temporarily unavailable|maintenance|error page|official .* unavailable",
-        haystack,
+    elif len(visible) < 1000 and (
+        re.search(r"service unavailable|temporarily unavailable|down for maintenance|maintenance (?:mode|in progress)|error page|official .* unavailable", haystack)
+        or re.fullmatch(r"(?:(?:scheduled|site|website|server) )?maintenance(?: page)?[.!]?", title.strip().lower())
     ):
         reasons.append("html_error_page:official_error_page")
 

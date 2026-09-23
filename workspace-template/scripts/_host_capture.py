@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Bounded, inert host text captures with declared origin and coverage limits."""
 
 from __future__ import annotations

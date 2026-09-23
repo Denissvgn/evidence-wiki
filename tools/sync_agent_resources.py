@@ -39,7 +39,7 @@ def exports() -> dict[str, bytes]:
     output = {paths[key]: encoded(value) for key, value in schemas.items()}
     guide_bytes = (ROOT / paths["guide/bootstrap/v1"]).read_bytes()
     bundle = portable_bundle({"content": guide_bytes.decode(), "sha256": hashlib.sha256(guide_bytes).hexdigest()},
-                             (ROOT / "workspace-template/docs/frameworks/pi.js").read_text(), (ROOT / "LICENSE").read_text())
+                             (ROOT / "workspace-template/docs/frameworks/pi.js").read_text(encoding="utf-8"), (ROOT / "LICENSE").read_text(encoding="utf-8"))
     validate_bundle(bundle)
     output[paths["framework/bundle/v1"]] = encoded(bundle)
     policy = {
@@ -81,7 +81,7 @@ def exports() -> dict[str, bytes]:
         files = {p.relative_to(directory).as_posix(): p.read_text(encoding="utf-8")
                  for p in sorted(directory.rglob("*")) if p.is_file()}
         output[paths[f"example/{name}/v1"]] = encoded({"files": files})
-    metadata = yaml.safe_load((ROOT / "workspace-template/workspace-system.yml").read_text())["workspace_system"]
+    metadata = yaml.safe_load((ROOT / "workspace-template/workspace-system.yml").read_text(encoding="utf-8"))["workspace_system"]
     entries = {}
     for key, relative in paths.items():
         data = output.get(relative)

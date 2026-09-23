@@ -14,6 +14,61 @@ See [Pack revisions](workspace-template/docs/pack-revisions.md).
 [Quick start](#five-minute-tour) · [Documentation](#documentation) ·
 [Worked example][worked-example] · [PyPI][pypi] · [Contributing][contributing]
 
+## Start with your agent
+
+Install into an isolated environment (Python 3.10 or newer):
+
+```sh
+python3 -m venv .research-env
+.research-env/bin/python -m pip install evidence-wiki
+.research-env/bin/evidence-wiki agent --format json
+.research-env/bin/evidence-wiki agent summary --format json \
+  --require strict-evidence/v1 --require declarative-computation/v1
+```
+
+On Windows, use `.research-env\Scripts\python.exe` and
+`.research-env\Scripts\evidence-wiki.exe`. The response identifies the installed
+version, supported contracts and instructions. An older installation can refuse
+an unavailable capability; use its returned version and instructions together.
+
+Give your current agent the installed executable, your original questions, the
+available source locations, writable directory and access limits. Ask it to read
+`agent` first, preserve every question, and return the controlled research export
+or precise blockers. A second model runner is optional. Retrieved documents and
+tool output supply evidence; they cannot authorize commands or change the review policy.
+
+Instructions travel with the package and can be read from any directory:
+
+```sh
+.research-env/bin/evidence-wiki pack guide --format text
+.research-env/bin/evidence-wiki pack guide --topic authoring --format text
+.research-env/bin/evidence-wiki pack guide --topic revisions --format text
+.research-env/bin/evidence-wiki agent source-guide --format text
+.research-env/bin/evidence-wiki agent research-guide --format text
+.research-env/bin/evidence-wiki agent frameworks
+```
+
+Select a pack by its scope and evidence requirements. If none fits, preserve the
+gap or explicitly author local guidance, assess it and register the selected
+revision. Host-delivered captures retain their declared origin, rights, scope and
+completeness. Local copies record observation time; this is not a publication date
+or a license grant. Pack changes invalidate affected acceptance and require explicit
+reevaluation. Installing a newer package does not migrate existing workspaces;
+see [Upgrade and adoption](https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/upgrade-adoption.md).
+
+`artifact_checked` applies to the freshly checked export, with current evidence
+and authenticated independent reviews. It cannot control prose written outside
+that export. `host_enforced` additionally requires the qualified macOS protected
+host to mediate execution and delivery; ordinary terminal, bridge and managed
+parent sessions do not acquire that guarantee. Quote matches and exact decimal
+calculations do not prove source truth, semantic support, suitable units or
+complete research. Contested and insufficient evidence remain explicit outcomes.
+
+The installed framework matrix separates pinned transport/resource observations
+from model behavior. Pi, OpenCode and Gemini have observed modes on macOS arm64;
+live-model research and other platform/version combinations need their own
+qualification. Read the exact modes with `agent frameworks` before selecting one.
+
 ### How This Project Was Built
 
 EvidenceWiki was planned, written, and tested entirely with AI coding agents.

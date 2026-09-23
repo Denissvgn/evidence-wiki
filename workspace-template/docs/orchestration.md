@@ -955,3 +955,7 @@ evidence-wiki upgrade --target . --include skills --include docs
 
 Optional-file conflicts stop before replacement. Use `--force-optional` only
 after reviewing the local edits and the backup behavior under `.replaced/`.
+
+| Error code | Meaning | Action |
+| --- | --- | --- |
+| `ORCHESTRATION_ABANDON_BLOCKED` | Pending submissions or a live child prevent safe parent abandonment. | Recover the submission and explicitly finish or abandon the child through its owner before abandoning the parent. Preserve the existing artifacts. |

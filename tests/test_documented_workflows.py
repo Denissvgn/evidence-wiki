@@ -14,6 +14,8 @@ from urllib.parse import unquote, urlsplit
 
 import yaml
 
+from evidence_wiki._agent_catalog import resource_paths
+from evidence_wiki.agent_resources import resource_document
 from tests._script_loader import load_script as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -108,12 +110,16 @@ def test_documentation_local_links_resolve_to_shipped_files():
     assert "README.md" in documents and "docs/library-api.md" in documents
     missing = []
     checked = 0
+    resources = resource_paths()
     for name in documents:
         for destination in _markdown_link_destinations((REPO_ROOT / name).read_text(encoding="utf-8")):
             parsed = urlsplit(destination)
             if not parsed.path:
                 continue
-            if parsed.scheme or parsed.netloc:
+            if name == "workspace-template/docs/installed-agent.md" and destination in resources:
+                target = resources[destination]
+                assert resource_document(destination)["content"]
+            elif parsed.scheme or parsed.netloc:
                 prefix = "/Denissvgn/evidence-wiki/"
                 if parsed.netloc.lower() != "github.com" or not parsed.path.startswith(prefix):
                     continue
@@ -1589,7 +1595,12 @@ class DocumentedWorkflowTests(unittest.TestCase):
 
         for expected in (
             "orchestrator brief",
-            "domain-packs/llm-research/",
+            "example/pack/v1",
+            "caller-owned writable asset directory",
+            "pack scaffold",
+            "pack freeze-cases",
+            "pack assess",
+            "pack resume",
             "guidance-only",
             "Do not add scripts",
             "domain_pack.human_gated: true",
@@ -1681,11 +1692,14 @@ class DocumentedWorkflowTests(unittest.TestCase):
 
         for text in (run_skill, handoff):
             self.assertIn("run_controller.py start", text)
-            self.assertIn("run_report.py baseline --output /tmp/run-baseline.json", text)
             self.assertIn("question_claim.py claim --slug", text)
             self.assertIn("question_resolve.py answer --slug", text)
             self.assertIn("run_report.py --baseline /tmp/run-baseline.json", text)
             self.assertIn("publication_readiness.py --format json", text)
+        self.assertIn("run_report.py baseline --output /tmp/run-baseline.json", handoff)
+        self.assertIn("controller captured the run baseline", run_skill)
+        self.assertIn("evidence-wiki agent start", run_skill)
+        self.assertIn("run_report.py --run-id", run_skill)
         self.assertIn("question_claim.py release --slug", run_skill)
         self.assertIn("workspace_status.py --check-complete --format json", run_skill)
         self.assertIn("--questions-processed-this-run", run_skill)

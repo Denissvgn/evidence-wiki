@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Closed declarations and lossless wire data for deterministic computation."""
 
 from __future__ import annotations

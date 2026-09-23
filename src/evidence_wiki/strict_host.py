@@ -120,7 +120,7 @@ class StrictResearchHost:
         )
         with tempfile.TemporaryDirectory(prefix="evidence-strict-probe-") as directory:
             self._execute(Path(directory), [sys.executable, "-B", "-c", program, protected_file, workspace_file], "", 10)
-            if (Path(directory) / "probe-ok").read_text() != "ok":
+            if (Path(directory) / "probe-ok").read_text(encoding="utf-8") != "ok":
                 _refuse("strict_host_probe_failed")
 
     def action(self, operation, *, question_slugs=None, work_order=None):

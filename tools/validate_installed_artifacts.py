@@ -42,10 +42,10 @@ import tarfile
 import tempfile
 import textwrap
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SMOKE_TOOL = REPO_ROOT / "tools" / "smoke_installed_orchestration.py"
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
@@ -230,13 +230,17 @@ def check_archive_membership(wheel: Path, sdist: Path) -> dict[str, object]:
 
 
 def run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
+    environment = dict(os.environ if env is None else env)
+    for key in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "GIT_DIR", "GIT_WORK_TREE"):
+        environment.pop(key, None)
+    environment.update(PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
     process = subprocess.run(  # noqa: S603 - argv is fixed by this repository-owned validator.
         argv,
         check=False,
         capture_output=True,
         text=True,
         cwd=str(cwd) if cwd is not None else None,
-        env=env,
+        env=environment,
         encoding="utf-8",
         errors="replace",
     )
@@ -265,6 +269,29 @@ def create_venv_with_wheel(root: Path, wheel: Path) -> Path:
     python = venv_python(venv)
     run([str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", str(wheel)])
     return venv
+
+
+def isolated_fixtures(scratch: Path) -> Path:
+    """Copy explicitly named qualification inputs, without source-package imports."""
+    root = scratch / "qualification-inputs"
+    members = ["tools/smoke_installed_orchestration.py", "tools/qualify_journeys.py",
+               "tools/_journey_cases.py", "tools/_journey_driver.py", "tools/_journey_authoring.py",
+               "tests/fixtures/onboarding-journeys/cases.json", "tests/_computation_fixture.py", "tests/fixtures/fake_codex_cli.py",
+               "tests/fixtures/strict-evidence/review-cases.json",
+               "tests/fixtures/workspace-init-profile.yml", "tests/_publication_fixture.py",
+               *["tests/_" + name + "_fixture.py" for name in
+                 ("execution", "usage", "snapshot", "temporal", "market", "historical", "simulation", "assessment")]]
+    packet_root = REPO_ROOT / "tests/fixtures/codebase-intake/native-packets"
+    members.extend(path.relative_to(REPO_ROOT).as_posix() for path in packet_root.rglob("*") if path.is_file())
+    for name in members:
+        source, target = REPO_ROOT / name, root / name
+        if source.is_symlink() or not source.is_file() or any(parent.is_symlink() for parent in source.parents if parent.is_relative_to(REPO_ROOT)):
+            raise ValidationError("unsafe or missing qualification input: " + name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    hashes = {name: sha256_of(root / name) for name in sorted(members)}
+    (root / "inputs.json").write_text(json.dumps(hashes, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    return root
 
 
 INSTALLED_PROBE = textwrap.dedent(
@@ -1465,6 +1492,8 @@ RESEARCH_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.y
 
 
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
+    if scratch.resolve().is_relative_to(REPO_ROOT.resolve()) or venv.resolve().is_relative_to(REPO_ROOT.resolve()):
+        raise ValidationError("installed execution must use an unrelated directory outside the checkout")
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
     cli = venv_cli(venv)
@@ -1472,6 +1501,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         raise ValidationError(f"{label}: the installed distribution did not provide the evidence-wiki entry point")
     outside = scratch / "outside-checkout"
     outside.mkdir()
+    fixture_root = isolated_fixtures(scratch)
     workspace = scratch / "provider-workspace"
     # Every command runs from a directory that is not the checkout, so a module
     # resolved from the source tree instead of the install would be a failure here.
@@ -1525,48 +1555,48 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         cwd=outside,
     )
     probe_result = json.loads(probe.strip().splitlines()[-1])
-    run([str(python), str(SMOKE_TOOL), "--cli", str(cli)], cwd=outside)
+    run([str(python), str(fixture_root / "tools/smoke_installed_orchestration.py"), "--cli", str(cli)], cwd=outside)
     publication = run([
         str(python), "-c", PUBLICATION_PROBE, str(cli),
-        str(REPO_ROOT / "tests/_publication_fixture.py"),
-        str(REPO_ROOT / "tests/fixtures/workspace-init-profile.yml"),
+        str(fixture_root / "tests/_publication_fixture.py"),
+        str(fixture_root / "tests/fixtures/workspace-init-profile.yml"),
         str(scratch / "publication-workspace"),
     ], cwd=outside)
     packets = run([
         str(python), "-c", PACKET_PROBE, str(cli),
-        str(REPO_ROOT / "tests/fixtures/codebase-intake/native-packets"),
+        str(fixture_root / "tests/fixtures/codebase-intake/native-packets"),
         str(scratch / "packet-workspace"),
     ], cwd=outside)
     execution = run([
-        str(python), "-c", EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_execution_fixture.py"),
+        str(python), "-c", EXECUTION_PROBE, str(cli), str(fixture_root / "tests/_execution_fixture.py"),
         str(scratch / "execution-workspace"),
     ], cwd=outside)
     usage = run([
-        str(python), "-c", USAGE_PROBE, str(cli), str(REPO_ROOT / "tests/_usage_fixture.py"),
+        str(python), "-c", USAGE_PROBE, str(cli), str(fixture_root / "tests/_usage_fixture.py"),
         str(scratch / "usage-evidence"),
     ], cwd=outside)
     snapshots = run([
-        str(python), "-c", SNAPSHOT_PROBE, str(cli), str(REPO_ROOT / "tests/_snapshot_fixture.py"),
+        str(python), "-c", SNAPSHOT_PROBE, str(cli), str(fixture_root / "tests/_snapshot_fixture.py"),
         str(scratch / "snapshot-evidence"),
     ], cwd=outside)
     temporal = run([
-        str(python), "-c", TEMPORAL_PROBE, str(cli), str(REPO_ROOT / "tests/_temporal_fixture.py"),
+        str(python), "-c", TEMPORAL_PROBE, str(cli), str(fixture_root / "tests/_temporal_fixture.py"),
         str(scratch / "temporal-evidence"),
     ], cwd=outside)
     market = run([
-        str(python), "-c", MARKET_PROBE, str(cli), str(REPO_ROOT / "tests/_market_fixture.py"),
+        str(python), "-c", MARKET_PROBE, str(cli), str(fixture_root / "tests/_market_fixture.py"),
         str(scratch / "market-evidence"),
     ], cwd=outside)
     historical = run([
-        str(python), "-c", HISTORICAL_EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_historical_fixture.py"),
+        str(python), "-c", HISTORICAL_EXECUTION_PROBE, str(cli), str(fixture_root / "tests/_historical_fixture.py"),
         str(scratch / "historical-execution"),
     ], cwd=outside)
     simulation = run([
-        str(python), "-c", SIMULATION_PROBE, str(cli), str(REPO_ROOT / "tests/_simulation_fixture.py"),
+        str(python), "-c", SIMULATION_PROBE, str(cli), str(fixture_root / "tests/_simulation_fixture.py"),
         str(scratch / "market-simulation"),
     ], cwd=outside)
     assessments = run([
-        str(python), "-c", ASSESSMENT_PROBE, str(cli), str(REPO_ROOT / "tests/_assessment_fixture.py"),
+        str(python), "-c", ASSESSMENT_PROBE, str(cli), str(fixture_root / "tests/_assessment_fixture.py"),
         str(scratch / "assessment-evidence"),
     ], cwd=outside)
     computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
@@ -1577,11 +1607,16 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     setup = run([str(python), "-c", SETUP_PROBE, str(cli), str(scratch / "workspace-application")], cwd=outside)
     authoring = run([str(python), "-c", PACK_AUTHORING_PROBE, str(cli), str(scratch / "pack-authoring"),
         str(scratch / "research-planning/request.json")], cwd=outside)
-    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
+    run([str(python), "-B", str(fixture_root / "tools/qualify_journeys.py"), "--output", str(scratch / "journeys")], cwd=outside)
+    journeys = json.loads((scratch / "journeys/observations.json").read_text(encoding="utf-8"))
+    if journeys["status"] != "passed" or not Path(journeys["package_location"]).is_relative_to(venv.resolve()):
+        raise ValidationError("installed journeys failed or imported a package outside the isolated environment")
+    return {"label": label, "fixture_inputs_sha256": sha256_of(fixture_root / "inputs.json"), "checkout_imports": "disabled", **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
-            **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research), **json.loads(revisions)}
+            **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research), **json.loads(revisions),
+            "journeys": journeys}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:
@@ -1611,46 +1646,83 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--expected-version", default=None, help="Version the installed package must report.")
     parser.add_argument("--skip-sdist", action="store_true", help="Validate only the wheel (not for release use).")
     parser.add_argument("--membership-only", action="store_true", help="Check archive contents without installing.")
+    parser.add_argument("--evidence-dir", type=Path, help="New private directory retaining full installed inputs, journeys and failed diagnostics.")
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def validate_distributions(args, summary, scratch):
     wheel, sdist = find_artifacts(args.dist_dir.resolve())
     checks: dict[str, object] = {}
-    summary: dict[str, object] = {
+    summary.update({
         "wheel": {"name": wheel.name, "sha256": sha256_of(wheel)},
         "sdist": {"name": sdist.name, "sha256": sha256_of(sdist)},
         "expected_version": args.expected_version,
         "checks": checks,
-    }
+    })
     checks["membership"] = check_archive_membership(wheel, sdist)
     if not args.membership_only:
-        with tempfile.TemporaryDirectory(prefix="evidence-wiki-artifacts-") as tmpdir:
-            scratch = Path(tmpdir)
-            wheel_scratch = scratch / "wheel"
-            wheel_scratch.mkdir()
-            checks["installed_wheel"] = validate_installed(
-                create_venv_with_wheel(wheel_scratch, wheel), wheel_scratch, args.expected_version, "wheel"
-            )
-            if not args.skip_sdist:
-                sdist_scratch = scratch / "sdist"
-                sdist_scratch.mkdir()
-                rebuilt = build_wheel_from_sdist(sdist, sdist_scratch)
-                direct_members = [name for name in wheel_members(wheel) if not name.endswith("RECORD")]
-                rebuilt_members = [name for name in wheel_members(rebuilt) if not name.endswith("RECORD")]
-                if direct_members != rebuilt_members:
-                    only_direct = sorted(set(direct_members) - set(rebuilt_members))
-                    only_rebuilt = sorted(set(rebuilt_members) - set(direct_members))
-                    raise ValidationError(
-                        "the wheel built from the sdist does not match the direct wheel; "
-                        f"only in direct: {only_direct[:10]}; only in sdist-built: {only_rebuilt[:10]}"
-                    )
-                checks["installed_sdist"] = validate_installed(
-                    create_venv_with_wheel(sdist_scratch, rebuilt), sdist_scratch, args.expected_version, "sdist"
+        wheel_scratch = scratch / "wheel"
+        wheel_scratch.mkdir()
+        checks["installed_wheel"] = validate_installed(
+            create_venv_with_wheel(wheel_scratch, wheel), wheel_scratch, args.expected_version, "wheel"
+        )
+        if not args.skip_sdist:
+            sdist_scratch = scratch / "sdist"
+            sdist_scratch.mkdir()
+            rebuilt = build_wheel_from_sdist(sdist, sdist_scratch)
+            direct_members = [name for name in wheel_members(wheel) if not name.endswith("RECORD")]
+            rebuilt_members = [name for name in wheel_members(rebuilt) if not name.endswith("RECORD")]
+            if direct_members != rebuilt_members:
+                only_direct = sorted(set(direct_members) - set(rebuilt_members))
+                only_rebuilt = sorted(set(rebuilt_members) - set(direct_members))
+                raise ValidationError(
+                    "the wheel built from the sdist does not match the direct wheel; "
+                    f"only in direct: {only_direct[:10]}; only in sdist-built: {only_rebuilt[:10]}"
                 )
-                checks["installed_sdist"]["rebuilt_wheel_sha256"] = sha256_of(rebuilt)
-            shutil.rmtree(scratch, ignore_errors=True)
+            checks["installed_sdist"] = validate_installed(
+                create_venv_with_wheel(sdist_scratch, rebuilt), sdist_scratch, args.expected_version, "sdist"
+            )
+            checks["installed_sdist"]["rebuilt_wheel_sha256"] = sha256_of(rebuilt)
+    summary["status"] = "partial" if args.skip_sdist or args.membership_only else "passed"
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    summary = {"status": "incomplete"}
+    evidence = args.evidence_dir.resolve() if args.evidence_dir else None
+    if evidence is not None:
+        evidence.mkdir(parents=True, exist_ok=False)
+    scratch = None
+    try:
+        manager = (nullcontext(tempfile.mkdtemp(prefix="evidence-wiki-artifacts-")) if evidence
+                   else tempfile.TemporaryDirectory(prefix="evidence-wiki-artifacts-"))
+        with manager as tmpdir:
+            scratch = Path(tmpdir).resolve()
+            if scratch.is_relative_to(REPO_ROOT.resolve()):
+                raise ValidationError("temporary execution root overlaps the checkout")
+            summary["execution_root"] = str(scratch)
+            if evidence is not None:
+                (evidence / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8", newline="\n")
+            validate_distributions(args, summary, scratch)
+    except BaseException as error:
+        summary.update(status="failed", error_type=type(error).__name__, error=str(error)[:8192])
+        raise
+    finally:
+        if evidence is not None:
+            try:
+                if scratch is not None and scratch.is_dir() and not scratch.is_relative_to(REPO_ROOT.resolve()):
+                    for child in scratch.iterdir():
+                        if child.is_dir() and not child.is_symlink():
+                            shutil.copytree(child, evidence / child.name, symlinks=True,
+                                            ignore=shutil.ignore_patterns("venv", "__pycache__"))
+                        elif child.is_file() and not child.is_symlink():
+                            shutil.copyfile(child, evidence / child.name)
+                    summary["evidence_retention"] = "copied_inputs_and_results; external_execution_root_retained"
+            except OSError as error:
+                summary.update(status="failed", evidence_retention="failed", retention_error=type(error).__name__)
+                raise
+            finally:
+                (evidence / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

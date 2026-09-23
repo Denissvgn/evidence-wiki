@@ -128,7 +128,7 @@ def _computation_case(case, config):
         owner("_evidence_authority").timestamp(data["as_of"])
     with tempfile.TemporaryDirectory(prefix="evidence-pack-arithmetic-") as temporary:
         root = Path(temporary)
-        (root / "research.yml").write_text(yaml.safe_dump(config, allow_unicode=True))
+        (root / "research.yml").write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8", newline="\n")
         raw = root / "raw/data/case.json"
         raw.parent.mkdir(parents=True)
         raw.write_bytes(canonical(data["records"]))
@@ -150,7 +150,7 @@ def _computation_case(case, config):
         frontmatter = normalizer.frontmatter_for(rendered, "sources/manifest.jsonl", output, "2000-01-01",
             normalized_at="2000-01-01T00:00:00Z", structured_view={"path": "sources/normalized/" + sidecar.name,
                 "content_hash": "sha256:" + hashlib.sha256(structured).hexdigest()})
-        output.write_text(normalizer.render_markdown(rendered, frontmatter))
+        output.write_text(normalizer.render_markdown(rendered, frontmatter), encoding="utf-8", newline="\n")
         try:
             result = owner("_computation_runtime").evaluate(root, as_of=data["as_of"])
         except (Exception, SystemExit) as error:

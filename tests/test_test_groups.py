@@ -18,6 +18,20 @@ def test_groups_preserve_order_and_keep_large_modules_intact():
     assert [node for group in result for node in group] == nodes
 
 
+def test_source_identity_includes_frozen_data_and_ignores_interpreter_caches(tmp_path):
+    fixture = tmp_path / "tests/fixtures/cases.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text('{"expected": false}')
+    before = GROUPS.source_identity(tmp_path)
+    fixture.write_text('{"expected": true}')
+    after = GROUPS.source_identity(tmp_path)
+    assert before != after and "tests/fixtures/cases.json" in after
+    cache = tmp_path / "tests/__pycache__/generated.pyc"
+    cache.parent.mkdir()
+    cache.write_bytes(b"cache")
+    assert GROUPS.source_identity(tmp_path) == after
+
+
 def test_failed_test_remains_failed_with_coverage_and_diagnostics(tmp_path, monkeypatch):
     root, output = tmp_path / "repo", tmp_path / "evidence"
     (root / "tools").mkdir(parents=True)

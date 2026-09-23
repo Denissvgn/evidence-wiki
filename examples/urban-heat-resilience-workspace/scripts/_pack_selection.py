@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Optional, inert selection metadata shared by pack validation and consumers."""
 
 from __future__ import annotations

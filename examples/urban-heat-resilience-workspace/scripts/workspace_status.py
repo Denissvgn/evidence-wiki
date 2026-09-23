@@ -501,7 +501,8 @@ def source_curation_counts(project_root: Path, config: dict[str, Any], records: 
         if not isinstance(provenance, dict):
             continue
         kind = record.get("kind")
-        if kind not in WEB_CURATION_KINDS or not has_text_field(provenance, "retrieved_by"):
+        local_copy = provenance.get("retrieved_by") == "local_setup" and provenance.get("source_type") == "local_file"
+        if kind not in WEB_CURATION_KINDS or not has_text_field(provenance, "retrieved_by") or local_copy:
             continue
         counts["automated_web_records"] += 1
         source_id = record.get("id")

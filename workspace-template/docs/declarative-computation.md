@@ -32,6 +32,11 @@ content-free reason; a busy lock uses `COMPUTATION_BUSY`, exit 6. CLI operations
 emit one JSON stdout document. An evaluated error invariant exits 3; malformed
 or unavailable required inputs exit 2.
 
+| Error code | Exit | Recoverable | Action |
+| --- | --- | --- | --- |
+| `COMPUTATION_REFUSED` | 2 | No | Inspect the bounded reason and correct the declaration, selected inputs, CLI arguments or clock before reevaluating. |
+| `COMPUTATION_BUSY` | 6 | Yes | Wait for the current writer, inspect the retained request and result identities, and retry without removing locks or journals. |
+
 ## Declaration and numeric contract
 
 A complete declaration has these required sections, even when a collection is
@@ -179,6 +184,9 @@ warning intake uses the canonical question owner and puts finding details in
 labeled untrusted-evidence blocks. Repeated findings reuse their question.
 Findings that disappear are reported as resolved by the current evaluation;
 existing questions retain their separate lifecycle and are not silently closed.
+Publication retains its normal review requirements: an unresolved warning can
+require attention even when arithmetic evaluation succeeds. A dispatched local
+status flag does not resolve the finding or approve an answer.
 
 ## Explicit-clock schedules
 

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Frozen caller-run controls over existing run, claim and publication owners."""
 
 from __future__ import annotations

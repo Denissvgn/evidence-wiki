@@ -30,14 +30,14 @@ def require(value, reason):
 def pi_cases(root: Path, tools: Path, bundle: Path, cases: Path, python: Path):
     provider = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FixtureProvider)
     provider.command, provider.paths, provider.native_results = "true", [], []
-    provider.native_call = json.loads(cases.read_text())[-1]["call"]
-    workspace = Path(json.loads(cases.read_text())[-1]["target"])
+    provider.native_call = json.loads(cases.read_text(encoding="utf-8"))[-1]["call"]
+    workspace = Path(json.loads(cases.read_text(encoding="utf-8"))[-1]["target"])
     agent = root / "pi-state"
     agent.mkdir()
-    (agent / "settings.json").write_text(json.dumps({"compaction": {"enabled": False, "keepRecentTokens": 1, "reserveTokens": 2048}}))
+    (agent / "settings.json").write_text(json.dumps({"compaction": {"enabled": False, "keepRecentTokens": 1, "reserveTokens": 2048}}), encoding="utf-8", newline="\n")
     (agent / "models.json").write_text(json.dumps({"providers": {"fixture": {
         "baseUrl": f"http://127.0.0.1:{provider.server_port}/v1", "api": "openai-completions", "apiKey": "fixture-key",
-        "models": [{"id": "fixture", "contextWindow": 128000, "maxTokens": 4096}]}}}))
+        "models": [{"id": "fixture", "contextWindow": 128000, "maxTokens": 4096}]}}}), encoding="utf-8", newline="\n")
     thread = threading.Thread(target=provider.serve_forever, daemon=True)
     thread.start()
     env = environment(root)
@@ -89,7 +89,7 @@ export default function(pi) {
  pi.registerTool({name:"evidence_wiki",label:"collision",description:"Collision probe",parameters:{type:"object",properties:{}},async execute(){return {content:[]};}});
  native(pi);
 }
-''')
+''', encoding="utf-8", newline="\n")
         try:
             with PiRpcBridge(executable, cwd=workspace, state_dir=agent, authority="local fixture qualification",
                              provider="fixture", model="fixture", environment=env, extension=collision):
@@ -117,7 +117,7 @@ def discovery(root: Path, tools: Path, bundle: Path):
         if name == "pi":
             collision = state / "collision"
             collision.mkdir()
-            (collision / "SKILL.md").write_text("---\nname: evidence-wiki\ndescription: Collision probe\n---\nUnexpected guidance.\n")
+            (collision / "SKILL.md").write_text("---\nname: evidence-wiki\ndescription: Collision probe\n---\nUnexpected guidance.\n", encoding="utf-8", newline="\n")
             script = """import {loadSkills} from REPLACE;
 const result=loadSkills({cwd:process.argv[1],agentDir:process.argv[2],skillPaths:[process.argv[3],process.argv[4]],includeDefaults:false});
 console.log(JSON.stringify(result));""".replace("REPLACE", json.dumps((tools / "@earendil-works/pi-coding-agent/dist/index.js").as_uri()))
@@ -136,8 +136,8 @@ console.log(JSON.stringify(result));""".replace("REPLACE", json.dumps((tools / "
         if name == "gemini" and "No skills discovered" in result.stdout:
             settings = state / "gemini/.gemini"
             settings.mkdir(parents=True, exist_ok=True)
-            (settings / "settings.json").write_text(json.dumps({"security": {"folderTrust": {"enabled": True}}}))
-            (settings / "trustedFolders.json").write_text(json.dumps({str(work): "TRUST_FOLDER"}))
+            (settings / "settings.json").write_text(json.dumps({"security": {"folderTrust": {"enabled": True}}}), encoding="utf-8", newline="\n")
+            (settings / "trustedFolders.json").write_text(json.dumps({str(work): "TRUST_FOLDER"}), encoding="utf-8", newline="\n")
             result = execute(argv, work, env, state / "trusted-process.json")
         require(result.returncode == 0 and "evidence-wiki" in result.stdout, name + " did not discover the portable skill")
         observed[name] = {"portable_discovery": "passed", "exit_code": result.returncode}
@@ -168,9 +168,9 @@ def main():
     cases, patch = prepare_cases(fixture, Path(sys.executable), reviewed=True)
     try:
         results = {"pi": pi_cases(output, args.tools_root.resolve() / "node_modules", bundle, cases, args.python.absolute())}
-        (output / "observations.json").write_text(json.dumps(results, indent=2) + "\n")
+        (output / "observations.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8", newline="\n")
         results["discovery"] = discovery(output, args.tools_root.resolve() / "node_modules", bundle)
-        (output / "observations.json").write_text(json.dumps(results, indent=2) + "\n")
+        (output / "observations.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8", newline="\n")
         print(json.dumps(results, indent=2))
     finally:
         patch.undo()

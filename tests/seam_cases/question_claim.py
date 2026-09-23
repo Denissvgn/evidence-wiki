@@ -16,6 +16,7 @@ seam that dropped or reformatted ``previous_holder`` still fails.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from tests._seam_question_fixture import add_questions, claim, twin_copies
@@ -33,6 +34,11 @@ def cases(workspace: Path) -> tuple[SeamCase, ...]:
     claim(workspace, "held", HOLDER)
     claim(workspace, "contended", HOLDER)
     claim(workspace, "stale", HOLDER)
+    stale = workspace / "wiki/questions/stale.md"
+    text, replacements = re.subn(r"(?m)^claimed_at:.*$", "claimed_at: '2001-01-01T00:00:00Z'", stale.read_text(encoding="utf-8"), count=1)
+    if replacements != 1:
+        raise AssertionError("stale claim fixture has no original timestamp")
+    stale.write_text(text, encoding="utf-8", newline="\n")
     shared = str(workspace)
     claim_cli, claim_seam = twin_copies(workspace, "claim")
     release_cli, release_seam = twin_copies(workspace, "release")
@@ -58,10 +64,10 @@ def cases(workspace: Path) -> tuple[SeamCase, ...]:
             name="steal_applies",
             argv=(
                 "--project-root", steal_cli, "claim", "--slug", "stale", "--agent-id", OTHER,
-                "--steal", "--if-older-than", "0", "--format", "json",
+                "--steal", "--if-older-than", "1", "--format", "json",
             ),
             call=lambda module: module.run_claim(
-                steal_seam, slug="stale", agent_id=OTHER, steal=True, if_older_than=0.0
+                steal_seam, slug="stale", agent_id=OTHER, steal=True, if_older_than=1.0
             ),
             expect=SUCCESS,
             volatile=("holder.claimed_at",),

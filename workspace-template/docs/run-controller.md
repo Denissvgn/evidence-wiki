@@ -8,6 +8,12 @@ without relying on chat history.
 This document defines the `run_state` artifact schema version 1.0 and the
 deterministic `scripts/run_controller.py` commands that update it.
 
+## Caller refusal
+
+| Error code | Exit | Recoverable | Action |
+| --- | --- | --- | --- |
+| `RUN_CALLER_CONTEXT_CONFLICT` | 3 | No | Preserve the run and inspect its original owner, instructions and controls. Continue only under that unchanged context, or start new work after an authorized change; never rewrite the old binding. |
+
 ## Artifact Locations
 
 - Active run state: `runs/<run_id>/run-state.json`

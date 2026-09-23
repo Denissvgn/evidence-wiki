@@ -1482,7 +1482,13 @@ def resolution_fields(
     if args.command == "answer":
         if load_sibling_module("_pack_revision_guard").pending_question(project_root, args.slug.strip()) is not None:
             args.require_coverage = True
-        load_sibling_module("_strict_evidence").enforce_resolution(project_root, config, args, frontmatter)
+        strict = load_sibling_module("_strict_evidence")
+        try:
+            strict.enforce_resolution(project_root, config, args, frontmatter)
+        except strict.ScriptRefusal as error:
+            raise ScriptRefusal(error.error_code, error.message, exit_code=error.exit_code,
+                                recoverable=error.recoverable, remediation=error.remediation,
+                                details=error.details) from error
         source_ids = validate_source_ids(project_root, config, unique_nonempty(args.source_id, "--source-id"))
         if not source_ids and not getattr(args, "allow_uncited", False):
             raise ResolveError(
