@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 - 2026-09-23
 
 - Record local-source observation time, distinguish local HTML from web
   acquisitions, preserve strict refusal envelopes in copied scripts and report
