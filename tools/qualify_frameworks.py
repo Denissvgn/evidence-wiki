@@ -159,25 +159,40 @@ def validate_results(path: Path, reviewed: bool):
     return {row["id"]: row["identity"] for row in rows}
 
 
-def qualify(name: str, root: Path, tools: Path, python: Path, cases: Path, reviewed: bool, *, journeys=False):
+def journey_selections(name, cases):
+    """Respect the pinned OpenCode shell limit without splitting a research flow."""
+    if name != "opencode":
+        return (None,)
+    from tools._journey_cases import load_cases, reference_cases
+
+    references, _ = reference_cases(ROOT / "tests/fixtures/strict-evidence/review-cases.json")
+    return tuple(row["id"] for row in [*load_cases(cases)["cases"], *references])
+
+
+def qualify(name: str, root: Path, tools: Path, python: Path, cases: Path, reviewed: bool, *, journeys=False, journey_case=None):
     from evidence_wiki.frameworks import compatibility
 
     pinned = next(row for row in compatibility()["frameworks"] if row["id"] == name)
     version = json.loads((tools / pinned["package"] / "package.json").read_text(encoding="utf-8"))["version"]
     if version != pinned["version"]:
         raise ValueError("unqualified_framework_version:" + name)
+    if journeys and name == "opencode" and journey_case is None:
+        raise ValueError("opencode_journeys_require_individual_case_selection")
     work = root / "work"
     work.mkdir()
     env = environment(root)
     result_path = root / "result.json"
     command = shlex.join([str(python), str(ROOT / "tools/_framework_probe.py"), str(cases), str(result_path)])
     if journeys:
-        command = shlex.join([str(python), "-B", str(ROOT / "tools/qualify_journeys.py"), "--cases", str(cases), "--output", str(root / "journeys")])
+        invocation = [str(python), "-B", str(ROOT / "tools/qualify_journeys.py"), "--cases", str(cases), "--output", str(root / "journeys")]
+        if journey_case is not None:
+            invocation.extend(["--case", journey_case])
+        command = shlex.join(invocation)
         result_path = root / "journeys/observations.json"
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FixtureProvider)
     server.command, server.paths = command, []
     if journeys and name == "opencode":
-        server.bash_timeout = 3_600_000
+        server.bash_timeout = 600_000
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
@@ -210,12 +225,12 @@ def qualify(name: str, root: Path, tools: Path, python: Path, cases: Path, revie
             (agent / "trustedFolders.json").write_text(json.dumps({str(work): "TRUST_FOLDER"}), encoding="utf-8", newline="\n")
             env.update(GEMINI_API_KEY="fixture-key", GOOGLE_GEMINI_BASE_URL=base_url)
             argv = ["node", str(tools / "@google/gemini-cli/bundle/gemini.js"), "--model", "gemini-3.5-flash", "--output-format", "stream-json",
-                    "--allowed-tools", f"run_shell_command({str(python)} {str(ROOT / 'tools/_framework_probe.py')})", "--prompt",
+                    "--allowed-tools", f"run_shell_command({command})", "--prompt",
                     "Execute the selected local conformance command once and report its observed outcome."]
         result = execute(argv, work, env, root / "process.json", timeout=3600 if journeys else 90)
         outcome = {"framework": name, "provider": "deterministic-local-fixture", "process_exit": result.returncode,
                    "version": version, "timed_out": result.timed_out, "requests": len(server.paths), "reviewed": reviewed,
-                   "mode": "scripted_journeys" if journeys else "canonical_fixture", "live_model": False}
+                   "mode": "scripted_journeys" if journeys else "canonical_fixture", "case_id": journey_case, "live_model": False}
         if result.returncode == 0 and result_path.is_file():
             if journeys:
                 observed = json.loads(result_path.read_text(encoding="utf-8"))
@@ -251,12 +266,14 @@ def main():
                         else prepare_cases(batch, args.python, reviewed=reviewed))
         try:
             for name in args.framework or ("pi", "opencode", "gemini"):
-                directory = batch / name
-                directory.mkdir()
-                row = qualify(name, directory, args.tools_root.resolve() / "node_modules", args.python.absolute(), cases, reviewed, journeys=args.journeys)
-                observations.append(row)
-                print(json.dumps(row), flush=True)
-                (output / "observations.json").write_text(json.dumps(observations, indent=2) + "\n", encoding="utf-8", newline="\n")
+                for selected in journey_selections(name, cases) if args.journeys else (None,):
+                    directory = batch / name if selected is None else batch / name / selected
+                    directory.mkdir(parents=True)
+                    row = qualify(name, directory, args.tools_root.resolve() / "node_modules", args.python.absolute(), cases,
+                                  reviewed, journeys=args.journeys, journey_case=selected)
+                    observations.append(row)
+                    print(json.dumps(row), flush=True)
+                    (output / "observations.json").write_text(json.dumps(observations, indent=2) + "\n", encoding="utf-8", newline="\n")
         finally:
             if patch is not None:
                 patch.undo()
