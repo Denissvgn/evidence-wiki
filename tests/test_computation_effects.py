@@ -38,6 +38,34 @@ def test_dry_run_writes_nothing_and_apply_preserves_prose(tmp_path):
     assert destination.read_bytes() == once
 
 
+@pytest.mark.parametrize("mutation", ["instructions", "missing_binding"])
+def test_pending_effect_never_rebinds_requirements(tmp_path, monkeypatch, mutation):
+    result, destination = prepared(tmp_path)
+    publisher = EFFECTS.sibling("_usage_materialization")
+    original = publisher.publish_file
+
+    def interrupt(root, relative, *args, **kwargs):
+        if relative == "wiki/outputs/totals.md":
+            raise OSError("Interrupted output")
+        return original(root, relative, *args, **kwargs)
+
+    monkeypatch.setattr(publisher, "publish_file", interrupt)
+    with pytest.raises(OSError):
+        EFFECTS.apply(tmp_path, "write", expected_result_id=result["result_id"], request_id="pending")
+    monkeypatch.setattr(publisher, "publish_file", original)
+    path = tmp_path / EFFECTS.STATE_PATH
+    if mutation == "instructions":
+        (tmp_path / "AGENTS.md").write_text("Changed requirements")
+    else:
+        state = json.loads(path.read_bytes())
+        state["requests"]["pending"]["command"].pop("requirement_basis")
+        path.write_text(json.dumps(state))
+    before = path.read_bytes(), destination.read_bytes()
+    with pytest.raises(ValueError, match="computation_request_conflict"):
+        EFFECTS.apply(tmp_path, "write", expected_result_id=result["result_id"], request_id="pending")
+    assert (path.read_bytes(), destination.read_bytes()) == before
+
+
 def test_interrupted_output_write_resumes_without_duplicate_blocks(tmp_path, monkeypatch):
     result, destination = prepared(tmp_path)
     publisher = EFFECTS.sibling("_usage_materialization")

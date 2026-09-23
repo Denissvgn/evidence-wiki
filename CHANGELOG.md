@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add same-pack revision plans, bounded research-impact mapping and explicit
+  coverage migration with archived answers and fresh review requirements.
+  Freeze active pack/computation criteria and refuse rebinding legacy actions.
+
 - Add caller-driven research advice, control-bound run coordination, verified source
   ingestion, original-question release accounting and optional local progress.
   Claim recovery now requires a finite positive threshold and a known claim age.

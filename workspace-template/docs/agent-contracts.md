@@ -33,6 +33,11 @@ The separate `source_usability` contract provides `agent inspect`, source
 readiness/routing and explicit host capture delivery. Read
 [source-usability.md](source-usability.md); default inspection runs no plugins,
 external tools or network requests, while explicit probes disclose their effects.
+The `pack_revisions` contract exposes bounded revision planning/application,
+current impact status and explicit coverage migration through the existing
+owners. Discover it with `pack schemas`; read `pack guide --topic revisions`.
+Revision records are local observations, never signed domain approvals.
+
 The separate `pack_discovery` contract provides pack inspection, caller-local
 catalogs and caller-declared fit decisions. Retrieve its schemas with
 `pack schemas` and guidance with `pack guide`; see [pack-selection.md](pack-selection.md).

@@ -257,6 +257,18 @@ ORCHESTRATION_SESSION_SCHEMA: dict[str, Any] = {
         "pause_reason": _nullable({"type": "string"}),
         "pending_action_id": _nullable({"$ref": "#/$defs/stable_id"}),
         "pending_submission": _nullable({"$ref": "#/$defs/pending_submission"}),
+        "requirement_basis": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"},
+        "abandoned_work": {
+            "type": "object", "additionalProperties": False,
+            "required": ["action_id", "run_id", "trusted_inputs", "reason", "qualification"],
+            "properties": {
+                "action_id": _nullable({"$ref": "#/$defs/stable_id"}),
+                "run_id": _nullable({"$ref": "#/$defs/stable_id"}),
+                "trusted_inputs": _nullable({"$ref": "#/$defs/pending_trusted_static_inputs"}),
+                "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "qualification": {"const": "not_accepted"},
+            },
+        },
         # Optional for read compatibility with sessions created before the
         # trusted-static-input binding was added during schema version 1.0.
         "pending_trusted_static_inputs": _nullable(

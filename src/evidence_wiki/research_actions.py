@@ -56,6 +56,14 @@ def guidance(target, *, agent_id=None, run_id=None):
         gaps.append("original_question_accounting_unavailable")
     if view.controls["state"] != "observed":
         gaps.append("instruction_or_policy_binding_unavailable")
+    coverage_owner = owner("coverage_manifest")
+    revision_pending = []
+    for question in view.questions:
+        path = owner("question_status").questions_directory(view.root, view.config) / (question["slug"] + ".md")
+        fm = owner("question_status").load_frontmatter(path)
+        summary = coverage_owner.coverage_summary_for_question(view.root, view.config, question["slug"], fm) if view.integrations_qualified else {}
+        if summary.get("error_code") == "COVERAGE_REVISION_REQUIRED":
+            revision_pending.append(question["slug"])
     if view.managed:
         add(
             "managed_resume",
@@ -67,6 +75,10 @@ def guidance(target, *, agent_id=None, run_id=None):
                 "route": "Use the existing host protocol; workers may only inspect their issued order and its postconditions.",
             },
         )
+    elif revision_pending:
+        gaps.append("pack_revision_migration_required")
+        add("inspect", argv=package("pack", "revision-status", "--target", str(view.root)), slugs=revision_pending,
+            reasons=["pack_revision_migration_required"], parameters={"guide_command": "pack guide --topic revisions"})
     elif not view.status.get("smoke", {}).get("ok") or view.controls["state"] != "observed":
         add(
             "repair",

@@ -65,7 +65,7 @@ def main(operation: str, argv: list[str]) -> int:
     elif operation == "schemas":
         parser.add_argument("--schema-id")
     elif operation == "guide":
-        parser.add_argument("--topic", choices=("selection", "authoring", "specification", "references"), default="selection")
+        parser.add_argument("--topic", choices=("selection", "authoring", "specification", "references", "revisions"), default="selection")
     parser.add_argument("--format", choices=("json", "text"), default="json")
     try:
         args = parser.parse_args(argv)
@@ -74,6 +74,7 @@ def main(operation: str, argv: list[str]) -> int:
             from ._script_host import shared_assets_root
 
             relative = {"selection": "pack-selection.md", "authoring": "pack-authoring.md",
+                        "revisions": "pack-revisions.md",
                         "specification": "pack-authoring-example.json", "references": "pack-assessment-references.json"}[args.topic]
             content = read_file(shared_assets_root(), "workspace-template/docs/" + relative).decode()
             if args.format == "text":
@@ -84,13 +85,18 @@ def main(operation: str, argv: list[str]) -> int:
             from .pack_authoring_contracts import contract_index as authoring_index
             from .pack_authoring_contracts import schema_document as authoring_schema
             from .pack_authoring_contracts import schemas as authoring_schemas
+            from .pack_revision_contracts import contract_index as revision_index
+            from .pack_revision_contracts import schema_document as revision_schema
+            from .pack_revision_contracts import schemas as revision_schemas
 
             if args.schema_id:
-                result = authoring_schema(args.schema_id) if args.schema_id in authoring_schemas() else schema_document(args.schema_id)
+                result = revision_schema(args.schema_id) if args.schema_id in revision_schemas() else authoring_schema(args.schema_id) if args.schema_id in authoring_schemas() else schema_document(args.schema_id)
             else:
                 result = contract_index()
                 result["authoring"] = authoring_index()
                 result["schema_ids"].extend(authoring_schemas())
+                result["revisions"] = revision_index()
+                result["schema_ids"].extend(revision_schemas())
         elif operation == "show":
             row, _ = select(args.selector, target=args.target, catalog=args.catalog, path=args.path, resource=args.resource)
             result = {"schema_version": "evidence-pack-inspection/v1", "pack": row}

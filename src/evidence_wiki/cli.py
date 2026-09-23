@@ -641,6 +641,7 @@ def _print_pack_help() -> None:
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
         "  evidence-wiki pack scaffold|derive|qualify|freeze-cases|assess|accept|resume [authoring options]\n"
         "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [--dry-run] [--format text|json]\n"
+        "  evidence-wiki pack revision-plan|revision-apply|revision-status|reevaluate [revision options]\n"
         "      [--keep-local TARGET]... [--accept-pack TARGET]...\n"
         "  evidence-wiki pack adopt --target PATH [--dry-run] [--accept-local-overrides]\n"
         "      [--format text|json]\n\n"
@@ -656,6 +657,10 @@ def _run_pack(args: list[str]) -> int:
         _print_pack_help()
         return 0
     subcommand = args.pop(0)
+    if subcommand in {"revision-plan", "revision-apply", "revision-status", "reevaluate"}:
+        from .pack_revision_commands import main as revision_main
+
+        return revision_main(subcommand, args)
     if subcommand in {"scaffold", "derive", "qualify", "freeze-cases", "assess", "accept", "resume"}:
         from .pack_authoring_commands import main as authoring_main
 
@@ -716,7 +721,7 @@ def _print_help() -> None:
         "  evidence-wiki serve-mcp --target PATH\n"
         "  evidence-wiki strict schemas|check|prepare-review|review|export [options]\n"
         "  evidence-wiki computation schemas|check|aggregate|evaluate|verify|schedule|write|apply-warnings|dispatch [options]\n"
-        "  evidence-wiki orchestrate start|next|submit|status|retire|cleanup-claims [options]\n"
+        "  evidence-wiki orchestrate start|next|submit|status|abandon|retire|cleanup-claims [options]\n"
         f"  evidence-wiki orchestrate run|resume --runner {managed_runners} [options]\n"
         "  evidence-wiki contract\n"
         "  evidence-wiki orchestrator-guide [--print] [--format json]\n\n"

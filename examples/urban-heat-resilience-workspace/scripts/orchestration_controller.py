@@ -348,6 +348,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     status = subparsers.add_parser("status", help="Read a parent orchestration session.")
     status.add_argument("--orchestration-id", default=None)
     status.add_argument("--format", choices=("text", "json"), default="text")
+    abandon = subparsers.add_parser("abandon", help="Fail a session while preserving its pending action and evidence for audit.")
+    abandon.add_argument("--orchestration-id", required=True)
+    abandon.add_argument("--agent-id", required=True)
+    abandon.add_argument("--reason", required=True)
+    add_driver_wait_argument(abandon)
+    abandon.add_argument("--format", choices=("text", "json"), default="text")
     for command in ("retire", "cleanup-claims"):
         retention = subparsers.add_parser(command, help="Plan or apply archive-backed claim retention.")
         retention.add_argument("--orchestration-id", required=True)
@@ -1368,21 +1374,17 @@ def verify_pending_trusted_static_inputs(
     *,
     allow_legacy_unbound: bool = False,
 ) -> None:
-    """Fail closed on static-input drift and explicitly migrate legacy pending actions."""
+    """Fail closed on static-input drift, including missing historical bindings."""
     if session.get("pending_action_id") != work_order.get("action_id"):
         return
     if "pending_trusted_static_inputs" not in session:
-        # Version 0.2.0 sessions predate controller-owned static fingerprints.
-        if allow_legacy_unbound:
-            return
         raise OrchestrationControllerError(
             "ORCHESTRATION_LEGACY_ACTION_UNBOUND",
-            "legacy pending action has not yet been bound to the current trusted static inputs",
+            "legacy pending action has no original trusted-input binding",
             recoverable=True,
             remediation=(
-                "Replay the pending action with evidence-wiki orchestrate next --resume, or use managed "
-                "evidence-wiki orchestrate resume, before submitting a result. The replay binds a controller-owned "
-                "fingerprint before any worker is launched."
+                "Preserve this action and its evidence. Explicitly retire the session, then start new work "
+                "under current reviewed requirements; replay cannot reconstruct the original criteria."
             ),
             details={"action_id": work_order.get("action_id")},
         )
@@ -2085,66 +2087,13 @@ def bind_legacy_pending_trusted_inputs(
     session: dict[str, Any],
     work_order: dict[str, Any],
 ) -> None:
-    """Bind one pre-0.2.1 pending action before workspace code is executed."""
+    """Retain the compatibility seam without inventing a historical baseline."""
     if "pending_trusted_static_inputs" in session:
         return
-    action_id = require_safe_id(work_order.get("action_id"), "action_id")
-    if session.get("pending_action_id") != action_id:
-        raise OrchestrationControllerError(
-            "ORCHESTRATION_STATE_INVALID",
-            "legacy trusted-input binding does not match the pending action",
-            recoverable=False,
-        )
-    fingerprint_path = trusted_static_input_path(project_root, session["orchestration_id"], action_id)
-    if fingerprint_path.exists():
-        fingerprint = load_json_object(
-            fingerprint_path,
-            error_code="ORCHESTRATION_STATE_INVALID",
-            label="legacy trusted static-input fingerprint",
-        )
-        if not valid_trusted_static_input_fingerprint(fingerprint):
-            raise OrchestrationControllerError(
-                "ORCHESTRATION_STATE_INVALID",
-                "legacy trusted static-input fingerprint is invalid",
-                recoverable=False,
-            )
-        current = trusted_static_input_fingerprint(project_root)
-        if fingerprint.get("fingerprint") != current.get("fingerprint"):
-            differences = trusted_static_input_differences(fingerprint, current)
-            shown = differences[:MAX_TRUSTED_STATIC_INPUT_DIFFERENCES]
-            raise OrchestrationControllerError(
-                "ORCHESTRATION_TRUSTED_INPUT_CHANGED",
-                "trusted static workspace inputs changed while legacy binding was being finalized",
-                recoverable=True,
-                remediation=(
-                    "Restore the static inputs recorded by the retained fingerprint, then replay the same action."
-                ),
-                details={
-                    "action_id": action_id,
-                    "expected_fingerprint": fingerprint.get("fingerprint"),
-                    "current_fingerprint": current.get("fingerprint"),
-                    "changed_paths": shown,
-                    "omitted_changed_path_count": max(0, len(differences) - len(shown)),
-                },
-            )
-    else:
-        fingerprint = trusted_static_input_fingerprint(project_root)
-        write_json_atomic(fingerprint_path, fingerprint)
-    session["pending_trusted_static_inputs"] = {
-        "action_id": action_id,
-        "fingerprint": fingerprint["fingerprint"],
-        "entry_count": fingerprint["entry_count"],
-        "total_bytes": fingerprint["total_bytes"],
-    }
-    session["updated_at"] = timestamp_utc()
-    write_json_atomic(session_path(project_root, session["orchestration_id"]), session)
-    record_event_once(
-        project_root,
-        session,
-        "trusted_inputs_bound",
-        "Bound a legacy pending action to controller-owned trusted static inputs.",
-        action_id=action_id,
-    )
+    raise OrchestrationControllerError(
+        "ORCHESTRATION_LEGACY_ACTION_UNBOUND", "Original requirements for the pending action are unknown.",
+        recoverable=False, remediation="Preserve pending work, explicitly retire the session and start new work.",
+        details={"action_id": work_order.get("action_id")})
 
 
 def fresh_workspace_status(project_root: Path) -> dict[str, Any]:
@@ -6361,6 +6310,12 @@ def finish_session(
 
 
 def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    load_sibling_module("_evidence_revision").capture_workspace(project_root)
+    with workspace_lock(project_root / ".locks/domain-pack-refresh.lock", purpose="session requirement binding"):
+        return start_bound_session(project_root, args)
+
+
+def start_bound_session(project_root, args):
     load_sibling_module("_usage_gate").require_host_intake(load_config(project_root))
     agent_id = require_agent_id(args.agent_id)
     orchestration_id = require_safe_id(args.orchestration_id or generated_orchestration_id(), "orchestration_id")
@@ -6396,6 +6351,7 @@ def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any
         handoff = project.get("handoff") if isinstance(project.get("handoff"), dict) else None
         session: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
+            "requirement_basis": load_sibling_module("_pack_revision_guard").controls(project_root),
             "artifact_type": SESSION_ARTIFACT_TYPE,
             "orchestration_id": orchestration_id,
             "started_at": now,
@@ -6472,6 +6428,9 @@ def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
         repair_last_completion_events(project_root, session)
         if session["status"] in TERMINAL_STATUSES:
             return session
+        guard = load_sibling_module("_pack_revision_guard")
+        if not session.get("pending_action_id") and (session.get("requirement_basis") is not None or (project_root / "domain-packs/.evidence-wiki-state.yml").exists()):
+            guard.require(session.get("requirement_basis") == guard.controls(project_root), "session_requirements_changed_or_unbound")
         if args.resume:
             resume_session(project_root, session)
         elif session["status"] == PAUSED_STATUS:
@@ -6490,6 +6449,7 @@ def next_work(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
                 # migration snapshot exists. Bind all trusted workspace code
                 # before fresh_workspace_status imports or executes it.
                 verify_provider_policy_unchanged(project_root, session, order)
+                verify_delegation_unchanged(project_root, session)
                 bind_legacy_pending_trusted_inputs(project_root, session, order)
             verify_runtime_guards(project_root, session, order)
             return replay_work_order(project_root, session, resume=args.resume, retained_order=order)
@@ -10096,6 +10056,26 @@ def status_session(project_root: Path, args: argparse.Namespace) -> dict[str, An
     return select_session(project_root, args.orchestration_id)
 
 
+def abandon_session(project_root, args):
+    identity = require_safe_id(args.orchestration_id, "orchestration_id")
+    with driver_session_lock(project_root, identity, command="abandon", agent_id=args.agent_id,
+                             wait_seconds=getattr(args, "driver_wait_seconds", 0.0)):
+        session = load_session(project_root, identity)
+        if args.agent_id != session["agent_id"] or not 1 <= len(args.reason.strip()) <= 4096:
+            raise OrchestrationControllerError("ORCHESTRATION_OWNER_MISMATCH", "Session owner and explicit reason are required.")
+        if session["status"] in TERMINAL_STATUSES:
+            return session
+        child_id = session.get("active_run_id")
+        child = load_sibling_module("run_controller").load_run_state(project_root, child_id) if child_id else None
+        if session.get("pending_submission") or child and child["state"]["current"] not in load_sibling_module("run_controller").TERMINAL_STATES:
+            raise OrchestrationControllerError("ORCHESTRATION_ABANDON_BLOCKED", "Resolve the pending submission and explicitly finish or abandon the child run first.")
+        session["abandoned_work"] = {"action_id": session.get("pending_action_id"), "run_id": child_id,
+            "trusted_inputs": session.get("pending_trusted_static_inputs"), "reason": args.reason,
+            "qualification": "not_accepted"}
+        session["active_run_id"] = None
+        return finish_session(project_root, session, "failed", args.reason, data=session["abandoned_work"])
+
+
 def render_text(document: dict[str, Any]) -> str:
     if document.get("artifact_type") == WORK_ORDER_ARTIFACT_TYPE:
         return f"{document['orchestration_id']} {document['action_id']}: {document['phase']}\n"
@@ -10114,6 +10094,8 @@ def command_document(project_root: Path, args: argparse.Namespace) -> dict[str, 
         return submit_result(project_root, args)
     if args.command == "status":
         return status_session(project_root, args)
+    if args.command == "abandon":
+        return abandon_session(project_root, args)
     if args.command in {"retire", "cleanup-claims"}:
         from types import SimpleNamespace
 
@@ -10166,6 +10148,11 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_INVALID
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
+    except Exception as error:
+        code = getattr(error, "error_code", "")
+        if code != "DOMAIN_PACK_REVISION_CONFLICT" and not code.startswith("EVIDENCE_REVISION_"):
+            raise
+        return load_sibling_module("_script_errors").emit_refusal(error, json_mode=json_mode)
 
     if args.format == "json":
         print(json.dumps(document, indent=2, sort_keys=False))

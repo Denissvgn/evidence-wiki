@@ -6,6 +6,11 @@ provenance, lifecycle state, and export validation. A validated research
 outcome is either a cited, auditable answer or a structured request for missing
 evidence.
 
+For updates to an installed domain pack, use `evidence-wiki pack revision-plan`,
+`revision-apply` and `revision-status`. They retain three-way conflicts and
+history, identify affected research, and guide explicit coverage reevaluation.
+See [Pack revisions](workspace-template/docs/pack-revisions.md).
+
 [Quick start](#five-minute-tour) · [Documentation](#documentation) ·
 [Worked example][worked-example] · [PyPI][pypi] · [Contributing][contributing]
 

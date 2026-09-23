@@ -117,6 +117,7 @@ class LifecyclePlan:
     log_entry: str | None = None
     input_fingerprint: str = ""
     candidate_fingerprint: str = ""
+    research_fingerprint: str = ""
 
 
 def _plain(value: Any) -> Any:
@@ -124,8 +125,14 @@ def _plain(value: Any) -> Any:
         return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_plain(item) for item in value]
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, bool):
         return value
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
     return copy.deepcopy(value)
 
 
@@ -662,6 +669,7 @@ def write_initial_state(project_root: Path, state: Mapping[str, Any]) -> None:
 
 
 def _validate_state(document: dict[str, Any]) -> dict[str, Any]:
+    load_workspace_module(_SCRIPT_DIR, "_pack_revision_impact", cache=_COMPUTATION_CACHE).validate_history(document)
     if document.get("schema_version") != STATE_SCHEMA_VERSION:
         raise LifecycleFailure(
             "DOMAIN_PACK_STATE_INVALID",
@@ -2173,6 +2181,8 @@ def plan_refresh(
     dry_run: bool = True,
     source_kind: str | None = None,
     warnings: list[str] | None = None,
+    rationale: str = "Explicit same-pack refresh; semantic adequacy remains subject to review.",
+    qualification: dict[str, Any] | None = None,
 ) -> LifecyclePlan:
     root = Path(project_root).expanduser().resolve()
     if _transaction_path(root).exists() or _transaction_path(root).is_symlink():
@@ -2301,6 +2311,12 @@ def plan_refresh(
                 "DOMAIN_PACK_INVALID",
                 "Candidate domain pack changed while refresh was being planned",
             )
+        impact_owner = load_workspace_module(_SCRIPT_DIR, "_pack_revision_impact", cache=_COMPUTATION_CACHE)
+        capture_owner = load_workspace_module(_SCRIPT_DIR, "_evidence_revision", cache=_COMPUTATION_CACHE)
+        guard = load_workspace_module(_SCRIPT_DIR, "_pack_revision_guard", cache=_COMPUTATION_CACHE)
+        report["revision_plan_id"] = impact_owner.digest({"workspace": final_workspace_fingerprint,
+            "research": guard.inputs(capture_owner.capture_workspace(root)), "candidate": candidate_tree_digest,
+            "keep_local": [], "accept_pack": [], "revision": None})
         return LifecyclePlan(
             report=report,
             state=state,
@@ -2473,6 +2489,16 @@ def plan_refresh(
     next_state = _validate_state(next_state)
     state_dirty = _canonical_bytes(next_state) != _canonical_bytes(state)
     material = config_dirty or bool(desired_files) or state_dirty
+    impact_owner = load_workspace_module(_SCRIPT_DIR, "_pack_revision_impact", cache=_COMPUTATION_CACHE)
+    _safe_workspace_destination(root, BACKUP_ROOT_RELATIVE)
+    impact, research_fingerprint, research_before = impact_owner.inspect(root, state, incoming_overlay, _plain(document), candidate_snapshot, desired_files)
+    if material:
+        revision = {"from": old_pack, "to": next_state["pack"], "impact": impact,
+                    "rationale": rationale, "qualification": qualification, "research_before": research_before}
+        revision["revision_id"] = impact_owner.digest(revision)
+        next_state.setdefault("research_revisions", []).append(revision)
+        next_state = _validate_state(next_state)
+        state_dirty = True
     status = "planned" if material and dry_run else "ready" if material else "no_changes"
     report = _refresh_report(
         mode="dry-run" if dry_run else "write",
@@ -2483,6 +2509,11 @@ def plan_refresh(
         conflicts=[],
         warnings=warnings,
     )
+    report["impact"] = impact
+    report["revision_id"] = revision["revision_id"] if material else None
+    report["revision_plan_id"] = impact_owner.digest({"workspace": initial_workspace_fingerprint,
+        "research": research_fingerprint, "candidate": candidate_tree_digest,
+        "keep_local": sorted(keep), "accept_pack": sorted(accept), "revision": report["revision_id"]})
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     log_entry = None
     if material:
@@ -2515,6 +2546,7 @@ def plan_refresh(
         log_entry=log_entry,
         input_fingerprint=final_workspace_fingerprint,
         candidate_fingerprint=candidate_tree_digest,
+        research_fingerprint=research_fingerprint,
     )
 
 
@@ -3309,6 +3341,10 @@ def apply_plan(
         )
     if plan.report["status"] == "no_changes":
         return plan.report
+    if installed_target_relative is not None:
+        guard = load_workspace_module(_SCRIPT_DIR, "_pack_revision_guard", cache=_COMPUTATION_CACHE)
+        observed = guard.idle(root)
+        guard.require(plan.research_fingerprint == observed, "revision_research_inputs_changed")
     transaction_id = uuid.uuid4().hex
     payloads = _transaction_payloads(
         root,
@@ -3523,6 +3559,9 @@ def run_refresh(
     source_kind: str | None = None,
     validated_candidate_fingerprint: str | None = None,
     candidate_validator: Callable[[Path], str | None] | None = None,
+    expected_plan_id: str | None = None,
+    rationale: str = "Explicit same-pack refresh; semantic adequacy remains subject to review.",
+    qualification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     project_input = Path(project_root).expanduser()
     if project_input.is_symlink():
@@ -3564,6 +3603,8 @@ def run_refresh(
             accept_pack=accept_pack,
             dry_run=True,
             source_kind=source_kind,
+            rationale=rationale,
+            qualification=qualification,
         )
         if (
             validated_tree is not None
@@ -3598,7 +3639,11 @@ def run_refresh(
                 dry_run=False,
                 source_kind=source_kind,
                 warnings=warnings,
+                rationale=rationale,
+                qualification=qualification,
             )
+            if expected_plan_id is not None and plan.report.get("revision_plan_id") != expected_plan_id:
+                raise LifecycleFailure("DOMAIN_PACK_REFRESH_CONFLICT", "Revision plan changed; replan before applying.", exit_code=3)
             if validated_tree is not None and plan.candidate_fingerprint != validated_tree:
                 raise LifecycleFailure(
                     "DOMAIN_PACK_INVALID",

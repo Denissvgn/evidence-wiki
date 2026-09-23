@@ -303,7 +303,7 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
         self.assertEqual(
             {
                 "managed_runner_ids": ["codex", "claude"],
-                "external_protocol_commands": ["start", "next", "submit", "status", "retire", "cleanup-claims"],
+                "external_protocol_commands": ["start", "next", "submit", "status", "abandon", "retire", "cleanup-claims"],
                 "claim_retention": {
                     "schema_version": 1,
                     "owner": "package",

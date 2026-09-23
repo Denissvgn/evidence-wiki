@@ -4849,6 +4849,14 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--orchestration-id", default=None)
     _add_format(status)
 
+    abandon = subparsers.add_parser("abandon", help="Fail a session while retaining pending work for audit.")
+    _add_target(abandon)
+    abandon.add_argument("--orchestration-id", required=True)
+    abandon.add_argument("--agent-id", required=True)
+    abandon.add_argument("--reason", required=True)
+    _add_driver_wait(abandon)
+    _add_format(abandon)
+
     for command in ("retire", "cleanup-claims"):
         retention = subparsers.add_parser(command, help="Plan or apply archive-backed claim retention.")
         _add_target(retention)
@@ -4910,7 +4918,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         root = _workspace_root(args.target)
-        if args.command in {"start", "next", "submit", "status", "retire", "cleanup-claims"}:
+        if args.command in {"start", "next", "submit", "status", "retire", "cleanup-claims", "abandon"}:
             return _passthrough_controller(root, args.command, _protocol_arguments(args))
 
         # Before the runner is resolved and before `run` creates a session: a delegated

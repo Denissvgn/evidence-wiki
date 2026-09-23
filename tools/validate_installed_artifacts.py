@@ -1391,6 +1391,51 @@ SETUP_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'
 ''')
 
 
+REVISION_PROBE = textwrap.dedent(r'''
+    import json, shutil, subprocess, sys
+    from pathlib import Path
+    import yaml
+    from evidence_wiki._script_host import shared_assets_root
+    from evidence_wiki.pack_discovery import owner
+    cli, root = Path(sys.argv[1]), Path(sys.argv[2])
+    root.mkdir()
+    target, candidate, saved = root/'workspace', root/'candidate/general-science', root/'revision.json'
+    def command(*args, expected=0):
+        result = subprocess.run([str(cli),*map(str,args)], cwd=root, text=True, capture_output=True)
+        assert result.returncode == expected, result.stdout + result.stderr
+        return None if args[0] == "init" else json.loads(result.stdout or result.stderr)
+    command('init','--target',target,'--project-name','reviewed-research','--project-description','Retain evidence',
+            '--owner-goal','Explicit research requirements','--domain-pack','general-science')
+    owner('intake_questions').run_intake_document(target, {'schema_version':'1.0','questions':[
+        {'id':'q1','question':'What evidence supports the claim?','priority':'high','origin':'caller'}]},
+        dry_run=False, from_file_label='caller')
+    shutil.copytree(shared_assets_root()/'domain-packs/general-science',candidate)
+    overlay=yaml.safe_load((candidate/'research.overlay.yml').read_text())
+    overlay['domain_pack']['version']='0.2.0'
+    (candidate/'research.overlay.yml').write_text(yaml.safe_dump(overlay,sort_keys=False))
+    (candidate/'claims.md').write_text((candidate/'claims.md').read_text()+'\nRetain explicit uncertainty.\n')
+    planned=command('pack','revision-plan','--target',target,'--path',candidate,'--rationale','Clarify evidence scope','--output',saved)
+    assert planned['owner_plan']['impact']['bounds']['questions_affected']==1
+    applied=command('pack','revision-apply','--from-file',saved)
+    assert applied['status']=='applied' and applied['research']['pending_questions']==['q1']
+    assert command('pack','revision-apply','--from-file',saved)['status']=='already_applied'
+    migration={'schema_version':'evidence-pack-reevaluation/v1','revision_id':applied['revision_id'],'slug':'q1',
+        'rationale':'Explicit reviewed requirement mapping','retired_facets':[],'request_replacements':{},'computation_migrations':{},
+        'template':{'coverage_profile':'scoped','required_facets':[{'facet_id':'evidence','description':'Retained evidence',
+            'required':True,'evidence_path':'academic_method_existence','source_policy':'academic_indexed',
+            'freshness_policy':'publication_identity','identity_policy':'citation_id_resolves','min_sources':1}],'optional_facets':[]}}
+    source=root/'migration.json';source.write_text(json.dumps(migration))
+    migrated=command('pack','reevaluate','--target',target,'--from-file',source)
+    assert migrated['status']=='migrated' and not migrated['release_accepted']
+    assert (target/migrated['archive']).is_file()
+    assert command('pack','reevaluate','--target',target,'--from-file',source)['status']=='already_migrated'
+    assert command('pack','revision-status','--target',target)['pending_questions']==['q1']
+    assert 'evidence-pack-reevaluation/v1' in command('pack','schemas')['schema_ids']
+    print(json.dumps({'revision_owner_application':'passed','revision_impact':'passed','coverage_revision_history':'passed',
+        'revision_replay':'passed','revision_semantic_certification':False}))
+''')
+
+
 RESEARCH_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'")].replace(
     "'allowed_actions':['local_setup']", "'allowed_actions':['local_setup','local_research']") + textwrap.dedent(r'''
     setup = command('apply','--from-file',saved)
@@ -1528,6 +1573,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     sources = run([str(python), "-c", SOURCE_PROBE, str(cli), str(scratch / "source-workspace")], cwd=outside)
     planning = run([str(python), "-c", PLANNING_PROBE, str(cli), str(scratch / "research-planning")], cwd=outside)
     research = run([str(python), "-c", RESEARCH_PROBE, str(cli), str(scratch / "caller-research")], cwd=outside)
+    revisions = run([str(python), "-c", REVISION_PROBE, str(cli), str(scratch / "pack-revisions")], cwd=outside)
     setup = run([str(python), "-c", SETUP_PROBE, str(cli), str(scratch / "workspace-application")], cwd=outside)
     authoring = run([str(python), "-c", PACK_AUTHORING_PROBE, str(cli), str(scratch / "pack-authoring"),
         str(scratch / "research-planning/request.json")], cwd=outside)
@@ -1535,7 +1581,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
-            **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research)}
+            **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research), **json.loads(revisions)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

@@ -54,6 +54,13 @@ identities. Calculated values remain derived evidence and require the selected
 strict review. Warning intake, output writes and cadence dispatch require
 explicit invocation; declarations and source text do not authorize those actions.
 
+Use `docs/pack-revisions.md` for same-pack improvements. Plan the exact candidate
+and impact before applying through the pack lifecycle. Finish or explicitly
+abandon active work before changing its requirements; missing old metadata is
+not permission to bind pending work to new criteria. Migrate affected coverage
+explicitly and obtain current review before release. The original answer,
+evidence, approvals and computation receipts stay in their historical scope.
+
 ## Research Knowledge Model
 
 The workspace has three knowledge layers:

@@ -69,7 +69,9 @@ def state_from(capture):
                 "computation_state_request_invalid")
         require(request["status"] in {"pending", "complete"} and type(request["writes"]) is list and len(request["writes"]) <= 64,
                 "computation_state_request_invalid")
-        require(type(request["command"]) is dict and set(request["command"]) == {"operation", "expected_result_id", "as_of", "cadence_id"},
+        require(type(request["command"]) is dict and set(request["command"]) in (
+                    {"operation", "expected_result_id", "as_of", "cadence_id"},
+                    {"operation", "expected_result_id", "as_of", "cadence_id", "requirement_basis"}),
                 "computation_state_request_invalid")
         parsed_time(request["started_at"], aware=True)
         for write in request["writes"]:
@@ -273,12 +275,28 @@ def plan(root, operation, result, capture, state, cadence_id, observed_at, confi
 
 def apply(project_root, operation, *, expected_result_id, request_id, as_of=None, cadence_id=None, dry_run=False):
     root = Path(project_root).resolve()
+    capture_workspace(root)
+    if dry_run:
+        return apply_bound(root, operation, expected_result_id=expected_result_id, request_id=request_id,
+                           as_of=as_of, cadence_id=cadence_id, dry_run=True)
+    apply_bound(root, operation, expected_result_id=expected_result_id, request_id=request_id,
+                as_of=as_of, cadence_id=cadence_id, dry_run=True)
+    with sibling("_workspace_locks").workspace_lock(root / ".locks/domain-pack-refresh.lock", purpose="computation requirements") as lock:
+        require(lock.locked, "computation_lock_required")
+        return apply_bound(root, operation, expected_result_id=expected_result_id, request_id=request_id,
+                           as_of=as_of, cadence_id=cadence_id)
+
+
+def apply_bound(project_root, operation, *, expected_result_id, request_id, as_of=None, cadence_id=None, dry_run=False):
+    root = Path(project_root).resolve()
     require(operation in {"write", "apply-warnings", "dispatch"}, "computation_operation_unknown")
     require(type(request_id) is str and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", request_id) is not None,
             "computation_request_id_invalid")
     require(type(expected_result_id) is str and re.fullmatch(r"sha256:[0-9a-f]{64}", expected_result_id) is not None,
             "computation_expected_result_required")
-    command = {"operation": operation, "expected_result_id": expected_result_id, "as_of": as_of, "cadence_id": cadence_id}
+    requirements = sibling("_pack_revision_guard").controls(root)
+    command = {"operation": operation, "expected_result_id": expected_result_id, "as_of": as_of, "cadence_id": cadence_id,
+               "requirement_basis": requirements}
     before = capture_workspace(root)
     state_from(before)
     config = sibling("_strict_evidence").configuration(root)
@@ -359,6 +377,7 @@ def apply(project_root, operation, *, expected_result_id, request_id, as_of=None
                     if name in inputs or any(name == prefix or name.startswith(prefix.rstrip("/") + "/") for prefix in roots)}
         expected_inputs = input_files(capture)
         def closing():
+            require(sibling("_pack_revision_guard").controls(root) == requirements, "computation_requirements_changed")
             require(input_files(capture_workspace(root)) == expected_inputs, "computation_inputs_changed")
             require(sibling("_selected_publication").producer_identity() == result["engine_id"], "computation_engine_changed")
             require(sibling("_computation_schedule").zone_identity(result["definition"]["clock"]["timezone"])[1] == result["clock"]["timezone"],

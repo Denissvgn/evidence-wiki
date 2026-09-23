@@ -37,6 +37,11 @@ human-readable non-secret reasons.
 
 ## Caller-bound research
 
+New runs retain a `requirement_basis` covering pack bytes, instructions, checker
+scripts, strict policy and computation declarations. Mutations refuse changed
+criteria; legacy active pack runs without this basis cannot be rebound. Explicit
+stale abandonment preserves the failed run so new work can use current criteria.
+
 `start --caller` records an optional `caller_context` with the current control,
 instruction, pack, deployed-checker and interpreter identities. Caller-bound
 heartbeat, transition, event, finish and recovery check that binding and the

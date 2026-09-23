@@ -1066,20 +1066,14 @@ class OrchestrationControllerTests(unittest.TestCase):
                 "orch-test",
                 "--resume",
             )
-            self.assertEqual(0, code, stderr)
-            self.assertEqual(order["action_id"], replayed["action_id"])
-            migrated = CONTROLLER.load_session(target, "orch-test")
-            self.assertTrue(CONTROLLER.valid_pending_trusted_static_inputs(migrated["pending_trusted_static_inputs"]))
-            fingerprint_path = CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"])
-            self.assertTrue(fingerprint_path.is_file())
+            self.assertEqual(CONTROLLER.EXIT_INVALID, code, stderr)
+            self.assertEqual("ORCHESTRATION_LEGACY_ACTION_UNBOUND", replayed["error_code"])
+            retained = CONTROLLER.load_session(target, "orch-test")
+            self.assertEqual(order["action_id"], retained["pending_action_id"])
+            self.assertNotIn("pending_trusted_static_inputs", retained)
+            self.assertFalse(CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"]).exists())
 
-            agents = target / "AGENTS.md"
-            agents.write_text(agents.read_text(encoding="utf-8") + "\npost-binding drift\n", encoding="utf-8")
-            code, error, _ = self.submit(root, target, order["action_id"])
-            self.assertEqual(CONTROLLER.EXIT_INVALID, code)
-            self.assertEqual("ORCHESTRATION_TRUSTED_INPUT_CHANGED", error["error_code"])
-
-    def test_legacy_trusted_input_binding_recovers_after_snapshot_precedes_session_write(self):
+    def test_missing_session_binding_never_adopts_an_orphan_fingerprint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = self.init_workspace(root, question=True)
@@ -1089,89 +1083,13 @@ class OrchestrationControllerTests(unittest.TestCase):
             session.pop("pending_trusted_static_inputs")
             CONTROLLER.write_json_atomic(CONTROLLER.session_path(target, "orch-test"), session)
             fingerprint_path = CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"])
-            fingerprint_path.unlink()
-            real_write = CONTROLLER.write_json_atomic
-            crashed = False
-
-            def crash_before_session_binding(path: Path, document: dict) -> None:
-                nonlocal crashed
-                if (
-                    not crashed
-                    and path == CONTROLLER.session_path(target.resolve(), "orch-test")
-                    and "pending_trusted_static_inputs" in document
-                ):
-                    crashed = True
-                    raise CONTROLLER.OrchestrationControllerError(
-                        "INJECTED_CRASH",
-                        "injected crash after legacy fingerprint persistence",
-                    )
-                real_write(path, document)
-
-            with mock.patch.object(CONTROLLER, "write_json_atomic", side_effect=crash_before_session_binding):
-                code, error, _ = self.controller(
-                    target,
-                    "next",
-                    "--orchestration-id",
-                    "orch-test",
-                    "--resume",
-                )
-            self.assertTrue(crashed, "fault injection did not reach the session write")
+            before = fingerprint_path.read_bytes()
+            with mock.patch.object(CONTROLLER, "fresh_workspace_status", side_effect=AssertionError("must not execute workspace status")):
+                code, result, _ = self.controller(target, "next", "--orchestration-id", "orch-test", "--resume")
             self.assertEqual(CONTROLLER.EXIT_INVALID, code)
-            self.assertEqual("INJECTED_CRASH", error["error_code"])
-            self.assertTrue(fingerprint_path.is_file())
-            retained_fingerprint = fingerprint_path.read_bytes()
+            self.assertEqual("ORCHESTRATION_LEGACY_ACTION_UNBOUND", result["error_code"])
+            self.assertEqual(before, fingerprint_path.read_bytes())
             self.assertNotIn("pending_trusted_static_inputs", CONTROLLER.load_session(target, "orch-test"))
-
-            code, replayed, stderr = self.controller(
-                target,
-                "next",
-                "--orchestration-id",
-                "orch-test",
-                "--resume",
-            )
-
-            self.assertEqual(0, code, stderr)
-            self.assertEqual(order["action_id"], replayed["action_id"])
-            self.assertEqual(retained_fingerprint, fingerprint_path.read_bytes())
-            rebound = CONTROLLER.load_session(target, "orch-test")
-            self.assertTrue(CONTROLLER.valid_pending_trusted_static_inputs(rebound["pending_trusted_static_inputs"]))
-
-    def test_legacy_replay_binds_trusted_inputs_before_workspace_status_executes(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            target = self.init_workspace(root, question=True)
-            self.start(target)
-            _, order, _ = self.controller(target, "next", "--orchestration-id", "orch-test")
-            session = CONTROLLER.load_session(target, "orch-test")
-            session.pop("pending_trusted_static_inputs")
-            CONTROLLER.write_json_atomic(CONTROLLER.session_path(target, "orch-test"), session)
-            CONTROLLER.trusted_static_input_path(target, "orch-test", order["action_id"]).unlink()
-            real_status = CONTROLLER.fresh_workspace_status
-
-            def status_after_binding(project_root: Path) -> dict:
-                retained = CONTROLLER.load_session(project_root, "orch-test")
-                self.assertTrue(
-                    CONTROLLER.valid_pending_trusted_static_inputs(
-                        retained.get("pending_trusted_static_inputs")
-                    )
-                )
-                return real_status(project_root)
-
-            with mock.patch.object(
-                CONTROLLER,
-                "fresh_workspace_status",
-                side_effect=status_after_binding,
-            ):
-                code, replayed, stderr = self.controller(
-                    target,
-                    "next",
-                    "--orchestration-id",
-                    "orch-test",
-                    "--resume",
-                )
-
-            self.assertEqual(0, code, stderr)
-            self.assertEqual(order["action_id"], replayed["action_id"])
 
     def test_materialized_effects_without_result_replay_same_action_then_submit(self):
         with tempfile.TemporaryDirectory() as tmpdir:

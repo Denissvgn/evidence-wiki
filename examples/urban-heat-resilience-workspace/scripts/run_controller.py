@@ -1048,7 +1048,13 @@ def caller_observation(project_root, operation):
             remediation="Inspect current instructions, policy, evidence and independent review; preserve the run until its owner can proceed.") from None
 
 
-def require_caller_context(project_root, document, agent_id, *, transfer=False):
+def require_caller_context(project_root, document, agent_id, *, transfer=False, retiring=False):
+    if retiring:
+        return
+    if not retiring and document.get("caller_context") is None:
+        revision = load_sibling_module("_pack_revision_guard")
+        if document.get("requirement_basis") is not None or (Path(project_root) / "domain-packs/.evidence-wiki-state.yml").exists():
+            revision.require(document.get("requirement_basis") == revision.controls(project_root), "run_requirements_changed_or_unbound")
     if document.get("caller_context") is None:
         return
     try:
@@ -1061,6 +1067,14 @@ def require_caller_context(project_root, document, agent_id, *, transfer=False):
 
 
 def run_start(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    guard = load_sibling_module("_pack_revision_guard")
+    requirements = guard.controls(project_root)
+    with workspace_lock(project_root / ".locks/domain-pack-refresh.lock", purpose="run requirement binding"):
+        guard.require(guard.controls(project_root) == requirements, "run_requirements_changed")
+        return start_with_requirements(project_root, args, requirements)
+
+
+def start_with_requirements(project_root, args, requirement_basis):
     agent_id = require_agent_id(args.agent_id)
     run_id = validate_run_id(args.run_id, allow_generate=True)
     caller = caller_observation(project_root, "capture") if getattr(args, "caller", False) else None
@@ -1080,6 +1094,7 @@ def run_start(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
         handoff = project.get("handoff") if isinstance(project.get("handoff"), dict) else None
         document: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
+            "requirement_basis": requirement_basis,
             "run_id": run_id,
             "started_at": now,
             "updated_at": now,
@@ -1415,7 +1430,7 @@ def run_abandon(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
     )
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id}"):
         document = load_run_state(project_root, run_id)
-        require_caller_context(project_root, document, agent_id, transfer=True)
+        require_caller_context(project_root, document, agent_id, transfer=True, retiring=True)
         current = document["state"]["current"]
         assert_not_terminal(run_id, current)
         staleness = stale_or_refuse(project_root, run_id, document, threshold_hours)
@@ -1731,6 +1746,11 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_INVALID
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
+    except Exception as error:
+        code = getattr(error, "error_code", "")
+        if code != "DOMAIN_PACK_REVISION_CONFLICT" and not code.startswith("EVIDENCE_REVISION_"):
+            raise
+        return load_sibling_module("_script_errors").emit_refusal(error, json_mode=json_mode)
 
     if args.format == "json":
         print(json.dumps(document, indent=2, sort_keys=False))

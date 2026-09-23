@@ -720,9 +720,11 @@ def validate_manifest(
     missing = REQUIRED_TOP_LEVEL_FIELDS - set(document)
     if missing:
         raise CoverageManifestError("COVERAGE_MANIFEST_INVALID", f"coverage manifest missing fields: {', '.join(sorted(missing))}")
-    unknown = set(document) - REQUIRED_TOP_LEVEL_FIELDS
+    unknown = set(document) - REQUIRED_TOP_LEVEL_FIELDS - {"revision_basis"}
     if unknown:
         raise CoverageManifestError("COVERAGE_MANIFEST_INVALID", f"coverage manifest has unknown fields: {', '.join(sorted(unknown))}")
+    if "revision_basis" in document:
+        load_sibling_module("_coverage_revision").validate_basis(document["revision_basis"])
     if document.get("schema_version") != SCHEMA_VERSION:
         raise CoverageManifestError("COVERAGE_MANIFEST_INVALID", f"coverage manifest schema_version must be {SCHEMA_VERSION}")
     slug = string_field(document, "question_slug", "coverage manifest", error_code="COVERAGE_MANIFEST_INVALID")
@@ -1367,6 +1369,20 @@ def coverage_summary_for_question(
         "missing_source_request_ids": [],
         "unconfirmed_claims": [],
     }
+    try:
+        guard = load_sibling_module("_pack_revision_guard")
+        revision = guard.pending_question(project_root, slug)
+        if revision is not None:
+            selected = selected_manifest_path(project_root, config, slug, manifest_value)
+            observed = load_yaml_mapping(selected, error_code="COVERAGE_MANIFEST_INVALID") if selected.is_file() else None
+            revision = guard.pending_question(project_root, slug, observed)
+    except (Exception, SystemExit):
+        revision = "unavailable"
+    if revision is not None:
+        summary.update(coverage_required=True, coverage_status="invalid", coverage_verdict="blocked",
+            error_code="COVERAGE_REVISION_REQUIRED", revision_id=revision,
+            error="Pack requirements changed; explicitly migrate coverage and recheck answer eligibility.")
+        return summary
     if manifest_value is None and not should_probe_default:
         return summary
 
@@ -1617,6 +1633,10 @@ def run_evaluate(project_root: str | Path, *, slug: str) -> dict[str, Any]:
         coverage_verdict=document["coverage_verdict"],
         policy_results=policy_results,
     )
+
+
+def run_revision(project_root: str | Path, request: dict[str, Any]) -> dict[str, Any]:
+    return load_sibling_module("_coverage_revision").migrate(project_root, request)
 
 
 def render_text(result: dict[str, Any]) -> str:

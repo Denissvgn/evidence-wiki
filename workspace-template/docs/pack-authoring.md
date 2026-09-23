@@ -55,6 +55,11 @@ Choose a new output rather than overwriting unexplained content.
 
 ## Revisions and specializations
 
+For an existing workspace, continue an accepted same-pack revision with
+`pack revision-plan`, `pack revision-apply` and `pack revision-status`. The
+[revision workflow](pack-revisions.md) preserves merge conflicts, maps affected
+research and requires explicit coverage migration before a new answer/review cycle.
+
 `pack derive --from-file derivation.json --output NEW_CONTAINER` copies exactly
 the selected base revision. Use `evidence-pack-derivation/v1`: select one explicit
 base locator and tree digest, a mode, name, version, rationale, bounded file

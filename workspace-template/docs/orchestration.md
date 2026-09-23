@@ -8,6 +8,20 @@ returns, and may reference several immutable child `run_id` records.
 
 ## Command Surface
 
+### Abandon work with unavailable original requirements
+
+`orchestrate abandon --target PATH --orchestration-id ID --agent-id OWNER
+--reason TEXT` records a failed session and retains the pending action, evidence
+and original fingerprint in its audit state. Finish or explicitly abandon its
+child first; a pending submission must be recovered before abandonment. This
+does not accept results, transfer claims or invent missing historical bindings.
+Subsequent work starts in a new session under current reviewed requirements.
+
+New sessions bind pack, instruction, checker, strict-policy and computation
+identities. Pending actions without their original trusted-input fingerprint
+refuse replay even when an orphan snapshot exists. Changing pack requirements
+requires a safe boundary; see [pack-revisions.md](pack-revisions.md).
+
 ### Claim retirement and cleanup
 
 The package owns explicit orchestration retirement and live claim-ledger cleanup.

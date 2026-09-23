@@ -36,6 +36,7 @@ OPERATIONS = (
     ("pack scaffold", "write", False), ("pack derive", "write", False), ("pack qualify", "write", False),
     ("pack freeze-cases", "write", False), ("pack assess", "write", False), ("pack accept", "write", False),
     ("pack resume", "depends_on_options", False),
+    ("pack revision-status", "read", True),
     ("agent inspect", "depends_on_options", False), ("agent routes", "depends_on_options", False),
     ("agent source-status", "temporary_write", True), ("agent capture", "write", True),
     ("agent source-schemas", "read", False), ("agent source-guide", "read", False),
@@ -119,6 +120,10 @@ def _negotiate(summary: dict, requirements: list[str], assurance: str) -> None:
     supported.add("source-usability/v1")
     supported.add("research-planning/v1")
     supported.add("pack-authoring/v1")
+    supported.add("pack-revisions/v1")
+    from .pack_revision_contracts import OPERATIONS as revision_operations
+
+    supported.update("pack " + name for name in revision_operations)
     supported.add("workspace-application/v1")
     supported.add("caller-research/v1")
     supported.update("agent " + name for name in RESEARCH_OPERATIONS)

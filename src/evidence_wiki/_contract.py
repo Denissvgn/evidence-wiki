@@ -275,6 +275,7 @@ def contract() -> dict:
     from .orchestration_schemas import public_orchestration_schema_documents
     from .pack_authoring_contracts import contract_index as pack_authoring_index
     from .pack_commands import contract_index as pack_contract_index
+    from .pack_revision_contracts import contract_index as pack_revision_index
     from .planning_contracts import contract_index as planning_contract_index
     from .research_contracts import contract_index as research_contract_index
     from .setup_contracts import contract_index as setup_contract_index
@@ -345,6 +346,7 @@ def contract() -> dict:
         "onboarding_contract": contract_index(),
         "pack_discovery": pack_contract_index(),
         "pack_authoring": pack_authoring_index(),
+        "pack_revisions": pack_revision_index(),
         "source_usability": source_contract_index(),
         "research_planning": planning_contract_index(),
         "installed_agent": {
@@ -416,7 +418,7 @@ def contract() -> dict:
         },
         "orchestration_capabilities": {
             "managed_runner_ids": list(orchestration.managed_runner_names()),
-            "external_protocol_commands": ["start", "next", "submit", "status", "retire", "cleanup-claims"],
+            "external_protocol_commands": ["start", "next", "submit", "status", "abandon", "retire", "cleanup-claims"],
             "claim_retention": {
                 "schema_version": 1,
                 "owner": "package",

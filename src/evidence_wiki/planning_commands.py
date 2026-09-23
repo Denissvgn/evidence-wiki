@@ -30,6 +30,15 @@ def save_plan(plan, output):
     for source in plan["bindings"]["inputs"]:
         if source.get("root") and path == Path(source["root"]) / source["path"]:
             refuse("plan_output_collides_with_source_input")
+    return save_document(plan, path)
+
+
+def save_document(plan, output):
+    """Publish a new bounded JSON artifact through a pinned parent descriptor."""
+    path = Path(output).expanduser().absolute()
+    relative_path(path.name)
+    parent = path.parent.resolve(strict=True)
+    path = parent / path.name
     _outside_assets(path, additional_roots=(Path(__file__).parent,))
     raw = canonical(plan) + b"\n"
     if len(raw) > MAX_BYTES:
