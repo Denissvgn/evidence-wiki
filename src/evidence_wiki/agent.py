@@ -22,6 +22,7 @@ from .errors import EvidenceWikiError, UsageError
 from .onboarding_contract import encode_document
 
 SUMMARY_BYTES = 32_768
+RESEARCH_OPERATIONS = ("next", "start", "resume", "heartbeat", "acquire", "ingest", "research-export", "progress", "research-guide", "research-schemas")
 OPERATIONS = (
     ("agent", "read", False), ("agent summary", "read", False), ("agent resources", "read", False),
     ("agent resource", "read", False), ("contract", "read", False),
@@ -41,6 +42,8 @@ OPERATIONS = (
     ("agent plan", "depends_on_options", False), ("agent plan-check", "read", False),
     ("agent apply", "write", False), ("agent setup-guide", "read", False), ("agent setup-schemas", "read", False),
     ("agent plan-schemas", "read", False), ("agent plan-guide", "read", False),
+    *(("agent " + name, effect, True) for name, effect in (("next", "read"), ("start", "write"), ("resume", "read"), ("research-export", "read"), ("progress", "depends_on_options"))),
+    ("agent research-guide", "read", False), ("agent research-schemas", "read", False),
     ("doctor", "temporary_write", True), ("status", "depends_on_options", True), ("questions add", "write", True),
     ("strict check", "read", True), ("strict prepare-review", "read", True),
     ("strict review", "write", True), ("strict export", "read", True),
@@ -117,6 +120,8 @@ def _negotiate(summary: dict, requirements: list[str], assurance: str) -> None:
     supported.add("research-planning/v1")
     supported.add("pack-authoring/v1")
     supported.add("workspace-application/v1")
+    supported.add("caller-research/v1")
+    supported.update("agent " + name for name in RESEARCH_OPERATIONS)
     for key in ("strict", "computation"):
         if summary[key]["checker"]["available"]:
             supported.add(summary[key]["capability"])
@@ -178,12 +183,14 @@ def bootstrap(target: str = ".", *, requirements: list[str] | None = None,
         _refuse("strict_checker_unavailable")
     guide = resource_document("guide/bootstrap/v1")
     template = resource_document("example/strict-policy/v1")
+    research_guide = resource_document("guide/research/v1")
     policy = json.loads(template["content"])
     observed = {entry["id"]: entry for entry in summary["resources"]}
-    for document in (guide, template):
+    for document in (guide, template, research_guide):
         if observed[document["id"]] != {key: value for key, value in document.items() if key != "content"}:
             _refuse("resource_snapshot_changed")
-    if policy["instructions"] != {"docs/installed-agent.md": "sha256:" + guide["sha256"]}:
+    if policy["instructions"] != {"docs/installed-agent.md": "sha256:" + guide["sha256"],
+                                  "skills/research-run.md": "sha256:" + research_guide["sha256"]}:
         _refuse("policy_instruction_identity_mismatch")
     state, environment = _workspace_observation(target)
     return {
@@ -200,6 +207,7 @@ def bootstrap(target: str = ".", *, requirements: list[str] | None = None,
             "reason": "template selected only; existing policy, authority and protected host not inspected",
         },
         "limitations": ["Bootstrap does not initialize, validate readiness, run research or confer execution authority.",
+                        "This compact operation index is supplemented by agent research-schemas for caller heartbeat, acquisition and ingestion.",
                         "No truth guarantee; framework modes need separate qualification and host enforcement needs protected execution."],
     }
 
@@ -210,6 +218,10 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv and argv[0] in RESEARCH_OPERATIONS:
+        from .research_commands import main as research_main
+
+        return research_main(argv[0], argv[1:])
     if argv and argv[0] in {"apply", "setup-guide", "setup-schemas"}:
         from .setup_commands import main as setup_main
 
@@ -241,6 +253,11 @@ def main(argv: list[str] | None = None) -> int:
                 or args.operation != "bootstrap" and args.target is not None
                 or args.operation in {"resource", "resources"} and (args.require or args.assurance != "artifact_checked")):
             _refuse("arguments", "ONBOARDING_INVALID")
+        if args.operation == "bootstrap" and args.target and (not argv or argv[0].startswith("--")) and _workspace_observation(args.target)[0] == "present":
+            _negotiate(capabilities(), args.require, args.assurance)
+            from .research_commands import main as research_main
+
+            return research_main("next", ["--target", args.target, "--format", args.format])
         if args.operation == "bootstrap":
             kind, version, payload = "bootstrap", "2", bootstrap(args.target or ".", requirements=args.require, assurance=args.assurance)
         elif args.operation == "summary":

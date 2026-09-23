@@ -52,7 +52,8 @@ def test_instruction_links_and_policy_identity():
     policy = json.loads(agent_resources.resource_document("example/strict-policy/v1")["content"])
     strict = load_packaged_script(ROOT, "_strict_contract")
     strict.policy_document(policy)
-    assert policy["instructions"] == {"docs/installed-agent.md": "sha256:" + guide["sha256"]}
+    assert policy["instructions"] == {"docs/installed-agent.md": "sha256:" + guide["sha256"],
+                                      "skills/research-run.md": "sha256:" + agent_resources.resource_document("guide/research/v1")["sha256"]}
 
 
 @pytest.mark.parametrize("resource_id", ["../../private", "guide/bootstrap/v2", "/tmp/private", "https://example.test",

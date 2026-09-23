@@ -1391,6 +1391,34 @@ SETUP_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'
 ''')
 
 
+RESEARCH_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'")].replace(
+    "'allowed_actions':['local_setup']", "'allowed_actions':['local_setup','local_research']") + textwrap.dedent(r'''
+    setup = command('apply','--from-file',saved)
+    target = root/'workspace'
+    advice = command('next','--target',target,'--agent-id','current')
+    assert not advice['actions_executed'] and not advice['research_complete']
+    assert advice['actions'][0]['operation'] == 'start'
+    started = command('start','--target',target,'--run-id','research','--agent-id','current')
+    assert started['run']['caller_context']['context_id']
+    before = {str(p.relative_to(target)):p.read_bytes() for p in target.rglob('*') if p.is_file()}
+    resumed = command('resume','--target',target,'--run-id','research','--agent-id','current')
+    assert any(row['operation']=='claim' for row in resumed['actions'])
+    assert before == {str(p.relative_to(target)):p.read_bytes() for p in target.rglob('*') if p.is_file()}
+    command('heartbeat','--target',target,'--run-id','research','--agent-id','current')
+    refused = command('heartbeat','--target',target,'--run-id','research','--agent-id','other',expected=3)
+    assert refused['error_code'] == 'ONBOARDING_OWNERSHIP_CONFLICT'
+    output = command('research-export','--target',target,expected=3)
+    assert not output['research_complete'] and output['original_outcomes'][0]['original_text'] == text
+    progress = command('progress','--target',target,'--run-id','research')
+    assert progress['semantic_evaluation']['unsupported_claim_escapes']['value'] is None
+    assert progress['measured']['question_outcomes'] == {'open':1}
+    assert command('research-guide')['content'].startswith('# Research with the current caller')
+    assert 'evidence-research-action/v1' in command('research-schemas')['schema_ids']
+    print(json.dumps({'caller_guidance':'passed','caller_run_binding':'passed','caller_readonly_resume':'passed',
+        'caller_ownership_conflict':'passed','original_question_accounting':'passed','local_telemetry_unknown_grading':'passed'}))
+''')
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
@@ -1499,6 +1527,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
     sources = run([str(python), "-c", SOURCE_PROBE, str(cli), str(scratch / "source-workspace")], cwd=outside)
     planning = run([str(python), "-c", PLANNING_PROBE, str(cli), str(scratch / "research-planning")], cwd=outside)
+    research = run([str(python), "-c", RESEARCH_PROBE, str(cli), str(scratch / "caller-research")], cwd=outside)
     setup = run([str(python), "-c", SETUP_PROBE, str(cli), str(scratch / "workspace-application")], cwd=outside)
     authoring = run([str(python), "-c", PACK_AUTHORING_PROBE, str(cli), str(scratch / "pack-authoring"),
         str(scratch / "research-planning/request.json")], cwd=outside)
@@ -1506,7 +1535,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
-            **json.loads(planning), **json.loads(authoring), **json.loads(setup)}
+            **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research)}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

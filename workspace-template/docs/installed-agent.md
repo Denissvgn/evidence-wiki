@@ -50,7 +50,7 @@ and `agent source-guide` for routing and capture instructions. Run
 `doctor --target WORKSPACE` and copied smoke/lint scripts for workspace checks.
 Doctor loads registered providers and probes writes; pack validation uses a
 temporary workspace. Read [execution contracts](guide/contracts/v1) for interpreter and recovery rules.
-Use `agent plan-guide` for planning details; `agent plan-check` rechecks unused plans.
+Use `agent plan-guide` for planning details; `agent research-guide` explains the caller loop.
 
 ## Select strict evidence before research
 
@@ -79,8 +79,8 @@ enforcement evidence. Semantic review and sources can still be mistaken.
 
 ## Investigate and retain gaps
 
-Read [caller-driven research](guide/research/v1), add original questions through
-the existing question intake, and follow claim/run coordination. Use
+Use `agent next --target WORKSPACE` for current advice. Read
+[caller-driven research](guide/research/v1); use canonical intake and claim/run owners. Use
 [discovery](guide/discovery/v1), [acquisition](guide/acquisition/v1) and
 [verification](guide/verification/v1) as needed. Providers still need credentials, connectivity, authorization and usable evidence. Preserve
 raw sources and provenance; normalize and verify before drawing conclusions.

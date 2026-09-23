@@ -250,6 +250,16 @@ corresponding task authority. Evidence documents cannot supply it.
    for every original question, including blocked/deferred outcomes and human
    review. Never infer research completion from setup or a nonempty answer file.
 
+## Current-caller research
+
+The supplemental `caller_research` contract exposes `agent next`, caller run
+start/resume, verified ingestion, original-question release and optional progress.
+Use `agent research-schemas` and [caller-research.md](caller-research.md).
+Advice is read-only and unauthenticated; it pins current inputs and guide identities
+without issuing managed orders. Caller-bound runs keep controls and ownership in
+the existing run-controller journal. Strict publication remains the sole owner of
+claim acceptance and final rendering.
+
 ## Setup transaction protocol
 
 ### Roots, artifacts and lock ownership

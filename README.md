@@ -90,6 +90,12 @@ guidance, freeze assessment cases, qualify a revision and resume setup planning.
 Apply a saved plan with `evidence-wiki agent apply --from-file PLAN`.
 [Workspace application](workspace-template/docs/workspace-application.md) describes
 local delivery, observed readiness, locking and conservative recovery.
+
+For an existing workspace, `evidence-wiki agent --target WORKSPACE` returns current
+next-action advice. Use `agent research-guide` for the caller-driven loop,
+verified source ingestion, original-question export and optional local progress.
+[Caller research](workspace-template/docs/caller-research.md) uses the current
+agent and canonical owners; no additional model runner is required.
 Structural and arithmetic checks retain separate domain-review requirements.
 
 Add a question using the [question API][question-api]:

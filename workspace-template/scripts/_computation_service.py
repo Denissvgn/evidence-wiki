@@ -91,8 +91,10 @@ def status(project_root, config):
                 "recorded_result_id": observed["result_id"] if observed else None})
         return {"schema_version": "evidence-computation-status/v1", "status": "blocked" if waiting or result["status"] != "passed" else "passed",
                 "result_id": result["result_id"], "definition_id": result["definition_id"], "clock": result["clock"],
+                "engine_id": result["engine_id"], "measurement": {"sources": len(result["sources"]), "records": len(result["records"]),
+                    "operations": result["operations"], "arithmetic": result["definition"]["arithmetic"]},
                 "invariants": result["invariants"], "findings": result["findings"], "dispatch": dispatch,
                 "reasons": ["computation_recovery_required"] if waiting else ["computation_invariants_failed"] if result["status"] != "passed" else []}
     except (Exception, SystemExit) as error:
         return {"schema_version": "evidence-computation-status/v1", "status": "blocked", "result_id": None,
-                "definition_id": None, "clock": None, "invariants": [], "findings": [], "dispatch": [], "reasons": [reason(error)]}
+                "definition_id": None, "clock": None, "engine_id": None, "measurement": None, "invariants": [], "findings": [], "dispatch": [], "reasons": [reason(error)]}

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add caller-driven research advice, control-bound run coordination, verified source
+  ingestion, original-question release accounting and optional local progress.
+  Claim recovery now requires a finite positive threshold and a known claim age.
+
 - Add plan-bound local workspace application with observed checks, selected source
   delivery, private checkpoints and conservative recovery.
 

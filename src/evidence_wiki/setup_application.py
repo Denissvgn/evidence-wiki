@@ -168,7 +168,7 @@ def receipt(plan, store, checkpoint):
         "computation": computation, "framework": plan["framework"], "blockers": plan["blockers"],
         "authority": {"boundary": "caller_authorized_local_setup", "writable_root": str(store.root),
                       "research_worker_isolation": "not_established", "receipt_trust": "local_observation", "authenticated": False},
-        "next_actions": [*({"action": "inspect_sources", "argv": command("agent", "source-status", "--target", target, "--format", "json",
+        "next_actions": [*({"action": "inspect_sources", "argv": command("agent", "source-status" if chunk else "inspect", "--target", target, "--format", "json",
                             *[arg for row in chunk for arg in ("--source-path", row["path"])])}
                            for chunk in ([local_paths(plan)[i:i+32] for i in range(0, len(local_paths(plan)), 32)] or [[]])),
                          {"action": "resume_setup", "argv": command("agent", "apply", "--from-file", str(store.transaction_path / "plan.json"))},

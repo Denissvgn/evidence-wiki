@@ -46,7 +46,8 @@ def exports() -> dict[str, bytes]:
         "schema_version": strict.POLICY_SCHEMA, "policy_id": "reviewed-evidence", "revision": "1",
         "assurance": "artifact_checked", "claims_path": "claims.json",
         "instructions": {"docs/installed-agent.md": "sha256:" + hashlib.sha256(
-            (ROOT / paths["guide/bootstrap/v1"]).read_bytes()).hexdigest()},
+            (ROOT / paths["guide/bootstrap/v1"]).read_bytes()).hexdigest(),
+            "skills/research-run.md": "sha256:" + hashlib.sha256((ROOT / paths["guide/research/v1"]).read_bytes()).hexdigest()},
         "rubric": {"id": "evidence-review", "revision": "1", "criteria": {
             "support": "Confirm the exact evidence supports the claim and any derivation.",
             "source_suitability": "Confirm source authority and fitness for this question.",

@@ -65,6 +65,8 @@ REQUIRED_STARTER_ASSETS = (
     "docs/source-usability.md",
     "docs/research-planning.md",
     "docs/workspace-application.md",
+    "docs/caller-research.md",
+    "scripts/_caller_context.py",
     "docs/pack-authoring.md",
     "docs/pack-authoring-example.json",
     "docs/pack-assessment-references.json",

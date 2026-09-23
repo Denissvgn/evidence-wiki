@@ -276,6 +276,7 @@ def contract() -> dict:
     from .pack_authoring_contracts import contract_index as pack_authoring_index
     from .pack_commands import contract_index as pack_contract_index
     from .planning_contracts import contract_index as planning_contract_index
+    from .research_contracts import contract_index as research_contract_index
     from .setup_contracts import contract_index as setup_contract_index
     from .source_contracts import contract_index as source_contract_index
 
@@ -402,6 +403,7 @@ def contract() -> dict:
                                          for path in (starter_root / "docs/computation-examples").glob("*") if path.is_dir()),
         },
         "workspace_application": setup_contract_index(),
+        "caller_research": research_contract_index(),
         "upgrade_compatibility": {
             "workspace_schema_versions": list(initializer.SUPPORTED_WORKSPACE_SCHEMA_VERSIONS),
             "research_yml_contract_versions": list(initializer.SUPPORTED_RESEARCH_YML_CONTRACTS),

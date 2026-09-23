@@ -32,7 +32,12 @@ Keep `workspace-system.yml` domain-neutral. Project-specific and domain-pack set
 
 The current trusted caller can conduct research directly through the workspace
 scripts without starting another model. Caller, managed-worker and external-host
-authority are distinct; see `docs/agent-contracts.md`. A managed work order never
+authority are distinct; see `docs/agent-contracts.md`. For the installed caller
+loop, read `docs/caller-research.md`: `agent next` provides read-only current advice,
+`agent start` binds a child run to current controls, and `agent resume` checks its
+owner and retained postconditions. `agent research-export` reconciles original
+questions through the current release owner; `agent progress` records optional
+local diagnostics without granting authority. A managed work order never
 promotes its worker to the caller/parent role. Reuse existing task permission for
 routine local decisions, preserve active evidence criteria, and ask only for
 material scope or authority that the task does not establish.

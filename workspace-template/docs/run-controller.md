@@ -35,6 +35,22 @@ Run artifacts are workspace data and must never include provider tokens or secre
 Store only identifiers, counters, workspace-relative paths, state names, and
 human-readable non-secret reasons.
 
+## Caller-bound research
+
+`start --caller` records an optional `caller_context` with the current control,
+instruction, pack, deployed-checker and interpreter identities. Caller-bound
+heartbeat, transition, event, finish and recovery check that binding and the
+recorded owner under the existing run lock. They never transfer ownership as a
+side effect. `adopt` remains the explicit stale-run transfer; claim ownership is
+separate. Positive finite thresholds are required for stale recovery.
+
+A changed control or checker requires inspection and a new safe-boundary decision;
+never edit a context ID to bless new bytes. Caller-mode completion invokes the
+current strict release owner and reconciles frozen original questions. Legacy
+runs retain their existing protocol and are not retroactively rebound.
+These local bindings coordinate callers; they do not authenticate a reviewer or
+establish worker isolation. See [caller-research.md](caller-research.md).
+
 ## `run_state` Schema
 
 Top-level `run_state` fields:
