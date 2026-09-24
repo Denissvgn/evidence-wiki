@@ -21,6 +21,35 @@ def test_adapter_does_not_modify_the_standard_os_module():
         assert os is standard_os
 
 
+def test_batched_reads_observe_current_bytes_and_reject_links(tmp_path):
+    from evidence_wiki._pack_io import file_reader
+    from evidence_wiki.errors import UsageError
+
+    path = tmp_path / "input.txt"
+    path.write_bytes(b"original")
+    with file_reader() as read:
+        assert read(tmp_path, "input.txt") == b"original"
+        path.write_bytes(b"changed")
+        assert read(tmp_path, "input.txt") == b"changed"
+        path.unlink()
+        path.symlink_to(tmp_path / "absent")
+        with pytest.raises((UsageError, ValueError)):
+            read(tmp_path, "input.txt")
+
+
+@pytest.mark.skipif(standard_os.name != "nt", reason="Exercises native reader generation revalidation")
+def test_batched_reads_refuse_a_changed_reader_generation(tmp_path, monkeypatch):
+    from evidence_wiki import _pack_io as pack_io
+    from evidence_wiki.errors import UsageError
+
+    (tmp_path / "input.txt").write_bytes(b"current")
+    with pytest.raises(UsageError) as error:
+        with pack_io.file_reader() as read:
+            assert read(tmp_path, "input.txt") == b"current"
+            monkeypatch.setattr(pack_io, "_windows_reader", lambda: (object(), object()))
+    assert error.value.details["field"] == "pack_reader_changed_during_read"
+
+
 def test_native_directory_operations_and_exclusive_publication(tmp_path):
     directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

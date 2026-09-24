@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -118,14 +119,36 @@ def yaml_document(raw: bytes):
         refuse("pack_yaml_invalid")
 
 
+def _windows_reader():
+    from ._script_host import load_packaged_script, shared_assets_root
+
+    assets = shared_assets_root()
+    return (load_packaged_script(assets, "_windows_files"),
+            load_packaged_script(assets, "_evidence_revision"))
+
+
+@contextmanager
+def file_reader():
+    """Bind one reader generation for a read-only batch, with a closing recheck."""
+    native = _windows_reader() if os.name == "nt" else None
+
+    def read(root, relative, maximum=MAX_FILE, expected=None):
+        return _read_file(root, relative, maximum, expected, native=native)
+
+    yield read
+    if native is not None and _windows_reader() != native:
+        refuse("pack_reader_changed_during_read")
+
+
 def read_file(root: Path, relative: str, maximum=MAX_FILE, expected=None) -> bytes:
+    return _read_file(root, relative, maximum, expected)
+
+
+def _read_file(root, relative, maximum, expected, *, native=None) -> bytes:
     relative_path(relative)
     try:
         if os.name == "nt" and type(root) is not int:
-            from ._script_host import load_packaged_script, shared_assets_root
-
-            module = load_packaged_script(shared_assets_root(), "_windows_files")
-            revision = load_packaged_script(shared_assets_root(), "_evidence_revision")
+            module, revision = native if native is not None else _windows_reader()
             observed = (root / relative).lstat()
             if expected is not None and signature(observed) != expected:
                 refuse("pack_changed_during_read")

@@ -9,7 +9,7 @@ import stat
 import sys
 from pathlib import Path
 
-from ._pack_io import capture_pack, identity, read_file, relative_path
+from ._pack_io import capture_pack, file_reader, identity, read_file, relative_path
 from ._script_host import shared_assets_root
 from .agent_resources import installation_metadata
 from .pack_catalog import _outside_assets
@@ -51,9 +51,10 @@ def target_basis(selection, *, owned_basis=None):
         "state": state, "directory_identity": directory}
 
 
-def tree_identity(root):
+def tree_identity(root, *, reader=None):
     """Hash bounded installed inputs, omitting only initializer-excluded caches."""
     rows, size, pending, entries = [], 0, [root], 0
+    read = read_file if reader is None else reader
     excluded = owner("init_research_workspace").EXCLUDED_NAMES | {"__pycache__"}
     while pending:
         directory = pending.pop()
@@ -73,7 +74,7 @@ def tree_identity(root):
                 if not child.is_file(follow_symlinks=False):
                     refuse("installed_tree_special_file")
                 relative = path.relative_to(root).as_posix()
-                raw = read_file(root, relative, 2_097_152)
+                raw = read(root, relative, 2_097_152)
                 size += len(raw)
                 if size > 33_554_432 or len(rows) >= 4096:
                     refuse("installed_tree_bound", "ONBOARDING_LIMIT")
@@ -82,13 +83,14 @@ def tree_identity(root):
     return {"sha256": digest(sorted(rows, key=lambda row: row["path"])), "files": len(rows), "bytes": size}
 
 
-def dependency_implementations():
+def dependency_implementations(*, reader=None):
     """Bind required distribution bytes, including data used by timezone checks."""
     import importlib.metadata
 
     from .source_inspection import DEPENDENCIES
 
     result, total = [], 0
+    read = read_file if reader is None else reader
     for name in DEPENDENCIES:
         try:
             distribution = importlib.metadata.distribution(name)
@@ -104,7 +106,7 @@ def dependency_implementations():
                 continue
             relative_path(str(item))
             path = Path(distribution.locate_file(item)).absolute()
-            raw = read_file(path.parent, path.name, 16_777_216)
+            raw = read(path.parent, path.name, 16_777_216)
             total += len(raw)
             if total > 67_108_864:
                 refuse("dependency_implementation_bytes_bound", "ONBOARDING_LIMIT")
@@ -115,16 +117,17 @@ def dependency_implementations():
 
 def installation_basis():
     executable = Path(sys.executable).resolve(strict=True)
-    raw = read_file(executable.parent, executable.name, 67_108_864)
     from .source_inspection import dependencies
 
-    return {"installation": installation_metadata(),
-        "starter": tree_identity(shared_assets_root() / "workspace-template"),
-        "package_code": tree_identity(Path(__file__).parent),
-        "interpreter": {"path": str(executable), "invocation": str(Path(sys.executable).absolute()),
-                        "prefix": sys.prefix, "sha256": hashlib.sha256(raw).hexdigest(),
-                        "version": platform.python_version(), "implementation": platform.python_implementation()},
-        "dependencies": dependencies(), "dependency_implementations": dependency_implementations()}
+    with file_reader() as read:
+        raw = read(executable.parent, executable.name, 67_108_864)
+        return {"installation": installation_metadata(),
+            "starter": tree_identity(shared_assets_root() / "workspace-template", reader=read),
+            "package_code": tree_identity(Path(__file__).parent, reader=read),
+            "interpreter": {"path": str(executable), "invocation": str(Path(sys.executable).absolute()),
+                            "prefix": sys.prefix, "sha256": hashlib.sha256(raw).hexdigest(),
+                            "version": platform.python_version(), "implementation": platform.python_implementation()},
+            "dependencies": dependencies(), "dependency_implementations": dependency_implementations(reader=read)}
 
 
 def selected_pack(domain):

@@ -231,7 +231,7 @@ class WorkspaceRevision:
     def materialize(self) -> Iterator[Path]:
         """Expose a private read-only tree, removing it when the operation finishes."""
         with tempfile.TemporaryDirectory(prefix="evidence-revision-") as temporary:
-            root = Path(temporary) / "workspace"
+            root = Path(temporary).resolve() / "workspace"
             root.mkdir(mode=0o700)
             for directory in self.directories:
                 if directory != ".":

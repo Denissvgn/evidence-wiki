@@ -32,6 +32,23 @@ def test_capture_includes_hidden_controls_and_materializes_exact_bytes(tmp_path,
     assert revision.capture_workspace(tmp_path).revision_id != captured.revision_id
 
 
+def test_materialization_canonicalizes_the_temporary_directory_alias(tmp_path, revision, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "research.yml").write_bytes(b"project: {}\n")
+    captured = revision.capture_workspace(source)
+    actual = tmp_path / "temporary"
+    actual.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    monkeypatch.setattr(revision.tempfile, "tempdir", str(alias))
+    with captured.materialize() as root:
+        assert root == root.resolve()
+        assert actual.resolve() in root.parents
+        assert (root / "research.yml").read_bytes() == b"project: {}\n"
+    assert not list(actual.iterdir())
+
+
 def test_windows_capture_pins_every_file_through_the_closing_scan(tmp_path, revision, monkeypatch):
     for name in ("a.txt", "b.txt"):
         (tmp_path / name).write_bytes(name.encode())
