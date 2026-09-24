@@ -4395,9 +4395,14 @@ def _managed_session_lock(root: Path, orchestration_id: str):
             f"Managed-host lock for {orchestration_id} is not a regular file.",
             exit_code=EXIT_RUNNER_FAILED,
         )
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
+    lock_os = os
+    if os.name == "nt":
+        from ._filesystem import os as lock_os
+    access = lock_os.O_RDONLY if os.name == "nt" else lock_os.O_RDWR
+    flags = access | lock_os.O_CREAT | getattr(lock_os, "O_BINARY", 0) | getattr(lock_os, "O_NOFOLLOW", 0)
+    descriptor = lock_os.open(path, flags, 0o600)
     locked = False
+    native_lock = None
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _is_multiply_linked_regular(opened):
@@ -4411,13 +4416,8 @@ def _managed_session_lock(root: Path, orchestration_id: str):
 
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             elif os.name == "nt":  # pragma: no cover - exercised on Windows CI
-                import msvcrt
-
-                if opened.st_size == 0:
-                    os.write(descriptor, b"\0")
-                    os.fsync(descriptor)
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                native_lock = lock_os.lock(descriptor, timeout_seconds=0)
+                native_lock.__enter__()
             else:  # pragma: no cover - no supported managed runner uses another platform
                 raise OSError(f"unsupported locking platform: {os.name}")
             locked = True
@@ -4436,10 +4436,7 @@ def _managed_session_lock(root: Path, orchestration_id: str):
 
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
                 elif os.name == "nt":  # pragma: no cover - exercised on Windows CI
-                    import msvcrt
-
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    native_lock.__exit__(None, None, None)
             except OSError:
                 pass
         os.close(descriptor)

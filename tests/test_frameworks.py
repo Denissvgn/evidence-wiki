@@ -52,7 +52,7 @@ def test_portable_bundle_is_derived_and_collision_safe(tmp_path):
     frameworks.validate_bundle(bundle)
     assert bundle["files"]["skills/evidence-wiki/references/bootstrap.md"] == resource_document("guide/bootstrap/v1")["content"]
     target = tmp_path / "caller-assets"
-    if os.name != "posix":
+    if os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd:
         with pytest.raises(UsageError):
             frameworks.export_bundle(target)
         return

@@ -87,11 +87,11 @@ jobs:
           .venv/bin/python -m ruff check .
           .venv/bin/python tools/sync_vendored_scripts.py --check
 
-      - name: Check native Windows filesystem contracts
+      - name: Check native Windows contracts
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          .\.venv\Scripts\python.exe -m pytest -q --tb=short tests/test_native_filesystem.py tests/test_workspace_capture_portability.py tests/test_legacy_usage_portability.py
+          .\.venv\Scripts\python.exe -m pytest -q --tb=short tests/test_native_filesystem.py tests/test_workspace_capture_portability.py tests/test_legacy_usage_portability.py tests/test_frameworks.py tests/test_evidence_assessments.py::test_prepare_issue_and_consume_nonfinancial_assessment tests/test_orchestration_host.py::OrchestrationHostTests::test_managed_run_completes_through_real_controller_with_fake_codex tests/test_orchestration_host.py::OrchestrationHostTests::test_managed_window_serializes_its_own_controller_calls_without_a_driver_refusal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run tests and quality checks (Windows)

@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -36,6 +36,14 @@ class SelectedPublicationTests(unittest.TestCase):
         self.root = helper.init_workspace(Path(self.temporary.name))
         helper.write_ship_ready_vendor_fixture(self.root)
         self.slug = "vendor-product-spec"
+
+    def test_logical_paths_preserve_proof_identity_for_windows_path_spellings(self):
+        first = PureWindowsPath("C:/Temp/capture-one/workspace")
+        second = PureWindowsPath("C:/Temp/capture-two/workspace")
+        documents = [{"path": str(root / "record.md"), "diagnostic": root.as_posix() + "/record.md"}
+                     for root in (first, second)]
+        self.assertEqual(SELECTED.logical_paths(documents[0], first), SELECTED.logical_paths(documents[1], second))
+        self.assertEqual("./record.md", SELECTED.logical_paths(documents[0], first)["diagnostic"])
 
     def run_selected(self, slugs=None, **kwargs):
         return SELECTED.run_selected_publication(self.root, [self.slug] if slugs is None else slugs, **kwargs)

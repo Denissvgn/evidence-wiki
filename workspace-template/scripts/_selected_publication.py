@@ -79,7 +79,7 @@ def logical_paths(value: Any, temporary_root: Path) -> Any:
     if isinstance(value, list):
         return [logical_paths(child, temporary_root) for child in value]
     if isinstance(value, str):
-        return value.replace(str(temporary_root), ".")
+        return value.replace(str(temporary_root), ".").replace(temporary_root.as_posix(), ".")
     return value
 
 

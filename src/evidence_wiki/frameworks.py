@@ -301,7 +301,10 @@ def export_bundle(target: str | Path) -> dict:
         identity = os.fstat(destination_fd)
         for child in stage.iterdir():
             os.rename(child.name, child.name, src_dir_fd=stage_fd, dst_dir_fd=destination_fd)
-        observed = os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
+        try:
+            observed = os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            refuse("bundle_destination_changed")
         if (observed.st_dev, observed.st_ino) != (identity.st_dev, identity.st_ino):
             refuse("bundle_destination_changed")
         return {"schema_version": "evidence-framework-bundle-result/v1", "status": "created",
