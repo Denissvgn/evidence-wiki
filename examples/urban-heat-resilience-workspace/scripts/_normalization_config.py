@@ -57,6 +57,7 @@ NATIVE_SOURCE_KINDS = frozenset(
         "repo_link",
         "web_link",
         "html",
+        "docx",
         "table",
         "codebase_architecture",
         "execution_evidence",

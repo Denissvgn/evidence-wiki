@@ -22,6 +22,7 @@ def contract_index():
                        "file_bytes": 1048576, "tree_bytes": 8388608, "output_bytes": MAX_OUTPUT},
             "catalog_authority": "caller-local revision and validation observations; workspace lifecycle remains authoritative",
             "provider_enablement": False, "semantic_fit": "caller_declared", "multi_pack_composition": False,
+            "composition_route": "agent extensions: explicitly compile members to one pinned identity before selecting it",
             "catalog_write_platform": "POSIX descriptor-relative operations and an established workspace lock"}
 
 

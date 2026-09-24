@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ._pack_io import canonical, read_file, refuse, yaml_document
+from ._pack_io import canonical, capture_pack, read_file, refuse, yaml_document
 from ._script_host import shared_assets_root
 from .domain_pack_lifecycle import _validate_candidate
 from .pack_discovery import owner
@@ -52,6 +52,44 @@ def plan(request):
     return decode(canonical(value), PLAN)
 
 
+def verify_replay(value):
+    """An operation label or matching history ID cannot substitute for current inputs."""
+    if value["plan_id"] != owner("_pack_revision_impact").digest({k: v for k, v in value.items() if k != "plan_id"}):
+        refuse("revision_replay_plan_changed", "ONBOARDING_PLAN_STALE")
+    if "generation" in value:
+        from .runtime_identity import generation
+
+        if value["generation"] != generation():
+            refuse("revision_replay_generation_changed", "ONBOARDING_PLAN_STALE")
+    request, proposed = value["request"], value["owner_plan"]
+    target = Path(request["target"]).expanduser().absolute()
+    candidate, qualification = _candidate(request)
+    lifecycle = owner("_domain_pack_lifecycle")
+    state = lifecycle.load_state(target)
+    if (proposed.get("target") != str(target.resolve()) or qualification != value["qualification"]
+            or capture_pack(candidate).tree_sha256 != value["candidate_sha256"]
+            or state["pack"]["tree_sha256"] != value["candidate_sha256"]
+            or lifecycle.inspect_workspace(target)["state"] != "current"):
+        refuse("revision_replay_inputs_changed", "ONBOARDING_PLAN_STALE")
+    revision_id = proposed.get("revision_id")
+    if revision_id is None:
+        if "mappings" in request or proposed.get("status") != "no_changes" or proposed.get("changes") != []:
+            refuse("revision_replay_no_change_proof_missing", "ONBOARDING_PLAN_STALE")
+        return None
+    records = state.get("research_revisions", [])
+    if (not records or records[-1]["revision_id"] != revision_id or records[-1]["to"] != state["pack"]
+            or records[-1]["rationale"] != request["rationale"] or records[-1]["qualification"] != qualification
+            or records[-1]["impact"] != proposed.get("impact")):
+        refuse("revision_replay_history_changed", "ONBOARDING_PLAN_STALE")
+    migration = records[-1]["impact"].get("identity_migration")
+    if (migration is not None) != ("mappings" in request):
+        refuse("revision_replay_operation_changed", "ONBOARDING_PLAN_STALE")
+    if migration is not None and (not isinstance(migration, dict) or migration.get("mappings") != request["mappings"]
+            or migration.get("resolutions") != {"keep_local": sorted(set(request["keep_local"])), "accept_pack": sorted(set(request["accept_pack"]))}):
+        refuse("migration_replay_intent_changed", "ONBOARDING_PLAN_STALE")
+    return records[-1]
+
+
 def apply(raw):
     from .pack_catalog import _outside_assets
 
@@ -69,8 +107,7 @@ def apply(raw):
         state = lifecycle.load_state(target)
         recorded = state.get("research_revisions", [])
         if recorded and recorded[-1]["revision_id"] == value["owner_plan"].get("revision_id"):
-            if lifecycle.inspect_workspace(target)["state"] != "current":
-                refuse("revision_installed_state_changed", "ONBOARDING_PLAN_STALE")
+            verify_replay(value)
             return {"status": "already_applied", "revision_id": recorded[-1]["revision_id"], "research": status(target)}
     if not value["owner_plan"].get("revision_plan_id"):
         refuse("revision_plan_binding_missing")

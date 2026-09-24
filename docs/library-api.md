@@ -1,5 +1,13 @@
 # Library API
 
+Version `13` adds an explicitly scoped `Onboarding` handle for discovery, setup,
+pack lifecycle and current-agent research. `Workspace` authority is unchanged.
+See [scoped onboarding](../workspace-template/docs/agent-contracts.md#scoped-python-onboarding)
+for root/operation grants, lifetime, payload parity and error behavior. The
+operation matrix is version `2`; `agent extensions` returns the optional MCP
+schemas and lifecycle request shapes. Strict evidence and final export gates
+remain authoritative across these surfaces.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -302,8 +310,9 @@ Hosts should check the declared surface at startup and retain an outer timeout.
 Orchestration still launches one version-matched controller process per call;
 `doctor` may probe external tools with individual timeouts.
 
-Lifecycle, full normalization, source inventory and request mutation, coverage
-editing, lint, and workspace-wide publication bundles remain CLI-only. The
+Workspace upgrade, full normalization, source inventory and general request
+mutation, coverage editing, lint, and workspace-wide publication bundles remain
+CLI-only. Scoped onboarding covers explicit setup and pack lifecycle operations. The
 matrix names their supported entry points. Package API use alone does not
 establish that an operation has no subprocesses or writes.
 

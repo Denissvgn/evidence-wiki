@@ -26,6 +26,7 @@ PDF_EXTENSIONS = {".pdf"}
 LATEX_EXTENSIONS = {".tex", ".sty", ".cls"}
 BIBTEX_EXTENSIONS = {".bib", ".bbl", ".bst"}
 HTML_EXTENSIONS = {".html", ".htm", ".xhtml"}
+DOCX_EXTENSIONS = {".docx"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".tif", ".tiff", ".bmp", ".eps"}
 TABLE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".feather"}
 # Structured payloads: evidence whose shape is fields rather than prose or rows. This
@@ -221,6 +222,7 @@ RAW_FINGERPRINT_CAPTURE_SUFFIXES = {
     "host_capture": {".md", ".markdown", ".mdown", ".txt"},
     "pdf": PDF_EXTENSIONS,
     "html": HTML_EXTENSIONS,
+    "docx": DOCX_EXTENSIONS,
     "table": TABLE_TEXT_EXTENSIONS,
     "structured_data": STRUCTURED_DATA_EXTENSIONS,
 }
@@ -395,6 +397,8 @@ def classify(path: Path, raw_root: Path) -> str:
         return "bibtex"
     if suffix in HTML_EXTENSIONS:
         return "html"
+    if suffix in DOCX_EXTENSIONS:
+        return "docx"
     if suffix in IMAGE_EXTENSIONS:
         return "image"
     if suffix in TABLE_EXTENSIONS:

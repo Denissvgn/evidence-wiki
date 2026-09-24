@@ -25,13 +25,14 @@ from types import ModuleType
 from typing import Any
 
 from . import __version__
+from ._onboarding_operations import METHODS as ONBOARDING_METHODS
 from ._operations import operation_matrix
 from ._script_host import load_packaged_script, shared_assets_root
 from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "12"
+LIBRARY_API_VERSION = "13"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -102,6 +103,7 @@ LIBRARY_API_SURFACE = (
     "orchestrate.session.cleanup_claims",
     "fleet_status",
     "contract",
+    *("onboarding." + name for name in ONBOARDING_METHODS),
 )
 
 
@@ -271,6 +273,7 @@ def contract() -> dict:
     import yaml
 
     from . import orchestration
+    from .extension_contracts import index as extension_index
     from .onboarding_schemas import contract_index
     from .orchestration_schemas import public_orchestration_schema_documents
     from .pack_authoring_contracts import contract_index as pack_authoring_index
@@ -347,6 +350,7 @@ def contract() -> dict:
         "pack_discovery": pack_contract_index(),
         "pack_authoring": pack_authoring_index(),
         "pack_revisions": pack_revision_index(),
+        "onboarding_extensions": extension_index(),
         "source_usability": source_contract_index(),
         "research_planning": planning_contract_index(),
         "installed_agent": {
@@ -514,6 +518,7 @@ def contract() -> dict:
             "question_resolve": question_resolve_module.SCHEMA_VERSION,
             "run_state": "1.0",
             "orchestration_session": orchestration.ORCHESTRATION_SESSION_SCHEMA_VERSION,
+            "orchestration_host_session": orchestration.ORCHESTRATION_HOST_SESSION_SCHEMA_VERSION,
             "orchestration_work_order": orchestration.ORCHESTRATION_WORK_ORDER_SCHEMA_VERSION,
             "orchestration_result": orchestration.ORCHESTRATION_RESULT_SCHEMA_VERSION,
             "orchestration_attempt": orchestration.ORCHESTRATION_ATTEMPT_SCHEMA_VERSION,

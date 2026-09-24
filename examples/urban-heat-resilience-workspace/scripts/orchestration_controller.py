@@ -63,6 +63,7 @@ from _workspace_module_loader import load_workspace_module
 from source_failure_taxonomy import is_attempt_failure_code, is_retryable_attempt_failure_code
 
 SCHEMA_VERSION = "1.0"
+HOST_SESSION_SCHEMA_VERSION = "1.1"
 SESSION_ARTIFACT_TYPE = "orchestration_session"
 WORK_ORDER_ARTIFACT_TYPE = "orchestration_work_order"
 RESULT_ARTIFACT_TYPE = "orchestration_result"
@@ -316,6 +317,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     start = subparsers.add_parser("start", help="Create one parent orchestration session.")
     start.add_argument("--orchestration-id", default=None)
     start.add_argument("--agent-id", required=True)
+    start.add_argument("--host-transition-id", default=None)
     start.add_argument("--max-actions", type=parse_positive_int, default=DEFAULT_MAX_ACTIONS)
     start.add_argument(
         "--action-timeout-seconds",
@@ -1673,7 +1675,14 @@ def load_session(project_root: Path, orchestration_id: str) -> dict[str, Any]:
         )
     document = load_json_object(path, error_code="ORCHESTRATION_STATE_INVALID", label="orchestration session")
     if (
-        document.get("schema_version") != SCHEMA_VERSION
+        not (
+            document.get("schema_version") == SCHEMA_VERSION and "host_transition_id" not in document
+            or document.get("schema_version") == HOST_SESSION_SCHEMA_VERSION
+            and isinstance(document.get("host_transition_id"), str)
+            and re.fullmatch(r"[a-f0-9]{64}", document["host_transition_id"]) is not None
+            and isinstance(document.get("requirement_basis"), str)
+            and re.fullmatch(r"sha256:[a-f0-9]{64}", document["requirement_basis"]) is not None
+        )
         or document.get("artifact_type") != SESSION_ARTIFACT_TYPE
         or document.get("orchestration_id") != orchestration_id
         or document.get("status") not in {ACTIVE_STATUS, PAUSED_STATUS, *TERMINAL_STATUSES}
@@ -6310,9 +6319,14 @@ def finish_session(
 
 
 def start_session(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    transition = getattr(args, "host_transition_id", None)
+    if transition is not None and (not isinstance(transition, str) or re.fullmatch(r"[a-f0-9]{64}", transition) is None):
+        raise OrchestrationControllerError("ORCHESTRATION_ID_INVALID", "Host transition identity must be a canonical digest")
     load_sibling_module("_usage_gate").require_host_intake(load_config(project_root))
     load_sibling_module("_evidence_revision").capture_workspace(project_root)
     with workspace_lock(project_root / ".locks/domain-pack-refresh.lock", purpose="session requirement binding"):
+        if transition is not None:
+            load_sibling_module("_pack_revision_guard").idle(project_root)
         return start_bound_session(project_root, args)
 
 
@@ -6351,8 +6365,9 @@ def start_bound_session(project_root, args):
         project = config.get("project") if isinstance(config.get("project"), dict) else {}
         handoff = project.get("handoff") if isinstance(project.get("handoff"), dict) else None
         session: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": HOST_SESSION_SCHEMA_VERSION if getattr(args, "host_transition_id", None) is not None else SCHEMA_VERSION,
             "requirement_basis": load_sibling_module("_pack_revision_guard").controls(project_root),
+            **({"host_transition_id": args.host_transition_id} if getattr(args, "host_transition_id", None) is not None else {}),
             "artifact_type": SESSION_ARTIFACT_TYPE,
             "orchestration_id": orchestration_id,
             "started_at": now,

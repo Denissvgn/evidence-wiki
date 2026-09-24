@@ -5,7 +5,9 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-OPERATION_MATRIX_VERSION = "1"
+from ._onboarding_operations import rows as onboarding_rows
+
+OPERATION_MATRIX_VERSION = "2"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -57,6 +59,7 @@ _ROWS = (
     ("orchestrate.session.cleanup_claims", "evidence-wiki orchestrate cleanup-claims", "removes verified archived live claim ledgers only with apply=True; retains archives, session evidence, markers and locks", "controller session, retention, and action locks on apply; read-only plan by default", "one version-matched controller process per call"),
     ("fleet_status", "evidence-wiki fleet-status", "per-target derived caches unless no_cache", "no lock; atomic per-target cache replacement", "none"),
     ("contract", "evidence-wiki contract", "none in a workspace; package resources may be extracted privately", "process-local resource lifetime", "none"),
+    *onboarding_rows(),
 )
 
 _CLI_ONLY = (
@@ -72,6 +75,7 @@ _CLI_ONLY = (
     ("publication.bundle", "evidence-wiki publication bundle", "workspace-wide publication bundle"),
     ("orchestrate.managed", "evidence-wiki orchestrate run / resume", "managed runner lifecycle"),
     ("mcp.serve", "evidence-wiki serve-mcp", "long-running server lifecycle"),
+    ("onboarding.mcp_serve", "evidence-wiki serve-onboarding-mcp", "separate explicit roots/grants and long-running server lifecycle"),
 )
 
 

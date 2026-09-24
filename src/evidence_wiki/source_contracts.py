@@ -15,7 +15,7 @@ MAX_DOCUMENT = 1_048_576
 HOST_TOOLS = "evidence-host-tools/v1"
 DELIVERY = "evidence-host-delivery/v1"
 ROUTES = "evidence-source-routes/v1"
-FORMATS = ("markdown", "plain_text", "html", "pdf", "csv", "json", "url", "image")
+FORMATS = ("markdown", "plain_text", "html", "pdf", "docx", "csv", "json", "url", "image")
 
 
 def refuse(reason, code="ONBOARDING_INVALID"):

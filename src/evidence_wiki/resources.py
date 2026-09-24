@@ -45,6 +45,8 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/_domain_pack_lifecycle.py",
     "scripts/_pack_revision_guard.py",
     "scripts/_pack_revision_impact.py",
+    "scripts/_pack_composition.py",
+    "scripts/_docx_capture.py",
     "scripts/_coverage_revision.py",
     "scripts/_pack_selection.py",
     "scripts/_host_capture.py",

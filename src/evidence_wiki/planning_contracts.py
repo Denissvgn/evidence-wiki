@@ -40,7 +40,7 @@ def schemas():
                    required_scope=array(ident, 16), time=string(), units=string(), counterevidence=string(),
                    stopping=string(), inference=string(), quantitative=nullable(quant))
     question = obj(question_id=ident, template=nullable(string(128)), facets=array(opaque, 32), criteria=array(criteria, 32))
-    requirement = obj(source_id=ident, output_format={"enum": ["markdown", "plain_text", "html", "pdf", "csv", "json"]},
+    requirement = obj(source_id=ident, output_format={"enum": ["markdown", "plain_text", "html", "pdf", "docx", "csv", "json"]},
                       needs_complete={"type": "boolean"}, scope={"type": "object", "maxProperties": 16, "additionalProperties": string()})
     decisions = obj(
         project_name=string(128), language=string(64), raw_roots=array(string(512), 16, 1),

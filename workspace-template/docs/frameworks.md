@@ -135,3 +135,32 @@ version, model/tool configuration, platform or permission mode require requalifi
 Protected strict delivery remains owned by `StrictResearchHost` and strict export.
 The current parent owner refuses protected-evidence intake and the strict host
 refuses parent work orders. No framework binding upgrades that combination.
+
+## Optional native instruction installation
+
+`agent extensions` describes `evidence-native-instructions-request/v1`. Name
+`framework`, its exact qualified `version`, `scope` (`project` or `user`) and an
+existing canonical `root`. Use `agent instructions-plan --from-file REQUEST
+--output PLAN`, then `agent instructions-apply --from-file PLAN`. Installation
+copies the canonical portable skill and license; package installation alone
+never performs this action.
+
+| Framework | Project path below root | User path below root |
+| --- | --- | --- |
+| Pi | `.pi/skills/evidence-wiki` | `.pi/agent/skills/evidence-wiki` |
+| OpenCode | `.opencode/skills/evidence-wiki` | `.config/opencode/skills/evidence-wiki` |
+| Gemini CLI | `.gemini/skills/evidence-wiki` | `.gemini/skills/evidence-wiki` |
+
+Explicitly select the intended home directory for user scope. Existing directories
+and edited managed files are preserved with a conflict. Partial owned installs
+can resume from the same plan. `agent instructions-remove --from-file PLAN`
+moves an unchanged managed directory to `.evidence-wiki/instruction-archives/PLAN_ID`
+below the selected root for inspection/manual restoration. It leaves existing
+`AGENTS.md`, settings and other skills untouched.
+
+Refresh the selected host's discovery and inspect name collisions/precedence.
+Installation does not grant project trust or prove a model followed instructions.
+Keep terminal bootstrap and the canonical guide available independently. Locations
+follow [Pi skills](https://github.com/earendil-works/pi/blob/16787ad5b2dc748047f314ca1bfe7708f30f54f3/packages/coding-agent/docs/skills.md),
+[OpenCode skills](https://opencode.ai/docs/skills/) and
+[Gemini skills](https://geminicli.com/docs/cli/skills/).

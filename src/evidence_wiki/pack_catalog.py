@@ -161,8 +161,13 @@ def initialize(path: Path, roots: dict[str, str]) -> dict:
 
 
 def _root(value, key):
+    from ._onboarding_scope import ACTIVE_SCOPE
+
     row = value["roots"][key]
     path = Path(row["path"])
+    scope = ACTIVE_SCOPE.get()
+    if scope is not None:
+        scope.path(path, installation=True)
     if not path.exists():
         refuse("catalog_root_missing")
     if path.is_symlink() or not path.is_dir() or identity(path) != row["identity"]:

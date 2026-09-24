@@ -154,3 +154,27 @@ during inspection. Prefer an already available native path, such as the required
 Python PDF backend, where its contract fits; use host delivery or a reviewed
 adapter for unavailable formats. Obtain actual authority before changing access
 or spending, and keep unverified facts explicit through strict review/export.
+
+## DOCX text and tables
+
+`agent recipes` describes native `docx-text-tables` capture. Select a local `.docx`
+through setup or deliver it to an authorized raw root, then use the inventory and
+normalization owners. Verification and normalized-index retrieval retain the
+source ID and original bytes. The adapter reads transitional OOXML main-body
+paragraphs and rectangular, unmerged tables in `word/document.xml`. Cell strings
+remain exact, including leading zeros and decimals; types/formulas are not inferred.
+
+The adapter uses package code (MIT) and the Python standard library (Python's
+license terms). It needs no extra Python distribution, OS package, Word/LibreOffice,
+network or credentials and installs nothing. Document-use rights remain separate.
+This follows Microsoft's [WordprocessingML structure](https://learn.microsoft.com/en-us/office/open-xml/word/structure-of-a-wordprocessingml-document).
+
+Scope is bounded text extraction, without page-layout reconstruction or a
+whole-document completeness claim. OCR, images, macros/embedded objects, merged
+or nested tables, fields, numbered lists, tracked changes and referenced headers,
+footers, notes/comments are unsupported. Unsupported main-body content produces
+unusable-evidence diagnostics. Bounds are 16 MiB original bytes, 8 MiB per XML
+part, 512 ZIP parts, 100,000 XML nodes and 1,048,576 extracted characters. Entity
+declarations, unsafe ZIP paths, symlink parts and expansion abuse refuse.
+Extraction within this subset establishes neither truth nor source suitability.
+OCR, transcription and other office formats remain unqualified recipes.

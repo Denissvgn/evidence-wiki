@@ -120,6 +120,10 @@ REQUIRED_WHEEL_MEMBERS = (
     "evidence_wiki/_agent_catalog.py",
     "evidence_wiki/onboarding_schemas.py",
     "evidence_wiki/onboarding_contract.py",
+    *("evidence_wiki/" + name + ".py" for name in (
+        "onboarding", "onboarding_mcp", "onboarding_tools", "_onboarding_scope", "_onboarding_operations",
+        "extension_contracts", "extension_commands", "pack_migrations", "pack_composition", "fleet_revisions",
+        "host_transitions", "local_journal", "local_artifacts", "runtime_identity", "native_instructions", "capability_recipes")),
     *(f"evidence_wiki/assets/{relative}" for relative in REQUIRED_ASSET_PATHS),
 )
 
@@ -135,6 +139,8 @@ REQUIRED_SDIST_MEMBERS = (
     "tools/smoke_installed_orchestration.py",
     "tools/validate_installed_artifacts.py",
     "tools/sync_agent_resources.py",
+    "tools/probe_installed_extensions.py",
+    "tests/_docx_fixture.py",
     "tests/_publication_fixture.py",
     "tests/fixtures/fake_codex_cli.py",
     "tests/fixtures/madrid-autonomo-workspace/AGENTS.md",
@@ -275,6 +281,7 @@ def isolated_fixtures(scratch: Path) -> Path:
     """Copy explicitly named qualification inputs, without source-package imports."""
     root = scratch / "qualification-inputs"
     members = ["tools/smoke_installed_orchestration.py", "tools/qualify_journeys.py",
+               "tools/probe_installed_extensions.py", "tests/_docx_fixture.py",
                "tools/_journey_cases.py", "tools/_journey_driver.py", "tools/_journey_authoring.py",
                "tests/fixtures/onboarding-journeys/cases.json", "tests/_computation_fixture.py", "tests/fixtures/fake_codex_cli.py",
                "tests/fixtures/strict-evidence/review-cases.json",
@@ -870,7 +877,7 @@ HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
     del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
     del os.environ["EVIDENCE_WIKI_STATE_DIR"]
     assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
-    assert contract()["library_api"]["version"] == "12"
+    assert contract()["library_api"]["version"] == "13"
     print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
     '''
 )
@@ -998,7 +1005,7 @@ ASSESSMENT_PROBE = textwrap.dedent(
         assert workspace.assessments.apply_refresh(application) == applied
         assert workspace.assessments.check(envelope)["reasons"] == ["assessment_invalidated"]
         assert command("plan-refresh", host.refresh())["plan"]["entries"] == []
-        assert contract()["library_api"]["version"] == "12"
+        assert contract()["library_api"]["version"] == "13"
     print(json.dumps({"evidence_assessments": "authenticated_cli_api_parity", "assessment_refresh": "revocation_and_idempotent_apply"}))
     '''
 )
@@ -1605,6 +1612,8 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     research = run([str(python), "-c", RESEARCH_PROBE, str(cli), str(scratch / "caller-research")], cwd=outside)
     revisions = run([str(python), "-c", REVISION_PROBE, str(cli), str(scratch / "pack-revisions")], cwd=outside)
     setup = run([str(python), "-c", SETUP_PROBE, str(cli), str(scratch / "workspace-application")], cwd=outside)
+    extensions = run([str(python), "-I", str(fixture_root / "tools/probe_installed_extensions.py"), "--root", str(scratch / "scoped-extensions"),
+                      "--docx-fixture", str(fixture_root / "tests/_docx_fixture.py")], cwd=outside) if os.name == "posix" else json.dumps({"scoped_extensions": "unsupported_platform"})
     authoring = run([str(python), "-c", PACK_AUTHORING_PROBE, str(cli), str(scratch / "pack-authoring"),
         str(scratch / "research-planning/request.json")], cwd=outside)
     run([str(python), "-B", str(fixture_root / "tools/qualify_journeys.py"), "--output", str(scratch / "journeys")], cwd=outside)
@@ -1616,6 +1625,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
             **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research), **json.loads(revisions),
+            **json.loads(extensions),
             "journeys": journeys}
 
 

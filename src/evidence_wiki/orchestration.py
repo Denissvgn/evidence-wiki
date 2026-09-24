@@ -33,6 +33,7 @@ from typing import Any
 from urllib.parse import quote, quote_plus
 
 ORCHESTRATION_SESSION_SCHEMA_VERSION = "1.0"
+ORCHESTRATION_HOST_SESSION_SCHEMA_VERSION = "1.1"
 ORCHESTRATION_WORK_ORDER_SCHEMA_VERSION = "1.0"
 ORCHESTRATION_RESULT_SCHEMA_VERSION = "1.0"
 ORCHESTRATION_ATTEMPT_SCHEMA_VERSION = "1.0"
@@ -1031,6 +1032,7 @@ def protocol_start(
     action_timeout_seconds: int | None = None,
     total_timeout_seconds: int | None = None,
     driver_wait_seconds: float | None = None,
+    host_transition_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a parent orchestration session and return its session document.
 
@@ -1050,7 +1052,7 @@ def protocol_start(
             action_timeout_seconds=action_timeout_seconds,
             total_timeout_seconds=total_timeout_seconds,
             driver_wait_seconds=driver_wait_seconds,
-        ),
+        ) + (["--host-transition-id", host_transition_id] if host_transition_id is not None else []),
     )
 
 

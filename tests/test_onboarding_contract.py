@@ -148,7 +148,7 @@ def test_schemas_and_negotiation_are_caller_owned_and_have_no_workflow_claims():
     contract = evidence_wiki.contract()
     assert contract["onboarding_contract"] == contract_index()
     assert contract["schema_version"] == "1.0"
-    assert contract["library_api"]["version"] == "12"
+    assert contract["library_api"]["version"] == "13"
     assert "agent" not in contract["library_api"]["surface"]
 
 

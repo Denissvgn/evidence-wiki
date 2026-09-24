@@ -657,6 +657,10 @@ def _run_pack(args: list[str]) -> int:
         _print_pack_help()
         return 0
     subcommand = args.pop(0)
+    if subcommand in {"migration-plan", "migration-apply", "compose-plan", "compose", "fleet-plan", "fleet-apply"}:
+        from .extension_commands import main as extension_main
+
+        return extension_main(subcommand, args)
     if subcommand in {"revision-plan", "revision-apply", "revision-status", "reevaluate"}:
         from .pack_revision_commands import main as revision_main
 
@@ -694,6 +698,9 @@ def _print_help() -> None:
         "Usage:\n"
         "  evidence-wiki agent [summary|resources|resource ID] [--format text|json]\n"
         "  evidence-wiki agent frameworks|bundle|invoke [integration options]\n"
+        "  evidence-wiki agent extensions|recipes [--format json]\n"
+        "  evidence-wiki agent transition-plan|transition-apply --from-file DOCUMENT\n"
+        "  evidence-wiki agent instructions-plan|instructions-apply|instructions-remove --from-file DOCUMENT\n"
         "  evidence-wiki agent inspect|routes|source-status|capture|source-schemas|source-guide [source options]\n"
         "  evidence-wiki agent next|start|resume|heartbeat|acquire|ingest|research-export|progress|research-guide|research-schemas [research options]\n"
         "  evidence-wiki agent apply --from-file PLAN [--format json|text]\n"
@@ -713,12 +720,14 @@ def _print_help() -> None:
         "  evidence-wiki publication [--target PATH] --question SLUG [--question SLUG ...]\n"
         "  evidence-wiki normalize verify [--target PATH] [--source-id ID] [--format json|text]\n"
         "  evidence-wiki pack list|show|catalog|decide|schemas|guide [options]\n"
+        "  evidence-wiki pack migration-plan|migration-apply|compose-plan|compose|fleet-plan|fleet-apply --from-file DOCUMENT [--output PATH]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
         "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [options]\n"
         "  evidence-wiki pack adopt --target PATH [options]\n"
         "  evidence-wiki doctor [--target PATH] [--format text|json]\n"
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
+        "  evidence-wiki serve-onboarding-mcp [--allow-root PATH] [--allow-operation NAME]\n"
         "  evidence-wiki strict schemas|check|prepare-review|review|export [options]\n"
         "  evidence-wiki computation schemas|check|aggregate|evaluate|verify|schedule|write|apply-warnings|dispatch [options]\n"
         "  evidence-wiki orchestrate start|next|submit|status|abandon|retire|cleanup-claims [options]\n"
@@ -828,6 +837,10 @@ def main(argv: list[str] | None = None) -> int:
         return int(_packaged_script("_computation_cli").main(args))
     if command == "serve-mcp":
         return _run_serve_mcp(args)
+    if command == "serve-onboarding-mcp":
+        from .onboarding_mcp import main as onboarding_mcp_main
+
+        return onboarding_mcp_main(args)
     if command == "orchestrate":
         return _run_orchestrate(args)
     if command == "contract":

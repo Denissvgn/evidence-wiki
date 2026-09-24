@@ -17,7 +17,7 @@ from .source_probe import provider_probe
 
 
 def _normalizer(format_name, inspection):
-    native = {"markdown": "host_text", "plain_text": "host_text", "html": "html", "pdf": "pdf", "csv": "table", "url": "link_stub"}
+    native = {"markdown": "host_text", "plain_text": "host_text", "html": "html", "pdf": "pdf", "docx": "docx", "csv": "table", "url": "link_stub"}
     if format_name in native:
         return native[format_name]
     kind = "structured_data" if format_name == "json" else "image"
@@ -171,7 +171,7 @@ def plan(raw, *, target=None, host_tools=None, probe_providers=()):
             profile = source.get("host_capture")
             if profile is not None and profile["content_kind"] not in requirement["content_kinds"]:
                 row["gaps"].append("source_not_ready")
-            observed_format = profile["content_format"] if profile else {"html": "html", "pdf": "pdf", "table": "csv", "structured_data": "json"}.get(source.get("kind"))
+            observed_format = profile["content_format"] if profile else {"html": "html", "pdf": "pdf", "docx": "docx", "table": "csv", "structured_data": "json"}.get(source.get("kind"))
             if observed_format != requirement["output_format"]:
                 row["gaps"].append("capture_format_mismatch")
             provenance = manifest.get(source_id, {}).get("provenance") or {}
@@ -332,7 +332,7 @@ def plan(raw, *, target=None, host_tools=None, probe_providers=()):
                 row["gaps"].append("source_location_unresolved")
             elif not scope_allows(tool, query):
                 row["gaps"].append("host_scope_not_declared")
-            if not formats or formats[0] not in {"markdown", "plain_text", "html", "pdf", "csv"}:
+            if not formats or formats[0] not in {"markdown", "plain_text", "html", "pdf", "docx", "csv"}:
                 row["gaps"].append("normalizer_unavailable")
             row["normalizer"] = _normalizer(formats[0], inspection) if formats else None
             row["delivery_schema"] = "evidence-host-delivery/v1" if formats and formats[0] in {"markdown", "plain_text"} else "existing_provenance_sidecar"

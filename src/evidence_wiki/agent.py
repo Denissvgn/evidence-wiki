@@ -223,6 +223,20 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv and argv[0] in {"recipes", "extensions"}:
+        from .capability_recipes import recipes
+        from .extension_contracts import contract as extension_contract
+
+        if argv[1:] not in ([], ["--format", "json"]):
+            print(json.dumps({"error_code": "ONBOARDING_INVALID", "message": "Use agent recipes --format json.",
+                "recoverable": False, "remediation": "Inspect agent recipes.", "details": {"field": "recipe_arguments"}}))
+            return 2
+        print(json.dumps(recipes() if argv[0] == "recipes" else extension_contract(), ensure_ascii=False))
+        return 0
+    if argv and argv[0] in {"transition-plan", "transition-apply", "instructions-plan", "instructions-apply", "instructions-remove"}:
+        from .extension_commands import main as extension_main
+
+        return extension_main(argv[0], argv[1:])
     if argv and argv[0] in RESEARCH_OPERATIONS:
         from .research_commands import main as research_main
 

@@ -1,6 +1,7 @@
 """Revision impact, frozen requirements, migration and safe installed-owner routing."""
 
 import contextlib
+import copy
 import io
 import json
 import shutil
@@ -12,11 +13,30 @@ import yaml
 
 from evidence_wiki import cli
 from evidence_wiki._pack_io import canonical
+from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.pack_revisions import apply, plan, status
 from tests.test_strict_evidence import host as host
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_replayed_revision_rejects_changed_candidate_even_with_rehashed_plan(workspace, candidate):
+    from evidence_wiki._pack_io import capture_pack
+
+    wanted = {"schema_version": "evidence-pack-revision-request/v1", "target": str(workspace),
+        "path": str(candidate), "catalog": None, "revision": None, "rationale": "Update selected guidance",
+        "keep_local": [], "accept_pack": []}
+    prepared = plan(wanted)
+    apply(canonical(prepared))
+    path = candidate / "claims.md"
+    path.write_text(path.read_text() + "\nChanged after application.\n")
+    altered = copy.deepcopy(prepared)
+    altered["candidate_sha256"] = capture_pack(candidate).tree_sha256
+    altered["plan_id"] = owner("_pack_revision_impact").digest({k: v for k, v in altered.items() if k != "plan_id"})
+    with pytest.raises(EvidenceWikiError) as error:
+        apply(canonical(altered))
+    assert error.value.error_code == "ONBOARDING_PLAN_STALE"
 
 
 def invoke(*args):

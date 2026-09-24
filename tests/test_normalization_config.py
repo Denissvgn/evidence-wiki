@@ -321,6 +321,7 @@ class NativeKindDriftTests(unittest.TestCase):
             "repo_link": {"id": "link:r", "kind": "repo_link", "url": "https://github.com/o/r"},
             "web_link": {"id": "link:w", "kind": "web_link", "url": "https://example.org/a"},
             "html": {"id": "raw:h", "kind": "html", "raw_paths": ["raw/web/page.html"]},
+            "docx": {"id": "raw:d", "kind": "docx", "raw_paths": ["raw/papers/document.docx"]},
             "table": {"id": "raw:t", "kind": "table", "raw_paths": ["raw/data/rows.csv"]},
             "codebase_architecture": {"id": "code:c", "kind": "codebase_architecture"},
             "execution_evidence": {"id": "execution:c", "kind": "execution_evidence"},

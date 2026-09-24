@@ -887,6 +887,8 @@ def normalization_method(
         return "link"
     if record.get("kind") == "html" and html_raw_path(record) is not None:
         return "html"
+    if record.get("kind") == "docx" and any(PurePosixPath(path).suffix.lower() == ".docx" for path in record_raw_paths(record)):
+        return "docx"
     if record.get("kind") == "table" and table_raw_path(record) is not None:
         return "table"
     if adapters and adapter_for_kind(adapters, record.get("kind")) is not None:
@@ -1017,6 +1019,8 @@ def normalize_selected_record(
         return normalize_link_record(item.record)
     if item.method == "html":
         return normalize_html_record(project_root, item.record)
+    if item.method == "docx":
+        return normalize_docx_record(project_root, item.record)
     if item.method == "table":
         return normalize_table_record(project_root, item.record)
     if item.method == "codebase":
@@ -2860,6 +2864,33 @@ def normalize_html_record(project_root: Path, record: dict[str, Any]) -> Normali
     )
 
 
+def normalize_docx_record(project_root, record):
+    extractor = load_workspace_module(_SCRIPT_DIR, "_docx_capture")
+    revision = load_workspace_module(_SCRIPT_DIR, "_evidence_revision")
+    paths = [name for name in record_raw_paths(record) if PurePosixPath(name).suffix.lower() == ".docx"]
+    warnings = manifest_warnings(record)
+    data, reason = None, None
+    try:
+        if len(paths) != 1:
+            raise extractor.DocxInvalid("docx_original_selection_ambiguous")
+        path = project_root / paths[0]
+        observed = path.lstat()
+        if observed.st_size > extractor.MAX_BYTES:
+            raise extractor.DocxInvalid("docx_container_invalid_or_large")
+        raw = revision.read_observed_file(project_root, paths[0], revision.observation(observed))
+        data = extractor.extract(raw)
+    except (ValueError, OSError) as error:
+        reason = str(error) if isinstance(error, extractor.DocxInvalid) else "docx_input_invalid_or_changed"
+        set_record_unusable_evidence(record, [*record_unusable_evidence_reasons(record), reason])
+        warnings.append(reason)
+    return NormalizedSource(record=record, extraction_method="docx_text_tables",
+        title=PurePosixPath(paths[0]).stem if paths else record_id(record), authors=[], abstract=None, outline=[],
+        extracted_text=data["text"] if data else "None extracted.", media=[], links=[], bibliography_files=[],
+        included_paths=[], warnings=unique_values(warnings), title_confidence="none", title_source="file_name",
+        capture_status="content_extracted" if data else "partial", needs_ocr=reason == "docx_image_only_requires_ocr",
+        structured=data["structured"] if data else None)
+
+
 def escape_table_cell(value: str) -> str:
     cell = " ".join(value.split()).replace("|", "\\|")
     if len(cell) > TABLE_MAX_CELL_CHARS:
@@ -3863,7 +3894,7 @@ def frontmatter_for(
         "standards": standards,
         "provenance": record.get("provenance") if isinstance(record.get("provenance"), dict) else None,
         "needs_ocr": True if source.needs_ocr else None,
-        "language": "en",
+        "language": None if source.extraction_method == "docx_text_tables" else "en",
         "confidence": confidence_for(source),
         "title_confidence": source.title_confidence if source.extraction_method == "pdf_text" else None,
         "abstract_confidence": source.abstract_confidence if source.extraction_method == "pdf_text" else None,
@@ -4267,6 +4298,8 @@ def normalization_report_summary(summary: dict[str, int | str]) -> dict[str, Any
         method_keys += ("market",)
     if "host_text" in summary:
         method_keys += ("host_text",)
+    if "docx" in summary:
+        method_keys += ("docx",)
     skipped_existing = int(summary["skipped_existing"])
     skipped_unsupported = int(summary["skipped_unsupported"])
     return {

@@ -140,6 +140,13 @@ capabilities from configured access and source usability. Select source IDs with
 route choices and remediation. Inspection does not activate providers or run
 normalization. See [source usability](workspace-template/docs/source-usability.md).
 
+`agent recipes` describes bounded native DOCX text/table capture. Use
+`agent extensions` for explicit pack identity migration, composition, fleet
+proposals and host transitions. Python hosts can use `Onboarding.open` with
+selected roots and operation grants; `serve-onboarding-mcp` exposes the same
+scoped owners. See [onboarding contracts](workspace-template/docs/agent-contracts.md#scoped-python-onboarding)
+and [optional native skill installation](workspace-template/docs/frameworks.md#optional-native-instruction-installation).
+
 Use `evidence-wiki agent plan --from-file request.json` to compile a read-only
 setup plan with original question mappings, evidence criteria, source routes and
 explicit assurance blockers. Save with `--output` and recheck input identities

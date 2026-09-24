@@ -2,6 +2,16 @@
 
 ## 1.0.0 - 2026-09-23
 
+- Add explicit first-pack and identity migrations, pinned pack composition,
+  independent fleet revision proposals and resumable host transitions between
+  fixed-requirement research sessions.
+- Add scoped Python onboarding and a separate opt-in MCP server with explicit
+  roots and mutation grants. Preserve existing workspace-handle authority.
+- Capture bounded DOCX main-body text and rectangular tables with original-byte
+  provenance, explicit unsupported-layout diagnostics and normal retrieval.
+- Install canonical agent skills at explicitly selected native locations, with
+  conflict preservation, exact-file receipts and reversible archival removal.
+
 - Record local-source observation time, distinguish local HTML from web
   acquisitions, preserve strict refusal envelopes in copied scripts and report
   publication blockers by category. Retain the acquisition coordination inode

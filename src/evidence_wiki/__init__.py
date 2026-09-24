@@ -22,6 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
     from ._contract import contract as contract
     from ._facades.diagnostics import fleet_status as fleet_status
     from ._facades.snapshots import verify_snapshot as verify_snapshot
+    from .onboarding import Onboarding as Onboarding
     from .workspace import Workspace as Workspace
 
 # Attribute name -> (submodule to import, attribute on it, or ``None`` for the
@@ -38,6 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
 # order. The leading underscore keeps one meaning for the public name.
 _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "Workspace": (".workspace", "Workspace"),
+    "Onboarding": (".onboarding", "Onboarding"),
     "contract": ("._contract", "contract"),
     "errors": (".errors", None),
     # Module-level rather than a handle method: it aggregates across many

@@ -21,8 +21,154 @@ print(json.dumps(schema))
 The accessor returns a fresh Draft 2020-12 JSON Schema with no external
 references. IDs cannot be paths, URLs, or arbitrary schema documents. Access and
 structural validation perform no filesystem writes, subprocesses, provider
-imports, or network access. Operational Python and MCP onboarding are separate
-surfaces; schema access does not imply that they exist.
+imports, or network access. Operational Python and MCP onboarding have separate
+root and operation grants, described below.
+
+## Scoped Python onboarding
+
+Library API version `13` adds `evidence_wiki.Onboarding`. Existing `Workspace`
+handles retain their authority and lifetime. A new handle defaults to read and
+planning operations; the host selects roots and grants mutations explicitly:
+
+```python
+from evidence_wiki import Onboarding
+
+with Onboarding.open(allowed_roots=["/research"], allow=["apply"]) as host:
+    bootstrap = host.bootstrap()  # installation only; no current-directory scan
+    contracts = host.contracts()
+    proposed = host.plan(setup_request)
+    checked = host.check_plan(proposed)
+    if proposed["setup_ready"] and checked["status"] == "current":
+        result = host.apply(proposed)
+```
+
+Use the interpreter containing the selected package. The handle binds package
+code, resource catalog, API version and interpreter identity. Restart the host
+process after an installation change: another handle cannot reload cached Python
+modules. Closing releases its root descriptors; returned content
+belongs to the caller and shared extracted assets remain owned by the process.
+Handles never implicitly close other handles. Calls are synchronous; serialize
+operations on one handle and retain an outer timeout.
+Root descriptors and mutation publishers require POSIX. Rootless content and
+bootstrap access do not create these descriptors.
+
+`host.contracts()` and `evidence-wiki agent extensions` return the same extension
+schemas, command routes, recipes and MCP declarations. The operation matrix in
+`contract().library_api` describes every public method. Plan/apply methods accept
+decoded objects or bounded UTF-8 JSON bytes and return canonical owner payloads.
+CLI `--output` publication is a separate effect. `bootstrap()` returns the
+capabilities envelope; `bootstrap(target)` returns the workspace-aware envelope.
+Resource methods return the CLI envelope's payload. Pack inspection returns full
+owner observations before CLI filtering/summary formatting. Errors retain
+`EvidenceWikiError` subclasses, stable codes, exit codes, recoverability and
+remediation. Unknown codes retain the base-class fallback. Closed handles raise
+`WORKSPACE_UNREADABLE`.
+
+Methods cover pack discovery/decisions and local drafts, inspection/capture,
+setup, revisions/migration/composition, fleet proposals, host transitions,
+instruction installation, current-agent research coordination and computation.
+Catalog registration, semantic assessment/acceptance, network acquisition,
+managed model runners and arbitrary executable/provider probes retain their
+separately authorized owners outside this scoped interface.
+
+Root grants cover catalog member roots and setup coordination directories as
+well as workspace data. Bundled read-only assets remain discoverable without a
+root grant. Escaping links and overlap with protected host authority refuse.
+Grants do not authenticate a reviewer, grant source-use permission or provide OS
+process isolation. Current strict review and `research_export` remain the final
+eligibility boundary. Setup, transport, arithmetic and migration success cannot
+replace it.
+
+## Optional onboarding MCP server
+
+```bash
+evidence-wiki serve-onboarding-mcp --allow-root /research --allow-operation apply
+```
+
+With no roots, this separate process can bootstrap and serve installed resources.
+Mutation tools appear only for the exact operation names the host grants. Client
+messages cannot change roots or grants. Existing `serve-mcp --target ...` callers
+retain the separate read/append contract.
+
+The server implements newline-delimited JSON-RPC over stdio with protocol
+`2024-11-05`, `initialize`, `notifications/initialized`, `ping`, `tools/list`,
+`tools/call`, `resources/list` and `resources/read`. One bounded UTF-8 document
+(at most 1 MiB of input, 4 MiB of output) occupies each line. Duplicate keys and invalid JSON refuse;
+stdout carries protocol and stderr carries diagnostics. Resources use closed
+`evidence-wiki://resource/ID` URIs. `tools/list` supplies tool schemas;
+`onboarding_contracts` supplies nested request/plan schemas. Successful tool JSON
+text equals its Python owner result. Typed owner errors use `isError: true`;
+invalid protocol messages use JSON-RPC errors.
+
+EOF closes the handle. Installation or root replacement requires restart.
+Execution is serial; notifications never invoke tools, and cancellation does not
+undo a committed owner effect. Retain plans/IDs/receipts and inspect recovery
+before retrying interrupted mutations. Tool declarations confer no host
+authentication or stronger evidence assurance. Framework-native MCP is not
+assumed.
+
+## Pack identity, composition and fleet operations
+
+Retrieve request shapes with `agent extensions`. Commands accept
+`--from-file DOCUMENT`; plan commands optionally save a new `--output FILE`.
+
+| Intent | Preview | Apply |
+| --- | --- | --- |
+| First pack or changed identity | `pack migration-plan` | `pack migration-apply` |
+| Related domains in one pinned pack | `pack compose-plan` | `pack compose --output NEW_CONTAINER` |
+| Selected workspaces and one candidate | `pack fleet-plan` | `pack fleet-apply` |
+
+Migration requires one candidate path or catalog revision, rationale, explicit
+configuration conflict resolutions, and policy/request-kind/template mappings.
+Map every removed ID to a valid unique replacement or `null` retirement.
+Ambiguous mappings refuse. Source IDs, evidence, requests, answers, host controls
+and old pack directories remain retained. Mappings express migration intent;
+they do not rewrite historical requests or certify answers. The lifecycle owner
+provides journals, backups, locks, revalidation and interrupted-write recovery.
+Reevaluate affected questions before fresh evidence/review and final export.
+Same-name changes continue through `pack revision-plan`/`revision-apply`.
+
+Composition accepts 2–8 members with path, unique alias and applicability, plus a
+new name/version/scope. It scopes policy/request/template names, retains original
+member bytes and guidance, and pins their identities in `composition.lock.json`.
+Shared declarations must agree; page-type/directory sets may be combined.
+Conflicting taxonomy, configuration, schema or computation declarations refuse.
+Nested compositions are unsupported. Validation rebuilds compiled files from
+pinned members; merely rehashing weakened output is insufficient. Review
+applicability and select the resulting single identity. Any member change needs
+recomposition and a whole-pack revision/migration.
+
+Fleet planning reads 1–16 explicit nonoverlapping workspaces; it never scans for
+others. Reports distinguish candidate availability, installed consistency, local
+conflicts and research impact from semantic applicability. Apply requires an
+explicit subset of proposed targets, with independent transactions and receipts.
+Partial failure retains successes. Retry selected unchanged plans or replan
+changed workspaces. Version labels never trigger propagation.
+
+## Explicit host transitions
+
+`agent transition-plan` prepares setup or a revision/reevaluation sequence and one
+new parent session; `agent transition-apply` applies it. Name a separate existing
+control root, transition ID, target, optional terminal previous session, next
+agent/session IDs, optional saved setup/revision plans and explicit reevaluation
+documents. New setup cannot be combined with historical revision inputs.
+
+Live work, pending orders, modified deployed runtime and stale requirements
+refuse. The private journal binds the plan and generation, and completed steps
+are checked against owner artifacts. Session creation binds correlation/current
+requirements under the controller lock. A retry reconciles interrupted creation
+without making another session. The operation creates the parent only; driving
+it, launching a model, writing computation results and dispatching schedules
+remain explicit. Old approvals retain their original basis. The ordinary route
+is `artifact_checked`; protected parent execution remains unsupported.
+`already_complete` confirms historical correlation, not current research
+readiness. Run the current export gate.
+
+Correlated host sessions use schema `1.1`, published as
+`contract().artifact_schema_documents.orchestration_host_session`. Ordinary
+sessions retain schema `1.0`. Work orders and results retain their own versions.
+The controller supports both session shapes and requires the correlation and
+frozen requirement basis for `1.1`; unknown versions refuse.
 
 `onboarding_contract.workflow_commands` lists the read-only `agent` bootstrap,
 summary, resource index and content retrieval commands. Separate

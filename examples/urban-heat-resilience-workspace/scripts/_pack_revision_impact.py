@@ -217,7 +217,7 @@ def inspect(root, state, incoming, effective, candidate_files, desired_files):
                         "current_definitions": sorted(computation_ids(effective)),
                         "values": "all_results_and_transitive_claims" if computation_changed else "unchanged", "effects_executed": False},
         "policy_ids": sorted(policy_ids), "removed_policy_ids": sorted(set(old_policies) - set(new_policies)),
-        "identifiers": {"namespace": "pack:" + state["pack"]["name"], "policies": identifier_changes(old_policies, new_policies),
+        "identifiers": {"namespace": "pack:" + state["pack"]["name"] if state["pack"].get("name") else None, "policies": identifier_changes(old_policies, new_policies),
                         "request_kinds": identifier_changes(old_kinds, new_kinds)},
         "unresolved_references": unresolved, "guidance": sorted(prose_files),
         "bounds": {"workspace_files": sum(research_input(name) for name in capture.files), "questions_scanned": len(question_files), "questions_affected": len(questions),
