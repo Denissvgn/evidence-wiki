@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import difflib
 import io
 import json
 import subprocess
@@ -15,6 +16,7 @@ import yaml
 import evidence_wiki
 from evidence_wiki.cli import main
 from evidence_wiki.errors import EvidenceWikiError
+from evidence_wiki.pack_discovery import owner
 from tests._assessment_fixture import SOURCE_ID, AssessmentFixture
 from tests._execution_fixture import authenticate, identifier
 from tests._script_loader import load_isolated_module
@@ -61,7 +63,19 @@ def test_prepare_issue_and_consume_nonfinancial_assessment(host):
         assert payload["inputs"]["selected"] == {SOURCE_ID: host.body["source_revision"]}
         assert payload["expires_at"] == "2026-12-01T00:00:00+00:00"
         envelope = host.sign(prepared["registration"])
-        receipt = workspace.assessments.issue(envelope)
+        try:
+            receipt = workspace.assessments.issue(envelope)
+        except EvidenceWikiError:
+            # Retain the synthetic proof difference instead of only a typed
+            # refusal when independent platform observations disagree.
+            stable = owner("_assessment_engine").stable_publication
+            fresh = workspace.assessments.prepare(host.request())["assessment"]["publication"]
+            expected = json.dumps(stable(payload["publication"]), sort_keys=True, indent=2).splitlines()
+            observed = json.dumps(stable(fresh), sort_keys=True, indent=2).splitlines()
+            difference = "\n".join(difflib.unified_diff(expected, observed, n=1))
+            if difference:
+                pytest.fail("Independent publication proof differs:\n" + difference[:8192])
+            raise
         host.checkpoint = receipt["checkpoint"]
         assert workspace.assessments.issue(envelope) == receipt
         checked = workspace.assessments.check(envelope)
