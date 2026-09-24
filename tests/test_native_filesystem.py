@@ -3,6 +3,7 @@
 import os as standard_os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,8 @@ def test_metadata_signature_retains_changes_when_size_and_mtime_are_restored(tmp
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         before = metadata_fstat(descriptor)
+        # Timestamp precision does not imply an update on every rapid write.
+        time.sleep(0.05)
         path.write_bytes(b"after!")
         os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
         after = metadata_fstat(descriptor)

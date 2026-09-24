@@ -98,7 +98,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          .\.venv\Scripts\python.exe tools/run_test_groups.py --group-size 48 --shard-count 3 --shard-index ${{ matrix.shard }}
+          .\.venv\Scripts\python.exe tools/run_test_groups.py --group-size 48 --shard-count 3 --shard-index ${{ matrix.shard }} --timeout 3600
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\.venv\Scripts\python.exe -m ruff check .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from evidence_wiki._filesystem import os
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.planning import compile_plan
@@ -268,7 +269,7 @@ def test_progress_has_unknown_grading_and_separate_estimates(workspace, tmp_path
     assert result["measured"]["question_outcomes"] == {"open": 1}
     assert files(workspace) == before
     save_report(tmp_path / "observed.json", result, target=workspace)
-    assert (tmp_path / "observed.json").stat().st_mode & 0o077 == 0
+    owner("_host_evidence_store").private_entry(os.stat(tmp_path / "observed.json", follow_symlinks=False))
 
 
 def test_resume_is_readonly_when_started_through_canonical_owner(workspace):

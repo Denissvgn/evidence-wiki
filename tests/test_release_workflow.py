@@ -229,6 +229,9 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert len(commands) == 2
     assert all("--shard-count 3 --shard-index ${{ matrix.shard }}" in command for command in commands)
     assert all("--group-size 48" in command for command in commands)
+    windows = next(command for command in commands if "Scripts\\python.exe" in command)
+    posix = next(command for command in commands if ".venv/bin/python" in command)
+    assert "--timeout 3600" in windows and "--timeout" not in posix
     assert all("-m ruff check ." in command and "sync_vendored_scripts.py --check" in command for command in commands)
     upload = next(step for step in test["steps"] if "actions/upload-artifact@" in step.get("uses", ""))
     assert upload["if"] == "always()"
