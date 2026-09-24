@@ -2,7 +2,6 @@
 
 
 
-import os
 from pathlib import Path
 
 import pytest
@@ -12,7 +11,6 @@ from evidence_wiki.planning import compile_plan
 from evidence_wiki.setup_application import apply_plan
 from tests.test_research_planning import request
 
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="Setup requires native POSIX descriptor locking.")
 
 def test_empty_setup_and_replay_preserve_question(tmp_path):
     plan = compile_plan(canonical(request(tmp_path)))

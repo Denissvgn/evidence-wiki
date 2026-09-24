@@ -31,6 +31,13 @@ On Windows, use `.research-env\Scripts\python.exe` and
 version, supported contracts and instructions. An older installation can refuse
 an unavailable capability; use its returned version and instructions together.
 
+Native Windows supports local workspace captures, protected publication, pack
+catalogs, authoring and setup through anchored handles and private ACLs. Reparse
+points, network shares and filesystems without the required native guarantees
+are refused. Use a host-owned directory and trust file restricted to the current
+Windows account and SYSTEM for protected evidence state. Framework runtime
+qualification and `host_enforced` isolation remain separate capabilities.
+
 Give your current agent the installed executable, your original questions, the
 available source locations, writable directory and access limits. Ask it to read
 `agent` first, preserve every question, and return the controlled research export
@@ -127,6 +134,23 @@ while OpenAlex can use `OPENALEX_API_KEY` from the process environment. See
 [workspace initialization][workspace-initialization], [source
 discovery][source-discovery], and [acquisition][acquisition] for the full
 contracts.
+
+Check credentials before the first command that needs external services:
+
+```bash
+evidence-wiki env check --service openalex --service github --format json
+evidence-wiki env run --service openalex --prompt -- \
+  evidence-wiki orchestrate run --target . --runner codex
+```
+
+`env check` reports variable names and presence only. `env run --prompt` asks
+for missing values with terminal echo disabled and passes them to the selected
+command and its children. Values are never saved by this helper or added to your
+parent shell. Inject persistent credentials through your host secret manager.
+Select `openai`, `anthropic`, `github` or `openalex`, or use `--require-env NAME`
+for another integration. Select only the credentials your workflow needs;
+initialization and offline work require none, and agent runners may use their
+own login. See [environment setup](workspace-template/docs/environment-setup.md).
 
 Inspect guidance before selecting it with `evidence-wiki pack list` and
 `evidence-wiki pack show bundled:general-science`. Packs expose scope inputs,

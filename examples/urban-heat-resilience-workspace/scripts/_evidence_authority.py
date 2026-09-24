@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import re
 import stat
 from datetime import datetime, timezone
@@ -18,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from _evidence_revision import canonical_bytes, content_id, observation
+from _native_fs import os
 from _qualified_packet import strict_json
 from _workspace_module_loader import load_workspace_module
 
@@ -113,8 +113,9 @@ def read_host_policy(project_root: Path) -> bytes:
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         descriptors.append(fd)
         before = os.fstat(fd)
+        private = before.native_private if hasattr(before, "native_private") else not before.st_mode & 0o077
         if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                or before.st_mode & 0o077 or before.st_size > MAX_TRUST_BYTES):
+                or not private or before.st_size > MAX_TRUST_BYTES):
             raise EvidenceInvalid("unsafe_host_trust_file")
         chunks = bytearray()
         while True:

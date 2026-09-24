@@ -5,11 +5,11 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ._filesystem import os
 from ._pack_io import canonical, read_file, relative_path
 from .host_capabilities import known_credentials, read_tools, scope_allows
 from .pack_catalog import _outside_assets
@@ -103,7 +103,7 @@ def deliver(raw, *, target, path, host_tools=None):
     owner("_delegation_gate").require_sanctioned_mutation(view.root, delegated, request_id=profile["request_id"],
         error_code="ONBOARDING_OWNERSHIP_CONFLICT", subject="Host capture delivery",
         remediation="Use the current acquisition order's request and delivery scope.")
-    if os.name != "posix" or os.link not in os.supports_dir_fd:
+    if os.link not in os.supports_dir_fd:
         refuse("capture_write_platform_unsupported", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
     directory = os.open(view.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     descriptors = [directory]
@@ -122,7 +122,7 @@ def deliver(raw, *, target, path, host_tools=None):
         with owner("_workspace_locks").descriptor_lock(lock):
             view.finish()
             _check_lock(lock_directory, lock)
-            parent = _directory(directory, str(Path(path).parent))
+            parent = _directory(directory, Path(path).parent.as_posix())
             descriptors.append(parent)
             sidecar_name = Path(path).name + ".provenance.yml"
             metadata_bytes = canonical(sidecar)
@@ -193,7 +193,7 @@ def deliver_local(*, target, input, path, source_id, question_ids):
         with owner("_workspace_locks").descriptor_lock(lock, timeout_seconds=0):
             _check_lock(locks, lock)
             view.finish()
-            parent = _directory(directory, str(Path(path).parent))
+            parent = _directory(directory, Path(path).parent.as_posix())
             descriptors.append(parent)
             name = Path(path).name
             # No adoption of an unexplained existing pair, even with identical bytes.

@@ -4,7 +4,6 @@ import contextlib
 import copy
 import io
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -14,6 +13,7 @@ import pytest
 import yaml
 
 from evidence_wiki import pack_catalog, pack_discovery
+from evidence_wiki._filesystem import os
 from evidence_wiki._pack_io import capture_pack, yaml_document
 from evidence_wiki.cli import main
 from evidence_wiki.domain_pack_validator import validate_domain_pack
@@ -125,7 +125,6 @@ def test_installed_state_is_authoritative_and_inspection_does_not_adopt(tmp_path
     assert select("installed:general-science", target=workspace)[0]["state"] == "invalid"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Catalog publication requires descriptor-relative native locking")
 def test_catalog_records_stale_and_missing_candidates_without_accepting_old_receipts(tmp_path, local_pack):
     root = tmp_path / "catalog"
     pack_catalog.initialize(root, {"assets": str(local_pack.parent)})
@@ -280,7 +279,6 @@ def test_project_local_guidance_uses_initializer_rules():
     assert decide(json.dumps(value).encode())["status"] == "valid"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Catalog writes require POSIX descriptors")
 def test_catalog_root_receipt_and_native_lock_changes(tmp_path, local_pack, monkeypatch):
     path = tmp_path / "catalog"
     pack_catalog.initialize(path, {"assets": str(local_pack.parent)})
@@ -321,7 +319,6 @@ def test_cli_bounds_guides_schemas_and_redacted_errors(capsys):
     assert json.loads(result.out)["error_code"] == "ONBOARDING_RESOURCE_UNKNOWN"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Catalog writes require POSIX descriptors")
 def test_concurrent_catalog_writers_and_replaced_lock(tmp_path, local_pack, monkeypatch):
     path = tmp_path / "catalog"
     pack_catalog.initialize(path, {"assets": str(local_pack.parent)})

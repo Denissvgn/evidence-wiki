@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import uuid
 from pathlib import Path
 
+from ._filesystem import os
 from ._pack_io import canonical, capture_pack, identity, read_file, relative_path
 from .pack_authoring_contracts import DRAFT, MAX_BYTES, checked, decode, digest, refuse
 from .pack_catalog import _outside_assets, _writer_flags

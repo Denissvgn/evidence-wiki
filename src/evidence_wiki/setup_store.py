@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import os
 import stat
 import unicodedata
 import uuid
 from pathlib import Path
 
+from ._filesystem import os
 from ._pack_io import canonical, identity, json_document, read_file, signature
 from .errors import EvidenceWikiError
 from .pack_discovery import owner
@@ -116,8 +116,8 @@ class SetupStore:
 
     @contextlib.contextmanager
     def locked(self):
-        if (os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
-                or "fcntl" not in owner("_workspace_locks").available_lock_backends()):
+        if (not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd
+                or not {"fcntl", "win32"}.intersection(owner("_workspace_locks").available_lock_backends())):
             refuse("setup_platform_unsupported", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
         try:
             fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

@@ -1,0 +1,139 @@
+"""Native filesystem invariants shared by package and standalone publishers."""
+
+import os as standard_os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from evidence_wiki._filesystem import os
+from evidence_wiki._pack_io import read_file
+from evidence_wiki.pack_catalog import initialize, register
+from evidence_wiki.pack_discovery import owner
+
+
+def test_adapter_does_not_modify_the_standard_os_module():
+    if standard_os.name == "nt":
+        assert os is not standard_os
+        assert os.open in os.supports_dir_fd and standard_os.open not in standard_os.supports_dir_fd
+    else:
+        assert os is standard_os
+
+
+def test_native_directory_operations_and_exclusive_publication(tmp_path):
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.mkdir("private", 0o700, dir_fd=directory)
+        nested = os.open("private", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+        try:
+            descriptor = os.open("temporary", os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=nested)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(b"retained bytes\r\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link("temporary", "published", src_dir_fd=nested, dst_dir_fd=nested, follow_symlinks=False)
+            with pytest.raises(FileExistsError):
+                os.link("temporary", "published", src_dir_fd=nested, dst_dir_fd=nested, follow_symlinks=False)
+            os.unlink("temporary", dir_fd=nested)
+            os.fsync(nested)
+            assert read_file(nested, "published") == b"retained bytes\r\n"
+            assert os.listdir(nested) == ["published"]
+            with os.scandir(nested) as entries:
+                assert [entry.name for entry in entries] == ["published"]
+            os.replace("published", "renamed", src_dir_fd=nested, dst_dir_fd=nested)
+            assert read_file(nested, "renamed") == b"retained bytes\r\n"
+            os.unlink("renamed", dir_fd=nested)
+        finally:
+            os.close(nested)
+        os.rmdir("private", dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
+def test_native_private_permissions_are_enforced(tmp_path):
+    root = tmp_path / "authority"
+    os.mkdir(root, 0o700)
+    descriptor = os.open(root / "policy.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    os.close(descriptor)
+    store = owner("_host_evidence_store")
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        store.private_entry(os.fstat(directory), directory=True)
+        descriptor = os.open("policy.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+        try:
+            store.private_entry(os.fstat(descriptor))
+        finally:
+            os.close(descriptor)
+        os.chmod(root / "policy.json", 0o644)
+        descriptor = os.open("policy.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+        try:
+            with pytest.raises(ValueError, match="unsafe_host_state_entry"):
+                store.private_entry(os.fstat(descriptor))
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(directory)
+
+
+def test_native_descriptor_lock_has_no_recursive_writer_bypass(tmp_path):
+    locks = owner("_workspace_locks")
+    first = os.open(tmp_path / "coordination.lock", os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    second = os.open(tmp_path / "coordination.lock", os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        with locks.descriptor_lock(first):
+            with pytest.raises(locks.LockUnavailableError) as error, locks.descriptor_lock(second, timeout_seconds=0):
+                pytest.fail("A second descriptor acquired the writer lock")
+            assert error.value.contended
+        with locks.descriptor_lock(second, timeout_seconds=0):
+            pass
+    finally:
+        os.close(second)
+        os.close(first)
+
+
+@pytest.mark.skipif(standard_os.name != "nt", reason="Exercises native Windows lock/capture interaction")
+def test_native_capture_can_observe_a_held_coordination_file(tmp_path):
+    locks = owner("_workspace_locks")
+    (tmp_path / "research.yml").write_bytes(b"project: {}\n")
+    with locks.workspace_lock(tmp_path / "coordination.lock") as lock:
+        assert lock.backend == "win32"
+        captured = owner("_evidence_revision").capture_workspace(tmp_path)
+        assert captured.files["coordination.lock"] == b""
+        assert captured.files["research.yml"] == b"project: {}\n"
+
+
+@pytest.mark.skipif(standard_os.name != "nt", reason="Exercises native Windows process ownership")
+def test_native_mutex_recovers_after_process_death(tmp_path):
+    locked = tmp_path / "coordination.lock"
+    source = (
+        "from pathlib import Path; import time; from evidence_wiki.pack_discovery import owner; "
+        "locks=owner('_workspace_locks'); "
+        "context=locks.workspace_lock(Path(" + repr(str(locked)) + ")); "
+        "context.__enter__(); print('locked', flush=True); time.sleep(30)"
+    )
+    child = subprocess.Popen([sys.executable, "-c", source], stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "locked"
+        child.terminate()
+        child.wait(timeout=10)
+        with owner("_workspace_locks").workspace_lock(locked, timeout_seconds=1) as result:
+            assert result.backend == "win32"
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+
+
+def test_catalog_uses_the_native_publisher(tmp_path):
+    catalog = tmp_path / "catalog"
+    packs = Path(__file__).resolve().parents[1] / "domain-packs"
+    # Catalog roots must be caller-local, so use a copied bounded pack.
+    import shutil
+
+    copies = tmp_path / "packs"
+    copies.mkdir()
+    shutil.copytree(packs / "general-science", copies / "general-science")
+    assert initialize(catalog, {"local": str(copies)})["status"] == "created"
+    result = register(catalog, revision="science", root_id="local", relative="general-science", scope="Scientific observations")
+    assert result["status"] == "registered"

@@ -243,7 +243,9 @@ interrupted requests resume with the same request/result identity. Conflicting
 user edits or changed inputs refuse and retain the pending record for repair.
 Pending effects block publication. Stored result hashes cannot authorize a
 strict claim or replace recomputation. File API support is checked explicitly;
-unsupported descriptor/no-follow capabilities refuse.
+unsupported descriptor/no-follow capabilities refuse. Native Windows operations
+use anchored local-drive handles and private ACLs, while POSIX operations retain
+their existing descriptor and permission checks.
 
 ## Strict claims and review
 

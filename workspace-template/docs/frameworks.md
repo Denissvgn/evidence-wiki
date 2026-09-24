@@ -15,8 +15,10 @@ directory, run `evidence-wiki agent bundle --target ASSET_DIRECTORY`. Existing
 destinations refuse; global/project instructions and agent settings are never
 merged or overwritten. A failed filesystem operation may leave a partial new
 destination; inspect it and choose a new empty destination before retrying.
-Filesystem publication requires POSIX descriptor-relative operations; unsupported
-platforms can retrieve the portable JSON bundle for host-owned materialization.
+Filesystem publication uses POSIX directory descriptors or native Windows
+handles on local drives. Other platforms can retrieve the portable JSON bundle
+for host-owned materialization. Filesystem support does not establish a framework
+runtime or protected-host qualification.
 
 The bundle contains a standards-compatible `skills/evidence-wiki/SKILL.md`, the
 unchanged canonical guide as a relative reference, bounded tool schemas and an

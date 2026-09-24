@@ -1,6 +1,5 @@
 """Explicit fleet selections preserve partial success and owner-level recovery."""
 
-import os
 import shutil
 from pathlib import Path
 
@@ -13,7 +12,6 @@ from tests.test_pack_migrations import bytes_of, initialize
 
 ROOT = Path(__file__).resolve().parents[1]
 
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="Explicit lifecycle publishers require POSIX directory descriptors.")
 
 
 def test_fleet_readonly_plan_and_partial_apply_replay(tmp_path):

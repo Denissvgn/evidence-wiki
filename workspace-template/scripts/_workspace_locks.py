@@ -2,9 +2,9 @@
 """Cross-platform workspace mutation locks.
 
 Mutating workspace scripts should use :func:`workspace_lock` around the full
-read-validate-write sequence. The helper uses ``fcntl.flock`` where available,
-``msvcrt.locking`` on Windows, and an ownership-token exclusive-create lockfile
-fallback when no native mechanism can be established. The fallback coordinates
+read-validate-write sequence. The helper uses ``fcntl.flock`` on POSIX and
+file-identity-bound native mutexes on Windows. It retains ``msvcrt.locking`` and
+an ownership-token exclusive-create lockfile as alternate backends. The fallback coordinates
 processes on filesystems that honor atomic exclusive creation, but it is not
 reported as having the same owner-death guarantees as a native advisory lock.
 If no lock can be acquired, mutation refuses with ``LOCK_UNAVAILABLE``.
@@ -38,6 +38,16 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+if os.name == "nt":
+    # This leaf helper is also loaded directly by importlib callers that do not
+    # put its directory on sys.path. Resolve only its installed native sibling.
+    import importlib.util
+
+    _native_spec = importlib.util.spec_from_file_location("_workspace_lock_windows_fs", Path(__file__).with_name("_windows_fs.py"))
+    _native_module = importlib.util.module_from_spec(_native_spec)
+    _native_spec.loader.exec_module(_native_module)
+    os = _native_module.filesystem
+
 try:  # pragma: no cover - platform dependent import
     import fcntl
 except ImportError:  # pragma: no cover - Windows
@@ -54,7 +64,7 @@ LOCK_REMEDIATION = (
     "Wait for the active writer to finish and retry with bounded timeout. If the owner crashed, "
     "inspect the retained lock metadata before using the documented stale-lock recovery; do not delete raw evidence."
 )
-LOCK_BACKENDS = ("fcntl", "msvcrt", "exclusive")
+LOCK_BACKENDS = (("win32", "msvcrt", "exclusive") if os.name == "nt" else ("fcntl", "msvcrt", "exclusive"))
 _CONTENDED_ERRNOS = {errno.EACCES, errno.EAGAIN}
 
 # Errnos that mean the filesystem cannot support this lock, never that a peer
@@ -144,8 +154,15 @@ def descriptor_lock(descriptor: int, *, timeout_seconds: float = 10.0) -> Iterat
     """Lock an already anchored regular file without reopening a mutable path.
 
     The caller owns the descriptor and namespace identity checks. This route
-    requires a native POSIX advisory lock and never uses the single-writer hatch.
+    requires native advisory locking and never uses the single-writer hatch.
     """
+    if getattr(os, "native_windows", False) and "win32" in LOCK_BACKENDS:
+        try:
+            with os.lock(descriptor, timeout_seconds=timeout_seconds):
+                yield
+        except BlockingIOError:
+            raise LockUnavailableError("The descriptor lock is held by another writer.", contended=True) from None
+        return
     observed = os.fstat(descriptor)
     if fcntl is None or not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
         raise LockUnavailableError("Native descriptor locking is unavailable.")
@@ -209,6 +226,8 @@ def available_lock_backends() -> tuple[str, ...]:
     available: list[str] = []
     for backend in LOCK_BACKENDS:
         if backend == "fcntl" and fcntl is not None:
+            available.append(backend)
+        elif backend == "win32" and getattr(os, "native_windows", False):
             available.append(backend)
         elif backend == "msvcrt" and msvcrt is not None:
             available.append(backend)
@@ -856,6 +875,21 @@ def _acquire_backend(
         try:
             if backend == "fcntl":
                 return _acquire_fcntl(lock_path, deadline, poll_interval_seconds)
+            if backend == "win32":
+                if not getattr(os, "native_windows", False):
+                    raise _BackendUnsupported("Windows native handles unavailable")
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                descriptor = os.open(lock_path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600)
+                context = os.lock(descriptor, timeout_seconds=max(0, deadline - time.monotonic()))
+                try:
+                    context.__enter__()
+                except BlockingIOError:
+                    os.close(descriptor)
+                    raise LockUnavailableError("The native lock is held by another writer.", contended=True) from None
+                except BaseException:
+                    os.close(descriptor)
+                    raise
+                return _AcquiredBackend("win32", handle=(descriptor, context), path=lock_path)
             if backend == "msvcrt":
                 return _acquire_msvcrt(lock_path, deadline, poll_interval_seconds)
             if backend == "exclusive":
@@ -883,6 +917,12 @@ def _acquire_backend(
 def _release_backend(acquired: _AcquiredBackend) -> None:
     if acquired.name == "fcntl":
         _release_fcntl(acquired)
+    elif acquired.name == "win32":
+        descriptor, context = acquired.handle
+        try:
+            context.__exit__(None, None, None)
+        finally:
+            os.close(descriptor)
     elif acquired.name == "msvcrt":
         _release_msvcrt(acquired)
     elif acquired.name == "exclusive":

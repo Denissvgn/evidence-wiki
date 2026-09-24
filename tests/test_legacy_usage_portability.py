@@ -48,9 +48,10 @@ def test_legacy_export_and_cache_still_refuse_explicit_declarations(legacy, decl
     assert not (root / "index.sqlite").exists()
 
 
-def test_legacy_reader_does_not_enable_unsupported_coherent_capture(legacy, monkeypatch):
+def test_capture_refuses_platform_without_a_native_reader(legacy, monkeypatch):
     root, source = legacy
     revision = load_isolated_module("portable_capture_boundary", SCRIPTS / "_evidence_revision.py")
+    monkeypatch.setattr(revision, "sys", SimpleNamespace(platform="unsupported"))
     monkeypatch.setattr(os, "supports_dir_fd", set())
     with pytest.raises(revision.ScriptRefusal) as caught:
         revision.read_observed_file(root, "sources/normalized/sample.md", revision.observation(source.stat()))
@@ -118,7 +119,7 @@ def test_windows_observation_accepts_distinct_path_and_descriptor_clocks(legacy,
     monkeypatch.setattr(os, "fstat", descriptor_change_time)
     with source.open("rb") as handle:
         observed = native.checked_file_observation(source, handle.fileno(), expected)
-    assert observed[-1] == expected[-1] + 100
+    assert observed[6] == expected[-1] + 100
 
 
 def test_windows_observation_refuses_a_different_file_descriptor(legacy):
@@ -130,6 +131,31 @@ def test_windows_observation_refuses_a_different_file_descriptor(legacy):
     with replacement.open("rb") as handle:
         with pytest.raises(native.EvidenceInvalid, match="usage_workspace_changed"):
             native.checked_file_observation(source, handle.fileno(), expected)
+
+
+def test_windows_observation_compares_extension_modes_without_losing_identity(legacy, monkeypatch):
+    _root, source = legacy
+    native = load_isolated_module("portable_windows_modes", SCRIPTS / "_windows_files.py")
+    original = source.lstat()
+    fields = {name: getattr(original, name) for name in (
+        "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns",
+    )}
+    fields["st_mode"] |= 0o111
+    monkeypatch.setattr(Path, "lstat", lambda _self: SimpleNamespace(**fields))
+    expected = native.observation(SimpleNamespace(**fields))
+    with source.open("rb") as handle:
+        native.checked_file_observation(source, handle.fileno(), expected)
+        fields["st_ino"] += 1
+        with pytest.raises(native.EvidenceInvalid, match="usage_workspace_changed"):
+            native.checked_file_observation(source, handle.fileno(), native.observation(SimpleNamespace(**fields)))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Requires Windows executable path metadata")
+def test_windows_reader_accepts_executable_bytes_without_executing_them(tmp_path):
+    native = load_isolated_module("portable_windows_executable", SCRIPTS / "_windows_files.py")
+    source = tmp_path / "fixture.exe"
+    source.write_bytes(b"inert executable identity fixture")
+    assert native.read_file(tmp_path, source.name, native.observation(source.lstat()), 1024) == source.read_bytes()
 
 
 def test_windows_observation_still_checks_path_change_time(legacy, monkeypatch):

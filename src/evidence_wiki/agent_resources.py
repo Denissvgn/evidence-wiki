@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import stat
 import zipfile
@@ -16,6 +15,7 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 
 from ._agent_catalog import CATALOG_PATH, resource_paths
+from ._filesystem import os
 from .errors import UsageError
 
 MAX_BYTES = 1_048_576

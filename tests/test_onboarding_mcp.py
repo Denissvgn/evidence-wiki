@@ -1,13 +1,13 @@
 """Actual stdio framing and scoped server authority are independent of workspace MCP."""
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from evidence_wiki._filesystem import os
 from evidence_wiki.onboarding import Onboarding
 from evidence_wiki.onboarding_mcp import OnboardingMcpServer
 from tests.test_caller_research import workspace as workspace
@@ -81,7 +81,6 @@ def test_oversized_line_drains_before_next_request():
     assert rows[1]["id"] == 4 and rows[1]["result"] == {}
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Research mutation owners require POSIX.")
 def test_ingest_tool_accepts_each_exclusive_selector_and_reconciles_actual_owner(workspace):
     from evidence_wiki._pack_io import canonical
     from evidence_wiki.errors import EvidenceWikiError

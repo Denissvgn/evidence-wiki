@@ -273,6 +273,7 @@ def contract() -> dict:
     import yaml
 
     from . import orchestration
+    from .environment import SERVICE_VARIABLES
     from .extension_contracts import index as extension_index
     from .onboarding_schemas import contract_index
     from .orchestration_schemas import public_orchestration_schema_documents
@@ -346,6 +347,17 @@ def contract() -> dict:
         "starter_schema_version": workspace_system.get("schema_version"),
         "compatible_research_yml_contract": workspace_system.get("compatible_research_yml_contract"),
         "profile_schema_versions": [initializer.PROFILE_SCHEMA_VERSION],
+        "environment_setup": {
+            "commands": ["env check", "env run"],
+            "report_schema": "evidence-environment/v1",
+            "services": dict(SERVICE_VARIABLES),
+            "additional_variables": "--require-env NAME",
+            "validation": "presence_only",
+            "prompt": "explicit_terminal_only",
+            "credential_scope": "selected_command_and_children",
+            "credentials_persisted": False,
+            "guide": "docs/environment-setup.md",
+        },
         "onboarding_contract": contract_index(),
         "pack_discovery": pack_contract_index(),
         "pack_authoring": pack_authoring_index(),

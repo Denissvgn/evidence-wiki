@@ -3,16 +3,17 @@
 import contextlib
 import io
 import json
-import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
 
+from evidence_wiki._filesystem import os
 from tests import test_publication_readiness as fixtures
 from tests._script_loader import load_isolated_module
 
@@ -27,7 +28,6 @@ def tree_bytes(root):
             for path in sorted(root.rglob("*")) if "__pycache__" not in path.parts}
 
 
-@unittest.skipUnless(os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"), "requires no-follow capture support")
 class SelectedPublicationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -180,7 +180,7 @@ class SelectedPublicationTests(unittest.TestCase):
 
     def test_platform_without_descriptor_support_refuses_without_writes(self):
         before = tree_bytes(self.root)
-        with patch.object(REVISION.os, "supports_dir_fd", set()):
+        with patch.object(REVISION.os, "supports_dir_fd", set()), patch.object(REVISION, "sys", SimpleNamespace(platform="unsupported")):
             self.assert_refusal("EVIDENCE_REVISION_UNSUPPORTED", lambda: REVISION.capture_workspace(self.root))
         self.assertEqual(before, tree_bytes(self.root))
 

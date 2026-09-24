@@ -4,6 +4,12 @@ Use the installed `evidence-wiki init` command to create a configured research w
 
 The initializer does not fetch network resources, install git hooks, initialize git, copy pilot data, or move raw sources.
 
+No API credentials are required for initialization. Before running an external
+integration, use `evidence-wiki env check` to inspect selected requirements and
+`evidence-wiki env run --prompt -- ...` to supply missing values through hidden
+terminal input. See [environment setup](environment-setup.md) for service
+selection and per-command credential handling.
+
 ## CLI Usage
 
 Create a generic workspace from explicit flags:

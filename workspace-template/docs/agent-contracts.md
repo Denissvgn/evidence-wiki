@@ -49,7 +49,9 @@ modules. Closing releases its root descriptors; returned content
 belongs to the caller and shared extracted assets remain owned by the process.
 Handles never implicitly close other handles. Calls are synchronous; serialize
 operations on one handle and retain an outer timeout.
-Root descriptors and mutation publishers require POSIX. Rootless content and
+Root descriptors and mutation publishers use native POSIX or Windows filesystem
+operations. Windows uses local-drive handles and rejects reparse points; private
+host state is checked through owner and ACL information. Rootless content and
 bootstrap access do not create these descriptors.
 
 `host.contracts()` and `evidence-wiki agent extensions` return the same extension
@@ -191,7 +193,7 @@ catalogs and caller-declared fit decisions. Retrieve its schemas with
 with `agent summary --format json` and exact resource content with
 `agent resource ID --format json`. Bootstrap and resource responses use v2
 envelopes; their v1 schemas remain available. Summary and index use v1 envelopes.
-The setup protocol below is implemented by `agent apply` for local POSIX setup.
+The setup protocol below is implemented by `agent apply` for local setup on POSIX and Windows.
 See [application and recovery](workspace-application.md) for supported assurance,
 observed results and conservative interruption boundaries. Direct `init` has no
 setup journal. Supplemental result/checkpoint schemas use `agent setup-schemas`.

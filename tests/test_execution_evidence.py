@@ -6,7 +6,6 @@ import contextlib
 import copy
 import io
 import json
-import os
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +13,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from evidence_wiki._filesystem import os
 from tests._execution_fixture import (
     KEYS,
     NOW,
@@ -36,7 +36,6 @@ VERIFY = load_isolated_module("execution_verify", SCRIPTS / "normalize_verify.py
 LINT = load_isolated_module("execution_lint", SCRIPTS / "lint.py")
 POLICY = load_isolated_module("execution_policy", SCRIPTS / "_evidence_policies.py")
 REVISION = load_isolated_module("execution_revision", SCRIPTS / "_evidence_revision.py")
-pytestmark = pytest.mark.skipif(os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="requires no-follow capture")
 
 
 @pytest.fixture
@@ -173,7 +172,7 @@ def test_evaluator_names_and_embedded_policy_cannot_authorize_a_pass(trusted, mo
         authority = root / "embedded-policy.json"
         monkeypatch.setenv("EVIDENCE_WIKI_AUTHORITY_FILE", str(authority.resolve()))
     authority.write_bytes(canonical(policy))
-    authority.chmod(0o644 if change == "public-trust" else 0o600)
+    os.chmod(authority, 0o644 if change == "public-trust" else 0o600)
     path.write_bytes(canonical(document))
     report = EXECUTION.inspect_execution(root, config, record)
     assert report["valid"], report
@@ -249,6 +248,8 @@ def test_unknown_required_execution_profile_cannot_fall_back_to_generic_html(tru
 
 
 def test_swapped_fifo_is_never_opened_in_blocking_mode(tmp_path, monkeypatch):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("This host has no filesystem FIFO object.")
     path = tmp_path / "artifact.txt"
     path.write_bytes(b"original")
     expected = REVISION.observation(path.stat())

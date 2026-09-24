@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from evidence_wiki._filesystem import os
+
 NOW = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
 SOURCE_ID = "execution:lab"
 KEYS = {"runner": "11" * 32, "evaluator": "22" * 32, "owner": "33" * 32}
@@ -49,8 +51,10 @@ def host_policy(path: Path):
               "principals": {principal: {"controller": principal, "roles": [role], "keys": {principal + "-key": KEYS[principal]}}
                              for principal, role in (("runner", "generator"), ("evaluator", "evaluator"), ("owner", "usage"))},
               "revoked_keys": [], "revoked_envelopes": []}
-    path.write_bytes(canonical(policy))
-    path.chmod(0o600)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(canonical(policy))
+    os.chmod(path, 0o600)
     return policy
 
 

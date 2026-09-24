@@ -1,7 +1,6 @@
 """Scoped API values, effects, lifecycle and malformed-input boundaries."""
 
 import json
-import os
 
 import pytest
 
@@ -25,7 +24,6 @@ def test_bootstrap_cli_parity_and_closed_lifetime(capsys):
     assert error.value.error_code == "WORKSPACE_UNREADABLE"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Scoped root descriptors require POSIX.")
 def test_setup_scope_grant_and_shared_values(tmp_path):
     value = request(tmp_path)
     with Onboarding.open(allowed_roots=[tmp_path]) as handle:
@@ -41,7 +39,6 @@ def test_setup_scope_grant_and_shared_values(tmp_path):
     assert error.value.details["field"] == "onboarding_path_outside_host_scope"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Scoped root descriptors require POSIX.")
 def test_root_replacement_and_generation_change_refuse(tmp_path, monkeypatch):
     root = tmp_path / "selected"
     root.mkdir()
@@ -64,7 +61,6 @@ def test_malformed_documents_have_typed_errors(method, value):
         getattr(handle, method)(value)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Scoped root descriptors require POSIX.")
 def test_escape_and_host_authority_overlap_refuse(tmp_path, monkeypatch):
     selected = tmp_path / "selected"
     selected.mkdir()
@@ -76,7 +72,6 @@ def test_escape_and_host_authority_overlap_refuse(tmp_path, monkeypatch):
         handle.bootstrap(selected)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Scoped root descriptors require POSIX.")
 def test_setup_can_apply_via_scoped_api_and_reconcile_over_mcp(tmp_path):
     from evidence_wiki.onboarding_mcp import OnboardingMcpServer
 
@@ -93,7 +88,6 @@ def test_setup_can_apply_via_scoped_api_and_reconcile_over_mcp(tmp_path):
         server.close()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Scoped root descriptors require POSIX.")
 def test_catalog_cannot_delegate_a_root_outside_the_host_scope(tmp_path, monkeypatch):
     from evidence_wiki import pack_catalog
     from evidence_wiki._onboarding_scope import Scope

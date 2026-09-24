@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import platform
 import re
 import sys
 from pathlib import Path
 
+from ._filesystem import os
 from .agent_resources import resource_document
 from .errors import UsageError
 

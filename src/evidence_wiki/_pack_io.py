@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
+from ._filesystem import os
 from .errors import UsageError
 
 MAX_FILE = 1_048_576
@@ -121,7 +121,16 @@ def yaml_document(raw: bytes):
 def read_file(root: Path, relative: str, maximum=MAX_FILE, expected=None) -> bytes:
     relative_path(relative)
     try:
-        if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+        if os.name == "nt" and type(root) is not int:
+            from ._script_host import load_packaged_script, shared_assets_root
+
+            module = load_packaged_script(shared_assets_root(), "_windows_files")
+            revision = load_packaged_script(shared_assets_root(), "_evidence_revision")
+            observed = (root / relative).lstat()
+            if expected is not None and signature(observed) != expected:
+                refuse("pack_changed_during_read")
+            value = module.read_file(root, relative, revision.observation(observed), maximum)
+        elif os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
             flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             descriptor = os.dup(root) if type(root) is int else os.open(root, flags)
             try:
@@ -142,15 +151,6 @@ def read_file(root: Path, relative: str, maximum=MAX_FILE, expected=None) -> byt
                         refuse("pack_changed_during_read")
             finally:
                 os.close(descriptor)
-        elif os.name == "nt":
-            from ._script_host import load_packaged_script, shared_assets_root
-
-            module = load_packaged_script(shared_assets_root(), "_windows_files")
-            revision = load_packaged_script(shared_assets_root(), "_evidence_revision")
-            observed = (root / relative).lstat()
-            if expected is not None and signature(observed) != expected:
-                refuse("pack_changed_during_read")
-            value = module.read_legacy_file(root, relative, revision.observation(observed), maximum)
         else:
             refuse("pack_read_platform_unsupported", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
         if len(value) > maximum:

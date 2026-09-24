@@ -708,6 +708,8 @@ def _print_help() -> None:
         "  evidence-wiki agent plan|plan-check|plan-schemas|plan-guide [planning options]\n"
         "  evidence-wiki init [initializer options]\n"
         "  evidence-wiki deploy [initializer options]\n"
+        "  evidence-wiki env check [--service NAME] [--require-env NAME] [--format text|json]\n"
+        "  evidence-wiki env run [--service NAME] [--require-env NAME] [--prompt] -- COMMAND [ARG ...]\n"
         "  evidence-wiki upgrade [upgrade options]\n"
         "  evidence-wiki questions add|export [--target PATH] [options]\n"
         "  evidence-wiki status [--target PATH] [--format text|json]\n"
@@ -805,6 +807,10 @@ def main(argv: list[str] | None = None) -> int:
         return agent_main(args)
     if command in {"init", "deploy"}:
         return _run_initializer(args)
+    if command == "env":
+        from .environment import main as environment_main
+
+        return environment_main(args)
     if command == "upgrade":
         return _run_upgrader(args)
     if command == "questions":

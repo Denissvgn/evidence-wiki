@@ -7,7 +7,6 @@ import copy
 import hashlib
 import hmac
 import json
-import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -16,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from evidence_wiki import verify_snapshot
+from evidence_wiki._filesystem import os
 from evidence_wiki.errors import SourceError
 from tests._execution_fixture import KEYS, authenticate, binding, canonical, identifier
 from tests._snapshot_fixture import SnapshotFixture
@@ -413,7 +413,7 @@ def test_offline_cli_refuses_unsafe_trust_files(host, tmp_path, hazard):
         os.link(host.policy_path, policy)
     else:
         policy.write_bytes(host.policy_path.read_bytes() if hazard == "public" else b"x" * (1024 * 1024 + 1))
-        policy.chmod(0o644 if hazard == "public" else 0o600)
+        os.chmod(policy, 0o644 if hazard == "public" else 0o600)
     result = subprocess.run([sys.executable, "-m", "evidence_wiki.cli", "snapshot", "verify", "--trust-policy", str(policy)],
                             input=b"{}", capture_output=True, timeout=60)
     assert result.returncode == 2 and b"EVIDENCE_SNAPSHOT_REFUSED" in result.stdout + result.stderr

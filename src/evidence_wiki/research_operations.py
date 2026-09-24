@@ -25,7 +25,7 @@ def coordinated(target):
     with owner("_workspace_locks").workspace_lock(
         root / ".locks/caller-research.lock", timeout_seconds=0, purpose="caller research coordination"
     ) as lock:
-        if not lock.locked or lock.backend not in {"fcntl", "msvcrt"}:
+        if not lock.locked or lock.backend not in {"fcntl", "win32", "msvcrt"}:
             refuse("caller_native_coordination_unavailable", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
         yield root
 

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import os
 import re
 from pathlib import Path
 
+from ._filesystem import os
 from ._pack_io import canonical, identity, json_document, read_file
 from .pack_authoring_store import child, protect, publish
 from .pack_catalog import _writer_flags

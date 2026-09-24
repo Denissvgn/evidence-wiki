@@ -87,6 +87,13 @@ jobs:
           .venv/bin/python -m ruff check .
           .venv/bin/python tools/sync_vendored_scripts.py --check
 
+      - name: Check native Windows filesystem contracts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\python.exe -m pytest -q --tb=short tests/test_native_filesystem.py tests/test_workspace_capture_portability.py tests/test_legacy_usage_portability.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Run tests and quality checks (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

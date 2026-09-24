@@ -3,12 +3,12 @@
 import copy
 import hashlib
 import json
-import os
 import sys
 
 import pytest
 
 from evidence_wiki import frameworks
+from evidence_wiki._filesystem import os
 from evidence_wiki.agent_resources import resource_document
 from evidence_wiki.errors import UsageError
 from tests.test_orchestration_contract_schemas import assert_matches_schema
@@ -99,7 +99,6 @@ def test_unknown_framework_modes_and_versions_do_not_negotiate():
     assert frameworks.compatibility(framework="pi", version="0.87.0", mode="canonical_fixture", platform_id="darwin-arm64")["status"] == "supported"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Descriptor-relative bundle publication is POSIX-only")
 def test_bundle_publication_never_follows_a_replaced_destination(tmp_path, monkeypatch):
     target, moved, outside = tmp_path / "bundle", tmp_path / "moved", tmp_path / "outside"
     outside.mkdir()
@@ -127,7 +126,7 @@ def test_native_stdout_preserves_data_that_looks_like_diagnostics(tmp_path):
     from evidence_wiki.orchestration import _execute_bounded
 
     expected = '{"note":"Authorization: Bearer fixture-token","value":"0.3000000000000000001"}\n'
-    result = _execute_bounded([sys.executable, "-c", "import sys;sys.stdout.write(" + repr(expected) + ")"],
+    result = _execute_bounded([sys.executable, "-c", "import sys;sys.stdout.buffer.write(" + repr(expected.encode()) + ")"],
                               cwd=tmp_path, stdin_text="", timeout_seconds=5, preserve_stdout=True)
     assert result.stdout == expected
     with pytest.raises(UnicodeError):

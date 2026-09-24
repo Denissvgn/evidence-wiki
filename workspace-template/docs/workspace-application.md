@@ -10,7 +10,9 @@ evidence-wiki agent apply --from-file setup-plan.json
 
 Use the same `apply` command to resume. No `--force`, shell command field,
 installation, network acquisition or additional model is involved. An apply
-process requires POSIX no-follow file operations and a native descriptor lock.
+process requires native no-follow file operations and native coordination.
+POSIX uses directory descriptors and advisory locks; Windows uses anchored
+filesystem handles, private ACLs and process-owned mutexes on local drives.
 An explicitly selected `EVIDENCE_WIKI_PYTHON` must match the current command's
 interpreter. Switching environments requires a new plan.
 

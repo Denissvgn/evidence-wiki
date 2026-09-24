@@ -20,6 +20,8 @@ DOMAIN_PACKS_DIR = "domain-packs"
 ORCHESTRATOR_DIR = "orchestrator"
 ORCHESTRATOR_SKILL = "research-orchestrate"
 REQUIRED_STARTER_ASSETS = (
+    "scripts/_native_fs.py",
+    "scripts/_windows_fs.py",
     "AGENTS.md",
     "CLAUDE.md",
     "README.md",
@@ -65,6 +67,7 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/smoke_validate_workspace.py",
     "scripts/workspace_status.py",
     "docs/acquisition.md",
+    "docs/environment-setup.md",
     "docs/agent-contracts.md",
     "docs/pack-selection.md",
     "docs/source-usability.md",

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
 
+from ._filesystem import os
 from ._pack_io import identity, json_document
 from ._script_host import shared_assets_root
 from .pack_catalog import _outside_assets, _writer_flags

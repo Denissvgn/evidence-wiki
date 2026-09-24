@@ -1,7 +1,6 @@
 """Host changes preserve fixed sessions and reconcile interrupted parent creation."""
 
 import json
-import os
 
 import pytest
 
@@ -11,8 +10,6 @@ from evidence_wiki.host_transitions import apply, plan
 from evidence_wiki.local_journal import Journal
 from evidence_wiki.pack_discovery import owner
 from tests.test_pack_migrations import initialize
-
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="Explicit lifecycle publishers require POSIX directory descriptors.")
 
 
 def request(tmp_path, target):

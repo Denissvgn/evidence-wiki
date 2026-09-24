@@ -48,7 +48,7 @@ declared optional guidance files. It preserves starter mechanics and recommends
 providers without enabling them. Canonical temporary initialization/smoke preflight
 runs before publishing the draft; `qualify` records the durable structural receipt.
 All files are inert UTF-8 data. New native draft
-publication uses POSIX descriptors and exclusive file creation; existing output
+publication uses native POSIX or Windows handles and exclusive file creation; existing output
 containers are refused. A failed write can leave a partial container, which is
 preserved for inspection. A missing `records/draft.json` is not a completed draft.
 Choose a new output rather than overwriting unexplained content.

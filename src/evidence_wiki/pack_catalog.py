@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import os
 import re
 import uuid
 from pathlib import Path
 
+from ._filesystem import os
 from ._pack_io import MAX_FILE, canonical, capture_pack, identity, json_document, read_file, refuse, relative_path
 from ._script_host import shared_assets_root
 from .errors import EvidenceWikiError
@@ -34,6 +34,13 @@ def _outside_assets(path: Path | int, *, additional_roots=()):
     assets = shared_assets_root().resolve()
     protected_paths = [assets / name for name in ("workspace-template", "domain-packs", "orchestrator")]
     protected_paths.extend(Path(root).resolve() for root in additional_roots)
+    if type(path) is int and getattr(os, "native_windows", False):
+        observed = os.fstat(path)
+        location = os.path_for_fd(path)
+        named = location.stat()
+        if (observed.st_dev, observed.st_ino) != (named.st_dev, named.st_ino):
+            refuse("catalog_ancestry_changed")
+        path = location
     if type(path) is int:
         protected_ids = {(item.stat().st_dev, item.stat().st_ino) for item in protected_paths if item.is_dir()}
         descriptor = os.dup(path)
@@ -126,7 +133,7 @@ def _write_file(directory: int, name: str, content: bytes, *, replace=False):
 
 
 def _writer_flags():
-    if os.name != "posix" or os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
         refuse("catalog_write_platform_unsupported", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
     return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import secrets
 import stat
 from collections.abc import Callable
@@ -15,6 +14,7 @@ import yaml
 from _evidence_authority import EvidenceInvalid, digest
 from _evidence_revision import observation
 from _evidence_usage import current_view
+from _native_fs import os
 from _record_artifacts import artifact_path
 from _usage_gate import normalized_relative
 

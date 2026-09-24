@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 
+from ._filesystem import os
 from ._pack_io import canonical, identity, read_file
 from .agent_resources import resource_document
 from .extension_contracts import validate

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+- Add native Windows handles, private ACLs and process-owned coordination for
+  workspace captures, protected publication, pack catalogs, authoring and setup.
+  Preserve hidden control files and distinguish path metadata from file-handle
+  metadata when inspecting executables.
+
+- Add `env check` for selected API credential requirements and `env run --prompt`
+  for protected terminal input passed only to the launched command. Reports show
+  presence without values; initialization remains usable without credentials.
+
 ## 1.0.0 - 2026-09-23
 
 - Add explicit first-pack and identity migrations, pinned pack composition,

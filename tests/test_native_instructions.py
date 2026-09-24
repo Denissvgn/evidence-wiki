@@ -1,7 +1,6 @@
 """Native instruction locations retain user content and recover interrupted writes."""
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -10,8 +9,6 @@ from evidence_wiki import native_instructions as native
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.agent_resources import resource_document
 from evidence_wiki.errors import EvidenceWikiError
-
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="Explicit lifecycle publishers require POSIX directory descriptors.")
 
 
 def request(root, framework="pi", scope="project"):

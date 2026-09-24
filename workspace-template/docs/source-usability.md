@@ -117,8 +117,9 @@ evidence-wiki agent capture --target /path/to/workspace --path raw/web/capture.m
 
 Delivery creates new raw bytes and their `.provenance.yml` sidecar; existing
 different content is never overwritten. Identical replay is reported explicitly.
-The native writer requires POSIX descriptor operations. Other hosts can deposit
-the same byte/provenance pair through their authorized delivery mechanism.
+The writer uses POSIX directory descriptors or native Windows handles on local
+drives. Other hosts can deposit the same byte/provenance pair through their
+authorized delivery mechanism.
 Use a configured raw root outside `raw/links`; the latter is for URL-list intake.
 Capture declaration and byte integrity do not establish source authenticity,
 license correctness, independent review or permission to bypass protected intake.

@@ -3,7 +3,6 @@
 import contextlib
 import io
 import json
-import os
 from datetime import datetime, timezone
 
 import pytest
@@ -17,10 +16,6 @@ from evidence_wiki.research_operations import run_operation
 from evidence_wiki.setup_worker import execute
 from tests.test_research_planning import request
 from tests.test_strict_evidence import host as host
-
-pytestmark = pytest.mark.skipif(
-    os.name != "posix", reason="Coherent research captures require POSIX no-follow readers."
-)
 
 
 @pytest.fixture

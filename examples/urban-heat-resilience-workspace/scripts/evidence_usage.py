@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +14,7 @@ import yaml
 from _evidence_authority import EvidenceInvalid, authority_basis, load_trust, name
 from _evidence_usage import current_view, decode_files, selection, transact, workspace_binding
 from _host_evidence_store import LOCK_FILE, STATE_FILE, host_directory, locked_state, read_state
+from _native_fs import os
 from _record_artifacts import exact_object, json_document
 from _script_errors import ScriptRefusal, emit_refusal
 from _usage_gate import refusal

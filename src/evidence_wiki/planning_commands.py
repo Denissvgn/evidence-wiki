@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import re
 import uuid
 from pathlib import Path
 
+from ._filesystem import os
 from ._pack_io import canonical, identity, read_file, relative_path
 from ._script_host import shared_assets_root
 from .agent import _Parser

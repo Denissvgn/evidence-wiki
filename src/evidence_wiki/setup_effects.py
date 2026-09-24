@@ -49,7 +49,7 @@ def write_set(operation, plan, result):
         if config["integrations"]["acquisition"]["enabled"]:
             directories.add(config["integrations"]["acquisition"]["target_root"])
         if config["integrations"]["discovery"]["enabled"]:
-            directories.add(str(Path(config["integrations"]["discovery"].get("candidate_store_path", "sources/discovery/candidates.jsonl")).parent))
+            directories.add(Path(config["integrations"]["discovery"].get("candidate_store_path", "sources/discovery/candidates.jsonl")).parent.as_posix())
     elif operation == "intake":
         files = {"index.md", "log.md", ".locks/log.lock", *[config["wiki"]["root"] + "/questions/" + row["slug"] + ".md" for row in plan["questions"]["rows"]]}
     elif operation == "coverage":
