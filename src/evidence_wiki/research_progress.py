@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 
+from ._filesystem import os
 from ._pack_io import canonical, read_file, relative_path
 from .pack_catalog import _outside_assets, _writer_flags
 from .pack_discovery import owner
