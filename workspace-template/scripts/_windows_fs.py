@@ -233,7 +233,8 @@ class WindowsFilesystem:
 
     def _create(self, name, root, *, directory, access, disposition=1, private=False):
         self._api()
-        if not isinstance(name, str) or not name or "\0" in name or len(name.encode("utf-16-le")) > 65532:
+        if (not isinstance(name, str) or not name and root is None
+                or "\0" in name or len(name.encode("utf-16-le")) > 65532):
             raise OSError(errno.EINVAL, "Invalid native filename")
         buffer = ctypes.create_unicode_buffer(name)
         text = UnicodeString(len(name.encode("utf-16-le")), ctypes.sizeof(buffer), ctypes.cast(buffer, ctypes.c_wchar_p))
@@ -433,9 +434,15 @@ class WindowsFilesystem:
             return
         # Windows flush rights differ from POSIX fsync on a read descriptor.
         # Reopen the same object with write rights, never a mutable pathname.
-        writable = self.kernel.ReOpenFile(handle, 0x40000000, 7, 0x02200000)
-        if writable == HANDLE(-1).value:
-            raise ctypes.WinError(ctypes.get_last_error())
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            # ReOpenFile rejects GENERIC_WRITE for directories. A native empty
+            # relative name reopens the held directory object with the precise
+            # FILE_ADD_FILE / FILE_WRITE_DATA right required by a flush.
+            writable = self._create("", handle, directory=True, access=0x2)
+        else:
+            writable = self.kernel.ReOpenFile(handle, 0x40000000, 7, 0x02200000)
+            if writable == HANDLE(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
         try:
             self._check(self.native.NtFlushBuffersFile(writable, ctypes.byref(result)))
         finally:
