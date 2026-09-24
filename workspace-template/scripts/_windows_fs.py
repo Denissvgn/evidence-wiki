@@ -353,9 +353,7 @@ class WindowsFilesystem:
     def _names(self, descriptor):
         """Stream native directory pages so caller entry bounds can stop early."""
         self._api()
-        handle = self.kernel.ReOpenFile(self._handle(descriptor), 0x001200a1, 7, 0x02200000)
-        if handle == HANDLE(-1).value:
-            raise ctypes.WinError(ctypes.get_last_error())
+        handle = self._create("", self._handle(descriptor), directory=True, access=0x21)
         restart = True
         try:
             while True:
