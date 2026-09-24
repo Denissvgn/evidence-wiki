@@ -277,7 +277,8 @@ def workspace_lock_contended(lock_path: Path) -> bool:
         return False
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         raise LockUnavailableError(f"Cannot safely inspect workspace lock {normalized}")
-    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    native = getattr(os, "native_windows", False) and "win32" in LOCK_BACKENDS
+    flags = (os.O_RDONLY if native else os.O_RDWR) | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(normalized, flags)
     except FileNotFoundError:
@@ -289,7 +290,10 @@ def workspace_lock_contended(lock_path: Path) -> bool:
         if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
             raise LockUnavailableError(f"Workspace lock changed while inspecting {normalized}")
         try:
-            if fcntl is not None:
+            if native:
+                with os.lock(descriptor, timeout_seconds=0):
+                    pass
+            elif fcntl is not None:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
             elif msvcrt is not None:

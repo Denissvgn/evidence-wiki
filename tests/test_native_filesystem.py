@@ -121,6 +121,22 @@ def test_native_descriptor_lock_has_no_recursive_writer_bypass(tmp_path):
         os.close(first)
 
 
+def test_existing_lock_probe_observes_contention_without_writes(tmp_path):
+    locks = owner("_workspace_locks")
+    path = tmp_path / "coordination.lock"
+    assert not locks.workspace_lock_contended(path)
+    assert not path.exists()
+    with locks.workspace_lock(path):
+        before = {item.name: item.read_bytes() for item in tmp_path.iterdir()}
+        metadata = path.stat()
+        assert locks.workspace_lock_contended(path)
+        assert {item.name: item.read_bytes() for item in tmp_path.iterdir()} == before
+        observed = path.stat()
+        assert (observed.st_ino, observed.st_size, observed.st_mtime_ns) == (
+            metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+    assert not locks.workspace_lock_contended(path)
+
+
 @pytest.mark.skipif(standard_os.name != "nt", reason="Exercises native Windows lock/capture interaction")
 def test_native_capture_can_observe_a_held_coordination_file(tmp_path):
     locks = owner("_workspace_locks")
