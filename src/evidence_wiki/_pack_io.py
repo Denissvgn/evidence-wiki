@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from ._filesystem import os
+from ._filesystem import metadata_fstat, os
 from .errors import UsageError
 
 MAX_FILE = 1_048_576
@@ -33,12 +33,15 @@ def canonical(value) -> bytes:
 
 
 def identity(path: Path | int) -> dict:
-    value = os.fstat(path) if isinstance(path, int) else path.stat()
+    value = metadata_fstat(path) if isinstance(path, int) else path.stat()
     return {"device": str(value.st_dev), "inode": str(value.st_ino)}
 
 
 def signature(value):
-    return value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+    result = value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+    if hasattr(value, "native_change_time_ns"):
+        result += (value.native_change_time_ns,)
+    return result
 
 
 def relative_path(value: str) -> str:
@@ -164,13 +167,13 @@ def _read_file(root, relative, maximum, expected, *, native=None) -> bytes:
                     descriptor = child
                 leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
                 with os.fdopen(leaf, "rb") as stream:
-                    before = os.fstat(stream.fileno())
+                    before = metadata_fstat(stream.fileno())
                     if expected is not None and signature(before) != expected:
                         refuse("pack_changed_during_read")
                     if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
                         refuse("pack_file_unsafe_or_large")
                     value = stream.read(maximum + 1)
-                    if signature(before) != signature(os.fstat(stream.fileno())):
+                    if signature(before) != signature(metadata_fstat(stream.fileno())):
                         refuse("pack_changed_during_read")
             finally:
                 os.close(descriptor)

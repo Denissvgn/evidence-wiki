@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from evidence_wiki._filesystem import os
-from evidence_wiki._pack_io import read_file
+from evidence_wiki._filesystem import metadata_fstat, os
+from evidence_wiki._pack_io import read_file, signature
 from evidence_wiki.pack_catalog import initialize, register
 from evidence_wiki.pack_discovery import owner
 
@@ -92,6 +92,11 @@ def test_native_private_permissions_are_enforced(tmp_path):
         descriptor = os.open("policy.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
         try:
             store.private_entry(os.fstat(descriptor))
+            if standard_os.name == "nt":
+                metadata = metadata_fstat(descriptor)
+                assert metadata.native_private is None
+                with pytest.raises(ValueError, match="unsafe_host_state_entry"):
+                    store.private_entry(metadata)
         finally:
             os.close(descriptor)
         os.chmod(root / "policy.json", 0o644)
@@ -103,6 +108,32 @@ def test_native_private_permissions_are_enforced(tmp_path):
             os.close(descriptor)
     finally:
         os.close(directory)
+
+
+def test_metadata_signature_retains_changes_when_size_and_mtime_are_restored(tmp_path):
+    path = tmp_path / "observed.txt"
+    path.write_bytes(b"before")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = metadata_fstat(descriptor)
+        path.write_bytes(b"after!")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = metadata_fstat(descriptor)
+        assert before.st_ino == after.st_ino
+        assert before.st_size == after.st_size
+        assert before.st_mtime_ns == after.st_mtime_ns
+        assert signature(before) != signature(after)
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.skipif(standard_os.name != "nt", reason="Exercises cold native metadata initialization")
+def test_metadata_stat_initializes_a_fresh_native_owner(tmp_path):
+    filesystem = owner("_windows_fs").WindowsFilesystem()
+    path = tmp_path / "observed.txt"
+    path.write_bytes(b"observed")
+    info = filesystem.stat(path, follow_symlinks=False, check_private=False)
+    assert info.st_size == 8 and info.native_private is None
 
 
 def test_native_descriptor_lock_has_no_recursive_writer_bypass(tmp_path):

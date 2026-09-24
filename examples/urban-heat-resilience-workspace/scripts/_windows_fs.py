@@ -319,9 +319,10 @@ class WindowsFilesystem:
                 disposition=2, private=not mode & 0o077)
             self.kernel.CloseHandle(handle)
 
-    def fstat(self, descriptor):
+    def fstat(self, descriptor, *, check_private=True):
         handle = self._handle(descriptor)
-        return NativeStat(os.fstat(descriptor), self.private_handle(handle), self.change_time(descriptor))
+        private = self.private_handle(handle) if check_private else None
+        return NativeStat(os.fstat(descriptor), private, self.change_time(descriptor))
 
     def change_time(self, descriptor):
         self._api()
@@ -331,18 +332,19 @@ class WindowsFilesystem:
             raise ctypes.WinError(ctypes.get_last_error())
         return (information.changed - 116444736000000000) * 100
 
-    def stat(self, path, *, dir_fd=None, follow_symlinks=True):
+    def stat(self, path, *, dir_fd=None, follow_symlinks=True, check_private=True):
         if isinstance(path, int):
-            return self.fstat(path)
+            return self.fstat(path, check_private=check_private)
         if dir_fd is None and follow_symlinks:
             return os.stat(path)
+        self._api()
         with self._parent(path, dir_fd) as (parent, name):
             if name == ".":
-                return self.fstat(parent)
+                return self.fstat(parent, check_private=check_private)
             handle = self._create(name, self._handle(parent), directory=None, access=0)
         descriptor = self._descriptor(handle, os.O_RDONLY | os.O_BINARY)
         try:
-            return self.fstat(descriptor)
+            return self.fstat(descriptor, check_private=check_private)
         finally:
             os.close(descriptor)
 

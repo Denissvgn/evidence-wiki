@@ -9,7 +9,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-from ._filesystem import os
+from ._filesystem import metadata_fstat, metadata_stat, os
 from ._pack_io import canonical, identity, json_document, read_file, signature
 from .errors import EvidenceWikiError
 from .pack_discovery import owner
@@ -36,20 +36,20 @@ def snapshot(target, *, durable=False):
         pending = [(root, "")]
         while pending:
             fd, relative = pending.pop()
-            info = os.fstat(fd)
+            info = metadata_fstat(fd)
             directories.append({"path": relative, "identity": identity(fd), "mode": stat.S_IMODE(info.st_mode)})
             for name in sorted(os.listdir(fd)):
                 if len(files) >= 1024 or len(directories) + len(pending) >= 1024:
                     refuse("setup_tree_entry_bound", "ONBOARDING_LIMIT")
                 path = relative + "/" + name if relative else name
-                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                before = metadata_stat(name, dir_fd=fd, follow_symlinks=False)
                 if stat.S_ISDIR(before.st_mode):
                     child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                     descriptors.append(child)
                     pending.append((child, path))
                 elif stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
                     raw = read_file(fd, name, 16_777_216)
-                    if signature(before) != signature(os.stat(name, dir_fd=fd, follow_symlinks=False)):
+                    if signature(before) != signature(metadata_stat(name, dir_fd=fd, follow_symlinks=False)):
                         refuse("setup_file_changed_during_observation", "ONBOARDING_OWNERSHIP_CONFLICT")
                     if durable:
                         file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
