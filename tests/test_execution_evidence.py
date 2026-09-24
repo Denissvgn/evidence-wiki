@@ -383,6 +383,8 @@ def test_unsafe_or_undeclared_originals_refuse_before_authentication(trusted, ki
     elif kind == "hardlink":
         os.link(folder / "inputs.txt", path)
     elif kind == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("This platform has no filesystem FIFO objects")
         os.mkfifo(path)
     else:
         path.write_bytes(b"not in the original declaration")

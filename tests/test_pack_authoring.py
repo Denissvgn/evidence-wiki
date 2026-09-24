@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from evidence_wiki._filesystem import os
 from evidence_wiki._pack_io import canonical, capture_pack
 from evidence_wiki.cli import main
 from evidence_wiki.errors import UsageError
@@ -276,16 +277,26 @@ def test_replaced_output_directory_is_not_followed(tmp_path, monkeypatch):
     output, moved, outside = tmp_path / "draft", tmp_path / "moved", tmp_path / "outside"
     outside.mkdir()
     original = store.publish
-    swapped = []
+    swapped, blocked = [], []
     def replace(directory, name, raw):
         if name == "specification.json" and not swapped:
-            output.rename(moved)
+            try:
+                output.rename(moved)
+            except PermissionError:
+                if os.name != "nt":
+                    raise
+                blocked.append(True)
+                return original(directory, name, raw)
             output.symlink_to(outside, target_is_directory=True)
             swapped.append(True)
         return original(directory, name, raw)
     monkeypatch.setattr(store, "publish", replace)
-    with pytest.raises(UsageError):
-        scaffold(canonical(specification()), output=output)
+    try:
+        result = scaffold(canonical(specification()), output=output)
+    except UsageError:
+        assert swapped and not blocked
+    else:
+        assert blocked and not swapped and result["status"] == "draft_created"
     assert not list(outside.iterdir())
 
 

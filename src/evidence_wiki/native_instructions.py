@@ -134,6 +134,11 @@ def apply(raw, *, remove=False):
                 except FileExistsError:
                     if archive.is_symlink() or not archive.is_dir() or list(archive.iterdir()):
                         refuse("native_instructions_archive_exists", "ONBOARDING_TARGET_CONFLICT")
+                if getattr(os, "native_windows", False):
+                    # Windows cannot rename a directory over an empty directory.
+                    # Release only the empty reservation; native rename refuses
+                    # any destination that appears before publication.
+                    os.rmdir(archive.name, dir_fd=destination)
                 os.rename(selected.name, archive.name, src_dir_fd=parent, dst_dir_fd=destination)
                 os.fsync(parent)
                 os.fsync(destination)

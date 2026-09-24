@@ -401,7 +401,7 @@ class ContentionSignalTests(unittest.TestCase):
         fake = _FakeFcntl()
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
             locks, "fcntl", fake
-        ), mock.patch.object(locks, "_sleep_until") as sleep:
+        ), mock.patch.object(locks, "LOCK_BACKENDS", ("fcntl",)), mock.patch.object(locks, "_sleep_until") as sleep:
             with self.assertRaises(locks.LockUnavailableError) as context:
                 with locks.workspace_lock(Path(tmpdir) / "session.lock", timeout_seconds=0.0, purpose="fcntl"):
                     pass  # pragma: no cover - the fake backend always refuses

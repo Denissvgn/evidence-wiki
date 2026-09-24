@@ -62,3 +62,25 @@ def test_failed_test_remains_failed_with_coverage_and_diagnostics(tmp_path, monk
     coverage = REPORTER.generate_reports(root, root / ".coverage", tmp_path / "coverage", snapshot)
     assert coverage["status"] == "reported"
     assert code == 1 and report["status"] == "failed"
+
+
+def test_timeout_retains_the_active_case_and_prior_failure(tmp_path):
+    root, output = tmp_path / "repo", tmp_path / "evidence"
+    (root / "tools").mkdir(parents=True)
+    (root / "tests").mkdir()
+    output.mkdir()
+    shutil.copyfile(ROOT / "tools/_suite_plugin.py", root / "tools/_suite_plugin.py")
+    (root / "tests/test_interrupted.py").write_text(
+        'import time\n'
+        'def test_failure():\n'
+        '    assert False, "retained failure before timeout"\n'
+        'def test_waiting():\n'
+        '    time.sleep(60)\n')
+    result = GROUPS.run(root, output, "interrupted", ["tests"], timeout=10)
+    assert result["exit_code"] == 124 and "missing_record" in result
+    rows = [json.loads(line) for line in (output / "interrupted.progress.jsonl").read_text().splitlines()]
+    failures = [row for row in rows if row.get("outcome") == "failed"]
+    assert "retained failure before timeout" in failures[0]["failure"]
+    assert [row for row in rows if row["event"] == "started"][-1]["nodeid"].endswith("::test_waiting")
+    assert not any(row["phase"] == "call" for row in rows
+                   if row["event"] == "report" and row["nodeid"].endswith("::test_waiting"))

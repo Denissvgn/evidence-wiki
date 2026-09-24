@@ -228,6 +228,7 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     commands = [step["run"] for step in test["steps"] if "tools/run_test_groups.py" in step.get("run", "")]
     assert len(commands) == 2
     assert all("--shard-count 3 --shard-index ${{ matrix.shard }}" in command for command in commands)
+    assert all("--group-size 48" in command for command in commands)
     assert all("-m ruff check ." in command and "sync_vendored_scripts.py --check" in command for command in commands)
     upload = next(step for step in test["steps"] if "actions/upload-artifact@" in step.get("uses", ""))
     assert upload["if"] == "always()"
@@ -242,6 +243,7 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert gate["env"] == {"SUITE_COMMIT": "${{ github.sha }}", "SUITE_RUN_ID": "${{ github.run_id }}"}
     command = shlex.split(gate["run"].replace("\\\n", " "))
     assert command[command.index("--shard-count") + 1] == "3"
+    assert command[command.index("--group-size") + 1] == "48"
     assert {command[i + 1] for i, arg in enumerate(command) if arg == "--platform"} == {
         "Linux/X64/3.10", "Linux/X64/3.14", "macOS/ARM64/3.12", "Windows/X64/3.12"}
 

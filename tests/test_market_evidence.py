@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -16,6 +15,7 @@ import pytest
 import yaml
 
 from evidence_wiki import Workspace, contract, verify_snapshot
+from evidence_wiki._filesystem import os
 from evidence_wiki.errors import SourceError
 from tests._execution_fixture import authenticate, binding, canonical, closure
 from tests._market_fixture import SOURCE_ID, example, listing, revise, workspace

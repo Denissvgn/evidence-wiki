@@ -1373,7 +1373,7 @@ def write_private_text(path: Path, text: str, root: Path) -> None:
         fd = os.open(path, flags, RESTRICTIVE_FILE_MODE)
     except OSError as exc:
         raise SystemExit(f"Cannot write private workspace file: {path}: {exc}") from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
     apply_restrictive_mode(path, RESTRICTIVE_FILE_MODE)
 
