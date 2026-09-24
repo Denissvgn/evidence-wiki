@@ -32,12 +32,14 @@ evidence_usage:
   state_id: research-evidence
 ```
 
-The directory must belong to the current user with no group or other access.
+The directory must belong to the current user. POSIX permissions must exclude
+group and other access; Windows ACLs must exclude other unprivileged users.
 State and lock files must be private regular files with one hard link. Paths
-must have no symlink components. This implementation requires POSIX directory
-descriptors, no-follow opens, and advisory file locking; unsupported systems
-refuse. Read operations do not create a missing store. The host must provision
-the directory; initialization creates only the state and lock inside it.
+must have no symlink or reparse-point components. POSIX uses directory
+descriptors, no-follow opens and advisory locks. Windows uses anchored local
+drive handles, private ACLs and native mutexes; unsupported filesystems refuse.
+Read operations do not create a missing store. The host must provision the
+directory; initialization creates only the state and lock inside it.
 
 Workspace configuration selects authority; it cannot supply keys. Removing the
 configuration while the state environment variable remains set does not enable

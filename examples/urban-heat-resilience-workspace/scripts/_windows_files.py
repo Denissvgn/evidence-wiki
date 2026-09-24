@@ -8,6 +8,7 @@ import re
 import stat
 import sys
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 
 from _evidence_authority import EvidenceInvalid
@@ -60,24 +61,11 @@ def validate_relative_path(relative: str) -> None:
             raise EvidenceInvalid("unsafe_usage_workspace_file")
 
 
-@contextmanager
-def open_observed_file(root: Path, relative: str, expected: tuple[int, ...], limit: int):
-    """Pin one regular file and its ancestors until the caller releases the context.
-
-    Open reparse points themselves, reject them, and retain directory handles
-    without write/delete sharing. A workspace capture pins every selected file
-    before reading any bytes; a single-file pin alone is not a workspace epoch.
-    """
-    if sys.platform != "win32":
-        raise OSError("Windows file handles are unavailable")
+@lru_cache(maxsize=1)
+def file_api():
+    """Bind immutable Win32 entry points once; keep filesystem observations live."""
     import ctypes
-    import msvcrt
     from ctypes import wintypes
-
-    validate_relative_path(relative)
-    path = root.absolute() / relative
-    if not path.drive or path.drive.startswith("\\\\") or ".." in path.parts:
-        raise EvidenceInvalid("unsafe_usage_workspace_file")
 
     class FileInformation(ctypes.Structure):
         _fields_ = [
@@ -105,6 +93,29 @@ def open_observed_file(root: Path, relative: str, expected: tuple[int, ...], lim
     kernel.GetDriveTypeW.restype = wintypes.UINT
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.restype = wintypes.BOOL
+    return kernel, FileInformation
+
+
+@contextmanager
+def open_observed_file(root: Path, relative: str, expected: tuple[int, ...], limit: int):
+    """Pin one regular file and its ancestors until the caller releases the context.
+
+    Open reparse points themselves, reject them, and retain directory handles
+    without write/delete sharing. A workspace capture pins every selected file
+    before reading any bytes; a single-file pin alone is not a workspace epoch.
+    """
+    if sys.platform != "win32":
+        raise OSError("Windows file handles are unavailable")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    validate_relative_path(relative)
+    path = root.absolute() / relative
+    if not path.drive or path.drive.startswith("\\\\") or ".." in path.parts:
+        raise EvidenceInvalid("unsafe_usage_workspace_file")
+
+    kernel, FileInformation = file_api()
     handles = []
     descriptor = None
     try:

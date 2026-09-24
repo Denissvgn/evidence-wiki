@@ -2,13 +2,13 @@
 
 import hashlib
 import json
-import os
 import shutil
 from pathlib import Path
 
 import pytest
 import yaml
 
+from evidence_wiki._filesystem import os
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.pack_composition import apply, plan
@@ -16,7 +16,7 @@ from evidence_wiki.pack_discovery import owner
 
 ROOT = Path(__file__).resolve().parents[1]
 
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="Explicit lifecycle publishers require POSIX directory descriptors.")
+pytestmark = pytest.mark.skipif(os.open not in os.supports_dir_fd, reason="Lifecycle publication requires anchored filesystem operations.")
 
 
 def request(tmp_path):

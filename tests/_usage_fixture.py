@@ -16,7 +16,7 @@ def require_host_storage():
         return
     if (importlib.util.find_spec("fcntl") is None or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "getuid")
             or os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd):
-        raise SkipTest("host evidence storage requires POSIX locking, ownership and no-follow directory operations")
+        raise SkipTest("host evidence storage requires native locking, ownership and no-follow directory operations")
 
 
 class UsageFixture:

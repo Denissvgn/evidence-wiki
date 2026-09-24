@@ -1,7 +1,6 @@
 """Cold-source handoff and strict public refusal regressions."""
 
 import json
-import os
 import subprocess
 import sys
 import zipfile
@@ -11,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from evidence_wiki._filesystem import os
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.planning import compile_plan
@@ -24,7 +24,7 @@ from tools._journey_cases import load_cases
 from tools.freeze_agent_trials import freeze
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Local setup requires descriptor-safe POSIX intake")
+@pytest.mark.skipif(os.open not in os.supports_dir_fd, reason="Local setup requires anchored filesystem operations")
 def test_local_capture_timestamp_is_observed_and_stable_on_replay(tmp_path, in_process):
     before = datetime.now(timezone.utc).replace(microsecond=0)
     plan = compile_plan(canonical(local_request(tmp_path)))
