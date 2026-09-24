@@ -143,7 +143,7 @@ def test_release_identity_checks_run_against_the_event_commit(tmp_path, monkeypa
         run_inline_python(code)
 
 
-@pytest.mark.parametrize("defect", [None, "bytes", "name", "version", "missing", "extra", "duplicate"])
+@pytest.mark.parametrize("defect", [None, "bytes", "name", "version", "missing", "extra", "duplicate", "partial", "selection", "artifact"])
 @pytest.mark.parametrize("use_backport", [False, True], ids=["default-parser", "tomli-backport"])
 def test_promoted_distributions_are_exactly_the_validated_bytes(tmp_path, monkeypatch, defect, use_backport):
     if use_backport:
@@ -154,7 +154,7 @@ def test_promoted_distributions_are_exactly_the_validated_bytes(tmp_path, monkey
     dist.mkdir(parents=True)
     payloads = {"wheel": ("evidence_wiki-0.7.1-py3-none-any.whl", b"validated wheel"),
                 "sdist": ("evidence_wiki-0.7.1.tar.gz", b"validated source archive")}
-    report = {"expected_version": "0.7.1"}
+    report = {"expected_version": "0.7.1", "status": "passed", "artifact": "both", "selection_status": "passed"}
     for kind, (name, content) in payloads.items():
         (dist / name).write_bytes(content)
         report[kind] = {"name": name, "sha256": hashlib.sha256(content).hexdigest()}
@@ -170,6 +170,12 @@ def test_promoted_distributions_are_exactly_the_validated_bytes(tmp_path, monkey
         (dist / "internal-report.json").write_text("{}")
     elif defect == "duplicate":
         (dist / "another.whl").write_bytes(b"extra wheel")
+    elif defect == "partial":
+        report["status"] = "partial"
+    elif defect == "selection":
+        report["selection_status"] = "incomplete"
+    elif defect == "artifact":
+        report["artifact"] = "wheel"
     (candidate / "artifact-validation.json").write_text(json.dumps(report))
     monkeypatch.chdir(tmp_path)
     code = inline_python("release-gate", "Verify the exact distribution bytes before promotion")
@@ -216,6 +222,7 @@ def test_ci_runs_the_same_shared_artifact_gate_as_the_release() -> None:
 def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results() -> None:
     workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
     test, package = workflow["jobs"]["test"], workflow["jobs"]["package"]
+    build, installed = workflow["jobs"]["build"], workflow["jobs"]["installed"]
     matrix = test["strategy"]["matrix"]
     assert set(matrix) == {"platform", "shard"}
     assert matrix["shard"] == [1, 2, 3]
@@ -224,7 +231,12 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert {(cell["os"], cell["python-version"]) for cell in matrix["platform"]} == expected
     assert len(list(itertools.product(matrix["platform"], matrix["shard"]))) == 12
     assert test["strategy"]["fail-fast"] is False
-    assert package["needs"] == "test" and "if" not in package
+    assert set(package["needs"]) == {"test", "build", "installed"}
+    assert package["if"] == "${{ !cancelled() }}"
+    assert "needs" not in build and installed["needs"] == "build"
+    assert installed["strategy"] == {"fail-fast": False, "max-parallel": 2, "matrix": {"artifact": ["wheel", "sdist"]}}
+    require = package["steps"][0]["run"]
+    assert all("test '${{ needs." + name + ".result }}' = success" in require for name in ("test", "build", "installed"))
     commands = [step["run"] for step in test["steps"] if "tools/run_test_groups.py" in step.get("run", "")]
     assert len(commands) == 2
     assert all("--shard-count 3 --shard-index ${{ matrix.shard }}" in command for command in commands)
@@ -240,8 +252,8 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     steps = package["steps"]
     download = next(step for step in steps if "actions/download-artifact@" in step.get("uses", ""))
     gate = next(step for step in steps if "-m tools.verify_test_shards" in step.get("run", ""))
-    build = next(step for step in steps if "-m build" in step.get("run", ""))
-    assert steps.index(download) < steps.index(gate) < steps.index(build)
+    artifact_gate = next(step for step in steps if "tools.verify_installed_artifacts" in step.get("run", ""))
+    assert steps.index(download) < steps.index(gate) < steps.index(artifact_gate)
     assert download["with"] == {"pattern": "suite-${{ github.sha }}-*-shard-*", "path": "suite-shards/"}
     assert gate["env"] == {"SUITE_COMMIT": "${{ github.sha }}", "SUITE_RUN_ID": "${{ github.run_id }}"}
     command = shlex.split(gate["run"].replace("\\\n", " "))
@@ -307,6 +319,40 @@ def test_archive_membership_accepts_a_policy_conformant_pair(tmp_path: Path) -> 
         "wheel_members": len(VALIDATOR.REQUIRED_WHEEL_MEMBERS),
         "sdist_members": len(VALIDATOR.REQUIRED_SDIST_MEMBERS),
     }
+
+
+def test_installed_ci_diagnostics_and_retries_preserve_each_artifact():
+    workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["installed"]
+    command = next(step for step in job["steps"] if "tools/validate_installed_artifacts.py" in step.get("run", ""))
+    assert command["timeout-minutes"] < job["timeout-minutes"]
+    assert "--artifact ${{ matrix.artifact }}" in command["run"]
+    assert "--journey-workers 3" in command["run"]
+    uploads = [step for step in job["steps"] if "actions/upload-artifact@" in step.get("uses", "")]
+    successful = next(step for step in uploads if step["with"]["path"].endswith("summary.json"))
+    diagnostics = next(step for step in uploads if step.get("if") == "always()")
+    assert "if" not in successful and successful["with"]["overwrite"] is True
+    assert successful["with"]["if-no-files-found"] == "error"
+    assert "github.run_attempt" not in successful["with"]["name"]
+    assert "github.run_attempt" in diagnostics["with"]["name"]
+    assert "matrix.artifact" in diagnostics["with"]["name"]
+    assert diagnostics["with"]["path"] == "reports/installed-artifacts/"
+    assert diagnostics["with"]["retention-days"] == 90
+
+
+def test_every_workflow_uses_pinned_node24_checkout_and_python_actions():
+    supported = {"actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+                 "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97"}
+    found = set()
+    for path in CI_WORKFLOW_PATH.parent.glob("*.yml"):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job in workflow["jobs"].values():
+            for step in job["steps"]:
+                action, _, revision = step.get("uses", "").partition("@")
+                if action in supported:
+                    assert revision == supported[action], (path, action)
+                    found.add(action)
+    assert found == set(supported)
 
 
 @pytest.mark.parametrize(

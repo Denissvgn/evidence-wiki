@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## 1.0.0 - Unreleased
 
 - Add native Windows handles, private ACLs and process-owned coordination for
   workspace captures, protected publication, pack catalogs, authoring and setup.
@@ -11,7 +11,13 @@
   for protected terminal input passed only to the launched command. Reports show
   presence without values; initialization remains usable without credentials.
 
-## 1.0.0 - 2026-09-23
+- Reduce repeated installed-file and Windows metadata checks during workspace
+  setup while preserving private-state and captured-file validation.
+- Distribution qualification reports live command and scenario progress,
+  timings and timeout diagnostics. Wheel and source-archive checks run
+  independently with bounded parallel scenarios and complete result verification.
+- Update workflow actions to Node.js 24 and make source-archive extraction
+  behavior explicit across supported Python versions.
 
 - Add explicit first-pack and identity migrations, pinned pack composition,
   independent fleet revision proposals and resumable host transitions between

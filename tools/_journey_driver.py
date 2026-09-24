@@ -7,7 +7,6 @@ import copy
 import hashlib
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +24,7 @@ from tools._journey_cases import (
     require,
     setup_request,
 )
+from tools._qualification_process import CommandRunner
 
 
 class Environment:
@@ -46,12 +46,13 @@ class Environment:
 class Journey:
     """Keep caller operations and the separately controlled reference reviewer distinct."""
 
-    def __init__(self, root, case):
+    def __init__(self, root, case, *, report_dir=None):
         from evidence_wiki import __version__
 
         self.root, self.case = Path(root).resolve(), case
         self.workspace = self.root / "workspace"
         self.root.mkdir(parents=True)
+        self.runner = CommandRunner(report_dir if report_dir is not None else self.root / "commands")
         self.version, self.commands = __version__, []
         self.quote = REFERENCE_QUOTE if case.get("reference") else QUOTE
         self.started = datetime.now(timezone.utc)
@@ -78,8 +79,8 @@ class Journey:
             invocation = [sys.executable, "-B", str(self.workspace / "scripts" / script), "--project-root", target, *operation, *forwarded]
         else:
             invocation = [sys.executable, "-B", "-m", "evidence_wiki.cli", *argv]
-        result = subprocess.run(invocation, cwd=self.root,  # noqa: S603 - fixed installed CLI and copied public owners.
-            env=env, input=stdin, text=True, capture_output=True, encoding="utf-8", timeout=180)
+        result = self.runner.run(invocation, label=self.case["id"] + "/" + " ".join(argv[:2]),
+                                 cwd=self.root, env=env, input=stdin, timeout=180, expected=expected)
         if len(result.stdout.encode()) + len(result.stderr.encode()) > 2_097_152:
             raise ValueError("journey_command_output_bound")
         value = None
