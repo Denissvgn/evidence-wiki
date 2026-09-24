@@ -139,8 +139,6 @@ Check credentials before the first command that needs external services:
 
 ```bash
 evidence-wiki env check --service openalex --service github --format json
-evidence-wiki env run --service openalex --prompt -- \
-  evidence-wiki orchestrate run --target . --runner codex
 ```
 
 `env check` reports variable names and presence only. `env run --prompt` asks

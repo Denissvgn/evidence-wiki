@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Windows handle-relative operations for the shared filesystem owners.
 
 NtCreateFile and NtSetInformationFile operate on held directory handles. Each
