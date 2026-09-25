@@ -2,6 +2,9 @@
 
 ## 1.0.0 - 2026-09-25
 
+- Version the updated workspace starter as 1.0.0 while preserving existing
+  workspace schema compatibility and explicit upgrade behavior.
+
 - Add native Windows handles, private ACLs and process-owned coordination for
   workspace captures, protected publication, pack catalogs, authoring and setup.
   Preserve hidden control files and distinguish path metadata from file-handle

@@ -21,6 +21,9 @@ on:
       - CHANGELOG.md
       - pyproject.toml
       - src/evidence_wiki/__init__.py
+      - workspace-template/workspace-system.yml
+      - workspace-template/docs/agent-resources/**
+      - tools/sync_agent_resources.py
       - tools/*release*.py
       - tools/*installed*.py
       - tools/*qualif*.py

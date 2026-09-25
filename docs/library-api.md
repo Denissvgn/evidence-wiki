@@ -609,7 +609,7 @@ recorded metadata:
 
 ```python
 ws.versions()
-# {'package': '0.7.0',
+# {'package': '1.0.0',
 #  'workspace': {'starter_version': '0.7.0',
 #                'schema_version': '0.1',
 #                'compatible_research_yml_contract': '0.1'}}

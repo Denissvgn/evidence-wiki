@@ -108,24 +108,35 @@ def test_broken_or_redirected_assets_refuse(tmp_path, fault):
     assert error.value.error_code == "ONBOARDING_ENVIRONMENT_INCOMPATIBLE"
 
 
-def test_empty_directory_bootstrap_is_read_only_and_does_not_load_runners(tmp_path, capsys):
-    def forbidden(*args, **kwargs):
-        pytest.fail("Bootstrap attempted workspace execution or a write")
-    with (patch("evidence_wiki._contract.contract", forbidden),
-          patch("evidence_wiki._script_host.load_packaged_script", forbidden),
-          patch("socket.socket", forbidden), patch("subprocess.Popen", forbidden),
-          patch("tempfile.TemporaryDirectory", forbidden), patch.object(Path, "write_text", forbidden)):
-        assert agent.main(["--target", str(tmp_path), "--format", "json"]) == 0
-    captured = capsys.readouterr()
-    assert not captured.err
-    value = decode_document("onboarding/bootstrap/v2", captured.out.encode())
-    assert len(captured.out.encode()) <= agent.SUMMARY_BYTES
+def test_empty_directory_bootstrap_is_read_only_and_does_not_load_runners(tmp_path):
+    # A cold interpreter keeps forbidden loader aliases imported under the guard
+    # from leaking into later tests in the same grouped process.
+    program = '''
+import sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+from evidence_wiki import agent
+def forbidden(*args, **kwargs):
+    raise AssertionError("Bootstrap attempted workspace execution or a write")
+with (patch("evidence_wiki._contract.contract", forbidden),
+      patch("evidence_wiki._script_host.load_packaged_script", forbidden),
+      patch("socket.socket", forbidden), patch("subprocess.Popen", forbidden),
+      patch("tempfile.TemporaryDirectory", forbidden), patch.object(Path, "write_text", forbidden)):
+    raise SystemExit(agent.main(["--target", sys.argv[2], "--format", "json"]))
+'''
+    captured = subprocess.run([sys.executable, "-c", program, str(ROOT / "src"), str(tmp_path)],
+                              capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert captured.returncode == 0, captured.stderr
+    assert not captured.stderr
+    value = decode_document("onboarding/bootstrap/v2", captured.stdout.encode())
+    assert len(captured.stdout.encode()) <= agent.SUMMARY_BYTES
     payload = value["payload"]
     assert payload["workspace"] == "absent"
     assert payload["strict_selection"]["effective_assurance"] is None
     assert payload["strict_selection"]["selection_scope"] == "new_workspace_template"
     assert not list(tmp_path.iterdir())
-    assert str(tmp_path) not in captured.out
+    assert str(tmp_path) not in captured.stdout
 
 
 @pytest.mark.parametrize("marker", ["absent", "partial", "present", "malformed", "symlink", "oversize", "scalar"])
