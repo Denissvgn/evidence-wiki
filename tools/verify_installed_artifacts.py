@@ -17,9 +17,11 @@ from tools.validate_installed_artifacts import (
 )
 
 
-def verify(dist_dir, evidence, *, commit, run_id):
+def verify(dist_dir, evidence, *, commit, run_id, expected_version=None):
     if not commit or not run_id:
         raise ValueError("commit and run ID are required")
+    if expected_version is not None and expected_version != __version__:
+        raise ValueError("requested release version differs from the checked-out package")
     wheel, sdist = find_artifacts(Path(dist_dir))
     archives = {kind: {"name": path.name, "sha256": sha256_of(path)} for kind, path in (("wheel", wheel), ("sdist", sdist))}
     membership = check_archive_membership(wheel, sdist)
@@ -35,6 +37,8 @@ def verify(dist_dir, evidence, *, commit, run_id):
             raise ValueError("unexpected or duplicate installation report")
         if report["workflow"]["GITHUB_SHA"] != commit or report["workflow"]["GITHUB_RUN_ID"] != run_id:
             raise ValueError("installation report belongs to a different commit or run")
+        if expected_version is not None and report.get("expected_version") != expected_version:
+            raise ValueError("installation report was not qualified for the requested release version")
         if (report["status"] != "partial" or report["selection_status"] != "passed"
                 or report["validation_inputs"] != inputs or any(report[key] != value for key, value in archives.items())):
             raise ValueError("installation is incomplete or its archive/validation bytes differ")
@@ -62,7 +66,10 @@ def verify(dist_dir, evidence, *, commit, run_id):
         reports[kind] = {"version": installed["version"], "scenarios": len(observed)}
     if set(reports) != {"wheel", "sdist"}:
         raise ValueError("both wheel and source-archive installation reports are required")
-    return {"status": "passed", "archives": archives, "installations": reports}
+    return {"status": "passed", "artifact": "both", "selection_status": "passed",
+            "expected_version": expected_version or __version__, **archives,
+            "archives": archives, "installations": reports,
+            "workflow": {"GITHUB_SHA": commit, "GITHUB_RUN_ID": run_id}, "validation_inputs": inputs}
 
 
 def main(argv=None):
@@ -71,9 +78,10 @@ def main(argv=None):
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--expected-version", help="Require both reports to have qualified this release version explicitly.")
     args = parser.parse_args(argv)
     try:
-        report = verify(args.dist_dir, args.evidence, commit=args.commit, run_id=args.run_id)
+        report = verify(args.dist_dir, args.evidence, commit=args.commit, run_id=args.run_id, expected_version=args.expected_version)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"Installed qualification verification failed: {error}")
         return 1

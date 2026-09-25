@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from datetime import datetime
 
 import pytest
 
-from tests.test_release_workflow import make_sdist, make_wheel
+from tests.test_release_workflow import inline_python, make_sdist, make_wheel, run_inline_python
 from tools import qualify_journeys as journeys
 from tools import validate_installed_artifacts as artifacts
 from tools import verify_installed_artifacts as verification
@@ -190,6 +191,35 @@ def test_single_artifact_and_timeout_options_are_explicit():
     assert args.artifact == "sdist" and args.journey_workers == 3 and args.command_timeout == 50
     with pytest.raises(SystemExit):
         artifacts.parse_args(["--artifact", "sdist", "--skip-sdist"])
+
+
+@pytest.mark.parametrize("defect", [None, "missing-version", "different-report-version", "different-requested-version"])
+def test_release_reports_promote_only_the_explicitly_qualified_version(tmp_path, monkeypatch, defect):
+    dist, reports = installation_reports(tmp_path)
+    version = verification.__version__
+    for report in reports.values():
+        report["expected_version"] = version
+    if defect == "missing-version":
+        reports["sdist"].pop("expected_version")
+    elif defect == "different-report-version":
+        reports["sdist"]["expected_version"] = "9.9.9"
+    evidence = tmp_path / "reports"
+    for kind, report in reports.items():
+        directory = evidence / kind
+        directory.mkdir(parents=True)
+        (directory / "summary.json").write_text(json.dumps(report))
+    requested = "9.9.9" if defect == "different-requested-version" else version
+    if defect:
+        with pytest.raises(ValueError, match="version"):
+            verification.verify(dist, evidence, commit="commit", run_id="run", expected_version=requested)
+        return
+    result = verification.verify(dist, evidence, commit="commit", run_id="run", expected_version=requested)
+    candidate = tmp_path / "release-candidate"
+    shutil.copytree(dist, candidate / "dist")
+    (candidate / "artifact-validation.json").write_text(json.dumps(result))
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nversion="{version}"\n')
+    monkeypatch.chdir(tmp_path)
+    run_inline_python(inline_python("release-gate", "Verify the exact distribution bytes before promotion"))
 
 
 def test_failed_retention_restores_validator_runtime(tmp_path, monkeypatch):

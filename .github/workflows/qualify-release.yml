@@ -1,0 +1,476 @@
+name: Release qualification
+
+on:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Exact tag supplied by the publication workflow
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Optional tag to check against the candidate version
+        required: false
+        type: string
+        default: ""
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/**
+      - CHANGELOG.md
+      - pyproject.toml
+      - src/evidence_wiki/__init__.py
+      - tools/*release*.py
+      - tools/*installed*.py
+      - tools/*qualif*.py
+      - tools/*journey*.py
+      - tools/*test*groups*.py
+      - tools/verify_test_shards.py
+      - tools/scale_benchmark.py
+      - tests/test_release*.py
+      - tests/test_qualification_management.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-qualification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+env:
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  release-identity:
+    name: Verify release identity and source quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the release environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Validate release identity
+        id: identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          .venv/bin/python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import subprocess
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
+
+          root = pathlib.Path.cwd()
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if commit != os.environ["RELEASE_COMMIT"]:
+              raise SystemExit("Checkout does not match the release event commit")
+          metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+          project = metadata["project"]
+          version = project["version"]
+          expected_tag = f"v{version}"
+          release_tag = os.environ.get("RELEASE_TAG", "")
+          if not release_tag:
+              if os.environ.get("GITHUB_EVENT_NAME") == "release":
+                  raise SystemExit("Publication must supply its release tag")
+              release_tag = expected_tag
+
+          if project["name"] != "evidence-wiki":
+              raise SystemExit(f"Unexpected project name: {project['name']!r}")
+          if release_tag != expected_tag:
+              raise SystemExit(f"Release tag {release_tag!r} must equal {expected_tag!r}")
+
+          init_text = (root / "src/evidence_wiki/__init__.py").read_text(encoding="utf-8")
+          version_match = re.search(r'^__version__\s*=\s*(?:["\'])([^"\']+)["\']\s*$', init_text, re.MULTILINE)
+          if version_match is None:
+              raise SystemExit("Could not find evidence_wiki.__version__")
+          if version_match.group(1) != version:
+              raise SystemExit(
+                  f"Package version {version_match.group(1)!r} does not match pyproject version {version!r}"
+              )
+
+          changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+          heading = re.compile(rf"^## {re.escape(version)} - \d{{4}}-\d{{2}}-\d{{2}}$", re.MULTILINE)
+          if heading.search(changelog) is None:
+              raise SystemExit(f"CHANGELOG.md has no dated heading for {version}")
+
+          if output := os.environ.get("GITHUB_OUTPUT"):
+              with pathlib.Path(output).open("a", encoding="utf-8") as stream:
+                  stream.write(f"version={version}\n")
+          print(f"Validated release identity: evidence-wiki {version} ({release_tag})")
+          PY
+
+      - name: Run source quality checks
+        shell: bash
+        run: |
+          .venv/bin/python -m ruff check .
+          .venv/bin/python tools/sync_vendored_scripts.py --check
+          .venv/bin/python tools/sync_agent_resources.py --check
+          git diff --check
+
+  release-tests:
+    name: Release tests / shard ${{ matrix.shard }}
+    needs: release-identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the release environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Run the complete collection's assigned groups
+        shell: bash
+        run: .venv/bin/python tools/run_test_groups.py --group-size 48 --shard-count 3 --shard-index ${{ matrix.shard }}
+
+      - name: Store the successful shard manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-suite-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}
+          path: suite-evidence/manifest.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+      - name: Retain this attempt's full suite evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-test-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
+          path: suite-evidence/
+          if-no-files-found: warn
+          retention-days: 90
+
+  release-build:
+    name: Build release distributions
+    needs: release-identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the release environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Build and inspect distributions
+        shell: bash
+        run: |
+          .venv/bin/python -m build --sdist --wheel --no-isolation
+          .venv/bin/python -m twine check --strict dist/*.whl dist/*.tar.gz
+
+      - name: Store candidate distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate-${{ github.sha }}-${{ github.run_id }}
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 7
+
+  release-artifacts:
+    name: Qualify release ${{ matrix.artifact }}
+    needs: [release-identity, release-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        artifact: [wheel, sdist]
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the release environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Download candidate distributions
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-candidate-${{ github.sha }}-${{ github.run_id }}
+          path: dist/
+
+      - name: Validate the installed artifact
+        timeout-minutes: 100
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-identity.outputs.version }}
+        run: |
+          .venv/bin/python tools/validate_installed_artifacts.py --dist-dir dist \
+            --artifact ${{ matrix.artifact }} --expected-version "$EXPECTED_VERSION" \
+            --journey-workers 3 --command-timeout 900 --case-timeout 1200 \
+            --journey-timeout 5400 --heartbeat-seconds 30 \
+            --evidence-dir reports/installed-artifacts | tee artifact-validation.json
+
+      - name: Store the successful installation report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-installed-${{ github.sha }}-${{ github.run_id }}-${{ matrix.artifact }}
+          path: reports/installed-artifacts/summary.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+      - name: Collect artifact diagnostics
+        if: always()
+        shell: bash
+        env:
+          RELEASE_GATE_STATUS: ${{ job.status }}
+        run: .venv/bin/python tools/collect_release_diagnostics.py --report artifact-validation.json
+
+      - name: Store artifact diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-artifact-diagnostics-${{ github.sha }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact }}
+          path: |
+            release-diagnostics/
+            reports/installed-artifacts/
+          if-no-files-found: warn
+          retention-days: 90
+
+  release-scale:
+    name: Verify the standard release scale budget
+    needs: release-identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the release environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Measure the standard scale profile against its release budget
+        shell: bash
+        run: |
+          .venv/bin/python tools/scale_benchmark.py \
+            --profile standard \
+            --require-budget \
+            --output scale-benchmark-standard.json
+
+      - name: Collect scale diagnostics
+        if: always()
+        shell: bash
+        env:
+          RELEASE_GATE_STATUS: ${{ job.status }}
+        run: .venv/bin/python tools/collect_release_diagnostics.py --report scale-benchmark-standard.json
+
+      - name: Store scale diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-scale-diagnostics-${{ github.sha }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-diagnostics/
+          if-no-files-found: warn
+          retention-days: 90
+
+  release-gate:
+    name: Verify complete release evidence and promote distributions
+    timeout-minutes: 15
+    needs: [release-identity, release-tests, release-build, release-artifacts, release-scale]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Create the verification environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Download this run's successful shard manifests
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: release-suite-${{ github.sha }}-${{ github.run_id }}-shard-*
+          path: suite-shards/
+
+      - name: Verify complete release test execution
+        shell: bash
+        env:
+          SUITE_COMMIT: ${{ github.sha }}
+          SUITE_RUN_ID: ${{ github.run_id }}
+        run: |
+          .venv/bin/python -m tools.verify_test_shards --evidence suite-shards \
+            --commit "$SUITE_COMMIT" --run-id "$SUITE_RUN_ID" --shard-count 3 --group-size 48 \
+            --platform Linux/X64/3.12 > suite-verification.json
+
+      - name: Download the validated candidate distributions
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-candidate-${{ github.sha }}-${{ github.run_id }}
+          path: release-candidate/dist/
+
+      - name: Download both successful installation reports
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: release-installed-${{ github.sha }}-${{ github.run_id }}-*
+          path: installed-checks/
+
+      - name: Verify complete installed qualification
+        shell: bash
+        env:
+          VALIDATION_COMMIT: ${{ github.sha }}
+          VALIDATION_RUN_ID: ${{ github.run_id }}
+          EXPECTED_VERSION: ${{ needs.release-identity.outputs.version }}
+        run: |
+          .venv/bin/python -m tools.verify_installed_artifacts --dist-dir release-candidate/dist \
+            --evidence installed-checks --commit "$VALIDATION_COMMIT" --run-id "$VALIDATION_RUN_ID" \
+            --expected-version "$EXPECTED_VERSION" > release-candidate/artifact-validation.json
+
+      - name: Verify the exact distribution bytes before promotion
+        shell: bash
+        run: |
+          .venv/bin/python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
+
+          candidate = Path("release-candidate")
+          report = json.loads((candidate / "artifact-validation.json").read_text(encoding="utf-8"))
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          if report.get("status") != "passed" or report.get("artifact") != "both" or report.get("selection_status") != "passed":
+              raise SystemExit("Both complete installed qualifications are required for publication")
+          if report["expected_version"] != version:
+              raise SystemExit("Artifact validation report has a different release version")
+          expected = set()
+          for kind, pattern in (("wheel", "*.whl"), ("sdist", "*.tar.gz")):
+              paths = list((candidate / "dist").glob(pattern))
+              if len(paths) != 1 or not paths[0].is_file() or paths[0].is_symlink():
+                  raise SystemExit(f"Expected one regular {kind} distribution")
+              path = paths[0]
+              expected.add(path.name)
+              if path.name != report[kind]["name"] or hashlib.sha256(path.read_bytes()).hexdigest() != report[kind]["sha256"]:
+                  raise SystemExit(f"Downloaded {kind} differs from the validated artifact")
+          if {path.name for path in (candidate / "dist").iterdir()} != expected:
+              raise SystemExit("Candidate contains unexpected distribution files")
+          print(f"Verified the validated wheel and source archive for {version}")
+          PY
+
+      - name: Retain promotion diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-gate-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            suite-shards/
+            suite-verification.json
+            installed-checks/
+            release-candidate/artifact-validation.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Store verified distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-package-distributions
+          path: |
+            release-candidate/dist/*.whl
+            release-candidate/dist/*.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 7

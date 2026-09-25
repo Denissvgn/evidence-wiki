@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 - Unreleased
+## 1.0.0 - 2026-09-25
 
 - Add native Windows handles, private ACLs and process-owned coordination for
   workspace captures, protected publication, pack catalogs, authoring and setup.
