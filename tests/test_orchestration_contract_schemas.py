@@ -303,7 +303,7 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
         self.assertEqual(
             {
                 "managed_runner_ids": ["codex", "claude"],
-                "external_protocol_commands": ["start", "next", "submit", "status", "retire", "cleanup-claims"],
+                "external_protocol_commands": ["start", "next", "submit", "status", "abandon", "retire", "cleanup-claims"],
                 "claim_retention": {
                     "schema_version": 1,
                     "owner": "package",
@@ -322,6 +322,7 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
         self.assertEqual(
             {
                 "orchestration_session",
+                "orchestration_host_session",
                 "orchestration_work_order",
                 "orchestration_result",
                 "orchestration_attempt",
@@ -334,7 +335,7 @@ class OrchestrationContractSchemaTests(unittest.TestCase):
                 self.assertEqual("object", schema["type"])
                 self.assertFalse(schema["additionalProperties"])
                 self.assertEqual(
-                    "1.0",
+                    "1.1" if name == "orchestration_host_session" else "1.0",
                     schema["properties"]["schema_version"]["enum"][0],
                 )
                 if name != "orchestration_result":

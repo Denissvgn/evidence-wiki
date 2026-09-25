@@ -27,6 +27,8 @@ from _evidence_revision import canonical_bytes, content_id
 from _host_evidence_store import STATE_ENV, locked_state, read_state, write_state
 from _publication_context import captured_view
 from _record_artifacts import artifact_path, closure_identity, json_document, validate_file_bounds
+from _strict_contract import artifact_id as strict_artifact_id
+from _strict_contract import review_document as strict_review_document
 from _temporal_contract import authenticate_availability, availability_receipt
 from _workspace_module_loader import load_workspace_module
 
@@ -180,6 +182,7 @@ class UsageState:
         self.revisions: dict[str, dict[str, Any]] = {}
         self.availability: dict[str, dict[str, Any]] = {}
         self.assessments: dict[str, dict[str, Any]] = {}
+        self.strict_reviews: dict[str, dict[str, Any]] = {}
         self.assessment_invalidations: dict[str, dict[str, Any]] = {}
         self.revoked_sources: set[str] = set()
         self.revoked_revisions: set[str] = set()
@@ -260,6 +263,11 @@ class UsageState:
                     raise EvidenceInvalid("assessment_superseded_identity_unknown")
                 self.assessment_invalidations.setdefault(previous, {"event_id": identity, "superseded_by": identifier,
                                                                     "status": "superseded"})
+        elif action in {"register-strict-review", "register-strict-human-review"}:
+            identifier = strict_artifact_id(body["review"])
+            if identifier in self.strict_reviews:
+                raise EvidenceInvalid("strict_review_already_recorded")
+            self.strict_reviews[identifier] = {"envelope": event["command"], "event_id": identity, "authority": event["authority"]}
         elif action == "invalidate-assessments":
             for entry in body["plan"]["entries"]:
                 identifier = entry["assessment_id"]
@@ -343,12 +351,17 @@ def validate_command(envelope: Any, state_id: str, binding: str) -> dict[str, An
     elif action == "invalidate-assessments":
         body = exact_object(command["body"], {"plan"})
         refresh_document(body["plan"])
+    elif action in {"register-strict-review", "register-strict-human-review"}:
+        body = exact_object(command["body"], {"review"})
+        strict_review_document(body["review"])
     else:
         raise EvidenceInvalid("usage_action_unsupported")
     return command
 
 
 def command_role(action: str) -> str:
+    if action in {"register-strict-review", "register-strict-human-review"}:
+        return "human-review" if action == "register-strict-human-review" else "evaluator"
     if action in {"register-assessment", "invalidate-assessments"}:
         return "assessment"
     return "revocation" if action == "revoke" else "usage"
@@ -416,6 +429,10 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
         if command["action"] == "invalidate-assessments":
             assessment_engine = load_workspace_module(Path(__file__).resolve().parent, "_assessment_refresh")
             assessment_engine.validate_apply(root, config, command["body"]["plan"], assessment_view)
+        strict = None
+        if command["action"] in {"register-strict-review", "register-strict-human-review"}:
+            strict = load_workspace_module(Path(__file__).resolve().parent, "_strict_evidence")
+            strict.validate_review(root, config, envelope, UsageView(state, trust, now))
         receipt = state.append(envelope, artifacts, trust, now)
         # A host policy change during validation cannot authorize the commit.
         committed_at = datetime.now(timezone.utc)
@@ -432,6 +449,8 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
             assessment_engine.closing_issue(root, config, command["body"]["assessment"], assessment_view)
         if command["action"] == "invalidate-assessments":
             assessment_engine.closing_apply(root, config, command["body"]["plan"], assessment_view)
+        if strict is not None:
+            strict.validate_review(root, config, envelope, UsageView(state, trust, committed_at))
         write_state(directory, canonical_bytes(state.document))
         return receipt
 

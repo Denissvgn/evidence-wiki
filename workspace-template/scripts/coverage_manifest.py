@@ -403,13 +403,22 @@ def domain_pack_policy_vocabularies(config: dict[str, Any]) -> dict[str, dict[st
             "CONFIG_INVALID",
             f"domain_pack.policy_vocabularies contains unknown section(s): {', '.join(unknown)}",
         )
-    return {
+    vocabularies = {
         field: normalize_policy_vocabulary_declarations(
             raw_vocabularies.get(field),
             label=f"domain_pack.policy_vocabularies.{field}",
         )
         for field in POLICY_VOCABULARY_FIELDS
     }
+    name = domain_pack.get("name")
+    if isinstance(name, str) and name.strip():
+        prefix = "pack:" + name.strip() + "/"
+        for declarations in vocabularies.values():
+            for policy_id in declarations:
+                if not policy_id.startswith(prefix):
+                    raise CoverageManifestError("CONFIG_INVALID", "Declared policy namespace must match domain_pack.name",
+                        details={"policy_id": policy_id, "pack_name": name.strip()})
+    return vocabularies
 
 
 def merged_policy_vocabularies(config: dict[str, Any] | None = None) -> dict[str, dict[str, str]]:
@@ -711,9 +720,11 @@ def validate_manifest(
     missing = REQUIRED_TOP_LEVEL_FIELDS - set(document)
     if missing:
         raise CoverageManifestError("COVERAGE_MANIFEST_INVALID", f"coverage manifest missing fields: {', '.join(sorted(missing))}")
-    unknown = set(document) - REQUIRED_TOP_LEVEL_FIELDS
+    unknown = set(document) - REQUIRED_TOP_LEVEL_FIELDS - {"revision_basis"}
     if unknown:
         raise CoverageManifestError("COVERAGE_MANIFEST_INVALID", f"coverage manifest has unknown fields: {', '.join(sorted(unknown))}")
+    if "revision_basis" in document:
+        load_sibling_module("_coverage_revision").validate_basis(document["revision_basis"])
     if document.get("schema_version") != SCHEMA_VERSION:
         raise CoverageManifestError("COVERAGE_MANIFEST_INVALID", f"coverage manifest schema_version must be {SCHEMA_VERSION}")
     slug = string_field(document, "question_slug", "coverage manifest", error_code="COVERAGE_MANIFEST_INVALID")
@@ -864,8 +875,15 @@ def load_template(
         raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", f"Cannot read coverage template {path_value}: {exc}") from exc
     except yaml.YAMLError as exc:
         raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", f"Invalid YAML in coverage template {path_value}: {exc}") from exc
+    return normalize_template_document(document, policy_vocabularies=policy_vocabularies)
+
+
+def normalize_template_document(
+    document: Any, *, policy_vocabularies: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Validate an inert in-memory template with the same rules as file intake."""
     if not isinstance(document, dict):
-        raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", f"coverage template must be a YAML mapping: {path_value}")
+        raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "coverage template must be a YAML mapping")
     unknown = set(document) - TEMPLATE_FIELDS
     if unknown:
         raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", f"coverage template has unknown fields: {', '.join(sorted(unknown))}")
@@ -1351,6 +1369,20 @@ def coverage_summary_for_question(
         "missing_source_request_ids": [],
         "unconfirmed_claims": [],
     }
+    try:
+        guard = load_sibling_module("_pack_revision_guard")
+        revision = guard.pending_question(project_root, slug)
+        if revision is not None:
+            selected = selected_manifest_path(project_root, config, slug, manifest_value)
+            observed = load_yaml_mapping(selected, error_code="COVERAGE_MANIFEST_INVALID") if selected.is_file() else None
+            revision = guard.pending_question(project_root, slug, observed)
+    except (Exception, SystemExit):
+        revision = "unavailable"
+    if revision is not None:
+        summary.update(coverage_required=True, coverage_status="invalid", coverage_verdict="blocked",
+            error_code="COVERAGE_REVISION_REQUIRED", revision_id=revision,
+            error="Pack requirements changed; explicitly migrate coverage and recheck answer eligibility.")
+        return summary
     if manifest_value is None and not should_probe_default:
         return summary
 
@@ -1445,7 +1477,23 @@ def run_init(project_root: Path, config: dict[str, Any], args: argparse.Namespac
         if args.template
         else None
     )
-    document = build_manifest(slug, args.coverage_profile, template)
+    return run_init_document(project_root, config, slug=slug, template=template,
+                             coverage_profile=args.coverage_profile, force=args.force)
+
+
+def run_init_document(project_root: Path, config: dict[str, Any], *, slug: str,
+                      template: dict[str, Any] | None, coverage_profile: str | None = None,
+                      force: bool = False) -> dict[str, Any]:
+    """Materialize an inline template through the same coverage owner as the CLI."""
+    slug = validate_slug(slug)
+    ensure_question_exists(project_root, config, slug)
+    path = manifest_path(project_root, config, slug)
+    if path.exists() and not force:
+        raise CoverageManifestError("COVERAGE_MANIFEST_EXISTS", "Coverage manifest already exists.", details={"slug": slug})
+    policy_vocabularies = merged_policy_vocabularies(config)
+    if template is not None:
+        template = normalize_template_document(template, policy_vocabularies=policy_vocabularies)
+    document = build_manifest(slug, coverage_profile, template)
     validate_manifest(document, expected_slug=slug, policy_vocabularies=policy_vocabularies)
     write_manifest(path, document)
     return report("init", project_root, path, document, created=True)
@@ -1585,6 +1633,10 @@ def run_evaluate(project_root: str | Path, *, slug: str) -> dict[str, Any]:
         coverage_verdict=document["coverage_verdict"],
         policy_results=policy_results,
     )
+
+
+def run_revision(project_root: str | Path, request: dict[str, Any]) -> dict[str, Any]:
+    return load_sibling_module("_coverage_revision").migrate(project_root, request)
 
 
 def render_text(result: dict[str, Any]) -> str:

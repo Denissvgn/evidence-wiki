@@ -36,7 +36,9 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from _pack_selection import selection_metadata
 from _workspace_locks import workspace_lock
+from _workspace_module_loader import load_workspace_module
 
 STATE_SCHEMA_VERSION = "1.0"
 REFRESH_SCHEMA_VERSION = "1.0"
@@ -58,6 +60,25 @@ RESTRICTIVE_FILE_MODE = 0o600
 RESTRICTIVE_DIR_MODE = 0o700
 
 _MISSING = object()
+_COMPUTATION_CACHE = {}
+
+
+def _validate_computation(document: Mapping[str, Any], text: str | None = None) -> None:
+    if "computation" not in document:
+        return
+    try:
+        contract = load_workspace_module(_SCRIPT_DIR, "_computation_contract", cache=_COMPUTATION_CACHE)
+        if text is not None:
+            contract.validate_yaml(text)
+        if document.get("computation") is not None:
+            if text is not None:
+                definition = contract.declaration(_plain(document["computation"]))
+                load_workspace_module(_SCRIPT_DIR, "_computation_schedule", cache=_COMPUTATION_CACHE).validate_clock(definition)
+            else:
+                runtime = load_workspace_module(_SCRIPT_DIR, "_computation_runtime", cache=_COMPUTATION_CACHE)
+                runtime.load_definition(_plain(document))
+    except (ValueError, TypeError, KeyError):
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Computation configuration is invalid.") from None
 
 
 class LifecycleFailure(RuntimeError):
@@ -96,6 +117,8 @@ class LifecyclePlan:
     log_entry: str | None = None
     input_fingerprint: str = ""
     candidate_fingerprint: str = ""
+    research_fingerprint: str = ""
+    prior_state: dict[str, Any] | None = None
 
 
 def _plain(value: Any) -> Any:
@@ -103,8 +126,14 @@ def _plain(value: Any) -> Any:
         return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_plain(item) for item in value]
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, bool):
         return value
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
     return copy.deepcopy(value)
 
 
@@ -183,10 +212,20 @@ def _safe_pack_files(pack_root: Path) -> list[Path]:
 
 def file_inventory(pack_root: Path, *, include_bytes: bool = False) -> dict[str, Any]:
     result: dict[str, Any] = {}
+    raw_files = {}
     for path in _safe_pack_files(pack_root):
         relative = path.relative_to(pack_root).as_posix()
         content = path.read_bytes()
+        raw_files[relative] = content
         result[relative] = content if include_bytes else sha256_bytes(content)
+    if "composition.lock.json" in raw_files or b"composition" in raw_files.get("research.overlay.yml", b""):
+        try:
+            overlay = yaml.safe_load(raw_files.get("research.overlay.yml", b"")) or {}
+            if overlay.get("domain_pack", {}).get("composition") and "composition.lock.json" not in raw_files:
+                raise ValueError("composition_manifest_missing")
+            load_workspace_module(_SCRIPT_DIR, "_pack_composition", cache=_COMPUTATION_CACHE).verify(raw_files)
+        except (ValueError, TypeError, KeyError, yaml.YAMLError, RecursionError) as error:
+            raise LifecycleFailure("DOMAIN_PACK_INVALID", "Composed pack does not match its pinned member contracts") from error
     return result
 
 
@@ -246,12 +285,17 @@ def _load_overlay_content(content: bytes, label: str) -> dict[str, Any]:
         raise LifecycleFailure("DOMAIN_PACK_INVALID", f"Invalid domain-pack overlay at {label}: {exc}") from exc
     if not isinstance(document, dict):
         raise LifecycleFailure("DOMAIN_PACK_INVALID", "research.overlay.yml must contain a mapping")
+    _validate_computation(document, content.decode("utf-8"))
     pack = document.get("domain_pack")
     if not isinstance(pack, dict):
         raise LifecycleFailure("DOMAIN_PACK_INVALID", "research.overlay.yml must declare domain_pack")
     for key in ("name", "version", "compatible_research_yml_contract"):
         if not isinstance(pack.get(key), str) or not pack[key].strip():
             raise LifecycleFailure("DOMAIN_PACK_INVALID", f"domain_pack.{key} must be a non-empty string")
+    try:
+        selection_metadata(pack)
+    except ValueError as error:
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", str(error)) from None
     return document
 
 
@@ -636,6 +680,7 @@ def write_initial_state(project_root: Path, state: Mapping[str, Any]) -> None:
 
 
 def _validate_state(document: dict[str, Any]) -> dict[str, Any]:
+    load_workspace_module(_SCRIPT_DIR, "_pack_revision_impact", cache=_COMPUTATION_CACHE).validate_history(document)
     if document.get("schema_version") != STATE_SCHEMA_VERSION:
         raise LifecycleFailure(
             "DOMAIN_PACK_STATE_INVALID",
@@ -2138,157 +2183,9 @@ def _raise_conflicts(report: dict[str, Any]) -> None:
     )
 
 
-def plan_refresh(
-    project_root: Path,
-    candidate_root: Path,
-    *,
-    keep_local: list[str] | None = None,
-    accept_pack: list[str] | None = None,
-    dry_run: bool = True,
-    source_kind: str | None = None,
-    warnings: list[str] | None = None,
-) -> LifecyclePlan:
-    root = Path(project_root).expanduser().resolve()
-    if _transaction_path(root).exists() or _transaction_path(root).is_symlink():
-        raise LifecycleFailure(
-            "DOMAIN_PACK_TRANSACTION_INCOMPLETE",
-            "An interrupted domain-pack transaction must be recovered before refresh planning",
-            details={"transaction": TRANSACTION_RELATIVE.as_posix()},
-        )
-    candidate_input = Path(candidate_root).expanduser()
-    if candidate_input.is_symlink():
-        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Candidate domain-pack root must not be a symbolic link")
-    candidate = candidate_input.resolve()
-    keep, accept = _validate_resolution_flags(keep_local or [], accept_pack or [])
-    candidate_snapshot = file_inventory(candidate, include_bytes=True)
-    candidate_inventory = {
-        relative: sha256_bytes(content)
-        for relative, content in candidate_snapshot.items()
-    }
-    initial_candidate_fingerprint = _inventory_sha256(candidate_inventory)
-    overlay_content = candidate_snapshot.get("research.overlay.yml")
-    if overlay_content is None:
-        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Candidate pack has no research.overlay.yml")
-    initial_workspace_shallow = _workspace_fingerprint(root)
-    state = load_state(root)
-    if _workspace_fingerprint(root) != initial_workspace_shallow:
-        raise LifecycleFailure(
-            "DOMAIN_PACK_REFRESH_CONFLICT",
-            "Workspace changed while domain-pack refresh was being planned",
-            exit_code=3,
-        )
-    try:
-        initial_workspace_fingerprint = _workspace_fingerprint(root, state)
-    except LifecycleFailure as exc:
-        raise LifecycleFailure(
-            "DOMAIN_PACK_STATE_INVALID",
-            f"Tracked installed pack tree is unsafe: {exc}",
-            details=exc.details,
-        ) from exc
-    if _workspace_fingerprint(root) != initial_workspace_shallow:
-        raise LifecycleFailure(
-            "DOMAIN_PACK_REFRESH_CONFLICT",
-            "Workspace changed while domain-pack refresh was being planned",
-            exit_code=3,
-        )
-    old_pack = state["pack"]
-    raw_candidate = _load_overlay_content(
-        overlay_content,
-        str(candidate / "research.overlay.yml"),
-    )
-    candidate_meta = _pack_metadata(raw_candidate)
-    if candidate.name != candidate_meta["name"]:
-        raise LifecycleFailure(
-            "DOMAIN_PACK_INVALID",
-            "Candidate pack directory name must match domain_pack.name",
-            details={"directory": candidate.name, "declared_name": candidate_meta["name"]},
-        )
-    if candidate_meta["name"] != old_pack["name"]:
-        raise LifecycleFailure(
-            "DOMAIN_PACK_INVALID",
-            f"Refresh cannot switch pack {old_pack['name']!r} to {candidate_meta['name']!r}",
-        )
-    workspace_contract = _workspace_contract(root)
-    if candidate_meta["compatible_research_yml_contract"] != workspace_contract:
-        raise LifecycleFailure(
-            "DOMAIN_PACK_INVALID",
-            "Candidate pack is incompatible with the workspace research contract",
-            details={
-                "workspace_contract": workspace_contract,
-                "pack_contract": candidate_meta["compatible_research_yml_contract"],
-            },
-        )
-    target_relative = old_pack["target_relative"]
-    if PurePosixPath(target_relative).name != old_pack["name"]:
-        raise LifecycleFailure("DOMAIN_PACK_STATE_INVALID", "Tracked pack path does not match its name")
-    installed_root = _installed_pack_root(
-        root,
-        target_relative,
-        error_code="DOMAIN_PACK_STATE_INVALID",
-    )
-    try:
-        _safe_pack_files(installed_root)
-    except LifecycleFailure as exc:
-        raise LifecycleFailure(
-            "DOMAIN_PACK_STATE_INVALID",
-            f"Tracked installed pack tree is unsafe: {exc}",
-            details=exc.details,
-        ) from exc
-    incoming_overlay = normalize_overlay_paths(raw_candidate, target_relative)
+def merge_configuration(document, state, incoming_overlay, *, keep, accept):
+    """Apply the shared three-way configuration ownership rules without writing."""
     old_overlay = state["normalized_overlay"]
-    candidate_overlay_digest = overlay_sha256(raw_candidate)
-    candidate_tree_digest = initial_candidate_fingerprint
-    if (
-        not keep
-        and not accept
-        and candidate_overlay_digest == old_pack["overlay_sha256"]
-        and candidate_tree_digest == old_pack["tree_sha256"]
-        and inspect_workspace(root)["state"] == "current"
-    ):
-        report = _refresh_report(
-            mode="dry-run" if dry_run else "write",
-            target=root,
-            status="no_changes",
-            pack={
-                "name": old_pack["name"],
-                "installed_version": old_pack["installed_version"],
-                "candidate_version": candidate_meta["version"],
-                "installed_overlay_sha256": old_pack["overlay_sha256"],
-                "candidate_overlay_sha256": candidate_overlay_digest,
-                "installed_tree_sha256": old_pack["tree_sha256"],
-                "candidate_tree_sha256": candidate_tree_digest,
-                "source_kind": _candidate_kind(candidate, source_kind),
-            },
-            changes=[],
-            conflicts=[],
-            warnings=warnings,
-        )
-        final_workspace_fingerprint = _workspace_fingerprint(root, state)
-        if final_workspace_fingerprint != initial_workspace_fingerprint:
-            raise LifecycleFailure(
-                "DOMAIN_PACK_REFRESH_CONFLICT",
-                "Workspace changed while domain-pack refresh was being planned",
-                exit_code=3,
-            )
-        if tree_sha256(candidate) != candidate_tree_digest:
-            raise LifecycleFailure(
-                "DOMAIN_PACK_INVALID",
-                "Candidate domain pack changed while refresh was being planned",
-            )
-        return LifecyclePlan(
-            report=report,
-            state=state,
-            input_fingerprint=final_workspace_fingerprint,
-            candidate_fingerprint=candidate_tree_digest,
-        )
-    document, original_config_text = _research_round_trip(root / "research.yml")
-    configured_pack = _config_pack(document)
-    if not isinstance(configured_pack, Mapping):
-        raise LifecycleFailure(
-            "DOMAIN_PACK_STATE_INVALID",
-            "research.yml has no valid domain-pack identity mapping",
-        )
-
     local_overrides = set(state.get("local_overrides", []))
     planner = _ConfigPlanner(
         document,
@@ -2379,6 +2276,169 @@ def plan_refresh(
         if old_present and not incoming_present:
             planner.local_overrides.discard(target)
 
+    return planner
+
+
+def plan_refresh(
+    project_root: Path,
+    candidate_root: Path,
+    *,
+    keep_local: list[str] | None = None,
+    accept_pack: list[str] | None = None,
+    dry_run: bool = True,
+    source_kind: str | None = None,
+    warnings: list[str] | None = None,
+    rationale: str = "Explicit same-pack refresh; semantic adequacy remains subject to review.",
+    qualification: dict[str, Any] | None = None,
+) -> LifecyclePlan:
+    root = Path(project_root).expanduser().resolve()
+    if _transaction_path(root).exists() or _transaction_path(root).is_symlink():
+        raise LifecycleFailure(
+            "DOMAIN_PACK_TRANSACTION_INCOMPLETE",
+            "An interrupted domain-pack transaction must be recovered before refresh planning",
+            details={"transaction": TRANSACTION_RELATIVE.as_posix()},
+        )
+    candidate_input = Path(candidate_root).expanduser()
+    if candidate_input.is_symlink():
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Candidate domain-pack root must not be a symbolic link")
+    candidate = candidate_input.resolve()
+    keep, accept = _validate_resolution_flags(keep_local or [], accept_pack or [])
+    candidate_snapshot = file_inventory(candidate, include_bytes=True)
+    candidate_inventory = {
+        relative: sha256_bytes(content)
+        for relative, content in candidate_snapshot.items()
+    }
+    initial_candidate_fingerprint = _inventory_sha256(candidate_inventory)
+    overlay_content = candidate_snapshot.get("research.overlay.yml")
+    if overlay_content is None:
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Candidate pack has no research.overlay.yml")
+    initial_workspace_shallow = _workspace_fingerprint(root)
+    state = load_state(root)
+    if _workspace_fingerprint(root) != initial_workspace_shallow:
+        raise LifecycleFailure(
+            "DOMAIN_PACK_REFRESH_CONFLICT",
+            "Workspace changed while domain-pack refresh was being planned",
+            exit_code=3,
+        )
+    try:
+        initial_workspace_fingerprint = _workspace_fingerprint(root, state)
+    except LifecycleFailure as exc:
+        raise LifecycleFailure(
+            "DOMAIN_PACK_STATE_INVALID",
+            f"Tracked installed pack tree is unsafe: {exc}",
+            details=exc.details,
+        ) from exc
+    if _workspace_fingerprint(root) != initial_workspace_shallow:
+        raise LifecycleFailure(
+            "DOMAIN_PACK_REFRESH_CONFLICT",
+            "Workspace changed while domain-pack refresh was being planned",
+            exit_code=3,
+        )
+    old_pack = state["pack"]
+    raw_candidate = _load_overlay_content(
+        overlay_content,
+        str(candidate / "research.overlay.yml"),
+    )
+    candidate_meta = _pack_metadata(raw_candidate)
+    if candidate.name != candidate_meta["name"]:
+        raise LifecycleFailure(
+            "DOMAIN_PACK_INVALID",
+            "Candidate pack directory name must match domain_pack.name",
+            details={"directory": candidate.name, "declared_name": candidate_meta["name"]},
+        )
+    if candidate_meta["name"] != old_pack["name"]:
+        raise LifecycleFailure(
+            "DOMAIN_PACK_INVALID",
+            f"Refresh cannot switch pack {old_pack['name']!r} to {candidate_meta['name']!r}",
+        )
+    workspace_contract = _workspace_contract(root)
+    if candidate_meta["compatible_research_yml_contract"] != workspace_contract:
+        raise LifecycleFailure(
+            "DOMAIN_PACK_INVALID",
+            "Candidate pack is incompatible with the workspace research contract",
+            details={
+                "workspace_contract": workspace_contract,
+                "pack_contract": candidate_meta["compatible_research_yml_contract"],
+            },
+        )
+    target_relative = old_pack["target_relative"]
+    if PurePosixPath(target_relative).name != old_pack["name"]:
+        raise LifecycleFailure("DOMAIN_PACK_STATE_INVALID", "Tracked pack path does not match its name")
+    installed_root = _installed_pack_root(
+        root,
+        target_relative,
+        error_code="DOMAIN_PACK_STATE_INVALID",
+    )
+    try:
+        _safe_pack_files(installed_root)
+    except LifecycleFailure as exc:
+        raise LifecycleFailure(
+            "DOMAIN_PACK_STATE_INVALID",
+            f"Tracked installed pack tree is unsafe: {exc}",
+            details=exc.details,
+        ) from exc
+    incoming_overlay = normalize_overlay_paths(raw_candidate, target_relative)
+    candidate_overlay_digest = overlay_sha256(raw_candidate)
+    candidate_tree_digest = initial_candidate_fingerprint
+    if (
+        not keep
+        and not accept
+        and candidate_overlay_digest == old_pack["overlay_sha256"]
+        and candidate_tree_digest == old_pack["tree_sha256"]
+        and inspect_workspace(root)["state"] == "current"
+    ):
+        report = _refresh_report(
+            mode="dry-run" if dry_run else "write",
+            target=root,
+            status="no_changes",
+            pack={
+                "name": old_pack["name"],
+                "installed_version": old_pack["installed_version"],
+                "candidate_version": candidate_meta["version"],
+                "installed_overlay_sha256": old_pack["overlay_sha256"],
+                "candidate_overlay_sha256": candidate_overlay_digest,
+                "installed_tree_sha256": old_pack["tree_sha256"],
+                "candidate_tree_sha256": candidate_tree_digest,
+                "source_kind": _candidate_kind(candidate, source_kind),
+            },
+            changes=[],
+            conflicts=[],
+            warnings=warnings,
+        )
+        final_workspace_fingerprint = _workspace_fingerprint(root, state)
+        if final_workspace_fingerprint != initial_workspace_fingerprint:
+            raise LifecycleFailure(
+                "DOMAIN_PACK_REFRESH_CONFLICT",
+                "Workspace changed while domain-pack refresh was being planned",
+                exit_code=3,
+            )
+        if tree_sha256(candidate) != candidate_tree_digest:
+            raise LifecycleFailure(
+                "DOMAIN_PACK_INVALID",
+                "Candidate domain pack changed while refresh was being planned",
+            )
+        impact_owner = load_workspace_module(_SCRIPT_DIR, "_pack_revision_impact", cache=_COMPUTATION_CACHE)
+        capture_owner = load_workspace_module(_SCRIPT_DIR, "_evidence_revision", cache=_COMPUTATION_CACHE)
+        guard = load_workspace_module(_SCRIPT_DIR, "_pack_revision_guard", cache=_COMPUTATION_CACHE)
+        report["revision_plan_id"] = impact_owner.digest({"workspace": final_workspace_fingerprint,
+            "research": guard.inputs(capture_owner.capture_workspace(root)), "candidate": candidate_tree_digest,
+            "keep_local": [], "accept_pack": [], "revision": None})
+        return LifecyclePlan(
+            report=report,
+            state=state,
+            input_fingerprint=final_workspace_fingerprint,
+            candidate_fingerprint=candidate_tree_digest,
+        )
+    document, original_config_text = _research_round_trip(root / "research.yml")
+    configured_pack = _config_pack(document)
+    if not isinstance(configured_pack, Mapping):
+        raise LifecycleFailure(
+            "DOMAIN_PACK_STATE_INVALID",
+            "research.yml has no valid domain-pack identity mapping",
+        )
+
+    planner = merge_configuration(document, state, incoming_overlay, keep=keep, accept=accept)
+
     file_changes, file_conflicts, file_conflict_targets, desired_files, managed_files = _refresh_file_plan(
         installed_root=installed_root,
         candidate_root=candidate,
@@ -2421,6 +2481,7 @@ def plan_refresh(
         )
         _raise_conflicts(report)
 
+    _validate_computation(document)
     config_text = _render_round_trip(document)
     config_dirty = config_text != original_config_text
     next_state = copy.deepcopy(state)
@@ -2446,6 +2507,16 @@ def plan_refresh(
     next_state = _validate_state(next_state)
     state_dirty = _canonical_bytes(next_state) != _canonical_bytes(state)
     material = config_dirty or bool(desired_files) or state_dirty
+    impact_owner = load_workspace_module(_SCRIPT_DIR, "_pack_revision_impact", cache=_COMPUTATION_CACHE)
+    _safe_workspace_destination(root, BACKUP_ROOT_RELATIVE)
+    impact, research_fingerprint, research_before = impact_owner.inspect(root, state, incoming_overlay, _plain(document), candidate_snapshot, desired_files)
+    if material:
+        revision = {"from": old_pack, "to": next_state["pack"], "impact": impact,
+                    "rationale": rationale, "qualification": qualification, "research_before": research_before}
+        revision["revision_id"] = impact_owner.digest(revision)
+        next_state.setdefault("research_revisions", []).append(revision)
+        next_state = _validate_state(next_state)
+        state_dirty = True
     status = "planned" if material and dry_run else "ready" if material else "no_changes"
     report = _refresh_report(
         mode="dry-run" if dry_run else "write",
@@ -2456,6 +2527,11 @@ def plan_refresh(
         conflicts=[],
         warnings=warnings,
     )
+    report["impact"] = impact
+    report["revision_id"] = revision["revision_id"] if material else None
+    report["revision_plan_id"] = impact_owner.digest({"workspace": initial_workspace_fingerprint,
+        "research": research_fingerprint, "candidate": candidate_tree_digest,
+        "keep_local": sorted(keep), "accept_pack": sorted(accept), "revision": report["revision_id"]})
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     log_entry = None
     if material:
@@ -2488,7 +2564,193 @@ def plan_refresh(
         log_entry=log_entry,
         input_fingerprint=final_workspace_fingerprint,
         candidate_fingerprint=candidate_tree_digest,
+        research_fingerprint=research_fingerprint,
     )
+
+
+def _migration_maps(before, after, supplied):
+    impact = load_workspace_module(_SCRIPT_DIR, "_pack_revision_impact", cache=_COMPUTATION_CACHE)
+    kinds = load_workspace_module(_SCRIPT_DIR, "_request_kinds", cache=_COMPUTATION_CACHE)
+    old_pack, new_pack = before.get("domain_pack", {}), after.get("domain_pack", {})
+    groups = {
+        "policies": (impact.policies(before), impact.policies(after)),
+        "request_kinds": (kinds.declared_pack_kinds(before), kinds.declared_pack_kinds(after)),
+        "templates": (old_pack.get("coverage_templates", {}), new_pack.get("coverage_templates", {})),
+    }
+    if not isinstance(supplied, dict) or set(supplied) != set(groups):
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Migration requires explicit policy, request-kind and template mappings")
+    for name, (old, new) in groups.items():
+        mapping = supplied[name]
+        removed = set(old) - set(new)
+        if (not isinstance(mapping, dict) or set(mapping) != removed
+                or any(value is not None and (not isinstance(value, str) or value not in new) for value in mapping.values())
+                or len([value for value in mapping.values() if value is not None]) != len({value for value in mapping.values() if value is not None})):
+            raise LifecycleFailure("DOMAIN_PACK_INVALID", "Migration mappings are incomplete or ambiguous",
+                                   details={"group": name, "required": sorted(removed)})
+    return copy.deepcopy(supplied)
+
+
+def plan_migration(project_root, candidate_root, *, mappings, rationale, keep_local=None, accept_pack=None,
+                   qualification=None, dry_run=True):
+    """Plan first attachment or an identity switch without reinterpreting old research."""
+    project_input, candidate_input = Path(project_root).expanduser(), Path(candidate_root).expanduser()
+    root, candidate = project_input.resolve(), candidate_input.resolve()
+    _preflight_workspace_directory(project_input, root, error_code="DOMAIN_PACK_STATE_INVALID")
+    if candidate_input.is_symlink() or not isinstance(rationale, str) or not rationale.strip():
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "A regular candidate directory and migration rationale are required")
+    if _transaction_path(root).exists() or _transaction_path(root).is_symlink():
+        raise LifecycleFailure("DOMAIN_PACK_TRANSACTION_INCOMPLETE", "Recover the interrupted pack transaction before planning")
+    guard = load_workspace_module(_SCRIPT_DIR, "_pack_revision_guard", cache=_COMPUTATION_CACHE)
+    research_fingerprint = guard.idle(root)
+    document, original_text = _research_round_trip(root / "research.yml")
+    original = _plain(document)
+    configured = _config_pack(document)
+    prior = load_state(root) if configured is not None else None
+    if prior is None and (_state_path(root).exists() or "domain_pack" in document):
+        raise LifecycleFailure("DOMAIN_PACK_STATE_INVALID", "Generic workspace has contradictory pack metadata")
+    if prior is not None and inspect_workspace(root)["state"] not in {"current", "locally_modified"}:
+        raise LifecycleFailure("DOMAIN_PACK_STATE_INVALID", "Inspect and reconcile the existing pack before migration")
+    fingerprint = _workspace_fingerprint(root, prior)
+    snapshot = file_inventory(candidate, include_bytes=True)
+    raw_overlay = _load_overlay_content(snapshot.get("research.overlay.yml", b""), "candidate overlay")
+    meta = _pack_metadata(raw_overlay)
+    if candidate.name != meta["name"] or meta["compatible_research_yml_contract"] != _workspace_contract(root):
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Candidate identity or workspace contract is incompatible")
+    if prior and prior["pack"]["name"] == meta["name"]:
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Use same-pack revision planning for an unchanged identity")
+    relative = "domain-packs/" + meta["name"]
+    destination = _safe_workspace_destination(root, PurePosixPath(relative))
+    if destination.is_symlink() or destination.exists() and (not destination.is_dir() or any(_safe_pack_files(destination))):
+        raise LifecycleFailure("DOMAIN_PACK_REFRESH_CONFLICT", "Migration destination already exists", exit_code=3,
+                               details={"path": relative})
+    incoming = normalize_overlay_paths(raw_overlay, relative)
+    keep, accept = _validate_resolution_flags(keep_local or [], accept_pack or [])
+    if any(value.startswith("file:") for value in keep | accept):
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Identity migration never overwrites an existing pack directory")
+    if prior:
+        planner = merge_configuration(document, prior, incoming, keep=keep, accept=accept)
+    else:
+        planner = _ConfigPlanner(document, keep_local=keep, accept_pack=accept, local_overrides=set())
+        for pointer in overlay_write_pointers(original, incoming):
+            parts = _pointer_parts(pointer)
+            if parts[0] != "project":
+                planner.new(parts, incoming=_lookup(incoming, parts)[1])
+    if planner.conflicts:
+        raise LifecycleFailure("DOMAIN_PACK_REFRESH_CONFLICT", "Resolve the migration configuration conflicts", exit_code=3,
+                               details={"conflicts": planner.conflicts})
+    if (keep | accept) - planner.conflict_targets:
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Migration resolutions do not name current conflicts")
+    effective = _plain(document)
+    if _config_pack(effective) != incoming["domain_pack"]:
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "A migrated identity must use its complete validated declarations")
+    for key in ("raw", "sources", "strict_evidence", "evidence_trust", "evidence_usage", "integrations", "orchestration"):
+        if effective.get(key) != original.get(key):
+            raise LifecycleFailure("DOMAIN_PACK_INVALID", "Migration cannot relocate evidence or replace host controls",
+                                   details={"field": key})
+    stable_wiki = ("root", "required_dirs", "date_format", "link_style")
+    old_wiki = {k: original.get("wiki", {}).get(k) for k in stable_wiki}
+    new_wiki = {k: effective.get("wiki", {}).get(k) for k in stable_wiki}
+    capture = load_workspace_module(_SCRIPT_DIR, "_evidence_revision", cache=_COMPUTATION_CACHE).capture_workspace(root)
+    questions = load_workspace_module(_SCRIPT_DIR, "question_status", cache=_COMPUTATION_CACHE)
+    wiki_prefix = str(original.get("wiki", {}).get("root", "wiki")).rstrip("/") + "/"
+    used_types = {(questions.frontmatter_from_text(raw.decode("utf-8")) or {}).get("type")
+                  for name, raw in capture.files.items() if name.startswith(wiki_prefix) and name.endswith(".md")}
+    used_types.discard(None)
+    if old_wiki != new_wiki or not used_types <= set(effective.get("wiki", {}).get("allowed_page_types", [])):
+        raise LifecycleFailure("DOMAIN_PACK_INVALID", "Migration preserves wiki locations and existing page types")
+    mapped = _migration_maps(original, effective, mappings)
+    _validate_computation(document)
+    inventory = {name: sha256_bytes(raw) for name, raw in snapshot.items()}
+    candidate_fingerprint = _inventory_sha256(inventory)
+    new_state = {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "pack": {"name": meta["name"], "installed_version": meta["version"],
+                 "compatible_research_yml_contract": meta["compatible_research_yml_contract"],
+                 "target_relative": relative, "source_kind": "path", "overlay_sha256": overlay_sha256(raw_overlay),
+                 "normalized_overlay_sha256": overlay_sha256(incoming), "tree_sha256": candidate_fingerprint},
+        "normalized_overlay": _plain(incoming), "pre_pack_config": copy.deepcopy(prior["pre_pack_config"] if prior else original),
+        "config_ownership": sorted(planner.ownership, key=lambda row: row["path"]),
+        "managed_files": [{"path": name, "sha256": sha} for name, sha in sorted(inventory.items())],
+        "revision_files": [{"path": name, "sha256": sha} for name, sha in sorted(inventory.items())],
+        "local_overrides": sorted(planner.local_overrides), "transaction_id": None,
+        "research_revisions": copy.deepcopy(prior.get("research_revisions", []) if prior else []),
+    }
+    impact_owner = load_workspace_module(_SCRIPT_DIR, "_pack_revision_impact", cache=_COMPUTATION_CACHE)
+    previous = prior or {"pack": {"name": None, "target_relative": "domain-packs"},
+                         "normalized_overlay": {}, "revision_files": [], "research_revisions": []}
+    impact, observed, history = impact_owner.inspect(root, previous, incoming, effective, snapshot, snapshot)
+    guard.require(observed == research_fingerprint, "migration_research_changed")
+    impact["identity_migration"] = {"from": prior["pack"]["name"] if prior else None, "to": meta["name"],
+        "mappings": mapped, "existing_requests_rewritten": False,
+        "resolutions": {"keep_local": sorted(keep), "accept_pack": sorted(accept)},
+        "coverage": "Explicit per-question reevaluation retains old request IDs and archived answers; mappings are proposals, not renewed reviews."}
+    revision = {"from": copy.deepcopy(prior["pack"]) if prior else None, "to": new_state["pack"],
+                "impact": impact, "rationale": rationale, "qualification": qualification, "research_before": history}
+    revision["revision_id"] = impact_owner.digest(revision)
+    new_state["research_revisions"].append(revision)
+    _validate_state(new_state)
+    report = {"schema_version": REFRESH_SCHEMA_VERSION, "operation": "migrate", "mode": "dry-run" if dry_run else "write",
+        "target": str(root), "status": "planned" if dry_run else "ready", "pack": new_state["pack"],
+        "changes": planner.changes, "conflicts": [], "impact": impact, "revision_id": revision["revision_id"],
+        "preserved_pack": prior["pack"]["target_relative"] if prior else None, "log_appended": False,
+        "warnings": ["Prior pack bytes and request records remain historical; no source IDs or approval metadata are rebound."]}
+    report["revision_plan_id"] = impact_owner.digest({"workspace": fingerprint, "research": research_fingerprint,
+        "candidate": candidate_fingerprint, "keep_local": sorted(keep), "accept_pack": sorted(accept), "revision": revision["revision_id"]})
+    guard.require(_workspace_fingerprint(root, prior) == fingerprint and tree_sha256(candidate) == candidate_fingerprint,
+                  "migration_inputs_changed")
+    return LifecyclePlan(report=report, state=new_state, config_text=_render_round_trip(document), desired_files=snapshot,
+        config_dirty=True, state_dirty=True, input_fingerprint=fingerprint, candidate_fingerprint=candidate_fingerprint,
+        research_fingerprint=research_fingerprint, prior_state=prior,
+        log_entry=f"\n## [{datetime.now(timezone.utc).date()}] domain-pack-migrate | Attached {meta['name']}\n\n- Revision: `{revision['revision_id']}`.\n- Prior research requires explicit reevaluation.\n")
+
+
+def _validate_migration_journal(root, entries, pack_target):
+    """Bind recovery's write prefix to the validated staged identity, not caller paths."""
+    staged = {}
+    for name in (STATE_RELATIVE.as_posix(), "research.yml"):
+        entry = next((row for row in entries if row["path"] == name), None)
+        if entry is None or entry["staged"] is None:
+            raise LifecycleFailure("DOMAIN_PACK_TRANSACTION_INCOMPLETE", "Migration requires staged state and configuration")
+        raw = _read_transaction_artifact(root, _safe_relative(entry["staged"], label="migration staged input"),
+                                        entry["staged_sha256"], label="migration staged input")
+        try:
+            staged[name] = yaml.safe_load(raw)
+        except yaml.YAMLError as exc:
+            raise LifecycleFailure("DOMAIN_PACK_TRANSACTION_INCOMPLETE", "Invalid staged migration input") from exc
+    state = _validate_state(staged[STATE_RELATIVE.as_posix()])
+    configured = _config_pack(staged["research.yml"])
+    if (pack_target != PurePosixPath(state["pack"]["target_relative"]) or not configured
+            or configured["name"] != pack_target.name or configured["version"] != state["pack"]["installed_version"]
+            or any(row["existed"] for row in entries if PurePosixPath(row["path"]).is_relative_to(pack_target))):
+        raise LifecycleFailure("DOMAIN_PACK_TRANSACTION_INCOMPLETE", "Migration destination or staged identity is inconsistent")
+
+
+def run_migration(project_root, candidate_root, *, mappings, rationale, keep_local=None, accept_pack=None,
+                  qualification=None, candidate_validator=None, expected_plan_id=None, dry_run=False):
+    root = Path(project_root).expanduser().resolve()
+    if Path(project_root).is_symlink():
+        raise LifecycleFailure("DOMAIN_PACK_STATE_INVALID", "Workspace must not be a symbolic link")
+    arguments = dict(mappings=mappings, rationale=rationale, keep_local=keep_local, accept_pack=accept_pack,
+                     qualification=qualification, dry_run=dry_run)
+    def prepare():
+        validated = candidate_validator(Path(candidate_root)) if candidate_validator else tree_sha256(Path(candidate_root))
+        plan = plan_migration(root, candidate_root, **arguments)
+        if validated != plan.candidate_fingerprint or expected_plan_id and plan.report["revision_plan_id"] != expected_plan_id:
+            raise LifecycleFailure("DOMAIN_PACK_REFRESH_CONFLICT", "Migration inputs changed; prepare a new plan", exit_code=3)
+        return plan
+    if dry_run:
+        return prepare().report
+    if not _transaction_path(root).exists():
+        prepare()
+    else:
+        _preflight_workspace_directory(Path(project_root), root, error_code="DOMAIN_PACK_STATE_INVALID")
+    lock = _safe_workspace_destination(root, LOCK_RELATIVE)
+    log_lock = _safe_workspace_destination(root, LOG_LOCK_RELATIVE)
+    _mkdir_private(lock.parent)
+    with workspace_lock(lock, purpose="explicit pack identity migration"), workspace_lock(log_lock, purpose="activity log append"):
+        recover_transaction(root)
+        plan = prepare()
+        return apply_plan(root, plan, installed_target_relative=plan.state["pack"]["target_relative"], candidate_root=Path(candidate_root))
 
 
 def _legacy_pack_from_config(config: Mapping[str, Any]) -> dict[str, str]:
@@ -2787,7 +3049,7 @@ def _journal_pack_target(value: Any, operation: str) -> PurePosixPath | None:
                 "Adoption transaction journal must not declare a pack write prefix",
             )
         return None
-    if operation != "refresh" or not isinstance(value, str):
+    if operation not in {"refresh", "migrate"} or not isinstance(value, str):
         raise LifecycleFailure(
             "DOMAIN_PACK_TRANSACTION_INCOMPLETE",
             "Refresh transaction journal is missing its pack write prefix",
@@ -2813,7 +3075,7 @@ def _journal_destination_allowed(
     common = {STATE_RELATIVE, PurePosixPath("log.md")}
     if relative in common:
         return True
-    if operation != "refresh":
+    if operation not in {"refresh", "migrate"}:
         return False
     if relative == PurePosixPath("research.yml"):
         return True
@@ -2846,7 +3108,7 @@ def _journal_document(project_root: Path) -> dict[str, Any]:
     if (
         not _valid_transaction_id(transaction_id)
         or document.get("phase") != "prepared"
-        or operation not in {"adopt", "refresh"}
+        or operation not in {"adopt", "refresh", "migrate"}
         or not isinstance(entries, list)
         or not entries
     ):
@@ -2916,6 +3178,9 @@ def _journal_document(project_root: Path) -> dict[str, Any]:
                 "DOMAIN_PACK_TRANSACTION_INCOMPLETE",
                 "Transaction staged digest exists without staged content",
             )
+    if operation == "migrate":
+        _validate_migration_journal(project_root, entries, pack_target)
+        return document
     if pack_target is not None:
         state_entry = next(
             (entry for entry in entries if entry["path"] == STATE_RELATIVE.as_posix()),
@@ -3263,7 +3528,7 @@ def apply_plan(
     candidate_root: Path | None = None,
 ) -> dict[str, Any]:
     root = Path(project_root).expanduser().resolve()
-    fingerprint_state = (
+    fingerprint_state = plan.prior_state if plan.report.get("operation") == "migrate" else (
         load_state(root)
         if installed_target_relative is not None
         else plan.state if plan.report.get("operation") == "adopt" else None
@@ -3282,6 +3547,10 @@ def apply_plan(
         )
     if plan.report["status"] == "no_changes":
         return plan.report
+    if installed_target_relative is not None or plan.research_fingerprint:
+        guard = load_workspace_module(_SCRIPT_DIR, "_pack_revision_guard", cache=_COMPUTATION_CACHE)
+        observed = guard.idle(root)
+        guard.require(plan.research_fingerprint == observed, "revision_research_inputs_changed")
     transaction_id = uuid.uuid4().hex
     payloads = _transaction_payloads(
         root,
@@ -3496,6 +3765,9 @@ def run_refresh(
     source_kind: str | None = None,
     validated_candidate_fingerprint: str | None = None,
     candidate_validator: Callable[[Path], str | None] | None = None,
+    expected_plan_id: str | None = None,
+    rationale: str = "Explicit same-pack refresh; semantic adequacy remains subject to review.",
+    qualification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     project_input = Path(project_root).expanduser()
     if project_input.is_symlink():
@@ -3537,6 +3809,8 @@ def run_refresh(
             accept_pack=accept_pack,
             dry_run=True,
             source_kind=source_kind,
+            rationale=rationale,
+            qualification=qualification,
         )
         if (
             validated_tree is not None
@@ -3571,7 +3845,11 @@ def run_refresh(
                 dry_run=False,
                 source_kind=source_kind,
                 warnings=warnings,
+                rationale=rationale,
+                qualification=qualification,
             )
+            if expected_plan_id is not None and plan.report.get("revision_plan_id") != expected_plan_id:
+                raise LifecycleFailure("DOMAIN_PACK_REFRESH_CONFLICT", "Revision plan changed; replan before applying.", exit_code=3)
             if validated_tree is not None and plan.candidate_fingerprint != validated_tree:
                 raise LifecycleFailure(
                     "DOMAIN_PACK_INVALID",

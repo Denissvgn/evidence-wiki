@@ -13,15 +13,17 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import tempfile
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from _script_errors import ScriptRefusal
+from _workspace_module_loader import load_workspace_module
 
 SCHEMA_VERSION = "evidence-workspace-revision/v1"
 MAX_FILES = 10_000
@@ -57,7 +59,10 @@ def content_id(domain: str, value: Any) -> str:
 
 
 def observation(info: os.stat_result) -> tuple[int, ...]:
-    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    result = (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    if hasattr(info, "native_change_time_ns"):
+        result += (info.native_change_time_ns,)
+    return result
 
 
 def excluded(relative: str) -> bool:
@@ -77,7 +82,8 @@ def observe_tree(root: Path) -> dict[str, tuple[int, ...]]:
         if depth > MAX_DEPTH:
             raise refuse("EVIDENCE_REVISION_LIMIT", "Workspace nesting exceeds the capture bound.", max_depth=MAX_DEPTH)
         directory_info = directory.lstat()
-        if not stat.S_ISDIR(directory_info.st_mode) or directory.is_symlink():
+        if (not stat.S_ISDIR(directory_info.st_mode) or directory.is_symlink()
+                or getattr(directory_info, "st_file_attributes", 0) & 0x400):
             raise refuse("EVIDENCE_REVISION_UNSAFE", "Capture cannot traverse a linked directory.", path=prefix or ".")
         result[prefix or "."] = observation(directory_info)
         with os.scandir(directory) as entries:
@@ -96,6 +102,8 @@ def observe_tree(root: Path) -> dict[str, tuple[int, ...]]:
                 raise refuse("EVIDENCE_REVISION_UNSAFE", "Capture path is not portable.", path=relative)
             path = directory / name
             info = path.lstat()
+            if getattr(info, "st_file_attributes", 0) & 0x400:
+                raise refuse("EVIDENCE_REVISION_UNSAFE", "Capture cannot traverse a reparse point.", path=relative)
             if stat.S_ISDIR(info.st_mode):
                 pending.append((path, relative, depth + 1))
             elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
@@ -114,6 +122,12 @@ def observe_tree(root: Path) -> dict[str, tuple[int, ...]]:
 
 def read_observed_file(root: Path, relative: str, expected: tuple[int, ...]) -> bytes:
     """Read through no-follow directory descriptors where the platform supports them."""
+    if sys.platform == "win32":
+        native = load_workspace_module(Path(__file__).resolve().parent, "_windows_files")
+        try:
+            return native.read_file(root, relative, expected, MAX_FILE_BYTES)
+        except native.EvidenceInvalid as error:
+            raise windows_refusal(error) from error
     if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
         raise refuse(
             "EVIDENCE_REVISION_UNSUPPORTED",
@@ -145,6 +159,40 @@ def read_observed_file(root: Path, relative: str, expected: tuple[int, ...]) -> 
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def windows_refusal(error: ValueError) -> ScriptRefusal:
+    """Translate native read failures into the shared capture contract."""
+    code = {"usage_workspace_changed": "EVIDENCE_REVISION_CHANGED",
+            "usage_workspace_bound_exceeded": "EVIDENCE_REVISION_LIMIT"}.get(str(error), "EVIDENCE_REVISION_UNSAFE")
+    return refuse(code, "Windows workspace input could not be captured safely.")
+
+
+def capture_windows_files(root: Path, before: dict[str, tuple[int, ...]]) -> dict[str, bytes]:
+    """Keep the entire selected file set pinned across reads and the closing scan."""
+    native = load_workspace_module(Path(__file__).resolve().parent, "_windows_files")
+    try:
+        with ExitStack() as pins:
+            descriptors = {
+                relative: pins.enter_context(native.open_observed_file(root, relative, info, MAX_FILE_BYTES))
+                for relative, info in sorted(before.items()) if stat.S_ISREG(info[2])
+            }
+            payloads = {}
+            for relative, descriptor in descriptors.items():
+                chunks, size = [], 0
+                while chunk := os.read(descriptor, min(1024 * 1024, MAX_FILE_BYTES + 1 - size)):
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > MAX_FILE_BYTES:
+                        raise refuse("EVIDENCE_REVISION_LIMIT", "A file exceeds the capture bound.", path=relative)
+                if size != before[relative][4]:
+                    raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.", path=relative)
+                payloads[relative] = b"".join(chunks)
+            if observe_tree(root) != before:
+                raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.")
+            return payloads
+    except native.EvidenceInvalid as error:
+        raise windows_refusal(error) from error
 
 
 @dataclass(frozen=True)
@@ -183,7 +231,7 @@ class WorkspaceRevision:
     def materialize(self) -> Iterator[Path]:
         """Expose a private read-only tree, removing it when the operation finishes."""
         with tempfile.TemporaryDirectory(prefix="evidence-revision-") as temporary:
-            root = Path(temporary) / "workspace"
+            root = Path(temporary).resolve() / "workspace"
             root.mkdir(mode=0o700)
             for directory in self.directories:
                 if directory != ".":
@@ -212,12 +260,15 @@ def capture_workspace(root: str | Path, *, max_attempts: int = MAX_ATTEMPTS) -> 
     for attempt in range(max_attempts):
         try:
             before = observe_tree(root)
-            payloads = {
-                relative: read_observed_file(root, relative, info)
-                for relative, info in sorted(before.items()) if stat.S_ISREG(info[2])
-            }
-            if observe_tree(root) != before:
-                raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.")
+            if sys.platform == "win32":
+                payloads = capture_windows_files(root, before)
+            else:
+                payloads = {
+                    relative: read_observed_file(root, relative, info)
+                    for relative, info in sorted(before.items()) if stat.S_ISREG(info[2])
+                }
+                if observe_tree(root) != before:
+                    raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.")
             directories = tuple(sorted(relative for relative, info in before.items() if stat.S_ISDIR(info[2])))
             return WorkspaceRevision(MappingProxyType(payloads), directories)
         except (FileNotFoundError, NotADirectoryError):

@@ -106,6 +106,22 @@ The following optional fields add audit detail to the generated report:
 
 The initializer records validation commands and supplied results; it does not run those commands. Agents should update the generated report after running smoke validation, inventory dry-runs, normalization dry-runs, or lint checks.
 
+## Frozen research requirements and strict policy
+
+`strict_evidence` and `evidence_trust` may be supplied as configuration sections,
+including under `research_yml`. The strict policy uses the canonical
+`evidence-strict-policy/v1` validator. Trust selection carries only `policy_id`
+and `policy_revision`; it does not establish authenticated authority.
+
+The optional `frozen_requirements` field is an inert JSON object with exactly
+`schema_version: evidence-research-requirements/v1`, `request` and `decisions`
+objects. Initialization writes its canonical bytes to
+`docs/research-requirements.json` and binds that file's hash into any configured
+strict policy. A conflicting hash is refused. The field has a 1 MiB bound and
+does not execute its contents or attest that caller declarations are true.
+`agent plan` creates this field after validating the complete research request;
+see [research planning](research-planning.md).
+
 ## Handoff Correlation
 
 The optional `handoff` block carries upstream correlation identifiers from an external orchestrator or parent agent into the created workspace:

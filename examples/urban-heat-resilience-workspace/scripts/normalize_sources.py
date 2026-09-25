@@ -216,6 +216,7 @@ from _script_errors import ScriptRefusal, emit_error, emit_refusal, handle_syste
 from _structured_view import content_hash as structured_view_content_hash
 from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
+from _workspace_module_loader import load_workspace_module
 from source_failure_taxonomy import unusable_evidence_reasons as delivery_unusable_evidence_reasons
 
 
@@ -265,6 +266,7 @@ class NormalizedSource:
     # record's structured-view sidecar; `None` means the record binds no sidecar, which
     # is every source that is not structured evidence.
     structured: dict[str, Any] | None = None
+    capture_status: str | None = None
 
 
 @dataclass
@@ -857,6 +859,8 @@ def normalization_method(
     this package extracts itself, so an adapter fills a gap rather than shadowing a
     built-in extractor. Callers that pass no adapters get the pre-adapter behaviour.
     """
+    if record.get("kind") == "host_capture":
+        return "host_text"
     try:
         execution_profile = _execution_evidence.profile_for(record)
     except _execution_evidence.EvidenceInvalid:
@@ -883,6 +887,8 @@ def normalization_method(
         return "link"
     if record.get("kind") == "html" and html_raw_path(record) is not None:
         return "html"
+    if record.get("kind") == "docx" and any(PurePosixPath(path).suffix.lower() == ".docx" for path in record_raw_paths(record)):
+        return "docx"
     if record.get("kind") == "table" and table_raw_path(record) is not None:
         return "table"
     if adapters and adapter_for_kind(adapters, record.get("kind")) is not None:
@@ -996,6 +1002,8 @@ def normalize_selected_record(
 ) -> NormalizedSource:
 
     require_host_intake(config, [item.record])
+    if item.method == "host_text":
+        return normalize_host_capture_record(project_root, item.record)
     if pdftotext_path is not None:
         if pdf_extractor is not None:
             raise TypeError("pass pdf_extractor or pdftotext_path, not both")
@@ -1011,6 +1019,8 @@ def normalize_selected_record(
         return normalize_link_record(item.record)
     if item.method == "html":
         return normalize_html_record(project_root, item.record)
+    if item.method == "docx":
+        return normalize_docx_record(project_root, item.record)
     if item.method == "table":
         return normalize_table_record(project_root, item.record)
     if item.method == "codebase":
@@ -1029,6 +1039,33 @@ def record_raw_paths(record: dict[str, Any]) -> list[str]:
     if not isinstance(value, list):
         return []
     return [path for path in value if isinstance(path, str) and path]
+
+
+def normalize_host_capture_record(project_root: Path, record: dict[str, Any]) -> NormalizedSource:
+    capture = load_workspace_module(_SCRIPT_DIR, "_host_capture")
+    metadata = record.setdefault("metadata", {})
+    warnings = manifest_warnings(record)
+    try:
+        inspected = capture.inspect_record(project_root, record)
+        profile = inspected["profile"]
+        metadata["host_capture"] = profile
+        if inspected["unusable_reasons"]:
+            set_record_unusable_evidence(record, inspected["unusable_reasons"])
+        content = inspected["content"]
+        status = "failed" if not content.strip() else "content_extracted" if inspected["complete"] else "partial"
+        title, url = profile["title"], profile["origin_url"]
+        warnings.append("Host origin, scope, completeness and rights are caller declarations; captured bytes are checked independently.")
+        if not inspected["complete"]:
+            warnings.append("The capture is not a complete primary document: " + profile["content_kind"] + "/" + profile["completeness"] + ".")
+    except (ValueError, TypeError, KeyError):
+        metadata["host_capture"] = None
+        set_record_unusable_evidence(record, ["host_capture_invalid"])
+        content, status, title, url = "", "failed", record_id(record), None
+        warnings.append("Host capture bytes or provenance are invalid; restore the original capture and re-inventory this source.")
+    return NormalizedSource(record=record, extraction_method="host_text", title=title, authors=[],
+        abstract="Host-provided text with explicit capture qualifications.", outline=[], extracted_text=content,
+        media=[], links=[url] if url else [], bibliography_files=[], included_paths=[], warnings=unique_values(warnings),
+        capture_status=status)
 
 
 def normalize_adapter_record(
@@ -2743,9 +2780,9 @@ def html_unusable_evidence_reasons(title: str, body_text: str, raw_html: str) ->
 
     if re.search(r"\b404\b|page not found|not found", haystack):
         reasons.append("html_error_page:not_found")
-    elif len(visible) < 1000 and re.search(
-        r"service unavailable|temporarily unavailable|maintenance|error page|official .* unavailable",
-        haystack,
+    elif len(visible) < 1000 and (
+        re.search(r"service unavailable|temporarily unavailable|down for maintenance|maintenance (?:mode|in progress)|error page|official .* unavailable", haystack)
+        or re.fullmatch(r"(?:(?:scheduled|site|website|server) )?maintenance(?: page)?[.!]?", title.strip().lower())
     ):
         reasons.append("html_error_page:official_error_page")
 
@@ -2825,6 +2862,33 @@ def normalize_html_record(project_root: Path, record: dict[str, Any]) -> Normali
         warnings=unique_values(warnings),
         title_confidence=title_confidence,
     )
+
+
+def normalize_docx_record(project_root, record):
+    extractor = load_workspace_module(_SCRIPT_DIR, "_docx_capture")
+    revision = load_workspace_module(_SCRIPT_DIR, "_evidence_revision")
+    paths = [name for name in record_raw_paths(record) if PurePosixPath(name).suffix.lower() == ".docx"]
+    warnings = manifest_warnings(record)
+    data, reason = None, None
+    try:
+        if len(paths) != 1:
+            raise extractor.DocxInvalid("docx_original_selection_ambiguous")
+        path = project_root / paths[0]
+        observed = path.lstat()
+        if observed.st_size > extractor.MAX_BYTES:
+            raise extractor.DocxInvalid("docx_container_invalid_or_large")
+        raw = revision.read_observed_file(project_root, paths[0], revision.observation(observed))
+        data = extractor.extract(raw)
+    except (ValueError, OSError) as error:
+        reason = str(error) if isinstance(error, extractor.DocxInvalid) else "docx_input_invalid_or_changed"
+        set_record_unusable_evidence(record, [*record_unusable_evidence_reasons(record), reason])
+        warnings.append(reason)
+    return NormalizedSource(record=record, extraction_method="docx_text_tables",
+        title=PurePosixPath(paths[0]).stem if paths else record_id(record), authors=[], abstract=None, outline=[],
+        extracted_text=data["text"] if data else "None extracted.", media=[], links=[], bibliography_files=[],
+        included_paths=[], warnings=unique_values(warnings), title_confidence="none", title_source="file_name",
+        capture_status="content_extracted" if data else "partial", needs_ocr=reason == "docx_image_only_requires_ocr",
+        structured=data["structured"] if data else None)
 
 
 def escape_table_cell(value: str) -> str:
@@ -3612,6 +3676,8 @@ def raw_paths(record: dict[str, Any], included_paths: list[str]) -> list[str]:
 
 
 def status_for(source: NormalizedSource) -> str:
+    if source.capture_status is not None:
+        return source.capture_status
     if source.adapter_status is not None:
         # The adapter's own verdict wins. Status is inferred from the body everywhere
         # else, but a rendering that capped or dropped payload content looks complete
@@ -3750,6 +3816,7 @@ def frontmatter_for(
         "normalized_format": NORMALIZED_FORMAT_VERSION,
         "source_id": record.get("id"),
         "source_kind": record.get("kind"),
+        **({"host_capture": metadata.get("host_capture")} if source.extraction_method == "host_text" else {}),
         "status": status_for(source),
         "evidence_usable": not unusable_reasons,
         "unusable_evidence_reasons": unusable_reasons or None,
@@ -3827,7 +3894,7 @@ def frontmatter_for(
         "standards": standards,
         "provenance": record.get("provenance") if isinstance(record.get("provenance"), dict) else None,
         "needs_ocr": True if source.needs_ocr else None,
-        "language": "en",
+        "language": None if source.extraction_method == "docx_text_tables" else "en",
         "confidence": confidence_for(source),
         "title_confidence": source.title_confidence if source.extraction_method == "pdf_text" else None,
         "abstract_confidence": source.abstract_confidence if source.extraction_method == "pdf_text" else None,
@@ -4229,6 +4296,10 @@ def normalization_report_summary(summary: dict[str, int | str]) -> dict[str, Any
     method_keys = ("latex", "pdf", "links", "html", "tables", "codebase", "adapter", "execution")
     if "market" in summary:
         method_keys += ("market",)
+    if "host_text" in summary:
+        method_keys += ("host_text",)
+    if "docx" in summary:
+        method_keys += ("docx",)
     skipped_existing = int(summary["skipped_existing"])
     skipped_unsupported = int(summary["skipped_unsupported"])
     return {

@@ -20,10 +20,27 @@ synthetic_defaults: &synthetic_defaults
 
 fixtures:
   - <<: *synthetic_defaults
+    stable_id: onboarding-journeys
+    source_work: Synthetic research requests and controlled-release reference outcomes
+    created_at: 2026-09-23
+    transformations: Wholly synthetic scope, evidence, computation and revision scenarios; no real-world or expert-domain certification.
+    shipped_paths:
+      - tests/fixtures/onboarding-journeys/**
+  - <<: *synthetic_defaults
     stable_id: fixture-catalog
     source_work: Fixture rights catalog
     shipped_paths:
       - tests/fixtures/fixture-provenance.yml
+  - <<: *synthetic_defaults
+    stable_id: terminal-rpc-peer
+    source_work: Project-authored deterministic terminal transport peer
+    shipped_paths:
+      - tests/fixtures/pi_rpc_stub.py
+  - <<: *synthetic_defaults
+    stable_id: strict-reference-judgments
+    source_work: Synthetic retained-source claims and explicit reference judgments
+    shipped_paths:
+      - tests/fixtures/strict-evidence/**
   - <<: *synthetic_defaults
     stable_id: managed-codex-cli
     source_work: Synthetic network-free Codex CLI for installed-wheel orchestration smoke tests

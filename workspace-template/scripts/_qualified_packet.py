@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import stat
 from contextlib import contextmanager
@@ -18,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from _evidence_revision import observation, read_observed_file
+from _native_fs import os
 from _normalized_contract import safe_source_id
 from _packet_vendor_services_context_packet import ContextPacketError, validate_context_packet
 from _script_errors import ScriptRefusal

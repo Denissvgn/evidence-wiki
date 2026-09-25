@@ -77,6 +77,11 @@ class PackageCliTests(unittest.TestCase):
         self.assertIsInstance(payload["starter_version"], str)
         self.assertIsInstance(payload["compatible_research_yml_contract"], str)
         self.assertEqual(["0.1"], payload["profile_schema_versions"])
+        environment_setup = payload["environment_setup"]
+        self.assertEqual(["env check", "env run"], environment_setup["commands"])
+        self.assertEqual("evidence-environment/v1", environment_setup["report_schema"])
+        self.assertEqual("OPENALEX_API_KEY", environment_setup["services"]["openalex"])
+        self.assertFalse(environment_setup["credentials_persisted"])
         self.assertEqual(
             {
                 "workspace_schema_versions": ["0.1"],
@@ -107,6 +112,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertIn("workspace-template/docs/orchestrator-handoff.md", required_assets["starter"])
         self.assertIn("workspace-template/docs/run-controller.md", required_assets["starter"])
         self.assertIn("workspace-template/docs/acquisition.md", required_assets["starter"])
+        self.assertIn("workspace-template/docs/environment-setup.md", required_assets["starter"])
         self.assertIn("workspace-template/docs/source-discovery.md", required_assets["starter"])
         self.assertIn("workspace-template/docs/source-delivery.md", required_assets["starter"])
         self.assertIn("workspace-template/docs/workspace-status.md", required_assets["starter"])
@@ -268,7 +274,7 @@ class PackageCliTests(unittest.TestCase):
         payload = json.loads(self.run_cli("contract"))
 
         library_api = payload["library_api"]
-        self.assertEqual("12", library_api["version"])
+        self.assertEqual("13", library_api["version"])
         surface = library_api["surface"]
         self.assertIsInstance(surface, list)
         for operation in (

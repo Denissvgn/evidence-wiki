@@ -13,6 +13,20 @@ domain_pack:
   version: 0.1.0
   description: Domain guidance for standards registry and product requirement research.
   compatible_research_yml_contract: "0.1"
+  selection:
+    schema_version: '1.0'
+    typical_questions:
+    - Which standard edition and requirement applies?
+    - What evidence supports conformity for the stated scope?
+    exclusions:
+    - Guidance does not confer certification or auditor approval.
+    required_scope_inputs:
+    - id: standard_edition
+      description: Standard identifier, edition and amendments.
+    - id: assessment_scope
+      description: Product, process or organization and applicable jurisdiction.
+    review_requirements:
+    - Review normative versus informative text and any required competent assessment.
   taxonomy_doc: taxonomy.md
   claims_doc: claims.md
   coverage_templates:

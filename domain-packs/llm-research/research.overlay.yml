@@ -13,6 +13,20 @@ domain_pack:
   version: 0.1.0
   description: Domain guidance for research about LLM systems, autonomous research agents, benchmarks, datasets, and implementation availability.
   compatible_research_yml_contract: "0.1"
+  selection:
+    schema_version: '1.0'
+    typical_questions:
+    - How do the reported methods and evaluation protocols compare?
+    - Is an implementation available for the claimed capability?
+    exclusions:
+    - Model names alone do not establish capability or framework compatibility.
+    required_scope_inputs:
+    - id: research_question
+      description: The claim or comparison to investigate.
+    - id: evaluation_scope
+      description: Tasks, datasets, versions and comparison conditions.
+    review_requirements:
+    - Check implementation and evaluation evidence independently of promotional claims.
   taxonomy_doc: taxonomy.md
   claims_doc: claims.md
   scaffolds:

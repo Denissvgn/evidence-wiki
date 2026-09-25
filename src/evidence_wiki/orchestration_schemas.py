@@ -16,6 +16,7 @@ from .orchestration import (
     MAX_RESULT_ARTIFACT_PATH_LENGTH,
     MAX_RESULT_ARTIFACTS,
     ORCHESTRATION_ATTEMPT_SCHEMA,
+    ORCHESTRATION_HOST_SESSION_SCHEMA_VERSION,
     ORCHESTRATION_RESULT_SCHEMA,
     ORCHESTRATION_SESSION_SCHEMA_VERSION,
     ORCHESTRATION_WORK_ORDER_SCHEMA_VERSION,
@@ -257,6 +258,18 @@ ORCHESTRATION_SESSION_SCHEMA: dict[str, Any] = {
         "pause_reason": _nullable({"type": "string"}),
         "pending_action_id": _nullable({"$ref": "#/$defs/stable_id"}),
         "pending_submission": _nullable({"$ref": "#/$defs/pending_submission"}),
+        "requirement_basis": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"},
+        "abandoned_work": {
+            "type": "object", "additionalProperties": False,
+            "required": ["action_id", "run_id", "trusted_inputs", "reason", "qualification"],
+            "properties": {
+                "action_id": _nullable({"$ref": "#/$defs/stable_id"}),
+                "run_id": _nullable({"$ref": "#/$defs/stable_id"}),
+                "trusted_inputs": _nullable({"$ref": "#/$defs/pending_trusted_static_inputs"}),
+                "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "qualification": {"const": "not_accepted"},
+            },
+        },
         # Optional for read compatibility with sessions created before the
         # trusted-static-input binding was added during schema version 1.0.
         "pending_trusted_static_inputs": _nullable(
@@ -647,11 +660,22 @@ ORCHESTRATION_WORK_ORDER_SCHEMA: dict[str, Any] = {
 }
 
 
+def host_session_schema() -> dict[str, Any]:
+    """An explicit version for correlated host sessions; ordinary sessions stay unchanged."""
+    schema = deepcopy(ORCHESTRATION_SESSION_SCHEMA)
+    schema["title"] = "EvidenceWiki correlated host orchestration session"
+    schema["properties"]["schema_version"] = {"type": "string", "enum": [ORCHESTRATION_HOST_SESSION_SCHEMA_VERSION]}
+    schema["properties"]["host_transition_id"] = {"type": "string", "pattern": r"^[a-f0-9]{64}$", "minLength": 64, "maxLength": 64}
+    schema["required"] += ["host_transition_id", "requirement_basis"]
+    return schema
+
+
 def public_orchestration_schema_documents() -> dict[str, dict[str, Any]]:
     """Return caller-owned schema documents for the public contract payload."""
 
     return {
         "orchestration_session": deepcopy(ORCHESTRATION_SESSION_SCHEMA),
+        "orchestration_host_session": host_session_schema(),
         "orchestration_work_order": deepcopy(ORCHESTRATION_WORK_ORDER_SCHEMA),
         "orchestration_result": {
             "$schema": JSON_SCHEMA_DIALECT,

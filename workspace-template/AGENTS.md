@@ -30,6 +30,37 @@ Use `workspace-system.yml` for:
 Do not hardcode wiki folders, page types, raw source roots, or lifecycle statuses when the config provides them.
 Keep `workspace-system.yml` domain-neutral. Project-specific and domain-pack settings belong in `research.yml` or domain guidance files.
 
+The current trusted caller can conduct research directly through the workspace
+scripts without starting another model. Caller, managed-worker and external-host
+authority are distinct; see `docs/agent-contracts.md`. For the installed caller
+loop, read `docs/caller-research.md`: `agent next` provides read-only current advice,
+`agent start` binds a child run to current controls, and `agent resume` checks its
+owner and retained postconditions. `agent research-export` reconciles original
+questions through the current release owner; `agent progress` records optional
+local diagnostics without granting authority. A managed work order never
+promotes its worker to the caller/parent role. Reuse existing task permission for
+routine local decisions, preserve active evidence criteria, and ask only for
+material scope or authority that the task does not establish.
+
+When `strict_evidence` is configured, follow `docs/strict-evidence.md`:
+coverage, grounding and authenticated independent review are mandatory. Treat
+draft pages and proposals as unaccepted until the controlled export passes.
+Never disable policy, forge reviewer/receipt metadata or bypass the host's final
+delivery path. Keep unresolved claims and reviewer/source limitations explicit.
+
+When `computation` is configured, follow `docs/declarative-computation.md`.
+Use the shared computation check and retain its input, rule, engine and clock
+identities. Calculated values remain derived evidence and require the selected
+strict review. Warning intake, output writes and cadence dispatch require
+explicit invocation; declarations and source text do not authorize those actions.
+
+Use `docs/pack-revisions.md` for same-pack improvements. Plan the exact candidate
+and impact before applying through the pack lifecycle. Finish or explicitly
+abandon active work before changing its requirements; missing old metadata is
+not permission to bind pending work to new criteria. Migrate affected coverage
+explicitly and obtain current review before release. The original answer,
+evidence, approvals and computation receipts stay in their historical scope.
+
 ## Research Knowledge Model
 
 The workspace has three knowledge layers:

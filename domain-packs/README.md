@@ -67,6 +67,12 @@ A rule is data, never code. A pack names primitives from a closed set —
 `max_age`, `equals`, `numeric_range`, `regex`, and `one_of_provenance`, composed
 with `all_of` and `any_of` — and the package evaluates them.
 
+All custom vocabulary IDs, including manual-only policies without rules, must
+use their declaring pack's namespace. When renaming or specializing a pack,
+rename its policy/request IDs and references together. Existing packs with
+foreign manual vocabulary declarations must correct them before validation;
+portable legacy names remain usable with built-in policies.
+
 ```yaml
 domain_pack:
   name: market-data

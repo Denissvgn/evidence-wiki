@@ -29,6 +29,12 @@ it in a provider list. That is all installation does.
 Authorization is unchanged and lives where it has always lived — in
 `research.yml`:
 
+The trusted caller writes this configuration within the user's existing task
+authority. A recommendation, credential or host-tool declaration cannot grant
+that authority. Managed workers cannot change their protected source policy;
+the host owns recorded revisions at a boundary without a pending action. See
+[agent-contracts.md](agent-contracts.md) for roles and local adaptation rules.
+
 ```yaml
 integrations:
   acquisition:

@@ -7,13 +7,13 @@ import copy
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
 
+from evidence_wiki._filesystem import os
 from tests._script_loader import load_isolated_module
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "workspace-template/scripts"

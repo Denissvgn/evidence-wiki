@@ -20,6 +20,8 @@ DOMAIN_PACKS_DIR = "domain-packs"
 ORCHESTRATOR_DIR = "orchestrator"
 ORCHESTRATOR_SKILL = "research-orchestrate"
 REQUIRED_STARTER_ASSETS = (
+    "scripts/_native_fs.py",
+    "scripts/_windows_fs.py",
     "AGENTS.md",
     "CLAUDE.md",
     "README.md",
@@ -28,7 +30,28 @@ REQUIRED_STARTER_ASSETS = (
     "research.yml",
     "workspace-system.yml",
     "scripts/doctor.py",
+    "scripts/_strict_contract.py",
+    "scripts/_strict_evidence.py",
+    "scripts/strict_evidence.py",
+    "scripts/_computation_contract.py",
+    "scripts/_computation_expression.py",
+    "scripts/_computation_runtime.py",
+    "scripts/_computation_schedule.py",
+    "scripts/_computation_effects.py",
+    "scripts/_computation_service.py",
+    "scripts/_computation_cli.py",
+    "scripts/aggregate_records.py",
+    "scripts/evaluate_formulas.py",
+    "scripts/verify_assertions.py",
+    "scripts/schedule_milestones.py",
     "scripts/_domain_pack_lifecycle.py",
+    "scripts/_pack_revision_guard.py",
+    "scripts/_pack_revision_impact.py",
+    "scripts/_pack_composition.py",
+    "scripts/_docx_capture.py",
+    "scripts/_coverage_revision.py",
+    "scripts/_pack_selection.py",
+    "scripts/_host_capture.py",
     "scripts/init_research_workspace.py",
     "scripts/lint.py",
     "scripts/_provider_accounting.py",
@@ -44,6 +67,21 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/smoke_validate_workspace.py",
     "scripts/workspace_status.py",
     "docs/acquisition.md",
+    "docs/environment-setup.md",
+    "docs/agent-contracts.md",
+    "docs/pack-selection.md",
+    "docs/source-usability.md",
+    "docs/research-planning.md",
+    "docs/workspace-application.md",
+    "docs/caller-research.md",
+    "scripts/_caller_context.py",
+    "docs/pack-authoring.md",
+    "docs/pack-revisions.md",
+    "docs/upgrade-adoption.md",
+    "docs/pack-authoring-example.json",
+    "docs/pack-assessment-references.json",
+    "docs/strict-evidence.md",
+    "docs/declarative-computation.md",
     "docs/orchestration.md",
     "docs/orchestrator-handoff.md",
     "docs/run-controller.md",
@@ -81,6 +119,8 @@ REQUIRED_ORCHESTRATOR_ASSETS = (
 
 def required_asset_manifest() -> dict[str, list[str]]:
     """Return stable source-relative anchors every distribution must contain."""
+    from ._agent_catalog import CATALOG_PATH, resource_paths
+
     return {
         "starter": [f"{STARTER_DIR}/{relative}" for relative in REQUIRED_STARTER_ASSETS],
         "domain_packs": [
@@ -89,6 +129,7 @@ def required_asset_manifest() -> dict[str, list[str]]:
             for relative in REQUIRED_DOMAIN_PACK_ASSETS
         ],
         "orchestrator": [f"{ORCHESTRATOR_DIR}/{relative}" for relative in REQUIRED_ORCHESTRATOR_ASSETS],
+        "agent": [CATALOG_PATH, "workspace-template/docs/frameworks/pi.js", *sorted(set(resource_paths().values()))],
     }
 
 

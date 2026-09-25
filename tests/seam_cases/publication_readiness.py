@@ -1,8 +1,8 @@
 """Publication readiness and capture refusals agree across both interfaces."""
 
-import os
 from pathlib import Path
 
+from evidence_wiki._filesystem import os
 from tests._publication_fixture import write_ship_ready_vendor_fixture
 from tests.seam_cases import REFUSAL, SUCCESS, SeamCase
 from tests.test_publication_readiness import PublicationReadinessTests

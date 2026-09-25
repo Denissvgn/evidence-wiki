@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from evidence_wiki._filesystem import os
 from tests._execution_fixture import authenticate, canonical, identifier
 from tests._script_loader import load_isolated_module
 from tests._usage_fixture import UsageFixture, require_host_storage
@@ -254,7 +254,7 @@ def test_unsafe_host_paths_fail_closed(usage, monkeypatch, unsafe):
     if unsafe == "workspace":
         monkeypatch.setenv("EVIDENCE_WIKI_STATE_DIR", str(fixture.root))
     elif unsafe == "public-directory":
-        fixture.host.chmod(0o755)
+        os.chmod(fixture.host, 0o755)
     elif unsafe == "symlink":
         alias = fixture.host.parent / "alias"
         alias.symlink_to(fixture.host, target_is_directory=True)
@@ -262,15 +262,17 @@ def test_unsafe_host_paths_fail_closed(usage, monkeypatch, unsafe):
     elif unsafe == "state-hardlink":
         os.link(state, fixture.host / "linked")
     elif unsafe == "state-fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("This host has no filesystem FIFO object; native reparse/device refusals are covered separately.")
         state.unlink()
         os.mkfifo(state, 0o600)
     elif unsafe == "state-symlink":
         state.rename(fixture.host / "saved")
         state.symlink_to(fixture.host / "saved")
     elif unsafe == "public-state":
-        state.chmod(0o644)
+        os.chmod(state, 0o644)
     else:
-        (fixture.host / "evidence-state.lock").chmod(0o644)
+        os.chmod((fixture.host / "evidence-state.lock"), 0o644)
     with pytest.raises(ValueError):
         with module.current_view(fixture.root, fixture.config):
             pytest.fail("unsafe state accepted")

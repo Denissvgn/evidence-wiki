@@ -10,6 +10,9 @@ from typing import Any
 SCHEMA_VERSION = "1.0"
 
 _REMEDIATIONS = {
+    "COMPUTATION_BUSY": "Wait for the current computation writer to finish, inspect its result and request IDs, then retry without deleting locks or journals.",
+    "COMPUTATION_REFUSED": "Inspect the computation reason, correct the declared inputs, expressions or clock selection, and evaluate again before applying any effect.",
+    "RUN_CALLER_CONTEXT_CONFLICT": "Preserve the run and inspect its original owner, instructions and controls. Use that unchanged context or explicitly start new work after an authorized change; never rewrite the old binding.",
     'EVIDENCE_REVISION_INVALID': "Correct the selected scope or workspace input before retrying publication.",
     'EVIDENCE_REVISION_LIMIT': "Correct the selected scope or workspace input before retrying publication.",
     'EVIDENCE_REVISION_UNSAFE': "Correct the selected scope or workspace input before retrying publication.",
@@ -132,6 +135,9 @@ _REMEDIATIONS = {
         "--agent-id AGENT."
     ),
     "COVERAGE_REQUIRED": "Create or select a coverage manifest and pass only after required facets are covered.",
+    "COVERAGE_REVISION_REQUIRED": "Use pack revision-status and explicitly migrate affected coverage before a new answer and review cycle.",
+    "DOMAIN_PACK_REVISION_CONFLICT": "Preserve pending work and original criteria; finish or explicitly abandon it, then replan the revision.",
+    "ORCHESTRATION_ABANDON_BLOCKED": "Recover pending submissions and explicitly finish or abandon the child before abandoning its parent.",
     "COVERAGE_BLOCKED": "Resolve blocked coverage facets with accepted sources or source requests before answering.",
     "COVERAGE_MANIFEST_INVALID": "Fix the coverage manifest YAML so it matches docs/coverage-manifest.md.",
     "COVERAGE_MANIFEST_EXISTS": "Use the existing manifest, choose another slug, or pass --force deliberately.",
@@ -263,9 +269,8 @@ _REMEDIATIONS = {
         "start a new orchestration session from the updated workspace instead of editing parent state."
     ),
     "ORCHESTRATION_LEGACY_ACTION_UNBOUND": (
-        "Replay the pending action with evidence-wiki orchestrate next --resume, or use managed "
-        "evidence-wiki orchestrate resume, before submitting a result. The replay binds a controller-owned "
-        "fingerprint before any worker is launched."
+        "Preserve the pending action and its evidence; explicitly retire the parent through its owner. "
+        "Start new work under current reviewed criteria. Missing historical bindings cannot be invented."
     ),
     "WORK_ORDER_INVALID": (
         "Restore the exact controller-owned work order under "
@@ -807,6 +812,9 @@ NON_RECOVERABLE_CODES = frozenset(
         "CANDIDATE_STORE_INVALID",
         "ORCHESTRATION_OWNER_MISMATCH",
         "ORCHESTRATION_RETIRED",
+        "ORCHESTRATION_LEGACY_ACTION_UNBOUND",
+        "RUN_CALLER_CONTEXT_CONFLICT",
+        "COMPUTATION_REFUSED",
         "ORCHESTRATION_STATE_INVALID",
         "PROVIDER_REGISTRATION_INVALID",
         "WORKSPACE_UNREADABLE",

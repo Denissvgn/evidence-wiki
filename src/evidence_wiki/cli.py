@@ -468,6 +468,8 @@ def _run_publication(args: list[str]) -> int:
         document = _handle(parsed.project_root).publish_selected(parsed.question, expected_revision=parsed.expected_revision)
     except EvidenceWikiError as exc:
         return _refuse(exc, json_mode=True)
+    if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+        return _emit_refusal(_packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery"), json_mode=True)
     rendered = script.render(document)
     if parsed.output:
         Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
@@ -486,7 +488,14 @@ def _run_questions_export(forwarded: list[str]) -> int:
         return _refuse(exc, json_mode=json_mode)
     # ``jsonl`` is the same document reshaped by the script's own renderer, and
     # ``--output`` only chooses where the rendered bytes go.
-    rendered = script.render_output(document, parsed.format)
+    try:
+        if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+            raise _packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery")
+        rendered = script.render_output(document, parsed.format)
+    except Exception as exc:
+        if _packaged_script("_script_errors").is_refusal(exc):
+            return _emit_refusal(exc, json_mode=json_mode)
+        raise
     if parsed.output:
         Path(parsed.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
     else:
@@ -620,8 +629,19 @@ def _print_pack_help() -> None:
     print(
         "evidence-wiki pack: domain pack utilities\n\n"
         "Usage:\n"
+        "  evidence-wiki pack list [--target PATH] [--catalog DIR] [--limit N] [--origin bundled|local|installed]\n"
+        "  evidence-wiki pack show [SELECTOR | --path PATH | --resource ID] [--target PATH] [--catalog DIR]\n"
+        "  evidence-wiki pack catalog init --catalog DIR --root ID=PATH [--root ID=PATH]...\n"
+        "  evidence-wiki pack catalog register --catalog DIR --id REV --root-id ID --path RELATIVE --scope TEXT\n"
+        "      [--derived-from SELECTOR --derived-sha256 HASH]\n"
+        "  evidence-wiki pack catalog list --catalog DIR\n"
+        "  evidence-wiki pack decide --from-file JSON [--target PATH] [--catalog DIR]\n"
+        "  evidence-wiki pack schemas [--schema-id ID]\n"
+        "  evidence-wiki pack guide [--format json|text]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
+        "  evidence-wiki pack scaffold|derive|qualify|freeze-cases|assess|accept|resume [authoring options]\n"
         "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [--dry-run] [--format text|json]\n"
+        "  evidence-wiki pack revision-plan|revision-apply|revision-status|reevaluate [revision options]\n"
         "      [--keep-local TARGET]... [--accept-pack TARGET]...\n"
         "  evidence-wiki pack adopt --target PATH [--dry-run] [--accept-local-overrides]\n"
         "      [--format text|json]\n\n"
@@ -637,6 +657,22 @@ def _run_pack(args: list[str]) -> int:
         _print_pack_help()
         return 0
     subcommand = args.pop(0)
+    if subcommand in {"migration-plan", "migration-apply", "compose-plan", "compose", "fleet-plan", "fleet-apply"}:
+        from .extension_commands import main as extension_main
+
+        return extension_main(subcommand, args)
+    if subcommand in {"revision-plan", "revision-apply", "revision-status", "reevaluate"}:
+        from .pack_revision_commands import main as revision_main
+
+        return revision_main(subcommand, args)
+    if subcommand in {"scaffold", "derive", "qualify", "freeze-cases", "assess", "accept", "resume"}:
+        from .pack_authoring_commands import main as authoring_main
+
+        return authoring_main(subcommand, args)
+    if subcommand in {"list", "show", "catalog", "decide", "schemas", "guide"}:
+        from .pack_commands import main as pack_main
+
+        return pack_main(subcommand, args)
     if subcommand not in {"validate", "refresh", "adopt"}:
         parser = argparse.ArgumentParser(prog="evidence-wiki pack")
         parser.error(f"unknown pack subcommand: {subcommand}")
@@ -660,8 +696,20 @@ def _print_help() -> None:
     print(
         "evidence-wiki: deploy source-grounded research workspaces\n\n"
         "Usage:\n"
+        "  evidence-wiki agent [summary|resources|resource ID] [--format text|json]\n"
+        "  evidence-wiki agent frameworks|bundle|invoke [integration options]\n"
+        "  evidence-wiki agent extensions|recipes [--format json]\n"
+        "  evidence-wiki agent transition-plan|transition-apply --from-file DOCUMENT\n"
+        "  evidence-wiki agent instructions-plan|instructions-apply|instructions-remove --from-file DOCUMENT\n"
+        "  evidence-wiki agent inspect|routes|source-status|capture|source-schemas|source-guide [source options]\n"
+        "  evidence-wiki agent next|start|resume|heartbeat|acquire|ingest|research-export|progress|research-guide|research-schemas [research options]\n"
+        "  evidence-wiki agent apply --from-file PLAN [--format json|text]\n"
+        "  evidence-wiki agent setup-guide|setup-schemas [options]\n"
+        "  evidence-wiki agent plan|plan-check|plan-schemas|plan-guide [planning options]\n"
         "  evidence-wiki init [initializer options]\n"
         "  evidence-wiki deploy [initializer options]\n"
+        "  evidence-wiki env check [--service NAME] [--require-env NAME] [--format text|json]\n"
+        "  evidence-wiki env run [--service NAME] [--require-env NAME] [--prompt] -- COMMAND [ARG ...]\n"
         "  evidence-wiki upgrade [upgrade options]\n"
         "  evidence-wiki questions add|export [--target PATH] [options]\n"
         "  evidence-wiki status [--target PATH] [--format text|json]\n"
@@ -673,13 +721,18 @@ def _print_help() -> None:
         "  evidence-wiki snapshot verify --trust-policy PATH\n"
         "  evidence-wiki publication [--target PATH] --question SLUG [--question SLUG ...]\n"
         "  evidence-wiki normalize verify [--target PATH] [--source-id ID] [--format json|text]\n"
+        "  evidence-wiki pack list|show|catalog|decide|schemas|guide [options]\n"
+        "  evidence-wiki pack migration-plan|migration-apply|compose-plan|compose|fleet-plan|fleet-apply --from-file DOCUMENT [--output PATH]\n"
         "  evidence-wiki pack validate --path NAME_OR_PATH [--format json]\n"
         "  evidence-wiki pack refresh --target PATH --path NAME_OR_PATH [options]\n"
         "  evidence-wiki pack adopt --target PATH [options]\n"
         "  evidence-wiki doctor [--target PATH] [--format text|json]\n"
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
-        "  evidence-wiki orchestrate start|next|submit|status|retire|cleanup-claims [options]\n"
+        "  evidence-wiki serve-onboarding-mcp [--allow-root PATH] [--allow-operation NAME]\n"
+        "  evidence-wiki strict schemas|check|prepare-review|review|export [options]\n"
+        "  evidence-wiki computation schemas|check|aggregate|evaluate|verify|schedule|write|apply-warnings|dispatch [options]\n"
+        "  evidence-wiki orchestrate start|next|submit|status|abandon|retire|cleanup-claims [options]\n"
         f"  evidence-wiki orchestrate run|resume --runner {managed_runners} [options]\n"
         "  evidence-wiki contract\n"
         "  evidence-wiki orchestrator-guide [--print] [--format json]\n\n"
@@ -708,6 +761,8 @@ def _print_help() -> None:
         "is set; forced replacements are preserved under .replaced/<path>.\n\n"
         "Contract prints the supported contract and schema versions as JSON so\n"
         "orchestrators can negotiate compatibility before deploy or upgrade.\n\n"
+        "Agent provides a read-only guide and compact resource/capability negotiation\n"
+        "before a workspace exists. Start here: evidence-wiki agent\n\n"
         "Doctor checks local runtime dependencies, optional tools, workspace\n"
         "write permissions, contract metadata, and which external normalizer\n"
         "adapters a workspace is authorized to execute, before an unattended run.\n\n"
@@ -746,8 +801,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     command = args.pop(0)
+    if command == "agent":
+        from .agent import main as agent_main
+
+        return agent_main(args)
     if command in {"init", "deploy"}:
         return _run_initializer(args)
+    if command == "env":
+        from .environment import main as environment_main
+
+        return environment_main(args)
     if command == "upgrade":
         return _run_upgrader(args)
     if command == "questions":
@@ -774,8 +837,16 @@ def main(argv: list[str] | None = None) -> int:
         return _run_temporal(args)
     if command == "assessments":
         return _run_assessments(args)
+    if command == "strict":
+        return int(_packaged_script("strict_evidence").main(args))
+    if command == "computation":
+        return int(_packaged_script("_computation_cli").main(args))
     if command == "serve-mcp":
         return _run_serve_mcp(args)
+    if command == "serve-onboarding-mcp":
+        from .onboarding_mcp import main as onboarding_mcp_main
+
+        return onboarding_mcp_main(args)
     if command == "orchestrate":
         return _run_orchestrate(args)
     if command == "contract":

@@ -33,6 +33,7 @@ from typing import Any
 from urllib.parse import quote, quote_plus
 
 ORCHESTRATION_SESSION_SCHEMA_VERSION = "1.0"
+ORCHESTRATION_HOST_SESSION_SCHEMA_VERSION = "1.1"
 ORCHESTRATION_WORK_ORDER_SCHEMA_VERSION = "1.0"
 ORCHESTRATION_RESULT_SCHEMA_VERSION = "1.0"
 ORCHESTRATION_ATTEMPT_SCHEMA_VERSION = "1.0"
@@ -789,6 +790,8 @@ def _execute_bounded(
     timeout_seconds: int,
     capture_limit: int = MAX_CAPTURE_BYTES,
     environment: dict[str, str] | None = None,
+    inherit_environment: bool = True,
+    preserve_stdout: bool = False,
 ) -> ProcessResult:
     """Run fixed argv while bounding retained stdout and stderr diagnostics."""
     popen_kwargs: dict[str, Any] = {}
@@ -796,7 +799,7 @@ def _execute_bounded(
         popen_kwargs["start_new_session"] = True
     elif os.name == "nt":  # pragma: no cover - exercised on Windows CI
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    runner_environment = dict(os.environ)
+    runner_environment = dict(os.environ) if inherit_environment else {}
     runner_environment["PYTHONDONTWRITEBYTECODE"] = "1"
     if environment is not None:
         runner_environment.update(environment)
@@ -854,7 +857,13 @@ def _execute_bounded(
         stdin_thread.join(timeout=5)
         stdout_thread.join(timeout=5)
         stderr_thread.join(timeout=5)
-    stdout, stdout_truncated = _bounded_capture_text(stdout_capture)
+    if preserve_stdout:
+        # Native data transports need exact UTF-8 protocol bytes. Diagnostic
+        # callers retain the existing redaction/truncation presentation.
+        stdout = bytes(stdout_capture.buffer).decode("utf-8")
+        stdout_truncated = stdout_capture.total > stdout_capture.limit
+    else:
+        stdout, stdout_truncated = _bounded_capture_text(stdout_capture)
     stderr, stderr_truncated = _bounded_capture_text(stderr_capture)
     return ProcessResult(
         returncode=int(process.returncode or 0),
@@ -1023,6 +1032,7 @@ def protocol_start(
     action_timeout_seconds: int | None = None,
     total_timeout_seconds: int | None = None,
     driver_wait_seconds: float | None = None,
+    host_transition_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a parent orchestration session and return its session document.
 
@@ -1042,7 +1052,7 @@ def protocol_start(
             action_timeout_seconds=action_timeout_seconds,
             total_timeout_seconds=total_timeout_seconds,
             driver_wait_seconds=driver_wait_seconds,
-        ),
+        ) + (["--host-transition-id", host_transition_id] if host_transition_id is not None else []),
     )
 
 
@@ -4385,9 +4395,14 @@ def _managed_session_lock(root: Path, orchestration_id: str):
             f"Managed-host lock for {orchestration_id} is not a regular file.",
             exit_code=EXIT_RUNNER_FAILED,
         )
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
+    lock_os = os
+    if os.name == "nt":
+        from ._filesystem import os as lock_os
+    access = lock_os.O_RDONLY if os.name == "nt" else lock_os.O_RDWR
+    flags = access | lock_os.O_CREAT | getattr(lock_os, "O_BINARY", 0) | getattr(lock_os, "O_NOFOLLOW", 0)
+    descriptor = lock_os.open(path, flags, 0o600)
     locked = False
+    native_lock = None
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _is_multiply_linked_regular(opened):
@@ -4401,13 +4416,8 @@ def _managed_session_lock(root: Path, orchestration_id: str):
 
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             elif os.name == "nt":  # pragma: no cover - exercised on Windows CI
-                import msvcrt
-
-                if opened.st_size == 0:
-                    os.write(descriptor, b"\0")
-                    os.fsync(descriptor)
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                native_lock = lock_os.lock(descriptor, timeout_seconds=0)
+                native_lock.__enter__()
             else:  # pragma: no cover - no supported managed runner uses another platform
                 raise OSError(f"unsupported locking platform: {os.name}")
             locked = True
@@ -4426,10 +4436,7 @@ def _managed_session_lock(root: Path, orchestration_id: str):
 
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
                 elif os.name == "nt":  # pragma: no cover - exercised on Windows CI
-                    import msvcrt
-
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    native_lock.__exit__(None, None, None)
             except OSError:
                 pass
         os.close(descriptor)
@@ -4841,6 +4848,14 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--orchestration-id", default=None)
     _add_format(status)
 
+    abandon = subparsers.add_parser("abandon", help="Fail a session while retaining pending work for audit.")
+    _add_target(abandon)
+    abandon.add_argument("--orchestration-id", required=True)
+    abandon.add_argument("--agent-id", required=True)
+    abandon.add_argument("--reason", required=True)
+    _add_driver_wait(abandon)
+    _add_format(abandon)
+
     for command in ("retire", "cleanup-claims"):
         retention = subparsers.add_parser(command, help="Plan or apply archive-backed claim retention.")
         _add_target(retention)
@@ -4902,7 +4917,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         root = _workspace_root(args.target)
-        if args.command in {"start", "next", "submit", "status", "retire", "cleanup-claims"}:
+        if args.command in {"start", "next", "submit", "status", "retire", "cleanup-claims", "abandon"}:
             return _passthrough_controller(root, args.command, _protocol_arguments(args))
 
         # Before the runner is resolved and before `run` creates a session: a delegated

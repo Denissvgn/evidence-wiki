@@ -12,6 +12,14 @@ codes, and field-by-field artifact shapes; this skill says *what to do, in what
 order, and how to decide*. It delegates the inside-the-workspace work to the
 workspace's own skills instead of restating them.
 
+A trusted caller researching one workspace can use its `research-run` playbook
+directly without launching another model. Managed workers remain restricted to
+their issued orders and must never invoke this parent playbook or revise their
+protected provider policy. External hosts supply their own authorization and
+isolation; declaring a browser or connector does not establish permission or
+usable evidence. The workspace's `docs/agent-contracts.md` defines these roles
+and the boundary for local pack and source-policy revisions.
+
 ## Use When
 
 Use this skill when an agent must own a research workspace from the outside:

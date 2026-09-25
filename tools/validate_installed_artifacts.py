@@ -42,15 +42,22 @@ import tarfile
 import tempfile
 import textwrap
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SMOKE_TOOL = REPO_ROOT / "tools" / "smoke_installed_orchestration.py"
 SRC_ROOT = REPO_ROOT / "src"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from evidence_wiki import resources  # noqa: E402 - the checkout's manifest names what the archives must carry.
+from tools._qualification_process import CommandRunner, interruptible, positive_seconds  # noqa: E402
+
+_RUNNER = CommandRunner()
+_OPTIONS = argparse.Namespace(command_timeout=900, journey_timeout=5400, case_timeout=1200,
+                              journey_workers=1, active_artifact="artifacts", evidence=None)
 
 #: Every asset the package contract requires, as archive-relative paths.
 REQUIRED_ASSET_PATHS = tuple(
@@ -99,6 +106,31 @@ FORBIDDEN_SUFFIXES = (".pyc", ".pyo")
 REQUIRED_WHEEL_MEMBERS = (
     "evidence_wiki/__init__.py",
     "evidence_wiki/cli.py",
+    "evidence_wiki/agent.py",
+    "evidence_wiki/frameworks.py",
+    "evidence_wiki/pi_bridge.py",
+    "evidence_wiki/_pack_io.py",
+    "evidence_wiki/pack_catalog.py",
+    "evidence_wiki/pack_commands.py",
+    "evidence_wiki/pack_decisions.py",
+    "evidence_wiki/pack_discovery.py",
+    "evidence_wiki/source_commands.py",
+    "evidence_wiki/source_contracts.py",
+    "evidence_wiki/source_delivery.py",
+    "evidence_wiki/source_inputs.py",
+    "evidence_wiki/source_inspection.py",
+    "evidence_wiki/source_probe.py",
+    "evidence_wiki/source_readiness.py",
+    "evidence_wiki/source_routing.py",
+    "evidence_wiki/host_capabilities.py",
+    "evidence_wiki/agent_resources.py",
+    "evidence_wiki/_agent_catalog.py",
+    "evidence_wiki/onboarding_schemas.py",
+    "evidence_wiki/onboarding_contract.py",
+    *("evidence_wiki/" + name + ".py" for name in (
+        "onboarding", "onboarding_mcp", "onboarding_tools", "_onboarding_scope", "_onboarding_operations",
+        "extension_contracts", "extension_commands", "pack_migrations", "pack_composition", "fleet_revisions",
+        "host_transitions", "local_journal", "local_artifacts", "runtime_identity", "native_instructions", "capability_recipes")),
     *(f"evidence_wiki/assets/{relative}" for relative in REQUIRED_ASSET_PATHS),
 )
 
@@ -113,6 +145,11 @@ REQUIRED_SDIST_MEMBERS = (
     "src/evidence_wiki/__init__.py",
     "tools/smoke_installed_orchestration.py",
     "tools/validate_installed_artifacts.py",
+    "tools/_qualification_process.py",
+    "tools/qualify_journeys.py",
+    "tools/sync_agent_resources.py",
+    "tools/probe_installed_extensions.py",
+    "tests/_docx_fixture.py",
     "tests/_publication_fixture.py",
     "tests/fixtures/fake_codex_cli.py",
     "tests/fixtures/madrid-autonomo-workspace/AGENTS.md",
@@ -207,20 +244,33 @@ def check_archive_membership(wheel: Path, sdist: Path) -> dict[str, object]:
     return {"wheel_members": len(wheel_names), "sdist_members": len(sdist_names)}
 
 
-def run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
-    process = subprocess.run(  # noqa: S603 - argv is fixed by this repository-owned validator.
-        argv,
-        check=False,
-        capture_output=True,
-        text=True,
-        cwd=str(cwd) if cwd is not None else None,
-        env=env,
-        encoding="utf-8",
-        errors="replace",
-    )
+def command_label(argv):
+    if "-c" in argv:
+        program = argv[argv.index("-c") + 1]
+        return next((key.lower().removesuffix("_probe") for key, value in globals().items()
+                     if key.endswith("_PROBE") and value == program), "python-command")
+    if "-m" in argv:
+        return argv[argv.index("-m") + 1]
+    if "python" in Path(argv[0]).name:
+        return next((Path(arg).name for arg in argv[1:] if arg.endswith(".py")), "python-command")
+    return " ".join([Path(argv[0]).name, *argv[1:3]])
+
+
+def run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
+        timeout=None, label=None, stream_stderr=False) -> str:
+    environment = dict(os.environ if env is None else env)
+    for key in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "GIT_DIR", "GIT_WORK_TREE"):
+        environment.pop(key, None)
+    environment.update(PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
+    stage = _OPTIONS.active_artifact + "/" + (label or command_label(argv))
+    try:
+        process = _RUNNER.run(argv, label=stage, cwd=cwd, env=environment,
+                              timeout=timeout or _OPTIONS.command_timeout, stream_stderr=stream_stderr)
+    except subprocess.TimeoutExpired as error:
+        raise ValidationError(f"{stage} exceeded {error.timeout:g}s; inspect retained command logs") from error
     if process.returncode != 0:
         raise ValidationError(
-            f"command returned {process.returncode}: {argv!r}\nstdout:\n{process.stdout}\nstderr:\n{process.stderr}"
+            f"{stage} returned {process.returncode}\nstdout (tail):\n{process.stdout[-8192:]}\nstderr (tail):\n{process.stderr[-8192:]}"
         )
     return process.stdout
 
@@ -243,6 +293,35 @@ def create_venv_with_wheel(root: Path, wheel: Path) -> Path:
     python = venv_python(venv)
     run([str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", str(wheel)])
     return venv
+
+
+def fixture_members():
+    members = ["tools/smoke_installed_orchestration.py", "tools/qualify_journeys.py",
+               "tools/probe_installed_extensions.py", "tests/_docx_fixture.py",
+               "tools/_journey_cases.py", "tools/_journey_driver.py", "tools/_journey_authoring.py", "tools/_qualification_process.py",
+               "tests/fixtures/onboarding-journeys/cases.json", "tests/_computation_fixture.py", "tests/fixtures/fake_codex_cli.py",
+               "tests/fixtures/strict-evidence/review-cases.json",
+               "tests/fixtures/workspace-init-profile.yml", "tests/_publication_fixture.py",
+               *["tests/_" + name + "_fixture.py" for name in
+                 ("execution", "usage", "snapshot", "temporal", "market", "historical", "simulation", "assessment")]]
+    packet_root = REPO_ROOT / "tests/fixtures/codebase-intake/native-packets"
+    members.extend(path.relative_to(REPO_ROOT).as_posix() for path in packet_root.rglob("*") if path.is_file())
+    return sorted(members)
+
+
+def isolated_fixtures(scratch: Path) -> Path:
+    """Copy explicitly named qualification inputs, without source-package imports."""
+    root = scratch / "qualification-inputs"
+    members = fixture_members()
+    for name in members:
+        source, target = REPO_ROOT / name, root / name
+        if source.is_symlink() or not source.is_file() or any(parent.is_symlink() for parent in source.parents if parent.is_relative_to(REPO_ROOT)):
+            raise ValidationError("unsafe or missing qualification input: " + name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    hashes = {name: sha256_of(root / name) for name in sorted(members)}
+    (root / "inputs.json").write_text(json.dumps(hashes, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    return root
 
 
 INSTALLED_PROBE = textwrap.dedent(
@@ -821,7 +900,7 @@ HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
     del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
     del os.environ["EVIDENCE_WIKI_STATE_DIR"]
     assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
-    assert contract()["library_api"]["version"] == "12"
+    assert contract()["library_api"]["version"] == "13"
     print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
     '''
 )
@@ -949,13 +1028,502 @@ ASSESSMENT_PROBE = textwrap.dedent(
         assert workspace.assessments.apply_refresh(application) == applied
         assert workspace.assessments.check(envelope)["reasons"] == ["assessment_invalidated"]
         assert command("plan-refresh", host.refresh())["plan"]["entries"] == []
-        assert contract()["library_api"]["version"] == "12"
+        assert contract()["library_api"]["version"] == "13"
     print(json.dumps({"evidence_assessments": "authenticated_cli_api_parity", "assessment_refresh": "revocation_and_idempotent_apply"}))
     '''
 )
 
 
+COMPUTATION_PROBE = textwrap.dedent(r'''
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    import yaml
+    from evidence_wiki import contract
+    from evidence_wiki.computation import evaluate, execute, schema_document
+
+    cli, root = sys.argv[1], Path(sys.argv[2])
+    deployed = subprocess.run([cli, "deploy", "--target", str(root), "--project-name", "computed-evidence",
+                               "--project-description", "Declared arithmetic", "--domain-pack", "general-science"],
+                              check=False, capture_output=True, text=True)
+    assert deployed.returncode == 0, deployed.stderr
+    path = root / "research.yml"
+    config = yaml.safe_load(path.read_text())
+    config["computation"] = {
+        "version": "1.0", "arithmetic": {"mode": "exact", "precision": 64, "scale": 2, "rounding": "ROUND_HALF_EVEN"},
+        "clock": {"as_of": "2026-09-21T00:00:00Z", "timezone": "UTC", "ambiguous": "refuse", "nonexistent": "refuse", "search_days": 366},
+        "tables": {}, "aggregations": {}, "invariants": {}, "cadence": {},
+        "graphs": {"worksheet": {"description": "Declared arithmetic", "constants": {}, "inputs": {},
+            "nodes": {"total": {"expr": "0.1 + 0.2", "unit": "units"}}, "output_mapping": {"total": "total"},
+            "output_page": "wiki/outputs/computed.md"}}
+    }
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    expected = evaluate(root)
+    assert expected["graphs"]["worksheet"]["outputs"]["total"]["value"] == "0.3"
+    assert expected["graphs"]["worksheet"]["outputs"]["total"]["formatted"] == "0.30"
+    assert schema_document(expected["schema_version"])["additionalProperties"] is False
+    assert contract()["computation"]["capability"] == "declarative-computation/v1"
+    for script in ("aggregate_records.py", "evaluate_formulas.py", "verify_assertions.py", "schedule_milestones.py"):
+        completed = subprocess.run([sys.executable, str(root / "scripts" / script), "--target", str(root)],
+                                   check=True, capture_output=True, text=True)
+        assert json.loads(completed.stdout) == expected
+    rendered = subprocess.run([cli, "computation", "check", "--target", str(root)],
+                              check=True, capture_output=True, text=True)
+    assert json.loads(rendered.stdout) == expected
+    receipt = execute(root, "write", expected_result_id=expected["result_id"], request_id="installed-output")
+    assert receipt["dry_run"] is False
+    assert "0.30" in (root / "wiki/outputs/computed.md").read_text()
+    assert execute(root, "write", expected_result_id=expected["result_id"], request_id="installed-output")["replayed"] is True
+    for candidate in ("sample-benchmark", "sample-portfolio", "sample-filing"):
+        assert (root / "docs/computation-examples" / candidate / "research.overlay.yml").is_file()
+    print(json.dumps({"declarative_computation": "passed", "copied_computation_scripts": "passed"}))
+''')
+
+
+AGENT_PROBE = textwrap.dedent(r'''
+    import hashlib
+    import json
+    import pathlib
+    import subprocess
+    import sys
+    from evidence_wiki.agent_resources import resource_document, resource_index
+    from evidence_wiki.onboarding_contract import decode_document
+    from evidence_wiki.onboarding_schemas import schema_document, schema_ids
+    from evidence_wiki.frameworks import compatibility, export_bundle, invoke, validate_bundle
+    from evidence_wiki._script_host import load_packaged_script, shared_assets_root
+
+    cli = sys.argv[1]
+    before = sorted(str(path) for path in pathlib.Path.cwd().rglob('*'))
+    result = subprocess.run([cli, 'agent', '--format', 'json'], capture_output=True, text=True)
+    assert result.returncode == 0 and not result.stderr, result.stderr + result.stdout
+    bootstrap = decode_document('onboarding/bootstrap/v2', result.stdout.encode())['payload']
+    assert bootstrap['workspace'] == 'absent'
+    assert bootstrap['strict_selection']['effective_assurance'] is None
+    assert before == sorted(str(path) for path in pathlib.Path.cwd().rglob('*'))
+    summary = subprocess.run([cli, 'agent', 'summary', '--format', 'json', '--require', 'strict-evidence/v1',
+                              '--require', 'declarative-computation/v1'], capture_output=True, text=True)
+    assert summary.returncode == 0, summary.stderr + summary.stdout
+    value = decode_document('onboarding/capabilities/v1', summary.stdout.encode())['payload']
+    assert len(summary.stdout.encode()) < value['limits']['summary_bytes']
+    assert all('host_enforced' not in mode for mode in value['frameworks']['qualified'])
+    assert value['strict']['host_probe'] == 'not_run'
+    assert value['installation']['package_version'] != ''
+    matrix = compatibility()
+    assert {row['id'] for row in matrix['frameworks']} == {'pi', 'opencode', 'gemini'}
+    assert all(row['modes']['host_enforced']['status'] != 'supported' for row in matrix['frameworks'])
+    bundle = json.loads(resource_document('framework/bundle/v1')['content'])
+    validate_bundle(bundle)
+    if sys.platform != 'win32':
+        assert export_bundle(pathlib.Path.cwd() / 'portable-bundle')['status'] == 'created'
+    call = {'schema_version':'evidence-framework-call/v1','request_id':'installed-resource',
+            'instruction_sha256':bootstrap['guide']['sha256'],'operation':'resource',
+            'parameters':{'resource_id':'evidence-framework-call/v1'}}
+    native = invoke(json.dumps(call).encode(), target=pathlib.Path.cwd())
+    assert native['status'] == 'completed' and native['evidence_acceptance'] == 'not_evaluated'
+    assert json.loads(native['result_json'])['payload']['id'] == 'evidence-framework-call/v1'
+    for entry in resource_index()['resources']:
+        document = resource_document(entry['id'])
+        assert hashlib.sha256(document['content'].encode()).hexdigest() == entry['sha256']
+    for key in schema_ids():
+        assert json.loads(resource_document(key)['content']) == schema_document(key)
+    for stem, method in (('_strict_contract', 'schema_documents'), ('_computation_contract', 'schemas')):
+        for key, schema in getattr(load_packaged_script(shared_assets_root(), stem), method)().items():
+            assert json.loads(resource_document(key)['content']) == schema
+    refused = subprocess.run([cli, 'agent', '--format', 'json', '--assurance', 'host_enforced'],
+                             capture_output=True, text=True)
+    assert refused.returncode == 2 and not refused.stderr
+    assert json.loads(refused.stdout)['details']['field'] == 'host_enforcement_not_verified'
+    print(json.dumps({'installed_agent_bootstrap': 'passed', 'closed_resources': 'passed',
+                      'schema_owner_parity': 'passed', 'portable_framework_bundle':'passed', 'canonical_native_call':'passed'}))
+''')
+
+
+PACK_PROBE = textwrap.dedent(r'''
+    import json
+    import os
+    import pathlib
+    import shutil
+    import subprocess
+    import sys
+    from evidence_wiki._script_host import shared_assets_root
+    from evidence_wiki.onboarding_contract import _matches
+    from evidence_wiki.pack_decisions import schema_document
+
+    cli, directory = sys.argv[1:]
+    scratch = pathlib.Path(directory)
+    scratch.mkdir()
+    def command(*args, expected=0):
+        result = subprocess.run([cli, 'pack', *map(str, args)], capture_output=True, text=True)
+        assert result.returncode == expected and not result.stderr, result.stdout + result.stderr
+        return json.loads(result.stdout)
+    before = sorted(scratch.rglob('*'))
+    listing = command('list')
+    assert listing['bounds'] == {'total': 5, 'returned': 5, 'truncated': False}
+    assert sorted(scratch.rglob('*')) == before
+    row = command('show', 'bundled:general-science')['pack']
+    assert row['state'] == 'available' and row['metadata']['selection']['unknown_fields'] == []
+    guide = command('guide')['content']
+    value = json.loads(guide.split('```json\n', 1)[1].split('```', 1)[0])
+    value['selections'][0]['tree_sha256'] = row['identity']['tree_sha256']
+    decision = scratch / 'decision.json'
+    decision.write_text(json.dumps(value), encoding='utf-8')
+    result = command('decide', '--from-file', decision)
+    _matches(result, schema_document('evidence-pack-decision-result/v1'))
+    assert result['status'] == 'valid' and not result['research_ready']
+    catalog_status = 'unsupported_platform'
+    if os.name == 'posix':
+        assets = scratch / 'packs'
+        assets.mkdir()
+        candidate = assets / 'general-science'
+        shutil.copytree(shared_assets_root() / 'domain-packs/general-science', candidate)
+        catalog = scratch / 'catalog'
+        assert command('catalog', 'init', '--catalog', catalog, '--root', 'local=' + str(assets))['status'] == 'created'
+        assert command('catalog', 'register', '--catalog', catalog, '--id', 'science', '--root-id', 'local',
+                       '--path', 'general-science', '--scope', 'Caller scope')['status'] == 'registered'
+        local = command('show', 'local:science', '--catalog', catalog)['pack']
+        assert local['validation']['state'] == 'matching_observation'
+        command('show', 'general-science', '--catalog', catalog, expected=2)
+        (candidate / 'taxonomy.md').write_text('Changed local guidance.\n', encoding='utf-8')
+        assert command('show', 'local:science', '--catalog', catalog, expected=1)['pack']['state'] == 'mutated'
+        catalog_status = 'passed'
+    print(json.dumps({'pack_discovery': 'passed', 'pack_fit': 'passed', 'pack_catalog': catalog_status}))
+''')
+
+
+SOURCE_PROBE = textwrap.dedent(r'''
+    import base64
+    import hashlib
+    import json
+    import os
+    import pathlib
+    import subprocess
+    import sys
+    import sysconfig
+    import yaml
+
+    cli, location = sys.argv[1:]
+    root = pathlib.Path(location)
+    def command(*args, expected=0):
+        result = subprocess.run([cli, 'agent', *map(str, args)], capture_output=True, text=True)
+        assert result.returncode == expected and not result.stderr, result.stdout + result.stderr
+        return json.loads(result.stdout)
+    assert command('inspect', '--target', root)['target']['state'] == 'absent'
+    assert command('source-guide')['content'].startswith('# Inspect capabilities')
+    schemas = command('source-schemas')['schema_ids']
+    assert 'evidence-host-delivery/v1' in schemas and 'evidence-source-inspection/v1' in schemas
+    subprocess.run([cli, 'init', '--target', str(root), '--project-name', 'source-observation',
+                    '--project-description', 'Observe selected retained text.', '--domain-pack', 'general-science'],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    content = b'A retained source reports a measured reflectance of 0.74.\n'
+    profile = {'schema_version':'evidence-host-capture/v1','capture_id':'retained','tool_id':'browser','tool_version':'1',
+        'origin_url':'https://example.org/study','title':'Retained observation','retrieved_at':'2026-09-22T10:00:00Z',
+        'capture_method':'browser_visible_text','content_format':'markdown','content_kind':'primary','completeness':'complete',
+        'completeness_note':'Supplied complete text.','rights':{'status':'allowed','license':'CC0-1.0','terms_url':None,'note':'Fixture declaration.'},
+        'scope':{},'request_id':None,'content_sha256':'sha256:'+hashlib.sha256(content).hexdigest(),'content_bytes':len(content)}
+    request = root.parent / 'capture.json'
+    request.write_text(json.dumps({'schema_version':'evidence-host-delivery/v1','capture':profile,'content_base64':base64.b64encode(content).decode()}))
+    if os.name == 'posix':
+        result = command('capture', '--target', root, '--path', 'raw/web/retained.md', '--from-file', request)
+        assert result['status'] == 'delivered' and not result['request_fulfilled']
+        assert command('capture', '--target', root, '--path', 'raw/web/retained.md', '--from-file', request)['status'] == 'already_present'
+    else:
+        raw = root / 'raw/web/retained.md'
+        raw.write_bytes(content)
+        raw.with_name(raw.name+'.provenance.yml').write_text(json.dumps({'host_capture':profile,'checksum':profile['content_sha256'],
+            'origin_url':profile['origin_url'],'retrieved_at':profile['retrieved_at'],'license':profile['rights']['license']}))
+    subprocess.run([sys.executable, str(root/'scripts/source_inventory.py'), '--project-root', str(root)], check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    record = json.loads((root/'sources/manifest.jsonl').read_text().splitlines()[0])
+    subprocess.run([sys.executable, str(root/'scripts/normalize_sources.py'), '--project-root', str(root), '--source-id', record['id']],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    status = command('source-status', '--target', root, '--source-id', record['id'])
+    assert status['sources'][0]['usability'] == 'usable', status
+    assert status['strict']['effective_assurance'] is None and not status['research_ready']
+    assert (root/'raw/web/retained.md').read_bytes() == content
+    tools = {'schema_version':'evidence-host-tools/v1','tools':[{'id':'browser','version':'1','kind':'browser','operations':['capture'],
+        'scope':[{'kind':'uri_prefix','value':'https://example.org'}],'formats':['markdown'],'credential_refs':[],
+        'limits':{'max_requests':2,'max_bytes':10000,'max_cost_usd':'0'},'authorization':'declared','claims':['sandbox'],'basis':'declared'}]}
+    tool_file = root.parent / 'host-tools.json'; tool_file.write_text(json.dumps(tools))
+    assert command('inspect','--target',root,'--host-tools',tool_file)['host_tools'][0]['host_protection'] == 'not_verified'
+    # Publish only a local fixture registration in this disposable installation.
+    site = pathlib.Path(sysconfig.get_path('purelib'))
+    (site/'source_observation_fixture.py').write_text('\n'.join([
+        'import os', "assert 'SOURCE_FIXTURE_TOKEN' not in os.environ", 'class Capabilities:',
+        " allowed_domains=('example.org',)", " terms_urls=('https://example.org/terms',)", " license_inference='none'",
+        ' captures_raw=True', ' quarantine_on_incomplete=True', ' rate_limit=None',
+        " credentials=('SOURCE_FIXTURE_TOKEN',)", " request_kinds=('structured_data',)", 'class Provider:',
+        " id='observed-provider'", ' provider_api_version=1', ' capabilities=Capabilities()',
+        ' def validate_request(self, request):',
+        "  if request.get('symbol') != 'OBSERVATION': raise ValueError('request refused')", '  return dict(request)',
+        " def plan_fetch(self, request): raise AssertionError('fetch must not run')",
+        " def interpret(self, responses): raise AssertionError('interpret must not run')", '']))
+    metadata = site/'source_observation_fixture-1.0.dist-info'; metadata.mkdir()
+    (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: source-observation-fixture\nVersion: 1.0\n')
+    (metadata/'entry_points.txt').write_text('[evidence_wiki.acquisition_providers]\nEntryMarker = source_observation_fixture:Provider\n')
+    os.environ['SOURCE_FIXTURE_TOKEN']='never-emit-this-fixture-credential'
+    observed = command('inspect','--target',root,'--probe-provider','acquisition:source-observation-fixture/EntryMarker')
+    provider = next(row for row in observed['providers'] if row['id']=='observed-provider')
+    assert provider['probe']['loaded'] and provider['probe']['capabilities']['credentials']==['SOURCE_FIXTURE_TOKEN'], provider
+    assert 'never-emit-this-fixture-credential' not in json.dumps(observed)
+    config = yaml.safe_load((root/'research.yml').read_text())
+    config['integrations']['acquisition']={'enabled':True,'providers':['observed-provider']}
+    (root/'research.yml').write_text(yaml.safe_dump(config))
+    (root/'provider-request.json').write_text(json.dumps({'symbol':'OBSERVATION'}))
+    route = {'schema_version':'evidence-source-routes/v1','request_id':'observe','requirements':[{
+        'id':'rows','question_ids':['question'],'kind':'structured_data','query_or_identifier':'OBSERVATION','source_request_id':None,
+        'scope':{},'output_format':'csv','content_kinds':['primary'],'needs_complete':True,'source_ids':[]}],
+        'budget':{'max_requests':1,'max_bytes':10000,'max_cost_usd':'0'},'preferred_tools':[],
+        'registered_requests':[{'requirement_id':'rows','phase':'acquisition','provider_id':'observed-provider',
+            'registration':'source-observation-fixture/EntryMarker','request':{'symbol':'OBSERVATION'},'request_path':'provider-request.json'}]}
+    route_file = root.parent/'routes.json'; route_file.write_text(json.dumps(route))
+    planned = command('routes','--target',root,'--from-file',route_file,'--probe-provider','acquisition:source-observation-fixture/EntryMarker')
+    selected = next(row for row in planned['routes'] if row['kind']=='registered_provider')
+    assert selected['state']=='ready_to_attempt' and selected['request_validation']=='passed', selected
+    assert not selected['network_executed'] and not planned['research_ready']
+    route['registered_requests'][0]['request']={'symbol':'REFUSED'}
+    (root/'provider-request.json').write_text(json.dumps({'symbol':'REFUSED'})); route_file.write_text(json.dumps(route))
+    refused = command('routes','--target',root,'--from-file',route_file,'--probe-provider','acquisition:source-observation-fixture/EntryMarker')
+    assert next(row for row in refused['routes'] if row['kind']=='registered_provider')['state']=='blocked'
+    for path in metadata.iterdir():
+        path.unlink()
+    metadata.rmdir()
+    (site/'source_observation_fixture.py').unlink()
+    print(json.dumps({'source_inspection':'passed','host_capture_pipeline':'passed','source_readiness':'passed',
+                      'registered_request_probe':'passed','source_routes':'passed','declared_authority_not_promoted':'passed'}))
+''')
+
+
+PLANNING_PROBE = textwrap.dedent(r'''
+    import hashlib
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    import yaml
+    from evidence_wiki.pack_discovery import owner
+    from evidence_wiki.planning import compile_plan
+
+    cli, root = Path(sys.argv[1]), Path(sys.argv[2])
+    root.mkdir()
+    text = '¿Qué muestra la evidencia?\n第二行'
+    original = {'schema_version':'2.0','kind':'research_request','request_id':'installed-research','payload':{
+        'goal':'Answer using retained evidence','questions':[{'id':'q1','text':text}], 'derived_questions':[],
+        'target':{'writable_root':str(root),'relative_path':'workspace'},'outputs':['json'],
+        'scope':[{'name':'jurisdiction','value':'Spain'}],
+        'domain':{'mode':'none','pack':None,'rationale':'Generic research guidance is sufficient'},
+        'sources':[],'host_tools':[], 'authority':{'role':'caller','reference':'local setup',
+            'allowed_actions':['local_setup'],'source_scope':[],'writable_roots':[str(root)],'credential_references':[]},
+        'budgets':{'questions':5,'source_requests':0,'downloads':0,'bytes':0,'seconds':60},
+        'assumptions':[],'open_decisions':[],
+        'strict_evidence':{'mode':'strict','assurance':'artifact_checked','policy_id':'installed-policy','policy_revision':'1'}}}
+    facet = {'facet_id':'primary','description':'Retained primary evidence','required':True,'evidence_path':'official_guidance',
+        'source_policy':'official_primary','freshness_policy':'no_staleness_check','identity_policy':'official_domain_match','min_sources':1}
+    criterion = {'facet_id':'primary','source_classes':['official guidance'],'required_scope':['jurisdiction'],
+        'time':'Keep observation dates','units':'Keep source units','counterevidence':'Retain contrary evidence',
+        'stopping':'Support or explicit gaps for all facets','inference':'Label all derivations','quantitative':None}
+    request = {'schema_version':'evidence-research-setup/v1','request':original,
+        'decisions':{'question_plans':[{'question_id':'q1','template':None,'facets':[facet],'criteria':[criterion]}]}}
+    request_file, saved = root/'request.json', root/'plan.json'
+    request_file.write_text(json.dumps(request,ensure_ascii=False))
+    def command(*args, expected=0):
+        result = subprocess.run([str(cli),'agent',*map(str,args)],cwd=root,text=True,capture_output=True)
+        assert result.returncode == expected, result.stdout + result.stderr
+        return json.loads(result.stdout)
+    plan = command('plan','--from-file',request_file,'--output',saved)
+    assert plan['setup_ready'] and not plan['research_ready'] and not plan['actions_executed']
+    assert plan['questions']['rows'][0]['original_text'] == text
+    assert not (root/'workspace').exists()
+    assert compile_plan(json.dumps(plan['request']).encode())['plan_id'] == plan['plan_id']
+    assert command('plan-check','--from-file',saved)['status'] == 'current'
+    command('plan','--from-file',request_file,'--output',saved,expected=3)
+    assert command('plan-guide')['content'].startswith('# Plan a research workspace')
+    assert 'evidence-research-setup/v1' in command('plan-schemas')['schema_ids']
+    profile = root/'profile.yml'
+    profile.write_text(yaml.safe_dump(plan['profile'],allow_unicode=True))
+    deployed = subprocess.run([str(cli),'init','--profile',str(profile)],cwd=root,text=True,capture_output=True)
+    assert deployed.returncode == 0, deployed.stdout + deployed.stderr
+    target = root/'workspace'
+    config = yaml.safe_load((target/'research.yml').read_text())
+    assert config == plan['initialization']['effective_config']
+    frozen = (target/'docs/research-requirements.json').read_bytes()
+    assert config['strict_evidence']['instructions']['docs/research-requirements.json'] == 'sha256:' + hashlib.sha256(frozen).hexdigest()
+    intake = owner('intake_questions').run_intake_document(target,plan['questions']['batch'],dry_run=True,from_file_label='saved-plan')
+    assert intake['counts']['created'] == 1
+    command('plan-check','--from-file',saved,expected=3)
+    print(json.dumps({'research_planning':'passed','plan_readonly_replay':'passed','plan_staleness':'passed',
+        'initializer_frozen_requirements':'passed','planned_question_intake':'passed'}))
+''')
+
+
+PACK_AUTHORING_PROBE = textwrap.dedent(r'''
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    cli, root, request_path = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+    root.mkdir()
+    def command(*args, expected=0):
+        result = subprocess.run([str(cli),*map(str,args)],cwd=root,text=True,capture_output=True)
+        assert result.returncode == expected, result.stdout + result.stderr
+        return json.loads(result.stdout)
+    spec = json.loads(command('pack','guide','--topic','specification')['content'])
+    spec['unresolved'] = []
+    source = root/'spec.json'
+    source.write_text(json.dumps(spec))
+    draft = root/'draft'
+    created = command('pack','scaffold','--from-file',source,'--output',draft)
+    observed = command('pack','qualify','--draft',draft)
+    assert observed['validation']['ok'] and observed['validation']['semantic_adequacy'] == 'not_evaluated'
+    rows = []
+    for scenario,region,question,outcome in [('adequate','north','north','pass'),('missing',None,'north','fail'),
+            ('conflicting','south','north','fail'),('wrong_scope','north','east','fail')]:
+        rows.append({'id':scenario,'requirement_ids':['region'],'scenario':scenario,'kind':'policy',
+            'target':'pack:'+spec['name']+'/region-match',
+            'inputs':{'structured':{} if region is None else {'region':region},'question':{'metadata':{'region':question}},
+                'provenance':{},'origin_host':None,'provider_ids':[],'as_of':'2026-09-22T12:00:00Z'},
+            'expected':{'status':'observed','outcome':outcome,'human_review_required':True},'rationale':'Frozen region-equality outcome'})
+    suite={'schema_version':'evidence-pack-cases/v1','draft_id':created['draft_id'],'cases':rows,'exceptions':[],
+        'limitations':['Synthetic reference values; independent domain review remains required']}
+    cases=root/'cases.json';cases.write_text(json.dumps(suite))
+    assert not command('pack','freeze-cases','--draft',draft,'--from-file',cases)['gaps']
+    assessment=command('pack','assess','--draft',draft)
+    assert not assessment['assessment']['gaps'] and assessment['assessment']['mechanical_cases_passed']
+    assert assessment['assessment']['independent_review']=='not_verified'
+    assert all(row['passed'] for row in assessment['assessment']['reference_basis']['arithmetic_observations'])
+    catalog=root/'catalog'
+    command('pack','catalog','init','--catalog',catalog,'--root','drafts='+str(root))
+    accepted=command('pack','accept','--draft',draft,'--assessment-id',assessment['record']['sha256'],
+        '--catalog',catalog,'--root-id','drafts','--id','scoped-one','--scope','Scoped synthetic measurements')
+    assert accepted['semantic_adequacy']=='not_certified'
+    original=json.loads(request_path.read_text())
+    original['request']['payload']['target']={'writable_root':str(root),'relative_path':'workspace'}
+    original['request']['payload']['authority']['writable_roots']=[str(root)]
+    original['request']['payload']['scope'].append({'name':'region','value':'north'})
+    request=root/'research.json';request.write_text(json.dumps(original))
+    saved=root/'plan.json'
+    plan=command('pack','resume','--from-file',request,'--catalog',catalog,'--id','scoped-one','--output',saved)
+    assert plan['setup_ready'] and not plan['research_ready'] and not (root/'workspace').exists()
+    assert plan['bindings']['accepted_pack']['assessment_sha256']==assessment['record']['sha256']
+    assert command('agent','plan-check','--from-file',saved)['status']=='current'
+    Path(created['candidate'],'taxonomy.md').write_text('Changed guidance')
+    command('agent','plan-check','--from-file',saved,expected=3)
+    print(json.dumps({'local_pack_scaffold':'passed','frozen_pack_cases':'passed','canonical_pack_qualification':'passed',
+        'independent_arithmetic_references':'passed','qualified_local_registration':'passed','qualified_plan_resume':'passed',
+        'pack_domain_certification':False}))
+''')
+
+
+SETUP_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'")] + textwrap.dedent(r'''
+    result = command('apply','--from-file',saved)
+    assert result['status'] == 'ready' and result['setup_ready'] and result['evidence_empty'], result
+    assert not result['research_complete'] and not result['strict']['reviewer_authenticated']
+    assert result['strict']['effective_assurance'] == 'artifact_checked'
+    assert command('setup-guide')['content'].startswith('# Apply and recover')
+    assert 'evidence-setup-result/v1' in command('setup-schemas')['schema_ids']
+    target = root/'workspace'
+    before = {str(path.relative_to(target)):path.read_bytes() for path in target.rglob('*') if path.is_file()}
+    replay = command('apply','--from-file',saved)
+    assert replay['transaction_id'] == result['transaction_id']
+    assert before == {str(path.relative_to(target)):path.read_bytes() for path in target.rglob('*') if path.is_file()}
+    assert yaml.safe_load((target/'wiki/questions/q1.md').read_text().split('---')[1])['metadata']['original_text'] == text
+    original['payload']['target']['relative_path'] = 'sources-workspace'
+    original['payload']['budgets']['bytes'] = 100000
+    original['payload']['authority']['source_scope'] = [str(root)]
+    source = root/'original.html'
+    source.write_text('<html><head><title>Retained observations</title></head><body><h1>Retained observations</h1><p>Relevant measured evidence with dates, population and units.</p></body></html>')
+    original['payload']['sources'] = [{'id':'original','kind':'local_file','locator':str(source),'question_ids':['q1']}]
+    request['decisions']['source_requirements'] = [{'source_id':'original','output_format':'html','needs_complete':True,'scope':{'jurisdiction':'Spain'}}]
+    request_file.write_text(json.dumps(request,ensure_ascii=False))
+    source_plan = root/'source-plan.json'
+    command('plan','--from-file',request_file,'--output',source_plan)
+    observed = command('apply','--from-file',source_plan)
+    assert observed['status'] == 'ready' and observed['sources'][0]['usable'], observed
+    assert not observed['claims_verified'] and observed['usable_source_count'] == 1
+    (target/'user-note.txt').write_text('User changes are retained')
+    assert command('apply','--from-file',saved,expected=3)['error_code'] == 'ONBOARDING_OWNERSHIP_CONFLICT'
+    assert (target/'user-note.txt').read_text() == 'User changes are retained'
+    print(json.dumps({'workspace_application':'passed','setup_replay':'passed','local_source_observation':'passed','setup_conflict_preservation':'passed'}))
+''')
+
+
+REVISION_PROBE = textwrap.dedent(r'''
+    import json, shutil, subprocess, sys
+    from pathlib import Path
+    import yaml
+    from evidence_wiki._script_host import shared_assets_root
+    from evidence_wiki.pack_discovery import owner
+    cli, root = Path(sys.argv[1]), Path(sys.argv[2])
+    root.mkdir()
+    target, candidate, saved = root/'workspace', root/'candidate/general-science', root/'revision.json'
+    def command(*args, expected=0):
+        result = subprocess.run([str(cli),*map(str,args)], cwd=root, text=True, capture_output=True)
+        assert result.returncode == expected, result.stdout + result.stderr
+        return None if args[0] == "init" else json.loads(result.stdout or result.stderr)
+    command('init','--target',target,'--project-name','reviewed-research','--project-description','Retain evidence',
+            '--owner-goal','Explicit research requirements','--domain-pack','general-science')
+    owner('intake_questions').run_intake_document(target, {'schema_version':'1.0','questions':[
+        {'id':'q1','question':'What evidence supports the claim?','priority':'high','origin':'caller'}]},
+        dry_run=False, from_file_label='caller')
+    shutil.copytree(shared_assets_root()/'domain-packs/general-science',candidate)
+    overlay=yaml.safe_load((candidate/'research.overlay.yml').read_text())
+    overlay['domain_pack']['version']='0.2.0'
+    (candidate/'research.overlay.yml').write_text(yaml.safe_dump(overlay,sort_keys=False))
+    (candidate/'claims.md').write_text((candidate/'claims.md').read_text()+'\nRetain explicit uncertainty.\n')
+    planned=command('pack','revision-plan','--target',target,'--path',candidate,'--rationale','Clarify evidence scope','--output',saved)
+    assert planned['owner_plan']['impact']['bounds']['questions_affected']==1
+    applied=command('pack','revision-apply','--from-file',saved)
+    assert applied['status']=='applied' and applied['research']['pending_questions']==['q1']
+    assert command('pack','revision-apply','--from-file',saved)['status']=='already_applied'
+    migration={'schema_version':'evidence-pack-reevaluation/v1','revision_id':applied['revision_id'],'slug':'q1',
+        'rationale':'Explicit reviewed requirement mapping','retired_facets':[],'request_replacements':{},'computation_migrations':{},
+        'template':{'coverage_profile':'scoped','required_facets':[{'facet_id':'evidence','description':'Retained evidence',
+            'required':True,'evidence_path':'academic_method_existence','source_policy':'academic_indexed',
+            'freshness_policy':'publication_identity','identity_policy':'citation_id_resolves','min_sources':1}],'optional_facets':[]}}
+    source=root/'migration.json';source.write_text(json.dumps(migration))
+    migrated=command('pack','reevaluate','--target',target,'--from-file',source)
+    assert migrated['status']=='migrated' and not migrated['release_accepted']
+    assert (target/migrated['archive']).is_file()
+    assert command('pack','reevaluate','--target',target,'--from-file',source)['status']=='already_migrated'
+    assert command('pack','revision-status','--target',target)['pending_questions']==['q1']
+    assert 'evidence-pack-reevaluation/v1' in command('pack','schemas')['schema_ids']
+    print(json.dumps({'revision_owner_application':'passed','revision_impact':'passed','coverage_revision_history':'passed',
+        'revision_replay':'passed','revision_semantic_certification':False}))
+''')
+
+
+RESEARCH_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'")].replace(
+    "'allowed_actions':['local_setup']", "'allowed_actions':['local_setup','local_research']") + textwrap.dedent(r'''
+    setup = command('apply','--from-file',saved)
+    target = root/'workspace'
+    advice = command('next','--target',target,'--agent-id','current')
+    assert not advice['actions_executed'] and not advice['research_complete']
+    assert advice['actions'][0]['operation'] == 'start'
+    started = command('start','--target',target,'--run-id','research','--agent-id','current')
+    assert started['run']['caller_context']['context_id']
+    before = {str(p.relative_to(target)):p.read_bytes() for p in target.rglob('*') if p.is_file()}
+    resumed = command('resume','--target',target,'--run-id','research','--agent-id','current')
+    assert any(row['operation']=='claim' for row in resumed['actions'])
+    assert before == {str(p.relative_to(target)):p.read_bytes() for p in target.rglob('*') if p.is_file()}
+    command('heartbeat','--target',target,'--run-id','research','--agent-id','current')
+    refused = command('heartbeat','--target',target,'--run-id','research','--agent-id','other',expected=3)
+    assert refused['error_code'] == 'ONBOARDING_OWNERSHIP_CONFLICT'
+    output = command('research-export','--target',target,expected=3)
+    assert not output['research_complete'] and output['original_outcomes'][0]['original_text'] == text
+    progress = command('progress','--target',target,'--run-id','research')
+    assert progress['semantic_evaluation']['unsupported_claim_escapes']['value'] is None
+    assert progress['measured']['question_outcomes'] == {'open':1}
+    assert command('research-guide')['content'].startswith('# Research with the current caller')
+    assert 'evidence-research-action/v1' in command('research-schemas')['schema_ids']
+    print(json.dumps({'caller_guidance':'passed','caller_run_binding':'passed','caller_readonly_resume':'passed',
+        'caller_ownership_conflict':'passed','original_question_accounting':'passed','local_telemetry_unknown_grading':'passed'}))
+''')
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
+    if scratch.resolve().is_relative_to(REPO_ROOT.resolve()) or venv.resolve().is_relative_to(REPO_ROOT.resolve()):
+        raise ValidationError("installed execution must use an unrelated directory outside the checkout")
     """Exercise one fresh installation from outside the checkout."""
     python = venv_python(venv)
     cli = venv_cli(venv)
@@ -963,10 +1531,13 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         raise ValidationError(f"{label}: the installed distribution did not provide the evidence-wiki entry point")
     outside = scratch / "outside-checkout"
     outside.mkdir()
+    fixture_root = isolated_fixtures(scratch)
     workspace = scratch / "provider-workspace"
     # Every command runs from a directory that is not the checkout, so a module
     # resolved from the source tree instead of the install would be a failure here.
     run([str(cli), "--version"], cwd=outside)
+    agent_probe = run([str(python), "-c", AGENT_PROBE, str(cli)], cwd=outside)
+    pack_probe = run([str(python), "-c", PACK_PROBE, str(cli), str(scratch / "pack-discovery")], cwd=outside)
     contract_path = scratch / "contract.json"
     contract_path.write_text(run([str(cli), "contract"], cwd=outside), encoding="utf-8", newline="\n")
     run(
@@ -1014,54 +1585,75 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         cwd=outside,
     )
     probe_result = json.loads(probe.strip().splitlines()[-1])
-    run([str(python), str(SMOKE_TOOL), "--cli", str(cli)], cwd=outside)
+    run([str(python), str(fixture_root / "tools/smoke_installed_orchestration.py"), "--cli", str(cli)], cwd=outside)
     publication = run([
         str(python), "-c", PUBLICATION_PROBE, str(cli),
-        str(REPO_ROOT / "tests/_publication_fixture.py"),
-        str(REPO_ROOT / "tests/fixtures/workspace-init-profile.yml"),
+        str(fixture_root / "tests/_publication_fixture.py"),
+        str(fixture_root / "tests/fixtures/workspace-init-profile.yml"),
         str(scratch / "publication-workspace"),
     ], cwd=outside)
     packets = run([
         str(python), "-c", PACKET_PROBE, str(cli),
-        str(REPO_ROOT / "tests/fixtures/codebase-intake/native-packets"),
+        str(fixture_root / "tests/fixtures/codebase-intake/native-packets"),
         str(scratch / "packet-workspace"),
     ], cwd=outside)
     execution = run([
-        str(python), "-c", EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_execution_fixture.py"),
+        str(python), "-c", EXECUTION_PROBE, str(cli), str(fixture_root / "tests/_execution_fixture.py"),
         str(scratch / "execution-workspace"),
     ], cwd=outside)
     usage = run([
-        str(python), "-c", USAGE_PROBE, str(cli), str(REPO_ROOT / "tests/_usage_fixture.py"),
+        str(python), "-c", USAGE_PROBE, str(cli), str(fixture_root / "tests/_usage_fixture.py"),
         str(scratch / "usage-evidence"),
     ], cwd=outside)
     snapshots = run([
-        str(python), "-c", SNAPSHOT_PROBE, str(cli), str(REPO_ROOT / "tests/_snapshot_fixture.py"),
+        str(python), "-c", SNAPSHOT_PROBE, str(cli), str(fixture_root / "tests/_snapshot_fixture.py"),
         str(scratch / "snapshot-evidence"),
     ], cwd=outside)
     temporal = run([
-        str(python), "-c", TEMPORAL_PROBE, str(cli), str(REPO_ROOT / "tests/_temporal_fixture.py"),
+        str(python), "-c", TEMPORAL_PROBE, str(cli), str(fixture_root / "tests/_temporal_fixture.py"),
         str(scratch / "temporal-evidence"),
     ], cwd=outside)
     market = run([
-        str(python), "-c", MARKET_PROBE, str(cli), str(REPO_ROOT / "tests/_market_fixture.py"),
+        str(python), "-c", MARKET_PROBE, str(cli), str(fixture_root / "tests/_market_fixture.py"),
         str(scratch / "market-evidence"),
     ], cwd=outside)
     historical = run([
-        str(python), "-c", HISTORICAL_EXECUTION_PROBE, str(cli), str(REPO_ROOT / "tests/_historical_fixture.py"),
+        str(python), "-c", HISTORICAL_EXECUTION_PROBE, str(cli), str(fixture_root / "tests/_historical_fixture.py"),
         str(scratch / "historical-execution"),
     ], cwd=outside)
     simulation = run([
-        str(python), "-c", SIMULATION_PROBE, str(cli), str(REPO_ROOT / "tests/_simulation_fixture.py"),
+        str(python), "-c", SIMULATION_PROBE, str(cli), str(fixture_root / "tests/_simulation_fixture.py"),
         str(scratch / "market-simulation"),
     ], cwd=outside)
     assessments = run([
-        str(python), "-c", ASSESSMENT_PROBE, str(cli), str(REPO_ROOT / "tests/_assessment_fixture.py"),
+        str(python), "-c", ASSESSMENT_PROBE, str(cli), str(fixture_root / "tests/_assessment_fixture.py"),
         str(scratch / "assessment-evidence"),
     ], cwd=outside)
-    return {"label": label, **probe_result, "managed_smoke": "passed", **json.loads(publication),
+    computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
+    sources = run([str(python), "-c", SOURCE_PROBE, str(cli), str(scratch / "source-workspace")], cwd=outside)
+    planning = run([str(python), "-c", PLANNING_PROBE, str(cli), str(scratch / "research-planning")], cwd=outside)
+    research = run([str(python), "-c", RESEARCH_PROBE, str(cli), str(scratch / "caller-research")], cwd=outside)
+    revisions = run([str(python), "-c", REVISION_PROBE, str(cli), str(scratch / "pack-revisions")], cwd=outside)
+    setup = run([str(python), "-c", SETUP_PROBE, str(cli), str(scratch / "workspace-application")], cwd=outside)
+    extensions = run([str(python), "-I", str(fixture_root / "tools/probe_installed_extensions.py"), "--root", str(scratch / "scoped-extensions"),
+                      "--docx-fixture", str(fixture_root / "tests/_docx_fixture.py")], cwd=outside) if os.name == "posix" else json.dumps({"scoped_extensions": "unsupported_platform"})
+    authoring = run([str(python), "-c", PACK_AUTHORING_PROBE, str(cli), str(scratch / "pack-authoring"),
+        str(scratch / "research-planning/request.json")], cwd=outside)
+    journey_reports = (_OPTIONS.evidence / label / "journeys") if _OPTIONS.evidence is not None else scratch / "journeys"
+    run([str(python), "-B", str(fixture_root / "tools/qualify_journeys.py"), "--output", str(scratch / "journeys"),
+         "--report-dir", str(journey_reports), "--workers", str(_OPTIONS.journey_workers),
+         "--case-timeout", str(_OPTIONS.case_timeout)], cwd=outside, label="research-journeys",
+        timeout=_OPTIONS.journey_timeout, stream_stderr=True)
+    journeys = json.loads((journey_reports / "observations.json").read_text(encoding="utf-8"))
+    if journeys["status"] != "passed" or not Path(journeys["package_location"]).is_relative_to(venv.resolve()):
+        raise ValidationError("installed journeys failed or imported a package outside the isolated environment")
+    return {"label": label, "fixture_inputs_sha256": sha256_of(fixture_root / "inputs.json"), "checkout_imports": "disabled", **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
-            **json.loads(assessments)}
+            **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
+            **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research), **json.loads(revisions),
+            **json.loads(extensions),
+            "journeys": journeys}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:
@@ -1073,7 +1665,11 @@ def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:
             target = (unpack_root / member.name).resolve()
             if unpack_root.resolve() not in target.parents:
                 raise ValidationError(f"{sdist.name}: member escapes its root directory: {member.name}")
-        archive.extractall(unpack_root)  # noqa: S202 - members were checked above.
+            if not member.isfile() and not member.isdir():
+                raise ValidationError(f"{sdist.name}: links and special archive members are not supported: {member.name}")
+        # Explicit filtering avoids changing extraction semantics between Python versions.
+        options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+        archive.extractall(unpack_root, **options)  # noqa: S202 - contained regular files/directories only.
     roots = [child for child in unpack_root.iterdir() if child.is_dir()]
     if len(roots) != 1:
         raise ValidationError(f"{sdist.name}: expected one project root, found {[root.name for root in roots]}")
@@ -1089,51 +1685,152 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dist-dir", type=Path, default=REPO_ROOT / "dist", help="Directory holding one wheel and one sdist.")
     parser.add_argument("--expected-version", default=None, help="Version the installed package must report.")
+    parser.add_argument("--artifact", choices=("both", "wheel", "sdist"), default="both",
+                        help="Select one independently rerunnable installation; the final gate requires both reports.")
     parser.add_argument("--skip-sdist", action="store_true", help="Validate only the wheel (not for release use).")
     parser.add_argument("--membership-only", action="store_true", help="Check archive contents without installing.")
-    return parser.parse_args(argv)
+    parser.add_argument("--evidence-dir", type=Path, help="New private directory retaining full installed inputs, journeys and failed diagnostics.")
+    parser.add_argument("--journey-workers", type=int, choices=range(1, 9), default=1)
+    parser.add_argument("--command-timeout", type=positive_seconds, default=900)
+    parser.add_argument("--journey-timeout", type=positive_seconds, default=5400)
+    parser.add_argument("--case-timeout", type=positive_seconds, default=1200)
+    parser.add_argument("--heartbeat-seconds", type=positive_seconds, default=30)
+    args = parser.parse_args(argv)
+    if args.skip_sdist and args.artifact != "both":
+        parser.error("--skip-sdist cannot be combined with --artifact")
+    if args.skip_sdist:
+        args.artifact = "wheel"
+    return args
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def validation_identity():
+    members = ["tools/validate_installed_artifacts.py", *fixture_members()]
+    return {name: sha256_of(REPO_ROOT / name) for name in members}
+
+
+def validate_distributions(args, summary, scratch):
     wheel, sdist = find_artifacts(args.dist_dir.resolve())
     checks: dict[str, object] = {}
-    summary: dict[str, object] = {
+    summary.update({
         "wheel": {"name": wheel.name, "sha256": sha256_of(wheel)},
         "sdist": {"name": sdist.name, "sha256": sha256_of(sdist)},
         "expected_version": args.expected_version,
+        "artifact": args.artifact,
+        "validation_inputs": validation_identity(),
+        "workflow": {key: os.environ.get(key) for key in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")},
         "checks": checks,
-    }
+    })
     checks["membership"] = check_archive_membership(wheel, sdist)
+    _RUNNER.event("passed", "archive-membership")
     if not args.membership_only:
-        with tempfile.TemporaryDirectory(prefix="evidence-wiki-artifacts-") as tmpdir:
-            scratch = Path(tmpdir)
+        if args.artifact in {"both", "wheel"}:
+            _OPTIONS.active_artifact = "wheel"
             wheel_scratch = scratch / "wheel"
             wheel_scratch.mkdir()
             checks["installed_wheel"] = validate_installed(
                 create_venv_with_wheel(wheel_scratch, wheel), wheel_scratch, args.expected_version, "wheel"
             )
-            if not args.skip_sdist:
-                sdist_scratch = scratch / "sdist"
-                sdist_scratch.mkdir()
-                rebuilt = build_wheel_from_sdist(sdist, sdist_scratch)
-                direct_members = [name for name in wheel_members(wheel) if not name.endswith("RECORD")]
-                rebuilt_members = [name for name in wheel_members(rebuilt) if not name.endswith("RECORD")]
-                if direct_members != rebuilt_members:
-                    only_direct = sorted(set(direct_members) - set(rebuilt_members))
-                    only_rebuilt = sorted(set(rebuilt_members) - set(direct_members))
-                    raise ValidationError(
-                        "the wheel built from the sdist does not match the direct wheel; "
-                        f"only in direct: {only_direct[:10]}; only in sdist-built: {only_rebuilt[:10]}"
-                    )
-                checks["installed_sdist"] = validate_installed(
-                    create_venv_with_wheel(sdist_scratch, rebuilt), sdist_scratch, args.expected_version, "sdist"
+            _RUNNER.event("passed", "installed-wheel")
+        if args.artifact in {"both", "sdist"}:
+            _OPTIONS.active_artifact = "sdist"
+            sdist_scratch = scratch / "sdist"
+            sdist_scratch.mkdir()
+            _RUNNER.event("started", "sdist-rebuild")
+            rebuilt = build_wheel_from_sdist(sdist, sdist_scratch)
+            direct_members = [name for name in wheel_members(wheel) if not name.endswith("RECORD")]
+            rebuilt_members = [name for name in wheel_members(rebuilt) if not name.endswith("RECORD")]
+            if direct_members != rebuilt_members:
+                only_direct = sorted(set(direct_members) - set(rebuilt_members))
+                only_rebuilt = sorted(set(rebuilt_members) - set(direct_members))
+                raise ValidationError(
+                    "the wheel built from the sdist does not match the direct wheel; "
+                    f"only in direct: {only_direct[:10]}; only in sdist-built: {only_rebuilt[:10]}"
                 )
-                checks["installed_sdist"]["rebuilt_wheel_sha256"] = sha256_of(rebuilt)
-            shutil.rmtree(scratch, ignore_errors=True)
+            checks["installed_sdist"] = validate_installed(
+                create_venv_with_wheel(sdist_scratch, rebuilt), sdist_scratch, args.expected_version, "sdist"
+            )
+            checks["installed_sdist"]["rebuilt_wheel_sha256"] = sha256_of(rebuilt)
+            _RUNNER.event("passed", "installed-sdist")
+    summary["status"] = "partial" if args.artifact != "both" or args.membership_only else "passed"
+    summary["selection_status"] = "passed"
+
+
+def retain_evidence(scratch, evidence):
+    """Copy bounded inputs/results; keep large execution workspaces outside checkout."""
+    for label in ("wheel", "sdist"):
+        source, target = scratch / label, evidence / label
+        if not source.is_dir():
+            continue
+        for name in ("qualification-inputs", "journeys"):
+            directory = source / name
+            if not directory.is_dir():
+                continue
+            if name == "qualification-inputs":
+                shutil.copytree(directory, target / name, dirs_exist_ok=True)
+            else:
+                (target / name).mkdir(parents=True, exist_ok=True)
+                for path in directory.glob("*.json"):
+                    shutil.copyfile(path, target / name / path.name)
+
+
+def write_job_summary(summary):
+    destination = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not destination:
+        return
+    rows = sorted(summary.get("commands", []), key=lambda row: row.get("seconds", 0), reverse=True)
+    with Path(destination).open("a", encoding="utf-8") as stream:
+        stream.write(f"### Installed {summary.get('artifact', 'distribution')} validation: {summary['status']}\n\n")
+        stream.write("| Stage | Result | Seconds |\n|---|---|---:|\n")
+        for row in rows[:15]:
+            stream.write(f"| {row['stage']} | {row['status']} | {row['seconds']:.1f} |\n")
+        stream.write("\nFull command logs, progress and case results are retained in the diagnostics artifact.\n")
+
+
+def main(argv: list[str] | None = None) -> int:
+    global _RUNNER, _OPTIONS
+    args = parse_args(argv)
+    summary = {"status": "incomplete"}
+    evidence = args.evidence_dir.resolve() if args.evidence_dir else None
+    if evidence is not None:
+        evidence.mkdir(parents=True, exist_ok=False)
+    previous = _RUNNER, _OPTIONS
+    _RUNNER = CommandRunner(evidence / "commands" if evidence is not None else None, heartbeat=args.heartbeat_seconds)
+    _OPTIONS = argparse.Namespace(**vars(args), evidence=evidence, active_artifact="artifacts")
+    scratch = None
+    try:
+        manager = (nullcontext(tempfile.mkdtemp(prefix="evidence-wiki-artifacts-")) if evidence
+                   else tempfile.TemporaryDirectory(prefix="evidence-wiki-artifacts-"))
+        with manager as tmpdir:
+            scratch = Path(tmpdir).resolve()
+            if scratch.is_relative_to(REPO_ROOT.resolve()):
+                raise ValidationError("temporary execution root overlaps the checkout")
+            summary["execution_root"] = str(scratch)
+            if evidence is not None:
+                (evidence / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8", newline="\n")
+            validate_distributions(args, summary, scratch)
+    except BaseException as error:
+        summary.update(status="failed", error_type=type(error).__name__, error=str(error)[:8192])
+        raise
+    finally:
+        try:
+            summary["commands"] = _RUNNER.records
+            if evidence is not None:
+                try:
+                    if scratch is not None and scratch.is_dir() and not scratch.is_relative_to(REPO_ROOT.resolve()):
+                        retain_evidence(scratch, evidence)
+                        summary["evidence_retention"] = "inputs_and_results_retained; external_execution_root_retained"
+                except OSError as error:
+                    summary.update(status="failed", evidence_retention="failed", retention_error=type(error).__name__)
+                    raise
+                finally:
+                    (evidence / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        finally:
+            _RUNNER, _OPTIONS = previous
+            write_job_summary(summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    with interruptible():
+        raise SystemExit(main())

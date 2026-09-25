@@ -15,7 +15,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_CODEX = REPO_ROOT / "tests" / "fixtures" / "fake_codex_cli.py"
 FAKE_CODEX_WORKSPACE_PYTHON = "EVIDENCE_WIKI_FAKE_CODEX_WORKSPACE_PYTHON"
-EXPECTED_STARTER_VERSION = "0.7.0"
+EXPECTED_STARTER_VERSION = "1.0.0"
 
 
 def tiny_pdf_bytes() -> bytes:
@@ -250,12 +250,18 @@ def main() -> int:
     schema_documents = contract.get("artifact_schema_documents")
     expected_schemas = {
         "orchestration_session",
+        "orchestration_host_session",
         "orchestration_work_order",
         "orchestration_result",
         "orchestration_attempt",
     }
     if not isinstance(schema_documents, dict) or set(schema_documents) != expected_schemas:
         raise SystemExit("installed CLI did not publish the complete orchestration schema document set")
+    host_session = schema_documents["orchestration_host_session"]
+    if (host_session["properties"]["schema_version"]["enum"] != ["1.1"]
+            or not {"host_transition_id", "requirement_basis"} <= set(host_session["required"])
+            or schema_documents["orchestration_session"]["properties"]["schema_version"]["enum"] != ["1.0"]):
+        raise SystemExit("installed CLI changed an ordinary session or omitted correlated host-session bindings")
     starter_assets = set(contract.get("required_asset_manifest", {}).get("starter", []))
     required_provider_assets = {
         "workspace-template/scripts/discover_sources.py",

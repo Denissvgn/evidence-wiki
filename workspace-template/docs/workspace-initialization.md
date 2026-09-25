@@ -4,6 +4,12 @@ Use the installed `evidence-wiki init` command to create a configured research w
 
 The initializer does not fetch network resources, install git hooks, initialize git, copy pilot data, or move raw sources.
 
+No API credentials are required for initialization. Before running an external
+integration, use `evidence-wiki env check` to inspect selected requirements and
+`evidence-wiki env run --prompt -- ...` to supply missing values through hidden
+terminal input. See [environment setup](environment-setup.md) for service
+selection and per-command credential handling.
+
 ## CLI Usage
 
 Create a generic workspace from explicit flags:
@@ -17,6 +23,12 @@ evidence-wiki init \
 ```
 
 Create a workspace with a reusable domain pack:
+
+Inspect available guidance first with `evidence-wiki pack list` and
+`evidence-wiki pack show bundled:llm-research`. [Pack selection](pack-selection.md)
+also covers local catalogs and requirement-based fit decisions. The initializer
+continues to accept a bundled name or an explicit filesystem path; catalog
+registration does not install a pack or authorize providers.
 
 ```bash
 evidence-wiki init \

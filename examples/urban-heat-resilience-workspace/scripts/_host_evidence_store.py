@@ -8,7 +8,6 @@ No workspace path, fallback lock, or single-writer escape hatch is accepted.
 
 from __future__ import annotations
 
-import os
 import secrets
 import stat
 from collections.abc import Iterator
@@ -17,6 +16,7 @@ from pathlib import Path
 
 from _evidence_authority import EvidenceInvalid
 from _evidence_revision import observation
+from _native_fs import os
 
 try:
     import fcntl
@@ -31,8 +31,9 @@ MAX_STATE_BYTES = 64 * 1024 * 1024
 
 def private_entry(info: os.stat_result, *, directory: bool = False) -> None:
     kind = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
-    if (not kind or info.st_mode & 0o077 or info.st_uid != os.getuid()
-            or not directory and info.st_nlink != 1):
+    private = (info.native_private if hasattr(info, "native_private")
+               else not info.st_mode & 0o077 and info.st_uid == os.getuid())
+    if not kind or not private or not directory and info.st_nlink != 1:
         raise EvidenceInvalid("unsafe_host_state_entry")
 
 
@@ -44,7 +45,7 @@ def host_directory(project_root: Path) -> Iterator[int]:
     path = Path(raw)
     if not path.is_absolute() or ".." in path.parts or path.resolve().is_relative_to(project_root.resolve()):
         raise EvidenceInvalid("unsafe_host_state_path")
-    if (fcntl is None or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "getuid")
+    if ((fcntl is None and not getattr(os, "native_windows", False)) or not hasattr(os, "O_NOFOLLOW")
             or os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd):
         raise EvidenceInvalid("host_state_unsupported")
     descriptors: list[int] = []
@@ -139,13 +140,18 @@ def locked_state(project_root: Path, *, write: bool = False, initialize: bool = 
         else:
             lock = os.open(LOCK_FILE, flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         acquired = False
+        native_lock = None
         try:
             before = os.fstat(lock)
             private_entry(before)
             if before.st_size:
                 raise EvidenceInvalid("unsafe_host_state_lock")
             try:
-                fcntl.flock(lock, (fcntl.LOCK_EX if write else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+                if getattr(os, "native_windows", False):
+                    native_lock = os.lock(lock, timeout_seconds=0)
+                    native_lock.__enter__()
+                else:
+                    fcntl.flock(lock, (fcntl.LOCK_EX if write else fcntl.LOCK_SH) | fcntl.LOCK_NB)
                 acquired = True
             except OSError as exc:
                 raise EvidenceInvalid("host_state_lock_unavailable") from exc
@@ -156,5 +162,8 @@ def locked_state(project_root: Path, *, write: bool = False, initialize: bool = 
                 raise EvidenceInvalid("host_state_lock_changed")
         finally:
             if acquired:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+                if native_lock is not None:
+                    native_lock.__exit__(None, None, None)
+                else:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
             os.close(lock)

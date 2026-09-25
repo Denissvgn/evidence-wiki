@@ -13,6 +13,22 @@ domain_pack:
   version: 0.1.0
   description: Domain guidance for broad scientific literature reviews, evidence maps, method comparisons, dataset inventories, and reproducibility analysis.
   compatible_research_yml_contract: "0.1"
+  selection:
+    schema_version: '1.0'
+    typical_questions:
+    - What evidence supports the proposed mechanism?
+    - How do study methods, populations and limitations compare?
+    exclusions:
+    - Professional diagnosis or treatment decisions without qualified review.
+    required_scope_inputs:
+    - id: research_question
+      description: The exact question and intended evidence use.
+    - id: population
+      description: Population, system or dataset being studied.
+    - id: time_scope
+      description: Relevant study and observation period.
+    review_requirements:
+    - Assess study quality, generalizability and conflicting evidence.
   taxonomy_doc: taxonomy.md
   claims_doc: claims.md
   scaffolds:

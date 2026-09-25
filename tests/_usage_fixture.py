@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import copy
 import importlib.util
-import os
 from pathlib import Path
 from unittest import SkipTest
 
+from evidence_wiki._filesystem import os
 from tests._execution_fixture import authenticate, canonical, closure, host_policy, identifier
 
 
 def require_host_storage():
+    if getattr(os, "native_windows", False):
+        return
     if (importlib.util.find_spec("fcntl") is None or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "getuid")
             or os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd):
-        raise SkipTest("host evidence storage requires POSIX locking, ownership and no-follow directory operations")
+        raise SkipTest("host evidence storage requires native locking, ownership and no-follow directory operations")
 
 
 class UsageFixture:
@@ -23,7 +25,7 @@ class UsageFixture:
         self.root = (directory / "workspace").resolve()
         self.root.mkdir()
         self.host = (directory / "host").resolve()
-        self.host.mkdir(mode=0o700)
+        os.mkdir(self.host, mode=0o700)
         self.policy_path = self.host / "authority.json"
         self.policy = host_policy(self.policy_path)
         self.policy["principals"]["owner"]["roles"].append("revocation")
@@ -39,7 +41,7 @@ class UsageFixture:
 
     def save_policy(self):
         self.policy_path.write_bytes(canonical(self.policy))
-        self.policy_path.chmod(0o600)
+        os.chmod(self.policy_path, 0o600)
 
     def command(self, action, body=None, *, request_id=None):
         self.counter += 1

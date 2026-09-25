@@ -1480,6 +1480,15 @@ def resolution_fields(
     frontmatter: dict[str, Any],
 ) -> dict[str, Any]:
     if args.command == "answer":
+        if load_sibling_module("_pack_revision_guard").pending_question(project_root, args.slug.strip()) is not None:
+            args.require_coverage = True
+        strict = load_sibling_module("_strict_evidence")
+        try:
+            strict.enforce_resolution(project_root, config, args, frontmatter)
+        except strict.ScriptRefusal as error:
+            raise ScriptRefusal(error.error_code, error.message, exit_code=error.exit_code,
+                                recoverable=error.recoverable, remediation=error.remediation,
+                                details=error.details) from error
         source_ids = validate_source_ids(project_root, config, unique_nonempty(args.source_id, "--source-id"))
         if not source_ids and not getattr(args, "allow_uncited", False):
             raise ResolveError(
@@ -1686,6 +1695,28 @@ def render_reopen_page(text: str, source_ids: list[str], now: str) -> str:
     fields: dict[str, Any] = {"status": "open", "source_ids": merged, "updated": now.split("T", 1)[0]}
     remove_fields = ("claimed_by", "claimed_at", "blocked_reason", "blocking_request_ids")
     return apply_resolution_edits(text, fields, remove_fields, quoted_fields={"updated"})
+
+
+def render_revision_page(text: str, revision_id: str) -> str:
+    """Start a new answer/review cycle; original bytes belong to the revision archive."""
+    return apply_resolution_edits(text, {"status": "open", "coverage_required": True, "requirements_revision": revision_id},
+        ("claimed_by", "claimed_at", "answer_page", "approved_by", "approved_at", "human_review_approved",
+         "human_reviews", "human_review_requested_at", "human_review_status", "human_review_required", "human_review_policies",
+         "blocked_reason", "blocking_request_ids", "confidence", "evidence_strength", *GROUNDING_VERIFICATION_STAMPS))
+
+
+def reopen_for_revision(project_root, slug, revision_id, original):
+    """Coverage migration has archived history; this owner alone resets the question."""
+    claims = load_sibling_module("question_claim")
+    path = claims.question_page_path(project_root, slug)
+    guard = load_sibling_module("_pack_revision_guard")
+    with claims.question_lock(path):
+        current = path.read_bytes().decode("utf-8")
+        rendered = render_revision_page(original, revision_id)
+        guard.require(current in {original, rendered}, "revision_question_changed")
+        if current != rendered:
+            claims.write_page_atomic(path, rendered)
+    return rendered
 
 
 def apply_reopen_to_page(page_path: Path, text: str, merged: list[str], now: str) -> None:

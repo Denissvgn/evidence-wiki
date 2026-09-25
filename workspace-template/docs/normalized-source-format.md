@@ -218,7 +218,7 @@ Optional field meanings:
 | `extraction_method` | Method used, such as `latex`, `pdf_text`, `html_text`, `table_text`, `link_stub`, `manual`, `web_stub`, `codebase_context`, or `codebase_stub`. |
 | `pdf_extractor` | PDF records only: the selected backend `name` (`pypdf` or `poppler`) and resolved backend `version`. Changing the configured backend makes an existing PDF record stale and regenerates it. |
 | `content_hash` | Hash of normalized extracted content for reproducibility. |
-| `raw_fingerprint` | Content hash of the raw inputs (paper bundle, PDF, HTML page, CSV/TSV file, or structured payload, together with the provenance sidecars delivered beside them and the companion files those sidecars declared) copied from the manifest. Re-running normalization compares it to the manifest to re-generate only records whose raw source changed. Absent for links and codebase records. |
+| `raw_fingerprint` | Content hash of the raw inputs (paper bundle, PDF, HTML page, CSV/TSV file, host text capture or structured payload, together with the provenance sidecars delivered beside them and the companion files those sidecars declared) copied from the manifest. Re-running normalization compares it to the manifest to re-generate only records whose raw source changed. Absent for links and codebase records. |
 | `references_source_ids` | Matched citation-graph neighbors from local BibTeX bibliographies. v1 matches only arXiv IDs and DOI strings against existing manifest records; no title, author, or fuzzy matching is performed. |
 | `academic` | Provider-backed publication metadata copied from provenance when available: provider, source type, venue, publication year, OA status, peer-review/publication status, and provider ids. |
 | `standards` | Standards-registry metadata copied from `provenance.standards` when available. Typical fields include registry provider, standards body, designation, title, edition or year, status, registry URL, product category, legal act, OJEU reference, dataset license, and replacement-chain fields. |
@@ -226,9 +226,18 @@ Optional field meanings:
 | `rendered_coverage` | How much of a structured payload the record's body renders verbatim, and which facets lost content. Required for `extraction_method: adapter`, optional elsewhere but checked whenever declared. See "Rendered coverage" for the shape and the compliance floor. |
 | `structured_view` | Binds this record to its uncapped structured-view sidecar: `path` (workspace-relative, `sources/normalized/<safe-source-id>.structured.json`) and `content_hash` (`sha256:<64 lowercase hex>` over the sidecar bytes). `null` — or absent in records written before the field existed — for every record that has no structured view, which is most of them. Anchor-form grounding resolves pointers only against a sidecar this block binds. See "Structured View Sidecar". |
 | `needs_ocr` | `true` when PDF extraction ran successfully but produced near-empty text (likely a scanned or image-only PDF). See "Scanned PDFs and OCR". |
+| `host_capture` | Original `evidence-host-capture/v1` qualifications for `extraction_method: host_text`: byte identity, declared origin/tool/time, content kind, completeness, scope and rights. Original bytes and the sidecar are rechecked; declarations are not authentication or independent semantic review. |
 | `language` | BCP-47 language tag when known. |
 | `confidence` | `high`, `medium`, or `low` extraction confidence. |
 | `abstract_confidence` | PDF abstract extraction confidence. `low` means a fallback heuristic recovered text after heading reordering and the record carries a parse warning. |
+
+Explicit host captures normalize Markdown or plain UTF-8 text while preserving
+the original raw bytes. Excerpts stay partial; search snippets and generated
+summaries cannot claim primary source standing. Empty or invalid captures and
+unknown/restricted rights remain unusable, with reasons. Verification also
+checks that the normalized extracted text matches the retained capture. Bare
+Markdown keeps its existing adapter/unsupported behavior. See
+[source usability](source-usability.md) for the capture schema and scoped flow.
 
 `normalize_sources.py` keeps extraction `status` separate from evidence
 usability. A successfully parsed official error page can still have

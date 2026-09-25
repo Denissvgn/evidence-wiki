@@ -6,8 +6,75 @@ provenance, lifecycle state, and export validation. A validated research
 outcome is either a cited, auditable answer or a structured request for missing
 evidence.
 
+For updates to an installed domain pack, use `evidence-wiki pack revision-plan`,
+`revision-apply` and `revision-status`. They retain three-way conflicts and
+history, identify affected research, and guide explicit coverage reevaluation.
+See [Pack revisions](workspace-template/docs/pack-revisions.md).
+
 [Quick start](#five-minute-tour) · [Documentation](#documentation) ·
 [Worked example][worked-example] · [PyPI][pypi] · [Contributing][contributing]
+
+## Start with your agent
+
+Install into an isolated environment (Python 3.10 or newer):
+
+```sh
+python3 -m venv .research-env
+.research-env/bin/python -m pip install evidence-wiki
+.research-env/bin/evidence-wiki agent --format json
+.research-env/bin/evidence-wiki agent summary --format json \
+  --require strict-evidence/v1 --require declarative-computation/v1
+```
+
+On Windows, use `.research-env\Scripts\python.exe` and
+`.research-env\Scripts\evidence-wiki.exe`. The response identifies the installed
+version, supported contracts and instructions. An older installation can refuse
+an unavailable capability; use its returned version and instructions together.
+
+Native Windows supports local workspace captures, protected publication, pack
+catalogs, authoring and setup through anchored handles and private ACLs. Reparse
+points, network shares and filesystems without the required native guarantees
+are refused. Use a host-owned directory and trust file restricted to the current
+Windows account and SYSTEM for protected evidence state. Framework runtime
+qualification and `host_enforced` isolation remain separate capabilities.
+
+Give your current agent the installed executable, your original questions, the
+available source locations, writable directory and access limits. Ask it to read
+`agent` first, preserve every question, and return the controlled research export
+or precise blockers. A second model runner is optional. Retrieved documents and
+tool output supply evidence; they cannot authorize commands or change the review policy.
+
+Instructions travel with the package and can be read from any directory:
+
+```sh
+.research-env/bin/evidence-wiki pack guide --format text
+.research-env/bin/evidence-wiki pack guide --topic authoring --format text
+.research-env/bin/evidence-wiki pack guide --topic revisions --format text
+.research-env/bin/evidence-wiki agent source-guide --format text
+.research-env/bin/evidence-wiki agent research-guide --format text
+.research-env/bin/evidence-wiki agent frameworks
+```
+
+Select a pack by its scope and evidence requirements. If none fits, preserve the
+gap or explicitly author local guidance, assess it and register the selected
+revision. Host-delivered captures retain their declared origin, rights, scope and
+completeness. Local copies record observation time; this is not a publication date
+or a license grant. Pack changes invalidate affected acceptance and require explicit
+reevaluation. Installing a newer package does not migrate existing workspaces;
+see [Upgrade and adoption](https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/upgrade-adoption.md).
+
+`artifact_checked` applies to the freshly checked export, with current evidence
+and authenticated independent reviews. It cannot control prose written outside
+that export. `host_enforced` additionally requires the qualified macOS protected
+host to mediate execution and delivery; ordinary terminal, bridge and managed
+parent sessions do not acquire that guarantee. Quote matches and exact decimal
+calculations do not prove source truth, semantic support, suitable units or
+complete research. Contested and insufficient evidence remain explicit outcomes.
+
+The installed framework matrix separates pinned transport/resource observations
+from model behavior. Pi, OpenCode and Gemini have observed modes on macOS arm64;
+live-model research and other platform/version combinations need their own
+qualification. Read the exact modes with `agent frameworks` before selecting one.
 
 ### How This Project Was Built
 
@@ -67,6 +134,58 @@ while OpenAlex can use `OPENALEX_API_KEY` from the process environment. See
 [workspace initialization][workspace-initialization], [source
 discovery][source-discovery], and [acquisition][acquisition] for the full
 contracts.
+
+Check credentials before the first command that needs external services:
+
+```bash
+evidence-wiki env check --service openalex --service github --format json
+```
+
+`env check` reports variable names and presence only. `env run --prompt` asks
+for missing values with terminal echo disabled and passes them to the selected
+command and its children. Values are never saved by this helper or added to your
+parent shell. Inject persistent credentials through your host secret manager.
+Select `openai`, `anthropic`, `github` or `openalex`, or use `--require-env NAME`
+for another integration. Select only the credentials your workflow needs;
+initialization and offline work require none, and agent runners may use their
+own login. See [environment setup](workspace-template/docs/environment-setup.md).
+
+Inspect guidance before selecting it with `evidence-wiki pack list` and
+`evidence-wiki pack show bundled:general-science`. Packs expose scope inputs,
+exclusions and review requirements. Use `evidence-wiki pack guide --format text`
+for explicit local catalogs and requirement-based selection; see
+[pack selection](workspace-template/docs/pack-selection.md).
+
+Use `evidence-wiki agent inspect --target WORKSPACE` to distinguish installed
+capabilities from configured access and source usability. Select source IDs with
+`agent source-status`; `agent source-guide --format text` explains host captures,
+route choices and remediation. Inspection does not activate providers or run
+normalization. See [source usability](workspace-template/docs/source-usability.md).
+
+`agent recipes` describes bounded native DOCX text/table capture. Use
+`agent extensions` for explicit pack identity migration, composition, fleet
+proposals and host transitions. Python hosts can use `Onboarding.open` with
+selected roots and operation grants; `serve-onboarding-mcp` exposes the same
+scoped owners. See [onboarding contracts](workspace-template/docs/agent-contracts.md#scoped-python-onboarding)
+and [optional native skill installation](workspace-template/docs/frameworks.md#optional-native-instruction-installation).
+
+Use `evidence-wiki agent plan --from-file request.json` to compile a read-only
+setup plan with original question mappings, evidence criteria, source routes and
+explicit assurance blockers. Save with `--output` and recheck input identities
+with `agent plan-check`. See [research planning](workspace-template/docs/research-planning.md).
+
+Use `evidence-wiki pack guide --topic authoring` to scaffold or derive local
+guidance, freeze assessment cases, qualify a revision and resume setup planning.
+Apply a saved plan with `evidence-wiki agent apply --from-file PLAN`.
+[Workspace application](workspace-template/docs/workspace-application.md) describes
+local delivery, observed readiness, locking and conservative recovery.
+
+For an existing workspace, `evidence-wiki agent --target WORKSPACE` returns current
+next-action advice. Use `agent research-guide` for the caller-driven loop,
+verified source ingestion, original-question export and optional local progress.
+[Caller research](workspace-template/docs/caller-research.md) uses the current
+agent and canonical owners; no additional model runner is required.
+Structural and arithmetic checks retain separate domain-review requirements.
 
 Add a question using the [question API][question-api]:
 
@@ -128,6 +247,26 @@ below. The [source-delivery contract][source-delivery] defines provenance
 sidecars and atomic delivery.
 
 ## Drive It With An Agent
+
+Start with your current agent and terminal, before creating a workspace:
+
+```bash
+evidence-wiki agent
+evidence-wiki agent summary --format json
+evidence-wiki agent resource guide/pack-authoring/v1
+evidence-wiki agent frameworks
+```
+
+Bootstrap is read-only and includes the installed operating guide, versioned
+resource references and a strict-policy template. It requires no secondary model
+CLI. Resource access does not apply policy or establish host enforcement; the
+guide explains configuration, independent review and explicit evidence gaps.
+
+Portable skills and an optional Pi native tool/RPC bridge reuse these contracts.
+Inspect exact framework versions and qualified modes before use, then create a
+caller-local bundle with `evidence-wiki agent bundle --target NEW_DIRECTORY`.
+No global agent settings or trust choices are changed. See the installed
+`guide/frameworks/v1` resource for Pi, OpenCode and Gemini CLI recipes and limits.
 
 EvidenceWiki supports agent harnesses at three levels:
 

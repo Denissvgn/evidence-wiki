@@ -3,16 +3,17 @@
 import contextlib
 import io
 import json
-import os
 import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
 
+from evidence_wiki._filesystem import os
 from tests import test_publication_readiness as fixtures
 from tests._script_loader import load_isolated_module
 
@@ -27,7 +28,6 @@ def tree_bytes(root):
             for path in sorted(root.rglob("*")) if "__pycache__" not in path.parts}
 
 
-@unittest.skipUnless(os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"), "requires no-follow capture support")
 class SelectedPublicationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -36,6 +36,14 @@ class SelectedPublicationTests(unittest.TestCase):
         self.root = helper.init_workspace(Path(self.temporary.name))
         helper.write_ship_ready_vendor_fixture(self.root)
         self.slug = "vendor-product-spec"
+
+    def test_logical_paths_preserve_proof_identity_for_windows_path_spellings(self):
+        first = PureWindowsPath("C:/Temp/capture-one/workspace")
+        second = PureWindowsPath("C:/Temp/capture-two/workspace")
+        documents = [{"path": str(root / "record.md"), "diagnostic": root.as_posix() + "/record.md"}
+                     for root in (first, second)]
+        self.assertEqual(SELECTED.logical_paths(documents[0], first), SELECTED.logical_paths(documents[1], second))
+        self.assertEqual("./record.md", SELECTED.logical_paths(documents[0], first)["diagnostic"])
 
     def run_selected(self, slugs=None, **kwargs):
         return SELECTED.run_selected_publication(self.root, [self.slug] if slugs is None else slugs, **kwargs)
@@ -85,8 +93,8 @@ class SelectedPublicationTests(unittest.TestCase):
                 question = self.root / "wiki/questions" / f"{self.slug}.md"
                 question.write_text(question.read_text().replace("status: answered", "status: human_review"))
             return original_export(root, *args, **kwargs)
-        def load_for_evaluation(root, name):
-            return exporter if name == "export_answers" else original_load(root, name)
+        def load_for_evaluation(root, name, **kwargs):
+            return exporter if name == "export_answers" else original_load(root, name, **kwargs)
         with patch.object(SELECTED, "load_workspace_module", side_effect=load_for_evaluation), patch.object(exporter, "build_export", side_effect=edit_then_export):
             document = self.run_selected()
         self.assertEqual(2, len(invocations))
@@ -180,7 +188,7 @@ class SelectedPublicationTests(unittest.TestCase):
 
     def test_platform_without_descriptor_support_refuses_without_writes(self):
         before = tree_bytes(self.root)
-        with patch.object(REVISION.os, "supports_dir_fd", set()):
+        with patch.object(REVISION.os, "supports_dir_fd", set()), patch.object(REVISION, "sys", SimpleNamespace(platform="unsupported")):
             self.assert_refusal("EVIDENCE_REVISION_UNSUPPORTED", lambda: REVISION.capture_workspace(self.root))
         self.assertEqual(before, tree_bytes(self.root))
 

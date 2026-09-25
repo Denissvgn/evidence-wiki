@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -31,6 +32,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 # resolved path to stay inside an already-resolved root. Reused here for the
 # init/upgrade *writer* paths so the readers and writers cannot drift.
 from _handoff_signature import handoff_secret, sign_handoff
+from _pack_selection import selection_metadata
 from _provider_plugins import ProviderPluginError, registered_ids, require_registration
 
 
@@ -88,6 +90,9 @@ PROFILE_CONFIG_SECTIONS = (
     "lint",
     "outputs",
     "integrations",
+    "computation",
+    "strict_evidence",
+    "evidence_trust",
 )
 ALLOWED_PACK_FILE_SUFFIXES = {".csv", ".json", ".md", ".txt", ".yaml", ".yml"}
 FORBIDDEN_PACK_PATH_CHARACTERS = '<>:"|?*\\'
@@ -125,9 +130,13 @@ PROFILE_ALLOWED_KEYS = frozenset(
         "lint",
         "outputs",
         "integrations",
+        "computation",
+        "strict_evidence",
+        "evidence_trust",
         "research_yml",
         "init_report",
         "handoff",
+        "frozen_requirements",
     )
 )
 PROFILE_REQUIRED_PROJECT_FIELDS = ("name", "description", "owner_goal", "language")
@@ -395,7 +404,15 @@ def load_yaml(path: Path, label: str) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(f"Missing {label}: {path}")
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        text = path.read_text(encoding="utf-8")
+        document = yaml.safe_load(text) or {}
+        profile = document.get("workspace_init", {}) if isinstance(document, dict) else {}
+        research = profile.get("research_yml", {}) if isinstance(profile, dict) else {}
+        if any(isinstance(candidate, dict) and "computation" in candidate for candidate in (document, profile, research)):
+            try:
+                load_workspace_module(_SCRIPT_DIR, "_computation_contract").validate_yaml(text)
+            except ValueError as exc:
+                raise SystemExit("Invalid computation declaration: " + str(exc)) from None
     except yaml.YAMLError as exc:
         raise SystemExit(f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(document, dict):
@@ -744,7 +761,7 @@ def validate_provider_list(
             # Deployment must not authorize what this environment cannot supply, so the
             # accepted set is the built-ins plus whatever is actually installed here.
             # With nothing installed this is ``()`` and the old universe is unchanged.
-            registered=safe_registered_ids(phase),
+            registered=selected_registration_ids(value, phase),
         )
     except ProviderNotRegisteredError as exc:
         raise provider_registration_exit(
@@ -755,6 +772,16 @@ def validate_provider_list(
     except ProviderListError as exc:
         raise SystemExit(f"{label} {exc}") from exc
     return list(validated.providers)
+
+
+def selected_registration_ids(value: Any, phase: str) -> tuple[str, ...]:
+    """Avoid importing unrelated plugins for a built-in-only configuration."""
+    builtins = DISCOVERY_ACCEPTED_IDS if phase == "discovery" else ACQUISITION_PROVIDER_IDS
+    if value is None or isinstance(value, list) and all(
+        isinstance(item, str) and item.strip() in builtins for item in value
+    ):
+        return ()
+    return safe_registered_ids(phase)
 
 
 def validate_command_value(value: Any, label: str) -> None:
@@ -1013,6 +1040,26 @@ def validate_profile(profile: dict[str, Any]) -> None:
     validate_profile_config_sections(profile)
     validate_profile_core_keys(profile)
     normalize_seed_questions(profile)
+    frozen_requirements_bytes(profile)
+
+
+def frozen_requirements_bytes(profile: dict[str, Any]) -> bytes | None:
+    """Serialize bounded inert caller requirements, without approval semantics."""
+    if "frozen_requirements" not in profile:
+        return None
+    value = profile["frozen_requirements"]
+    if (not isinstance(value, dict) or set(value) != {"schema_version", "request", "decisions"}
+            or value["schema_version"] != "evidence-research-requirements/v1"
+            or not isinstance(value["request"], dict) or not isinstance(value["decisions"], dict)):
+        raise SystemExit("setup profile frozen_requirements has an invalid data envelope")
+    try:
+        raw = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
+        if len(raw) > 1_048_576:
+            raise ValueError("bound")
+        load_workspace_module(_SCRIPT_DIR, "_record_artifacts").json_document(raw)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise SystemExit("setup profile frozen_requirements exceeds the bounded JSON contract") from None
+    return raw
 
 
 def slug_from_path(path: Path) -> str:
@@ -1153,7 +1200,7 @@ def normalize_cli_provider_flags(values: Any, *, phase: str, label: str) -> tupl
             values,
             phase=phase,
             require_non_empty=True,
-            registered=safe_registered_ids(phase),
+            registered=selected_registration_ids(values, phase),
         )
     except ProviderNotRegisteredError as exc:
         raise provider_registration_exit(
@@ -1326,7 +1373,7 @@ def write_private_text(path: Path, text: str, root: Path) -> None:
         fd = os.open(path, flags, RESTRICTIVE_FILE_MODE)
     except OSError as exc:
         raise SystemExit(f"Cannot write private workspace file: {path}: {exc}") from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
     apply_restrictive_mode(path, RESTRICTIVE_FILE_MODE)
 
@@ -1480,6 +1527,10 @@ def validate_domain_pack_data_model(document: dict[str, Any]) -> None:
             "research.overlay.yml must use JSON-compatible YAML values for lifecycle tracking: "
             + issue
         )
+    try:
+        selection_metadata(document.get("domain_pack"))
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
 
 
 def validate_domain_pack_tree(source_path: Path) -> None:
@@ -1722,6 +1773,17 @@ def build_config(options: InitOptions, domain_pack: DomainPackSelection | None) 
     config["project"] = project_config
     if domain_pack is not None:
         config = normalize_domain_pack_paths(config, domain_pack.target_relative)
+    frozen = frozen_requirements_bytes(options.profile)
+    if frozen is not None and isinstance(config.get("strict_evidence"), dict):
+        policy = config["strict_evidence"]
+        instructions = policy.get("instructions")
+        if not isinstance(instructions, dict):
+            raise SystemExit("Invalid strict_evidence instructions")
+        expected = "sha256:" + hashlib.sha256(frozen).hexdigest()
+        path = "docs/research-requirements.json"
+        if path in instructions and instructions[path] != expected:
+            raise SystemExit("Frozen requirements instruction identity mismatch")
+        instructions[path] = expected
     validate_config_paths(config)
     return config
 
@@ -1780,6 +1842,24 @@ def config_list(value: Any, label: str) -> list[str]:
 
 
 def validate_config_paths(config: dict[str, Any]) -> None:
+    if "strict_evidence" in config:
+        try:
+            load_workspace_module(_SCRIPT_DIR, "_strict_contract").policy_document(config["strict_evidence"])
+        except (ValueError, TypeError, KeyError):
+            raise SystemExit("Invalid strict_evidence policy") from None
+    if "evidence_trust" in config:
+        authority = load_workspace_module(_SCRIPT_DIR, "_evidence_authority")
+        try:
+            selection = authority.exact_object(config["evidence_trust"], {"policy_id", "policy_revision"})
+            for value in selection.values():
+                authority.name(value)
+        except (ValueError, TypeError, KeyError):
+            raise SystemExit("Invalid evidence_trust selection") from None
+    if config.get("computation") is not None:
+        try:
+            load_workspace_module(_SCRIPT_DIR, "_computation_runtime").load_definition(config)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise SystemExit("Invalid computation declaration: " + str(exc)) from None
     raw_config = config_mapping(config, "raw")
     sources_config = config_mapping(config, "sources")
     wiki_config = config_mapping(config, "wiki")
@@ -2316,8 +2396,8 @@ def render_untrusted_evidence_block(label: str, value: str) -> str:
     )
 
 
-def render_question_page(question: dict[str, Any]) -> str:
-    timestamp = datetime.now(timezone.utc).date().isoformat()
+def render_question_page(question: dict[str, Any], *, observed_at: datetime | None = None) -> str:
+    timestamp = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
     text = question["question"]
     summary = question.get("summary") or text
     visible_title = escape_markdown_inline(text)
@@ -2427,6 +2507,9 @@ def render_log(config: dict[str, Any], options: InitOptions, domain_pack: Domain
 
 def write_workspace_files(target: Path, config: dict[str, Any], options: InitOptions, domain_pack: DomainPackSelection | None) -> None:
     seed_questions = normalize_seed_questions(options.profile)
+    frozen = frozen_requirements_bytes(options.profile)
+    if frozen is not None:
+        write_private_text(target / "docs/research-requirements.json", frozen.decode("utf-8"), target)
     write_yaml(
         target / "research.yml",
         config,

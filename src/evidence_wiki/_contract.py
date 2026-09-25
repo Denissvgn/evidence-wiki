@@ -25,13 +25,14 @@ from types import ModuleType
 from typing import Any
 
 from . import __version__
+from ._onboarding_operations import METHODS as ONBOARDING_METHODS
 from ._operations import operation_matrix
 from ._script_host import load_packaged_script, shared_assets_root
 from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "12"
+LIBRARY_API_VERSION = "13"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -102,6 +103,7 @@ LIBRARY_API_SURFACE = (
     "orchestrate.session.cleanup_claims",
     "fleet_status",
     "contract",
+    *("onboarding." + name for name in ONBOARDING_METHODS),
 )
 
 
@@ -271,7 +273,17 @@ def contract() -> dict:
     import yaml
 
     from . import orchestration
+    from .environment import SERVICE_VARIABLES
+    from .extension_contracts import index as extension_index
+    from .onboarding_schemas import contract_index
     from .orchestration_schemas import public_orchestration_schema_documents
+    from .pack_authoring_contracts import contract_index as pack_authoring_index
+    from .pack_commands import contract_index as pack_contract_index
+    from .pack_revision_contracts import contract_index as pack_revision_index
+    from .planning_contracts import contract_index as planning_contract_index
+    from .research_contracts import contract_index as research_contract_index
+    from .setup_contracts import contract_index as setup_contract_index
+    from .source_contracts import contract_index as source_contract_index
 
     # ``shared_assets_root()``, not a private ``with assets_root()`` block. A
     # library caller polls the contract or rebuilds it per workspace handle, and
@@ -291,6 +303,8 @@ def contract() -> dict:
     if not isinstance(workspace_system, dict):
         workspace_system = {}
     initializer = load_packaged_script(root, "init_research_workspace")
+    strict_contract = load_packaged_script(root, "_strict_contract")
+    computation_contract = load_packaged_script(root, "_computation_contract")
     status_module = load_packaged_script(root, "workspace_status")
     intake_module = load_packaged_script(root, "intake_questions")
     export_module = load_packaged_script(root, "export_answers")
@@ -333,6 +347,81 @@ def contract() -> dict:
         "starter_schema_version": workspace_system.get("schema_version"),
         "compatible_research_yml_contract": workspace_system.get("compatible_research_yml_contract"),
         "profile_schema_versions": [initializer.PROFILE_SCHEMA_VERSION],
+        "environment_setup": {
+            "commands": ["env check", "env run"],
+            "report_schema": "evidence-environment/v1",
+            "services": dict(SERVICE_VARIABLES),
+            "additional_variables": "--require-env NAME",
+            "validation": "presence_only",
+            "prompt": "explicit_terminal_only",
+            "credential_scope": "selected_command_and_children",
+            "credentials_persisted": False,
+            "guide": "docs/environment-setup.md",
+        },
+        "onboarding_contract": contract_index(),
+        "pack_discovery": pack_contract_index(),
+        "pack_authoring": pack_authoring_index(),
+        "pack_revisions": pack_revision_index(),
+        "onboarding_extensions": extension_index(),
+        "source_usability": source_contract_index(),
+        "research_planning": planning_contract_index(),
+        "installed_agent": {
+            "capability": "installed-agent/v1", "bootstrap_command": "evidence-wiki agent --format json",
+            "summary_command": "evidence-wiki agent summary --format json",
+            "resource_index_command": "evidence-wiki agent resources --format json",
+            "resource_command": "evidence-wiki agent resource ID --format json",
+            "resource_accessor": "evidence_wiki.agent_resources.resource_document",
+            "bootstrap_schema": "onboarding/bootstrap/v2", "resource_schema": "onboarding/resource/v2",
+            "summary_schema": "onboarding/capabilities/v1", "guide": "guide/bootstrap/v1",
+            "maximum_summary_bytes": 32768, "workspace_required": False,
+            "framework_matrix": "framework/compatibility/v1", "portable_bundle": "framework/bundle/v1",
+            "tool_schemas": ["evidence-framework-call/v1", "evidence-framework-result/v1"],
+            "pi_bridge": {"api": "evidence_wiki.pi_bridge.PiRpcBridge", "managed_runner": False,
+                          "host_enforced": False, "automatic_replay": False},
+        },
+        "strict_evidence": {
+            "capability": "strict-evidence/v1",
+            "schemas": sorted(strict_contract.schema_documents()),
+            "schema_command": "evidence-wiki strict schemas --schema-id ID",
+            "commands": ["strict check", "strict prepare-review", "strict review", "strict export"],
+            "default_new_request": "onboarding/research_request/v2",
+            "assurance_modes": ["artifact_checked", "host_enforced"],
+            "host_api": "evidence_wiki.strict_host.StrictResearchHost",
+            "host_operations": ["draft", "answer", "release"],
+            "parent_work_orders": {"supported": False, "reason": "protected_parent_intake_unavailable"},
+            "worker_processes": "single process; spawning and detached children denied",
+            "host_backend": {"id": "darwin-sbpl", "availability": "requires successful live probe"},
+            "review_authority": "existing external host trust policy and evidence event store; POSIX storage",
+            "review_actions": ["register-strict-review", "register-strict-human-review"],
+            "unsupported_checks": ["automatic_semantic_truth_verification"],
+            "limits": {"artifact_bytes": strict_contract.MAX_BYTES, "claims": strict_contract.MAX_CLAIMS,
+                       "questions": 100, "evidence_per_claim": 16, "worker_seconds": 600},
+            "contract_document": "docs/strict-evidence.md",
+        },
+        "computation": {
+            "capability": "declarative-computation/v1",
+            "schemas": sorted(computation_contract.schemas()),
+            "schema_accessor": "evidence_wiki.computation.schema_document",
+            "python_api": "evidence_wiki.computation.execute",
+            "read_operations": ["schemas", "check", "aggregate", "evaluate", "verify", "schedule"],
+            "write_operations": ["write", "apply-warnings", "dispatch"],
+            "script_entrypoints": ["aggregate_records.py", "evaluate_formulas.py", "verify_assertions.py", "schedule_milestones.py"],
+            "execution_owner": "shared packaged or copied workspace helpers",
+            "mutation_preconditions": ["explicit invocation", "current result identity", "idempotent request identity", "supported workspace lock"],
+            "platform_requirements": "descriptor-relative no-follow workspace capture and publication; unavailable primitives refuse",
+            "numeric_wire": "finite decimal strings; bounded control integers",
+            "expression_functions": sorted(computation_contract.FUNCTIONS),
+            "strict_claim_schema": "evidence-strict-claims/v2",
+            "error_codes": {"COMPUTATION_REFUSED": {"exit_code": 2}, "COMPUTATION_BUSY": {"exit_code": 6}},
+            "invariant_failure_exit_code": 3,
+            "limits": {"artifact_bytes": computation_contract.MAX_BYTES, "records": computation_contract.MAX_RECORDS,
+                       "sources": computation_contract.MAX_SOURCES, "groups": computation_contract.MAX_GROUPS},
+            "contract_document": "docs/declarative-computation.md",
+            "example_candidates": sorted(path.relative_to(starter_root).as_posix()
+                                         for path in (starter_root / "docs/computation-examples").glob("*") if path.is_dir()),
+        },
+        "workspace_application": setup_contract_index(),
+        "caller_research": research_contract_index(),
         "upgrade_compatibility": {
             "workspace_schema_versions": list(initializer.SUPPORTED_WORKSPACE_SCHEMA_VERSIONS),
             "research_yml_contract_versions": list(initializer.SUPPORTED_RESEARCH_YML_CONTRACTS),
@@ -345,7 +434,7 @@ def contract() -> dict:
         },
         "orchestration_capabilities": {
             "managed_runner_ids": list(orchestration.managed_runner_names()),
-            "external_protocol_commands": ["start", "next", "submit", "status", "retire", "cleanup-claims"],
+            "external_protocol_commands": ["start", "next", "submit", "status", "abandon", "retire", "cleanup-claims"],
             "claim_retention": {
                 "schema_version": 1,
                 "owner": "package",
@@ -441,6 +530,7 @@ def contract() -> dict:
             "question_resolve": question_resolve_module.SCHEMA_VERSION,
             "run_state": "1.0",
             "orchestration_session": orchestration.ORCHESTRATION_SESSION_SCHEMA_VERSION,
+            "orchestration_host_session": orchestration.ORCHESTRATION_HOST_SESSION_SCHEMA_VERSION,
             "orchestration_work_order": orchestration.ORCHESTRATION_WORK_ORDER_SCHEMA_VERSION,
             "orchestration_result": orchestration.ORCHESTRATION_RESULT_SCHEMA_VERSION,
             "orchestration_attempt": orchestration.ORCHESTRATION_ATTEMPT_SCHEMA_VERSION,

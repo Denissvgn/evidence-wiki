@@ -825,6 +825,13 @@ def build_export(
 ) -> dict[str, Any]:
     project_root = Path(project_root).expanduser().resolve()
     config = load_config(project_root)
+    strict = load_sibling_module("_strict_evidence")
+    if strict.configured(project_root, config):
+        if status_filter:
+            raise strict.refusal("strict_status_filter_requires_selected_publication")
+        return strict.publication(project_root)
+    if "computation" in config:
+        load_sibling_module("_computation_service").required(project_root, config)
     load_sibling_module("_usage_gate").require_unrestricted_legacy(project_root, config)
     question_status = load_sibling_module("question_status")
     questions_dir = question_status.questions_directory(project_root, config)
@@ -907,6 +914,16 @@ def build_export(
 
 
 def render_output(document: dict[str, Any], output_format: str) -> str:
+    if document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+        strict = load_sibling_module("_strict_evidence")
+        strict.bounded_result(document)
+        values = [document] if output_format == "json" else [
+            {**{k: v for k, v in document.items() if k != "questions"}, "record_type": "envelope"},
+            *[{**question, "record_type": "question"} for question in document["questions"]],
+        ]
+        rendered = "".join(json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n" for value in values)
+        strict.require(len(rendered.encode("utf-8")) <= strict.MAX_BYTES, "strict_output_bound_exceeded")
+        return rendered
     if output_format == "json":
         return json.dumps(document, indent=2, sort_keys=False) + "\n"
     envelope = {key: value for key, value in document.items() if key != "questions"}
@@ -960,9 +977,11 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = json_mode_requested(argv, default_json=True)
     try:
         document = run_export(args.project_root, status=args.status)
+        if args.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+            raise load_sibling_module("_strict_evidence").refusal("strict_output_requires_host_delivery")
+        rendered = render_output(document, args.format)
     except ScriptRefusal as refusal:
         return emit_refusal(refusal, json_mode=json_mode)
-    rendered = render_output(document, args.format)
     if args.output:
         Path(args.output).expanduser().resolve().write_text(rendered, encoding="utf-8", newline="\n")
     else:

@@ -137,7 +137,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
 
     def test_the_block_is_version_gated_rather_than_introspected(self):
         self.assertEqual({"version", "surface", "matrix_version", "operations", "cli_only", "timeout_policy"}, set(self.block))
-        self.assertEqual("12", self.block["version"])
+        self.assertEqual("13", self.block["version"])
         self.assertEqual(contract_module.LIBRARY_API_VERSION, self.block["version"])
         # A JSON payload cannot carry the declaration tuple, so the surface has to
         # arrive as a list on both sides of the CLI boundary.
@@ -208,6 +208,8 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
                 "add_batch",
             )
         )
+        from evidence_wiki._onboarding_operations import METHODS
+        expected.update("onboarding." + name for name in METHODS)
         self.assertEqual(expected, set(surface))
 
     def test_the_block_negotiates_beside_the_other_capability_blocks(self):
@@ -219,7 +221,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
         self.assertIn("artifact_schemas", payload)
 
     def test_every_declared_operation_resolves_and_has_one_boundary(self):
-        from evidence_wiki import Workspace, _facades
+        from evidence_wiki import Onboarding, Workspace, _facades
 
         owners = {
             "workspace": Workspace, "coverage": _facades.CoverageNamespace,
@@ -230,6 +232,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "snapshots": _facades.SnapshotsNamespace,
             "temporal": _facades.TemporalNamespace,
             "assessments": _facades.AssessmentsNamespace,
+            "onboarding": Onboarding,
         }
         boundaries = self.block["operations"]
         self.assertEqual(len(self.block["surface"]), len(boundaries))

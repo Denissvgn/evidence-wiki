@@ -6,13 +6,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import os
 import stat
 import sys
 from pathlib import Path
 from typing import Any
 
 from _evidence_authority import EvidenceInvalid
+from _native_fs import os
 from _script_errors import ScriptRefusal, emit_refusal
 from _snapshot_export import check, export, prepare
 from _snapshot_qualifications import qualify_source
@@ -77,8 +77,10 @@ def read_trust(path: str) -> bytes:
         descriptor = os.open(selected.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         stack.callback(os.close, descriptor)
         before = os.fstat(descriptor)
-        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_mode & 0o077 == 0
-                and before.st_uid == os.getuid() and 0 < before.st_size <= 1024 * 1024, "snapshot_trust_file_unsafe")
+        private = (before.native_private if hasattr(before, "native_private")
+                   else not before.st_mode & 0o077 and before.st_uid == os.getuid())
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and private
+                and 0 < before.st_size <= 1024 * 1024, "snapshot_trust_file_unsafe")
         chunks, size = [], 0
         while True:
             block = os.read(descriptor, min(65536, 1024 * 1024 + 1 - size))

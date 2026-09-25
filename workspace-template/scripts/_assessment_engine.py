@@ -114,6 +114,7 @@ def qualifications(view, request, inputs, evaluated_at):
 
 
 def build(root, config, request, view, *, evaluated_at=None, expected_revision=None):
+    require(config.get("strict_evidence") is None, "strict_assessment_route_requires_strict_review")
     request = request_document(request)
     evaluated_at = evaluated_at or view.now
     publication = run_selected_publication(root, request["question_slugs"], expected_revision=expected_revision,

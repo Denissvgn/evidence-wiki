@@ -1062,6 +1062,13 @@ def validate_domain_pack(selection: str, *, root: Path | None = None) -> dict[st
     expected_contract = starter_contract(starter_root)
     domain_pack_info, metadata_checks = metadata_check(domain_pack, expected_contract)
     checks.extend(metadata_checks)
+    selection_owner = _load_script(starter_root / "scripts/_pack_selection.py", "pack_selection_metadata")
+    try:
+        domain_pack_info["selection"] = selection_owner.selection_metadata(domain_pack)
+        checks.append(check("selection_metadata", "pass", "Optional selection metadata is valid; omitted fields remain unknown.", ["research.overlay.yml"]))
+    except ValueError:
+        domain_pack_info["selection"] = None
+        checks.append(check("selection_metadata", "fail", "Invalid optional pack selection metadata.", ["research.overlay.yml"]))
     recommended_acquisition, acquisition_check = recommended_acquisition_check(domain_pack)
     domain_pack_info["recommended_acquisition"] = recommended_acquisition
     checks.append(acquisition_check)

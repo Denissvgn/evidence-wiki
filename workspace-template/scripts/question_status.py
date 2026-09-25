@@ -91,7 +91,11 @@ def questions_directory(project_root: Path, config: dict[str, Any]) -> Path:
 
 
 def load_frontmatter(path: Path) -> dict[str, Any] | None:
-    text = path.read_text(encoding="utf-8")
+    return frontmatter_from_text(path.read_text(encoding="utf-8"))
+
+
+def frontmatter_from_text(text: str) -> dict[str, Any] | None:
+    """Parse a captured page with the same rules as canonical question listing."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     if not text.startswith("---\n"):
         return None

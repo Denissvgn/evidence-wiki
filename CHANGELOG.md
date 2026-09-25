@@ -1,6 +1,97 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 - 2026-09-25
+
+- Version the updated workspace starter as 1.0.0 while preserving existing
+  workspace schema compatibility and explicit upgrade behavior.
+
+- Add native Windows handles, private ACLs and process-owned coordination for
+  workspace captures, protected publication, pack catalogs, authoring and setup.
+  Preserve hidden control files and distinguish path metadata from file-handle
+  metadata when inspecting executables.
+
+- Add `env check` for selected API credential requirements and `env run --prompt`
+  for protected terminal input passed only to the launched command. Reports show
+  presence without values; initialization remains usable without credentials.
+
+- Reduce repeated installed-file and Windows metadata checks during workspace
+  setup while preserving private-state and captured-file validation.
+- Distribution qualification reports live command and scenario progress,
+  timings and timeout diagnostics. Wheel and source-archive checks run
+  independently with bounded parallel scenarios and complete result verification.
+- Update workflow actions to Node.js 24 and make source-archive extraction
+  behavior explicit across supported Python versions.
+
+- Add explicit first-pack and identity migrations, pinned pack composition,
+  independent fleet revision proposals and resumable host transitions between
+  fixed-requirement research sessions.
+- Add scoped Python onboarding and a separate opt-in MCP server with explicit
+  roots and mutation grants. Preserve existing workspace-handle authority.
+- Capture bounded DOCX main-body text and rectangular tables with original-byte
+  provenance, explicit unsupported-layout diagnostics and normal retrieval.
+- Install canonical agent skills at explicitly selected native locations, with
+  conflict preservation, exact-file receipts and reversible archival removal.
+
+- Record local-source observation time, distinguish local HTML from web
+  acquisitions, preserve strict refusal envelopes in copied scripts and report
+  publication blockers by category. Retain the acquisition coordination inode
+  without treating it as source content.
+
+- Add same-pack revision plans, bounded research-impact mapping and explicit
+  coverage migration with archived answers and fresh review requirements.
+  Freeze active pack/computation criteria and refuse rebinding legacy actions.
+
+- Add caller-driven research advice, control-bound run coordination, verified source
+  ingestion, original-question release accounting and optional local progress.
+  Claim recovery now requires a finite positive threshold and a known claim age.
+
+- Add plan-bound local workspace application with observed checks, selected source
+  delivery, private checkpoints and conservative recovery.
+
+- Add local pack specifications, deterministic scaffolding, pinned revisions and
+  specializations, immutable case/assessment records, qualified catalog selection
+  and setup-plan resumption. Manual policy namespaces now match their owning pack;
+  structural and synthetic-case outcomes remain separate from domain approval.
+
+- Add read-only research setup planning with lossless question accounting,
+  owner-validated profiles and coverage, frozen policy/computation identities,
+  explicit access and review blockers, and immutable saved-plan revalidation.
+
+- Add scoped capability/source inspection, declared host-tool contracts and
+  requirement-accounted source routing. Explicit Markdown/text captures retain
+  original bytes, origin, completeness and rights qualifications through native
+  normalization; optional probes stay separate from ordinary inspection.
+
+- Add explicit bundled/local/installed pack discovery, bounded caller-local
+  revision catalogs and requirement-based fit decisions. Optional selection
+  metadata preserves unknowns in older packs; content-bound structural observations
+  remain separate from human review, provider authorization and workspace state.
+
+- Add versioned framework compatibility, portable skill/tool bundles, and an
+  optional bounded Pi RPC bridge. Native calls retain canonical owner results;
+  transport completion stays separate from evidence acceptance and host isolation.
+
+- Add a read-only installed-agent bootstrap with compact capability negotiation,
+  closed versioned resources and explicit strict-assurance boundaries. Guides,
+  schemas and examples can be retrieved without creating a workspace.
+
+- Add declarative grouped aggregation, Decimal formula graphs, invariants and
+  explicit-clock schedules through shared package and standalone entry points.
+  Results retain source, rule and execution identities; explicit output/intake/
+  dispatch operations preserve ownership and support bounded replay.
+- Strict v2 claim and review resources bind derived values to current computation
+  results, units and rounding while retaining independent semantic review.
+
+- Strict evidence policy makes coverage, grounding and independent review
+  mandatory for accepted claims, with current source/review checks and controlled
+  exports. New request schemas require explicit strict-policy selection.
+- A macOS tool host isolates draft workers, denies protected data/control access
+  and process spawning, and routes reviewed answers through the existing owners.
+
+- The installation contract exposes individually retrievable onboarding schemas
+  with bounded JSON decoding, stable refusal codes and canonical content digests.
+- Agent guidance distinguishes direct callers, managed workers and external
+  hosts, including task authority and conservative setup recovery requirements.
 
 ## 0.7.3 - 2026-09-15
 

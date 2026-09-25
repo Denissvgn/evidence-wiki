@@ -37,7 +37,9 @@ Subcommands:
 - ``add``: append one validated request. ``--kind`` accepts a built-in kind or
   one declared by the active domain pack. Referenced ``--question-slug`` values
   must exist as question pages. Re-adding the same kind, query, and scope while
-  an open request exists is an idempotent no-op reported as a duplicate.
+  an open request exists is an idempotent no-op for existing question links.
+  Additional validated question links merge under the request lock outside active
+  managed sessions; issued managed scopes are never rebound.
 - ``list``: read-only listing with optional repeatable ``--status``, ``--kind``,
   and ``--scope`` filters.
 - ``fulfill``: link a delivered manifest ``--source-id`` to a request. Outside a
@@ -137,6 +139,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from _delegation_gate import (
     DelegationGateError,
     is_contingent_acquisition_order,
+    live_pending_orders,
     require_sanctioned_mutation,
 )
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
@@ -1876,39 +1879,38 @@ def run_add(args: argparse.Namespace) -> dict[str, Any]:
     with workspace_lock(source_requests_lock_path(path), purpose="source request mutation"):
         records = load_requests(path)
         duplicate = find_open_duplicate(records, kind, query, scope)
+        created = duplicate is None
         if duplicate is not None:
-            return {
+            missing = [slug for slug in question_slugs if slug not in (duplicate.get("question_slugs") or [])]
+            if not missing:
+                return {
+                    "schema_version": SCHEMA_VERSION, "action": "add", "created": False,
+                    "duplicate_of": duplicate.get("request_id"), "request": duplicate,
+                    "requests_path": relative_label(project_root, path),
+                }
+            if live_pending_orders(project_root):
+                raise SystemExit("Existing request links are frozen by an active managed session; preserve its issued scope.")
+            now = timestamp_utc()
+            duplicate["question_slugs"] = list(dict.fromkeys([*(duplicate.get("question_slugs") or []), *missing]))
+            duplicate["updated_at"] = now
+            _write_requests_unlocked(path, records)
+            record = duplicate
+        else:
+            now = timestamp_utc()
+            record = {
                 "schema_version": SCHEMA_VERSION,
-                "action": "add",
-                "created": False,
-                "duplicate_of": duplicate.get("request_id"),
-                "request": duplicate,
-                "requests_path": relative_label(project_root, path),
+                "request_id": generate_request_id(kind, query, now, len(records)),
+                "kind": kind, "query_or_identifier": query, "rationale": rationale,
+                "priority": args.priority, "question_slugs": question_slugs, "status": "open",
+                "created_at": now, "updated_at": now, "source_id": None,
             }
-
-        now = timestamp_utc()
-        record: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
-            "request_id": generate_request_id(kind, query, now, len(records)),
-            "kind": kind,
-            "query_or_identifier": query,
-            "rationale": rationale,
-            "priority": args.priority,
-            "question_slugs": question_slugs,
-            "status": "open",
-            "created_at": now,
-            "updated_at": now,
-            "source_id": None,
-        }
-        if scope:
-            # Present only when declared: an empty mapping would read as "nothing satisfies
-            # this", and its absence keeps unscoped records identical to pre-scope ones.
-            record["scope"] = scope
-        _append_request_unlocked(path, record)
+            if scope:
+                record["scope"] = scope
+            _append_request_unlocked(path, record)
     append_log_entry(
         project_root / "log.md",
         (
-            f"## [{now.split('T', 1)[0]}] source-request | Recorded source request\n\n"
+            f"## [{now.split('T', 1)[0]}] source-request | {'Recorded source request' if created else 'Linked source request to questions'}\n\n"
             f"- Request: `{record['request_id']}` ({record['kind']}, {record['priority']}).\n"
             f"- Needs: {query}\n"
             f"- Questions: {', '.join(question_slugs) if question_slugs else 'none'}.\n"
@@ -1917,7 +1919,8 @@ def run_add(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "action": "add",
-        "created": True,
+        "created": created,
+        **({"duplicate_of": record["request_id"], "updated": True} if not created else {}),
         "request": record,
         "requests_path": relative_label(project_root, path),
     }
@@ -2367,6 +2370,8 @@ def render_text_report(report: dict[str, Any]) -> str:
     if report.get("action") == "add":
         if report["created"]:
             lines = ["Recorded source request:", f"  {request_summary(report['request'])}"]
+        elif report.get("updated"):
+            lines = ["Linked additional questions to the existing open request:", f"  {request_summary(report['request'])}"]
         else:
             lines = [
                 f"Duplicate of open request {report['duplicate_of']}; nothing recorded:",

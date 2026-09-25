@@ -382,15 +382,17 @@ def test_unsupported_host_storage_fails_without_initializing(tmp_path, monkeypat
     monkeypatch.setenv("EVIDENCE_WIKI_STATE_DIR", str(host.resolve()))
     store = load_isolated_module("unsupported_host_storage", SCRIPTS / "_host_evidence_store.py")
     monkeypatch.setattr(store, "fcntl", None)
+    monkeypatch.setattr(store.os, "native_windows", False, raising=False)
     with pytest.raises(ValueError, match="host_state_unsupported"):
         with store.locked_state(root, write=True, initialize=True):
             pytest.fail("unsupported storage yielded a writable state")
     assert not list(host.iterdir())
 
 
-def test_host_fixture_skips_before_setup_without_posix_locking(tmp_path, monkeypatch):
+def test_host_fixture_skips_before_setup_without_supported_locking(tmp_path, monkeypatch):
     original = _usage_fixture.importlib.util.find_spec
     monkeypatch.setattr(_usage_fixture.importlib.util, "find_spec", lambda name: None if name == "fcntl" else original(name))
-    with pytest.raises(SkipTest, match="host evidence storage requires POSIX"):
+    monkeypatch.setattr(_usage_fixture.os, "native_windows", False, raising=False)
+    with pytest.raises(SkipTest, match="host evidence storage requires native"):
         UsageFixture(tmp_path, monkeypatch)
     assert not list(tmp_path.iterdir())

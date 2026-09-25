@@ -350,11 +350,12 @@ class FacadeErrorTranslationTests(WorkspaceBuilder, unittest.TestCase):
             session = ws.orchestrate.start(AGENT_ID, orchestration_id=ORCHESTRATION_ID)
             (target / "wiki" / "questions" / "linked.md").symlink_to(Path("..") / ".." / "research.yml")
 
-            with self.assertRaises(errors.OrchestrationError) as caught:
+            with self.assertRaises(errors.RevisionError) as caught:
                 session.next()
 
-        self.assertEqual("ORCHESTRATION_WORKSPACE_UNSAFE", caught.exception.error_code)
-        self.assertIn("integrity guard", str(caught.exception))
+        self.assertEqual("EVIDENCE_REVISION_UNSAFE", caught.exception.error_code)
+        self.assertEqual("wiki/questions/linked.md", caught.exception.details["path"])
+        self.assertFalse(caught.exception.recoverable)
         self.assertNotIsInstance(caught.exception, orchestration.OrchestrationHostError)
 
     def test_the_per_session_driver_lock_surfaces_as_a_typed_driver_busy_error(self):

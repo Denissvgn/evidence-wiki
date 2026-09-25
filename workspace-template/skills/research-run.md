@@ -1,6 +1,21 @@
 # research-run
 
-Canonical unattended research cycle: drive the question backlog from claimed work to a `complete` or `blocked_on_sources` verdict in one bounded, auditable run.
+Caller-driven research cycle through canonical claims, source requests, review and release.
+Read `docs/caller-research.md` for installed next-action, start/resume, ingestion,
+original-question export and optional local progress commands. Completion requires
+a current release; a run or workspace-status label alone is not confirmation.
+
+The current trusted caller can drive this loop using its selected workspace
+interpreter; a secondary model or parent orchestration session is optional.
+Direct caller work has no package-managed worker isolation guarantee. A worker
+with an issued order keeps every scope and parent-control restriction below.
+See `docs/agent-contracts.md` for roles, task authority and setup boundaries.
+
+For strict workspaces, use `docs/strict-evidence.md` to check the claim inventory,
+obtain required independent review and export through the controlled owner.
+The resolver enforces the policy even when flags are omitted. A matching quote,
+successful tool call or self-authored verification field does not establish
+acceptance; keep unsupported and contested work explicit.
 
 ## Use When
 
@@ -43,12 +58,11 @@ Inputs:
 
 ## Run Loop
 
-1. Capture the baseline and read status:
+1. Start a caller-bound run (the controller captures its baseline) and read status:
 
 ```bash
-python3 scripts/run_report.py baseline --output /tmp/run-baseline.json
-python3 scripts/run_controller.py start --agent-id <agent-id> --format json
-python3 scripts/run_controller.py heartbeat --run-id <run-id> --agent-id <agent-id> --format json
+evidence-wiki agent start --target . --agent-id <agent-id> --run-id <run-id>
+evidence-wiki agent heartbeat --target . --run-id <run-id> --agent-id <agent-id>
 python3 scripts/workspace_status.py --format json
 ```
 
@@ -58,7 +72,7 @@ python3 scripts/workspace_status.py --format json
 python3 scripts/workspace_status.py --format json --run-id <run-id>
 ```
 
-   Read the budgets from the `run` section, send heartbeats during long work, and confirm the verdict is `in_progress`. If you keep local counters for operator telemetry, initialize them to `questions_processed_this_run=0`, `source_requests_opened_this_run=0`, `releases_this_run=0`, `discovery_results_this_run=0`, `acquisition_downloads_this_run=0`, `github_archive_bytes_this_run=0`, `academic_provider_requests_this_run=0`, `web_downloads_this_run=0`, and `manual_url_deliveries_this_run=0`; status treats those as `runner_reported` when a `run_id` exists. The optional `run_controller` block identifies the current PM state, stale-run status, and terminal verdict; it does not replace `readiness.verdict`. Stop immediately on `attention_required`; report `complete` or `blocked_on_sources` as already done.
+   Read the budgets from the `run` section, send heartbeats during long work, and confirm the verdict is `in_progress`. If you keep local counters for operator telemetry, initialize them to `questions_processed_this_run=0`, `source_requests_opened_this_run=0`, `releases_this_run=0`, `discovery_results_this_run=0`, `acquisition_downloads_this_run=0`, `github_archive_bytes_this_run=0`, `academic_provider_requests_this_run=0`, `web_downloads_this_run=0`, and `manual_url_deliveries_this_run=0`; status treats those as `runner_reported` when a `run_id` exists. The optional `run_controller` block identifies the current PM state, stale-run status, and terminal verdict; it does not replace `readiness.verdict`. Stop immediately on `attention_required`. A reported `complete` or `blocked_on_sources` is a lifecycle observation; recheck strict release and original-question accounting before handoff.
 
 2. While actionable questions remain and `readiness.budget_state.should_stop` is not true:
 
@@ -110,7 +124,7 @@ python3 scripts/question_claim.py release --slug <slug> --agent-id <agent-id>
 
       Increment `questions_processed_this_run` after `answer`, `block`, `defer`, or `reject` succeeds. Do not increment it for a released claim.
 
-   3. Append an `answer` log entry per `research-answer.md`, then re-check stop conditions:
+   3. The resolver owns its transition log entry. Re-check stop conditions without duplicating that entry:
 
 ```bash
 python3 scripts/workspace_status.py --check-complete --format json \
@@ -140,7 +154,9 @@ python3 scripts/publication_readiness.py --format json bundle --run-id <run-id>
 
    Use the `--run-id` form when a controller snapshot exists and the run state's `workspace_baseline.run_report_baseline_path` points to the baseline captured at run start. Otherwise use the explicit `--baseline` form.
 
-4. Hand back: the run report JSON (what changed), the export (answers with citations and coverage fields), the publication-readiness verdict, and the final verdict from `workspace_status.py`. For controller-managed runs, include `run_controller.state`, `run_controller.final_verdict`, `run_controller.run_state_path`, and the `runs/<run_id>/evaluation/` bundle when it exists.
+4. For caller-bound strict work, obtain `evidence-wiki agent research-export --target WORKSPACE` (or explicitly allow partial output). Retain every original-question gap and current review/computation qualification.
+
+   Hand back: the run report JSON (what changed), the export (answers with citations and coverage fields), the publication-readiness verdict, and the final verdict from `workspace_status.py`. For controller-managed runs, include `run_controller.state`, `run_controller.final_verdict`, `run_controller.run_state_path`, and the `runs/<run_id>/evaluation/` bundle when it exists.
 
 ## Stop Conditions
 
@@ -166,7 +182,7 @@ readiness:
 
 ## Completion Checklist
 
-- Baseline was captured with `scripts/run_report.py baseline` before the first claim.
+- The controller captured the run baseline before the first claim; legacy baseline-only use explicitly captures `scripts/run_report.py baseline`.
 - If a PM `run_id` exists, status and final report commands included `--run-id <run-id>` and surfaced the `run_controller` block.
 - Every worked question was claimed first; no other agent's claim was touched.
 - Each resolved question was closed with `scripts/question_resolve.py` and follows the `research-answer.md` rules (real `answer_page`, cited `source_ids`, or a `blocked_reason` with a linked source request).

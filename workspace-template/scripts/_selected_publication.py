@@ -17,6 +17,7 @@ from _workspace_module_loader import load_workspace_module
 
 SCHEMA_VERSION = "evidence-selected-publication/v1"
 SCRIPT_DIR = Path(__file__).resolve().parent
+_STRICT_CACHE = {}
 GLOBAL_GATES = (
     "configuration_and_workspace_health", "source_integrity_and_normalization",
     "source_requests", "candidate_lifecycle", "claims_and_contradictions",
@@ -78,7 +79,7 @@ def logical_paths(value: Any, temporary_root: Path) -> Any:
     if isinstance(value, list):
         return [logical_paths(child, temporary_root) for child in value]
     if isinstance(value, str):
-        return value.replace(str(temporary_root), ".")
+        return value.replace(str(temporary_root), ".").replace(temporary_root.as_posix(), ".")
     return value
 
 
@@ -160,12 +161,22 @@ def run_selected_publication(
         raise refuse("EVIDENCE_REVISION_CHANGED", "Publication implementation changed while loading.")
     for _attempt in range(MAX_ATTEMPTS):
         revision = capture_workspace(root)
+        strict = load_workspace_module(SCRIPT_DIR, "_strict_evidence", cache=_STRICT_CACHE)
+        try:
+            candidate_config = yaml.safe_load(revision.files.get("research.yml", b""))
+        except yaml.YAMLError:
+            candidate_config = None  # The owning config validation below emits the refusal.
+        if strict.configured(root, candidate_config):
+            return strict.publication(root, selected, view=_usage_view, expected_revision=expected_revision)
         if expected_revision is not None and revision.revision_id != expected_revision:
             raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace no longer matches the expected revision.", expected_revision=expected_revision, actual_revision=revision.revision_id)
         config, inputs = validate_before_materialization(revision.files, readiness, usage_view=_usage_view,
                                                         purpose=_purpose, consumer=_consumer, expected_config=_expected_config)
         with revision.materialize() as captured_root, (
             authorized_capture(captured_root, config, _usage_view) if _usage_view is not None else nullcontext()
+        ), (
+            strict.internal_publication(captured_root, config)
+            if not strict.configured(root, config) and config.get("strict_evidence") is not None else nullcontext()
         ):
             question_dir = questions.questions_directory(captured_root, config)
             known = {item["slug"] for item in questions.collect_questions(question_dir)}

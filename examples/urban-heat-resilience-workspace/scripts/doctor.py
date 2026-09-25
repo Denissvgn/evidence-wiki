@@ -1134,7 +1134,7 @@ def verdict_for(checks: list[dict[str, Any]]) -> str:
     return "ok"
 
 
-def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> dict[str, Any]:
+def build_report(project_root: Path, env: DoctorEnvironment | None = None, *, inspect_registrations: bool = True) -> dict[str, Any]:
     env = env or DoctorEnvironment()
     project_root = project_root.expanduser().resolve()
     pyyaml, yaml_module = pyyaml_check(env)
@@ -1151,7 +1151,11 @@ def build_report(project_root: Path, env: DoctorEnvironment | None = None) -> di
         },
     )
     health_codes = ", ".join(workspace_health["finding_codes"]) or "none"
-    registered_providers = registered_providers_check(project_root, yaml_module)
+    registered_providers = (registered_providers_check(project_root, yaml_module) if inspect_registrations else
+        check_item(REGISTERED_PROVIDERS_CHECK_ID, "Registered providers", "degraded", False,
+                   "Third-party registration loading was not selected.",
+                   "Only built-in provider declarations were checked for local setup.",
+                   "Inspect explicitly selected third-party providers before using them."))
     checks = [
         python_check(env),
         pyyaml,

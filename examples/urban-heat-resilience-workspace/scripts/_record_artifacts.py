@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import stat
 from pathlib import Path
 from typing import Any
 
 from _evidence_authority import EvidenceInvalid, bounded_list, digest, exact_object
 from _evidence_revision import content_id, observation, read_observed_file
+from _native_fs import os
 from _qualified_packet import IntakeInvalid, open_directory, portable_path, strict_json
 from _script_errors import ScriptRefusal
 

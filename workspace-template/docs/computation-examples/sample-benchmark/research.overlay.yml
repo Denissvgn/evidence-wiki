@@ -1,0 +1,109 @@
+domain_pack:
+  name: sample-benchmark
+  version: 1.0.0
+  compatible_research_yml_contract: '0.1'
+  human_gated: true
+computation:
+  version: '1.0'
+  arithmetic:
+    mode: exact
+    precision: 64
+    scale: 2
+    rounding: ROUND_HALF_EVEN
+  clock:
+    as_of: '2026-09-21T12:00:00Z'
+    timezone: UTC
+    ambiguous: refuse
+    nonexistent: refuse
+    search_days: 366
+  tables: {}
+  aggregations:
+    evaluation:
+      description: Synthetic observations
+      selector:
+        source_glob: sources/normalized/*.md
+        records_pointer: /records
+        row_key: /id
+        allow_empty: false
+      filter: record.status == 'completed'
+      group_by:
+      - record.model
+      metrics:
+        count:
+          op: count
+          expr: null
+          denominator: null
+          unit: records
+        avg_score:
+          op: avg
+          expr: record.score
+          denominator: null
+          unit: ratio
+        maximum_latency:
+          op: max
+          expr: record.latency_ms
+          denominator: null
+          unit: ms
+      output_target: null
+  graphs:
+    report:
+      description: Synthetic worksheet
+      inputs:
+        score:
+          kind: aggregation
+          id: evaluation
+          metric: avg_score
+          group:
+          - sample-model
+          reduce: null
+        latency:
+          kind: aggregation
+          id: evaluation
+          metric: maximum_latency
+          group:
+          - sample-model
+          reduce: null
+      constants:
+        penalty:
+          value: '0.05'
+          unit: 1/ms
+      nodes:
+        normalized_score:
+          expr: score * 100
+          unit: percent
+        efficiency:
+          expr: normalized_score / (1 + latency * constants.penalty)
+          unit: score
+      output_mapping:
+        score_pct: normalized_score
+        efficiency: efficiency
+      output_page: null
+  invariants:
+    score_bounds:
+      description: Declared synthetic constraint
+      target: computed
+      selector: null
+      inputs:
+        score:
+          kind: aggregation
+          id: evaluation
+          metric: avg_score
+          group:
+          - sample-model
+          reduce: null
+      filter: null
+      assertion: score >= 0 and score <= 1
+      severity: error
+      failure_message: Declared constraint requires review.
+  cadence:
+    next_check:
+      description: Synthetic review date
+      trigger:
+        type: fixed_date
+        at: '2026-10-01T00:00:00Z'
+      lead_alerts:
+      - amount: 2
+        unit: days
+      action:
+        kind: evaluate_graph
+        target: report

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import re
 import stat
 from datetime import datetime, timezone
@@ -18,7 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from _evidence_revision import canonical_bytes, content_id, observation
+from _native_fs import os
 from _qualified_packet import strict_json
+from _workspace_module_loader import load_workspace_module
 
 TRUST_SCHEMA = "evidence-trust-policy/v1"
 AUTH_SCHEMA = "evidence-authentication/v1"
@@ -26,11 +27,31 @@ TRUST_ENV = "EVIDENCE_WIKI_AUTHORITY_FILE"
 MAX_TRUST_BYTES = 1024 * 1024
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
-ROLES = frozenset({"generator", "evaluator", "usage", "scrubber", "assessment", "availability", "revocation"})
+ROLES = frozenset({"generator", "evaluator", "usage", "scrubber", "assessment", "availability", "revocation", "human-review"})
+_STRICT_CACHE = {}
 
 
 class EvidenceInvalid(ValueError):
     """A bounded, content-free reason that an evidence contract cannot be used."""
+
+
+def observed_execution(*, operation: str, basis: dict[str, Any], result: dict[str, Any],
+                       started_at: str, finished_at: str, exit_code: int) -> dict[str, Any]:
+    """Describe a measured local check without minting authenticated authority.
+
+    Setup and other local callers retain this recomputable observation outside
+    claim acceptance. Authentication still requires verify_attestation and the
+    protected host policy; a stored success field cannot supply it.
+    """
+    name(operation)
+    if timestamp(finished_at) < timestamp(started_at) or type(exit_code) is not int:
+        raise EvidenceInvalid("execution_observation_invalid")
+    value = {"schema_version": "evidence-execution-observation/v1", "operation": operation,
+             "basis": basis, "result": result, "started_at": started_at, "finished_at": finished_at,
+             "exit_code": exit_code, "trust": "local_observation", "authenticated": False}
+    if len(canonical_bytes(value)) > 65000:
+        raise EvidenceInvalid("execution_observation_bound")
+    return {**value, "observation_id": content_id(value["schema_version"], value)}
 
 
 def timestamp(value: Any) -> datetime:
@@ -92,8 +113,9 @@ def read_host_policy(project_root: Path) -> bytes:
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         descriptors.append(fd)
         before = os.fstat(fd)
+        private = before.native_private if hasattr(before, "native_private") else not before.st_mode & 0o077
         if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                or before.st_mode & 0o077 or before.st_size > MAX_TRUST_BYTES):
+                or not private or before.st_size > MAX_TRUST_BYTES):
             raise EvidenceInvalid("unsafe_host_trust_file")
         chunks = bytearray()
         while True:
@@ -125,7 +147,7 @@ def load_trust(project_root: Path, config: dict[str, Any], now: datetime) -> dic
         policy = exact_object(strict_json(raw), {
             "schema_version", "policy_id", "policy_revision", "not_before", "expires_at",
             "principals", "revoked_keys", "revoked_envelopes",
-        })
+        }, {"strict_workspaces"})
     except ValueError as exc:
         raise EvidenceInvalid("invalid_host_trust_policy") from exc
     if (policy["schema_version"] != TRUST_SCHEMA
@@ -160,6 +182,14 @@ def load_trust(project_root: Path, config: dict[str, Any], now: datetime) -> dic
         name(key_id)
     for identifier in bounded_list(policy["revoked_envelopes"], maximum=4096):
         digest(identifier)
+    scopes = policy.get("strict_workspaces", {})
+    if not isinstance(scopes, dict) or len(scopes) > 128:
+        raise EvidenceInvalid("strict_host_scope_invalid")
+    if scopes:
+        strict = load_workspace_module(Path(__file__).resolve().parent, "_strict_contract", cache=_STRICT_CACHE)
+        for binding, selection in scopes.items():
+            digest(binding)
+            strict.policy_document(selection)
     return {"policy": policy, "content_hash": "sha256:" + hashlib.sha256(raw).hexdigest()}
 
 

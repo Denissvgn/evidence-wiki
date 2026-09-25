@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import uuid
@@ -350,6 +351,8 @@ def holder_block(frontmatter: dict[str, Any]) -> dict[str, Any]:
 
 def transition_claim(page_path: Path, agent_id: str, steal: bool, if_older_than: float | None) -> dict[str, Any]:
     """Apply the claim transition under a stable workspace lock for this question."""
+    if if_older_than is not None and (not math.isfinite(float(if_older_than)) or if_older_than <= 0):
+        raise ClaimError(EXIT_INVALID, "VALUE_INVALID", "Claim recovery requires a finite positive age threshold.")
     with question_lock(page_path):
         text = page_path.read_text(encoding="utf-8")
         parts = split_frontmatter_lines(text)
@@ -374,7 +377,9 @@ def transition_claim(page_path: Path, agent_id: str, steal: bool, if_older_than:
                 )
             if if_older_than is None:
                 raise ClaimError(EXIT_INVALID, "STEAL_THRESHOLD_REQUIRED", "--steal requires --if-older-than HOURS")
-            if age is not None and age < if_older_than:
+            if age is None:
+                raise ClaimError(EXIT_CONFLICT, "CLAIM_NOT_STALE", "Claim age is unknown; inspect and restore its ownership record.")
+            if age < if_older_than:
                 raise ClaimError(
                     EXIT_CONFLICT,
                     "CLAIM_NOT_STALE",

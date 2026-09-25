@@ -77,6 +77,7 @@ QUALIFIED_PACKET_INVALID = "NORMALIZED_CONTRACT_QUALIFIED_PACKET_INVALID"
 EXECUTION_EVIDENCE_INVALID = "NORMALIZED_CONTRACT_EXECUTION_EVIDENCE_INVALID"
 MARKET_EVIDENCE_INVALID = "NORMALIZED_CONTRACT_MARKET_EVIDENCE_INVALID"
 USAGE_EVIDENCE_INVALID = "NORMALIZED_CONTRACT_USAGE_EVIDENCE_INVALID"
+HOST_CAPTURE_INVALID = "NORMALIZED_CONTRACT_HOST_CAPTURE_INVALID"
 
 VIOLATION_CODES = (
     FRONTMATTER_MISSING,
@@ -91,6 +92,7 @@ VIOLATION_CODES = (
     EXECUTION_EVIDENCE_INVALID,
     MARKET_EVIDENCE_INVALID,
     USAGE_EVIDENCE_INVALID,
+    HOST_CAPTURE_INVALID,
 )
 
 # A rendering that caps content is honest only if it says so. `extraction_method:
@@ -1208,6 +1210,7 @@ def validate_document(
 ) -> list[Violation]:
     """Validate an already-parsed record, for callers that read it themselves."""
     violations = check_frontmatter(frontmatter)
+    violations.extend(check_host_capture(project_root, manifest_by_id, frontmatter, body))
     violations.extend(check_qualified_packet(project_root, config or {}, manifest_by_id, frontmatter))
     violations.extend(check_execution_evidence(project_root, config or {}, manifest_by_id, frontmatter))
     violations.extend(check_market_evidence(project_root, config or {}, manifest_by_id, frontmatter))
@@ -1276,6 +1279,17 @@ def validate_record(
         project_root=project_root,
         config=config,
     )
+
+
+def check_host_capture(project_root, manifest_by_id, frontmatter, body) -> list[Violation]:
+    source_id = frontmatter.get("source_id")
+    record = manifest_by_id.get(source_id, {}) if isinstance(source_id, str) else {}
+    if record.get("kind") != "host_capture" and frontmatter.get("extraction_method") != "host_text" and "host_capture" not in frontmatter:
+        return []
+    owner = load_workspace_module(_SCRIPT_DIR, "_host_capture")
+    return [Violation(HOST_CAPTURE_INVALID, reason, field="host_capture",
+                      remediation="Restore the intact original capture and its qualifications, then re-normalize this source.")
+            for reason in owner.normalized_issues(project_root, record, frontmatter, body)]
 
 
 def check_qualified_packet(

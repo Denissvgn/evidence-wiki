@@ -722,6 +722,12 @@ def build_readiness_document(
     status_module = load_sibling_module("workspace_status")
     lint_module = load_sibling_module("lint")
     export_module = load_sibling_module("export_answers")
+    strict = load_sibling_module("_strict_evidence")
+    if strict.configured(project_root, config):
+        result = strict.publication(project_root)
+        return {"schema_version": SCHEMA_VERSION, "generated_at": timestamp_utc(), "verdict": result["verdict"],
+                "network_io_executed": False, "strict_evidence": result,
+                "reasons": {"strict_evidence": [] if result["verdict"] == "ship" else ["Required strict checks did not pass."]}}
 
     status = embedded_inputs.get("status") if embedded_inputs else None
     if not isinstance(status, dict):
@@ -815,6 +821,9 @@ def write_json(path: Path, document: dict[str, Any]) -> None:
 def build_bundle(project_root: Path, run_id: str) -> dict[str, Any]:
     run_id = validate_run_id(run_id)
     config = load_config(project_root)
+    strict = load_sibling_module("_strict_evidence")
+    if strict.configured(project_root, config):
+        raise strict.refusal("strict_bundle_requires_controlled_export")
     load_sibling_module("_usage_gate").require_unrestricted_legacy(project_root, config)
     status_module = load_sibling_module("workspace_status")
     lint_module = load_sibling_module("lint")
@@ -860,6 +869,15 @@ def build_bundle(project_root: Path, run_id: str) -> dict[str, Any]:
 
 
 def render(document: dict[str, Any]) -> str:
+    if "strict_evidence" in document:
+        strict = load_sibling_module("_strict_evidence")
+        strict.bounded_result(document["strict_evidence"])
+        rendered = json.dumps(document, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+        strict.require(len(rendered.encode()) <= strict.MAX_BYTES, "strict_output_bound_exceeded")
+        return rendered
+    if document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+        load_sibling_module("_strict_evidence").bounded_result(document)
+        return json.dumps(document, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
     return json.dumps(document, indent=2, sort_keys=False) + "\n"
 
 
@@ -917,7 +935,12 @@ def main(argv: list[str] | None = None) -> int:
             return emit_refusal(exc, json_mode=json_mode)
         raise
 
-    output = render(document)
+    if args.output and (document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"} or "strict_evidence" in document):
+        return emit_refusal(load_sibling_module("_strict_evidence").refusal("strict_output_requires_host_delivery"), json_mode=True)
+    try:
+        output = render(document)
+    except ScriptRefusal as refusal:
+        return emit_refusal(refusal, json_mode=True)
     if args.output:
         Path(args.output).expanduser().resolve().write_text(output, encoding="utf-8", newline="\n")
     else:

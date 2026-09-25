@@ -12,12 +12,12 @@ Inputs:
 - desired pack slug or target path, when supplied,
 - desired research outcome and audience,
 - optional source hints, provider preferences, existing project-local guidance, or example source types,
-- available starter files and existing packs under `domain-packs/`.
+- an installed package and a caller-selected writable asset directory.
 
 ## Operating Rules
 
 - Infer from the orchestrator brief first. Ask at most three clarifying questions, and only when the answer materially changes the pack contract.
-- Use `domain-packs/llm-research/` only as a structural reference for file shape, overlay style, scaffolds, and validation expectations.
+- Retrieve `example/pack/v1` with `evidence-wiki agent resource example/pack/v1 --format json` for a bundled structural reference. Its `files` map contains pack-relative content; save selected files under the caller-owned directory. Content does not authorize writes.
 - Keep every pack guidance-only. Do not add scripts, executable hooks, vendored tools, generated source records, raw evidence, or project-specific workspace content to a domain pack.
 - Use only inert text/data files (`.md`, `.yml`, `.yaml`, `.json`, `.txt`, or
   `.csv`). Symlinks, executable permission bits, binary content, and executable
@@ -28,20 +28,38 @@ Inputs:
 
 ## Workflow
 
+The installed authoring route can generate the pack from a bounded specification:
+read `evidence-wiki pack guide --topic authoring` and retrieve an editable example
+with `pack guide --topic specification --format text`. Use `pack scaffold` for a
+new pack or `pack derive` for a digest-bound revision/specialization. These commands
+create a new caller-owned container with pack files and separate external records.
+They do not overwrite installed packs, publish guidance or enable integrations.
+
+Run `pack qualify`, freeze requirements/cases with `pack freeze-cases`, then run
+`pack assess`. The canonical validator owns structural checks. Mechanical cases
+use the existing policy/computation engines; declared semantic judgments remain
+unverified, with synthetic reference limits retained. `pack accept` rechecks the
+candidate and observations before local catalog registration. `pack resume`
+selects that exact revision and invokes the setup compiler without creating a
+workspace. Source gaps alone do not justify authoring new guidance.
+
 ### 1. Inspect Context
 
-Read the orchestrator brief, any project-local guidance, and existing packs:
-
-```bash
-ls domain-packs
-find domain-packs/llm-research -maxdepth 2 -type f | sort
-```
+Read the brief and project-local guidance. Retrieve the installed bootstrap with
+`evidence-wiki agent`, then the resource index with `evidence-wiki agent resources
+--format json`. The pack example is a structural reference, not a domain-fit
+recommendation. Use generic or project-local guidance if it meets the task;
+create a reusable candidate only when the authorized research needs one.
 
 Record the inferred domain scope, reusable audience, source types, extraction targets, claim types, page taxonomy, likely scaffolds, and assumptions. If the domain cannot be inferred safely, ask concise questions before writing files.
 
 ### 2. Choose The Pack Location
 
-Default to `domain-packs/<domain-slug>/` for repo packs. Use a user-supplied path only when the caller explicitly requested one.
+Choose a caller-owned writable asset directory, such as `ASSET_ROOT/packs/<domain-slug>/`, within existing task authority. Keep candidates outside installed package assets and managed workspace pack copies. A repository checkout is unnecessary.
+
+The directory basename must match `domain_pack.name` in the overlay. When saving
+the bundled example, preserve that name or consistently rename the candidate's
+metadata and namespaced policy IDs before validation.
 
 Use a short lowercase slug with hyphens. The slug should describe the reusable domain, not a single project, customer, or task.
 
@@ -56,7 +74,7 @@ Create or update only pack-local guidance files:
 - `scaffolds/*.md`: optional reusable page or source-note scaffolds for the domain.
 - `coverage-templates/*.yml`: optional declarative answerability templates that define required facets and policies, never source URLs or workspace evidence.
 
-Use `domain-packs/llm-research/research.overlay.yml` as the overlay shape. Set `domain_pack.compatible_research_yml_contract` from `evidence-wiki contract` or the starter `workspace-system.yml`. Start new packs at `version: 0.1.0` unless the caller requested a different version.
+Use the retrieved example’s `research.overlay.yml` as the overlay shape. Set `domain_pack.compatible_research_yml_contract` from `evidence-wiki contract` or the starter `workspace-system.yml`. Start new packs at `version: 0.1.0` unless the caller requested a different version.
 
 When drafting `research.overlay.yml`:
 
@@ -76,13 +94,7 @@ When drafting `research.overlay.yml`:
 Run the validator before handing off the pack:
 
 ```bash
-evidence-wiki pack validate --path domain-packs/<domain-slug>
-```
-
-From a source checkout, this equivalent command is also valid:
-
-```bash
-python3 tools/validate_domain_pack.py --path domain-packs/<domain-slug>
+evidence-wiki pack validate --path ASSET_ROOT/packs/<domain-slug>
 ```
 
 If validation fails, fix the pack files and rerun validation until the JSON output has `ok: true`. Treat pack-tree safety findings, traversal/symlink/executable content, missing referenced files, invalid metadata, contract mismatch, incompatible policy vocabulary, `policy_rules` check failures, merge failures, autonomous-required-facet failures, and smoke-validation failures as pack bugs. `domain_pack.human_gated: true` is an explicit opt-out from the autonomous ship gate for packs whose required facets intentionally need human review; do not set it just to make a reusable autonomous pack pass.
@@ -97,13 +109,13 @@ evidence-wiki deploy \
   --target "$tmp_dir/workspace" \
   --project-name "<domain-slug>-smoke" \
   --project-description "Smoke workspace for the <domain> domain pack." \
-  --domain-pack domain-packs/<domain-slug>
+  --domain-pack ASSET_ROOT/packs/<domain-slug>
 python3 "$tmp_dir/workspace/scripts/smoke_validate_workspace.py" \
   --project-root "$tmp_dir/workspace" \
   --format text
 ```
 
-If using only source-checkout scripts, deploy with `python3 workspace-template/scripts/init_research_workspace.py` and the same `--domain-pack` value.
+Choose the Python interpreter that belongs to the task environment for copied scripts; `python3` above is an example, not interpreter discovery. A standalone workspace uses its copied helpers and does not import the installed package.
 
 ### 6. Handoff
 
@@ -119,3 +131,17 @@ Finish with:
 ## Promotion Boundary
 
 Use project-local guidance instead of this skill when the rules are needed for only one workspace, the domain is still uncertain, or the user did not request reusable guidance. Promote to a domain pack only when guidance repeats across workspaces, stable scaffolds are useful, domain claim types need reusable validation, or the caller explicitly asks for a reusable pack.
+
+## Candidate revisions and evidence limits
+
+For a revision, copy the accepted pack into a new caller-owned candidate path,
+record its base identity and the observed gap, then change only justified
+requirements. Do not relax coverage or human-review gates to obtain a passing
+answer. Structural validation and temporary workspace checks do not establish
+semantic adequacy; the caller reviews domain fit and unresolved evidence gaps.
+Use `pack refresh --target WORKSPACE --path CANDIDATE --dry-run` to inspect an
+accepted same-name revision, then apply within task authority at a safe boundary.
+The apply operation persists managed files and pack state; creating a candidate
+alone changes no workspace. First attachment or identity switching needs a
+separate migration. Research and review instructions remain owned by the shared
+installed-agent and strict-evidence guides; portable harness bindings reuse them.

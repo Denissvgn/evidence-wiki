@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import stat
@@ -123,7 +124,7 @@ def parse_positive_float(value: str) -> float:
         parsed = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be a positive number") from exc
-    if parsed <= 0:
+    if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive number")
     return parsed
 
@@ -203,6 +204,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     start_parser = subparsers.add_parser("start", help="Create a new run controller artifact.")
     start_parser.add_argument("--run-id", default=None, help="Optional run id. Defaults to a UTC timestamp id.")
+    start_parser.add_argument("--caller", action="store_true", help="Bind current caller instructions, policy and run ownership.")
     add_common_command_options(start_parser, needs_run_id=False)
 
     transition_parser = subparsers.add_parser("transition", help="Move an active run to a non-terminal state.")
@@ -1037,12 +1039,49 @@ def assert_not_terminal(run_id: str, current: str) -> None:
         )
 
 
+def caller_observation(project_root, operation):
+    try:
+        return getattr(load_sibling_module("_caller_context"), operation)(project_root)
+    except (Exception, SystemExit):
+        raise RunControllerError("RUN_CALLER_CONTEXT_CONFLICT", "Current caller controls or release are unavailable.",
+            exit_code=3, recoverable=False, details={"reason":"caller_controls_or_release_unavailable"},
+            remediation="Inspect current instructions, policy, evidence and independent review; preserve the run until its owner can proceed.") from None
+
+
+def require_caller_context(project_root, document, agent_id, *, transfer=False, retiring=False):
+    if retiring:
+        return
+    if not retiring and document.get("caller_context") is None:
+        revision = load_sibling_module("_pack_revision_guard")
+        if document.get("requirement_basis") is not None or (Path(project_root) / "domain-packs/.evidence-wiki-state.yml").exists():
+            revision.require(document.get("requirement_basis") == revision.controls(project_root), "run_requirements_changed_or_unbound")
+    if document.get("caller_context") is None:
+        return
+    try:
+        load_sibling_module("_caller_context").validate(project_root, document, agent_id=agent_id, transfer=transfer)
+    except (Exception, SystemExit) as error:
+        reason = str(error) if type(error) is ValueError and re.fullmatch(r"[a-z][a-z0-9_]{0,95}", str(error)) else "caller_controls_unavailable"
+        raise RunControllerError("RUN_CALLER_CONTEXT_CONFLICT", "Caller run controls or ownership changed.",
+            exit_code=3, recoverable=False, details={"run_id": document.get("run_id"), "reason": reason},
+            remediation="Preserve the run, inspect current controls/ownership, and use explicit stale adoption or a new run.") from None
+
+
 def run_start(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    guard = load_sibling_module("_pack_revision_guard")
+    requirements = guard.controls(project_root)
+    with workspace_lock(project_root / ".locks/domain-pack-refresh.lock", purpose="run requirement binding"):
+        guard.require(guard.controls(project_root) == requirements, "run_requirements_changed")
+        return start_with_requirements(project_root, args, requirements)
+
+
+def start_with_requirements(project_root, args, requirement_basis):
     agent_id = require_agent_id(args.agent_id)
     run_id = validate_run_id(args.run_id, allow_generate=True)
+    caller = caller_observation(project_root, "capture") if getattr(args, "caller", False) else None
+    existed = run_dir(project_root, run_id).exists()
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id}"):
         directory = run_dir(project_root, run_id)
-        if directory.exists() and run_state_path(project_root, run_id).exists():
+        if run_state_path(project_root, run_id).exists() or caller is not None and existed:
             raise RunControllerError("RUN_EXISTS", f"run already exists: {run_id}", details={"run_id": run_id})
         directory.mkdir(parents=True, exist_ok=True)
         quarantine_run_temp_files(project_root, run_id)
@@ -1055,6 +1094,7 @@ def run_start(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
         handoff = project.get("handoff") if isinstance(project.get("handoff"), dict) else None
         document: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
+            "requirement_basis": requirement_basis,
             "run_id": run_id,
             "started_at": now,
             "updated_at": now,
@@ -1083,6 +1123,9 @@ def run_start(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
             "recovery_history": [],
             "final_verdict": None,
         }
+        if caller is not None:
+            document["caller_context"] = caller
+            require_caller_context(project_root, document, agent_id)
         refresh_counts(project_root, document, status)
         event = state_transition_event(
             project_root,
@@ -1111,6 +1154,7 @@ def run_transition(project_root: Path, args: argparse.Namespace) -> dict[str, An
         )
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id}"):
         document = load_run_state(project_root, run_id)
+        require_caller_context(project_root, document, agent_id)
         current = document["state"]["current"]
         assert_not_terminal(run_id, current)
         assert_transition_allowed(run_id, current, to_state)
@@ -1190,6 +1234,7 @@ def run_event(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
         raise RunControllerError("VALUE_INVALID", "--message must be a non-empty string")
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id}"):
         document = load_run_state(project_root, run_id)
+        require_caller_context(project_root, document, agent_id)
         event = custom_event(
             project_root,
             run_id,
@@ -1212,6 +1257,8 @@ def require_stale_threshold(value: float | None, *, command: str) -> float:
             f"{command} requires --if-stale-hours so active-run recovery is explicit.",
             remediation="Pass --if-stale-hours HOURS after inspecting runs/<run_id>/events.jsonl.",
         )
+    if not math.isfinite(float(value)) or float(value) <= 0:
+        raise RunControllerError("VALUE_INVALID", "Stale recovery requires a finite positive threshold.")
     return float(value)
 
 
@@ -1257,8 +1304,9 @@ def run_recover(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
     run_id = validate_run_id(args.run_id)
     agent_id = require_agent_id(args.agent_id)
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id} recovery"):
-        quarantined = quarantine_run_temp_files(project_root, run_id)
         document = load_run_state(project_root, run_id, allow_pending=True)
+        require_caller_context(project_root, document, agent_id)
+        quarantined = quarantine_run_temp_files(project_root, run_id)
         pending = document.get(PENDING_EVENT_FIELD)
         if pending is None and not quarantined:
             return document
@@ -1316,6 +1364,7 @@ def run_heartbeat(project_root: Path, args: argparse.Namespace) -> dict[str, Any
     agent_id = require_agent_id(args.agent_id)
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id}"):
         document = load_run_state(project_root, run_id)
+        require_caller_context(project_root, document, agent_id)
         current = document["state"]["current"]
         assert_not_terminal(run_id, current)
         now = timestamp_utc()
@@ -1340,6 +1389,7 @@ def run_adopt(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
     threshold_hours = require_stale_threshold(args.if_stale_hours, command="adopt")
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id}"):
         document = load_run_state(project_root, run_id)
+        require_caller_context(project_root, document, agent_id, transfer=True)
         current = document["state"]["current"]
         assert_not_terminal(run_id, current)
         staleness = stale_or_refuse(project_root, run_id, document, threshold_hours)
@@ -1380,6 +1430,7 @@ def run_abandon(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
     )
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id}"):
         document = load_run_state(project_root, run_id)
+        require_caller_context(project_root, document, agent_id, transfer=True, retiring=True)
         current = document["state"]["current"]
         assert_not_terminal(run_id, current)
         staleness = stale_or_refuse(project_root, run_id, document, threshold_hours)
@@ -1442,6 +1493,7 @@ def run_override_manual_url_budget(project_root: Path, args: argparse.Namespace)
         raise RunControllerError("VALUE_INVALID", "--approved-by must be a non-empty string")
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id}"):
         document = load_run_state(project_root, run_id)
+        require_caller_context(project_root, document, agent_id)
         current = document["state"]["current"]
         assert_not_terminal(run_id, current)
         baseline_status = status_document(project_root)
@@ -1528,6 +1580,7 @@ def run_finish(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
         raise RunControllerError("FINAL_VERDICT_REQUIRED", "--final-verdict is required for finish")
     with workspace_lock(run_lock_path(project_root, run_id), purpose=f"run state {run_id}"):
         document = load_run_state(project_root, run_id)
+        require_caller_context(project_root, document, agent_id)
         current = document["state"]["current"]
         assert_not_terminal(run_id, current)
         assert_transition_allowed(run_id, current, final_verdict)
@@ -1555,7 +1608,8 @@ def run_finish(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
         enforce_manual_url_budget(document, status, args.manual_url_deliveries_this_run)
         completion_readiness: dict[str, Any] | None = None
         if final_verdict == "complete":
-            completion_readiness = evaluate_completion_readiness(project_root, run_id)
+            completion_readiness = (caller_observation(project_root, "completion_readiness")
+                                    if document.get("caller_context") is not None else evaluate_completion_readiness(project_root, run_id))
             if completion_readiness["verdict"] != "ship":
                 raise RunControllerError(
                     "RUN_COMPLETION_NOT_READY",
@@ -1692,6 +1746,11 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_INVALID
     except SystemExit as exc:
         return handle_system_exit(exc, json_mode=json_mode, default_exit_code=EXIT_INVALID)
+    except Exception as error:
+        code = getattr(error, "error_code", "")
+        if code != "DOMAIN_PACK_REVISION_CONFLICT" and not code.startswith("EVIDENCE_REVISION_"):
+            raise
+        return load_sibling_module("_script_errors").emit_refusal(error, json_mode=json_mode)
 
     if args.format == "json":
         print(json.dumps(document, indent=2, sort_keys=False))

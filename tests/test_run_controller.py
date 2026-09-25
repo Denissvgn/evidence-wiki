@@ -19,6 +19,7 @@ SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
 RUN_CONTROLLER_PATH = SCRIPTS / "run_controller.py"
 
 RUN_STATE_FIELDS = {
+    "requirement_basis",
     "schema_version",
     "run_id",
     "started_at",

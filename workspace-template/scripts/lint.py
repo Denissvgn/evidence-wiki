@@ -1891,7 +1891,8 @@ def is_automated_provenance(provenance: dict[str, Any]) -> bool:
 
 def is_web_curation_record(record: dict[str, Any], provenance: dict[str, Any]) -> bool:
     kind = record.get("kind")
-    return kind in WEB_CURATION_KINDS and is_automated_provenance(provenance)
+    local_copy = provenance.get("retrieved_by") == "local_setup" and provenance.get("source_type") == "local_file"
+    return kind in WEB_CURATION_KINDS and is_automated_provenance(provenance) and not local_copy
 
 
 def has_license_or_terms_status(provenance: dict[str, Any]) -> bool:
@@ -3992,6 +3993,16 @@ def run_checks(
     if lint_config.get("validate_questions", True):
         selected_files = wiki_files if question_paths is None else [path for path in wiki_files if path in question_paths]
         check_questions(project_root, selected_files, claim_staleness_window_hours(config), results, config)
+    if config.get("computation") is not None:
+        computation = load_workspace_module(_SCRIPT_DIR, "_computation_service").status(project_root, config)
+        results["computation"] = computation
+        if computation["status"] != "passed":
+            issue(results, "HIGH", "computation_required_check_failed", "Required computation checks are incomplete or failed.",
+                  files=["research.yml"], recommendation="Run computation check and resolve its reported reasons before publication.")
+        for finding in computation["findings"]:
+            if finding["severity"] == "warning":
+                issue(results, "MEDIUM", "computation_warning", "A computation invariant requires review.",
+                      files=["research.yml"], recommendation="Inspect the finding and explicitly apply warning intake if appropriate.")
     levels = severity_order(config)
     results["stats"]["issue_counts"] = issue_counts(results, levels)
     generate_recommendations(results)

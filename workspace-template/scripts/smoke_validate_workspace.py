@@ -368,7 +368,9 @@ def validate_provider_list(
         # Registration widens the accepted set to what is installed *here*, so a
         # workspace authorizing a pip-installed provider passes only where it exists.
         # With nothing installed this is ``()`` and the accepted set is the old one.
-        validated = validate_provider_ids(value, phase=phase, registered=safe_registered_ids(phase))
+        builtin = ACQUISITION_PROVIDER_IDS if phase == "acquisition" else DISCOVERY_PROVIDER_IDS
+        registered = () if isinstance(value, list) and all(isinstance(item, str) and item in builtin for item in value) else safe_registered_ids(phase)
+        validated = validate_provider_ids(value, phase=phase, registered=registered)
     except ProviderNotRegisteredError as exc:
         return [], str(exc), [], exc.provider_ids
     except ProviderListError as exc:
