@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+- Preserve acquisition orchestration declarations in native initialization
+  profiles. Reject unsupported nested sections and invalid or conflicting
+  acquisition settings before workspace writes, and show the effective
+  acquisition responsibility in preview and initialization reports.
+
 ## 1.0.0 - 2026-09-25
 
 - Version the updated workspace starter as 1.0.0 while preserving existing

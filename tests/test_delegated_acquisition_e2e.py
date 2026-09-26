@@ -599,6 +599,45 @@ class DelegatedStructuredSourceTests(DelegatedWorkspace, unittest.TestCase):
     CSV_NAME = "supplier-quotes.csv"
     CSV_BODY = "supplier,currency,unit_price\nacme,EUR,12.50\nglobex,EUR,13.75\n"
 
+    def test_native_profile_drives_delegated_acquisition_without_configuration_repair(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            workspace = root / "workspace"
+            profile = yaml.safe_load(PROFILE_FIXTURE_PATH.read_text(encoding="utf-8"))
+            declaration = {"acquisition": "delegated", "acquirer_agent_id": ACQUIRER, "max_attempts_per_request": 3}
+            profile["workspace_init"].update(
+                target_path=str(workspace),
+                raw={"immutable": True, "source_roots": ["raw/data"]},
+                research_yml={"orchestration": declaration},
+                questions=[{"id": QUESTION_SLUG, "question": "What does the supplier quote?", "priority": "high"}],
+            )
+            path = root / "profile.yml"
+            path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(0, INIT.main(["--profile", str(path), "--scope-root", str(root), "--dry-run"]))
+                self.assertFalse(workspace.exists())
+                self.assertEqual(0, INIT.main(["--profile", str(path), "--scope-root", str(root)]))
+            original_config = (workspace / "research.yml").read_bytes()
+            self.assertEqual(declaration, yaml.safe_load(original_config).get("orchestration"))
+            request_id = self.block_question_on_a_request(workspace)
+            session = self.start(workspace)
+            self.assertEqual("delegated", session["acquisition_mode"])
+            self.assertEqual(3, session["max_attempts_per_request"])
+            self.assertEqual({"enabled": False, "providers": []}, session["provider_policy"]["acquisition"])
+            code, order = self.next_action(workspace)
+            self.assertEqual(0, code, order)
+            self.assertEqual("acquisition", order["phase"])
+            self.assertEqual("delegated", order["acquisition_mode"])
+            self.assertEqual(ACQUIRER, order["assigned_agent_id"])
+            self.assertEqual([request_id], order["scope"]["request_ids"])
+            self.assertEqual([QUESTION_SLUG], order["scope"]["question_slugs"])
+            self.acquire_csv(workspace, request_id)
+            code, completed = self.submit(workspace, order["action_id"], artifacts=[f"raw/data/{self.CSV_NAME}"])
+            self.assertEqual(0, code, completed)
+            self.assertEqual("research", completed["phase"])
+            self.assertEqual("open", self.question_status(workspace))
+            self.assertEqual(original_config, (workspace / "research.yml").read_bytes())
+
     def acquire_csv(self, workspace: Path, request_id: str) -> str:
         """The delegated acquirer's loop, delivering a table instead of a JSON payload."""
         destination = workspace / "raw" / "data"

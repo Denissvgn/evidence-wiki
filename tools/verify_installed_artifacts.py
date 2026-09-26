@@ -48,6 +48,11 @@ def verify(dist_dir, evidence, *, commit, run_id, expected_version=None):
         installed = checks["installed_" + kind]
         if installed["label"] != kind or installed["checkout_imports"] != "disabled" or installed["version"] != __version__:
             raise ValueError("installed package identity differs")
+        if installed.get("native_initialization") != {
+            "direct_profile": "passed", "nested_profile": "passed",
+            "no_write_refusals": "passed", "controller_submission": "passed",
+        }:
+            raise ValueError("native initialization scenarios did not all complete")
         journeys = installed["journeys"]
         observed = [{"case_id": row["case_id"], "trial": row["trial"]} for row in journeys["trials"]]
         if (journeys["status"] != "passed" or journeys["candidate_unchanged"] is not True

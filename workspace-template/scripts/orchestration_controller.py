@@ -54,6 +54,7 @@ from _orchestration_config import (
     OrchestrationConfigError,
     orchestration_config,
     valid_agent_id,
+    validate_acquisition_exclusivity,
 )
 from _provider_plugins import registered_ids
 from _provider_registry import ProviderListError, ProviderNotRegisteredError, validate_provider_ids
@@ -1932,19 +1933,15 @@ def acquisition_policy(config: dict[str, Any]) -> dict[str, Any]:
         ) from exc
     if declared["acquisition_mode"] == ACQUISITION_MODE_DELEGATED:
         policy = provider_policy(config)
-        if policy["acquisition"]["enabled"]:
+        try:
+            validate_acquisition_exclusivity(declared, providers_enabled=policy["acquisition"]["enabled"])
+        except OrchestrationConfigError as exc:
             raise OrchestrationControllerError(
-                "CONFIG_INVALID",
-                (
-                    "research.yml declares orchestration.acquisition: delegated while "
-                    "integrations.acquisition is enabled; exactly one of them acquires evidence"
-                ),
-                remediation=(
-                    "Disable integrations.acquisition.providers, or remove "
-                    "orchestration.acquisition: delegated."
-                ),
+                exc.error_code,
+                exc.message,
+                remediation=exc.remediation,
                 details={"acquisition_providers": policy["acquisition"]["providers"]},
-            )
+            ) from exc
     return declared
 
 

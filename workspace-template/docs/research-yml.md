@@ -317,9 +317,18 @@ orchestration:
 
 **Delegation is not a provider grant.** It authorizes no network access, no credentials,
 and no fetching by this package; whatever the acquirer reaches, it reaches on its own
-authority. `integrations.acquisition.providers` must stay empty under delegation — the two
-are mutually exclusive, and declaring both is refused when the session starts rather than
-resolved silently in favor of one.
+authority. Active package acquisition and delegation are mutually exclusive.
+Use `integrations.acquisition.enabled: false` and `providers: []` for an explicit
+delegated setup. A valid populated provider list may remain stored while disabled;
+it grants no acquisition authority. Competing enabled providers refuse when the
+session starts and during native initialization, before workspace files are written.
+
+Native profiles accept this section directly as `workspace_init.orchestration`
+or under `workspace_init.research_yml.orchestration`. Both preview and creation
+validate the effective merged settings and preserve the external field names and
+supported `x-` metadata. See [profile overrides](workspace-init-profile.md).
+Profile override containers must be mappings; the runtime's tolerance of an
+absent or null workspace section does not make a null profile override valid.
 
 Delegated acquisition is an external-protocol mode. Drive it with
 `evidence-wiki orchestrate start/next/submit`; the package-managed `orchestrate run` and

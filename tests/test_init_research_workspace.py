@@ -3,6 +3,7 @@ import io
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -32,6 +33,19 @@ def load_init_module():
 INIT = load_init_module()
 
 
+def initialization_snapshot(root: Path) -> dict:
+    """Retain contents and write-sensitive metadata around a refused initialization."""
+    return {
+        path.relative_to(root).as_posix(): (
+            stat.S_IMODE(path.stat().st_mode),
+            path.stat().st_ino,
+            path.stat().st_mtime_ns,
+            path.read_bytes() if path.is_file() else None,
+        )
+        for path in [root, *sorted(root.rglob("*"))]
+    }
+
+
 class InitResearchWorkspaceTests(unittest.TestCase):
     def run_init(self, *args: str) -> str:
         stdout = io.StringIO()
@@ -51,6 +65,255 @@ class InitResearchWorkspaceTests(unittest.TestCase):
         profile = self.fixture_profile(target)
         profile_path.write_text(yaml.safe_dump(profile, sort_keys=False))
         return profile
+
+    def assert_profile_refused_without_writes(self, updates, expected, *, extra_args=()):
+        for existing in (False, True):
+            for dry_run in (False, True):
+                with self.subTest(existing=existing, dry_run=dry_run), tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir).resolve()
+                    target = root / "workspace"
+                    if existing:
+                        target.mkdir(mode=0o755)
+                    (root / "unrelated.txt").write_text("Keep this sibling unchanged.", encoding="utf-8")
+                    profile = self.fixture_profile(target)
+                    profile["workspace_init"].update(updates)
+                    path = root / "profile.yml"
+                    path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+                    before = initialization_snapshot(root)
+                    args = ["--profile", str(path), "--scope-root", str(root), *extra_args]
+                    if dry_run:
+                        args.append("--dry-run")
+                    with self.assertRaises(SystemExit) as caught:
+                        self.run_init(*args)
+                    self.assertIn(expected, str(caught.exception))
+                    self.assertEqual(before, initialization_snapshot(root))
+
+    def test_native_profile_preserves_direct_and_nested_orchestration(self):
+        declaration = {
+            "acquisition": "delegated", "acquirer_agent_id": "external-acquirer",
+            "max_attempts_per_request": 4, "x-queue": {"name": "reviewed"},
+        }
+        for nested in (False, True):
+            with self.subTest(nested=nested), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir).resolve()
+                target = root / "workspace"
+                profile = self.fixture_profile(target)
+                destination = profile["workspace_init"]
+                if nested:
+                    destination = destination.setdefault("research_yml", {})
+                destination["orchestration"] = declaration
+                path = root / "profile.yml"
+                path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+                before = initialization_snapshot(root)
+                self.run_init("--profile", str(path), "--scope-root", str(root), "--dry-run")
+                self.assertEqual(before, initialization_snapshot(root))
+                self.run_init("--profile", str(path), "--scope-root", str(root))
+                config = self.load_config(target)
+                self.assertEqual(declaration, config.get("orchestration"))
+                reader = INIT.load_workspace_module(target / "scripts", "_orchestration_config")
+                self.assertEqual(
+                    {"acquisition_mode": "delegated", "acquirer_agent_id": "external-acquirer",
+                     "max_attempts_per_request": 4}, reader.orchestration_config(config),
+                )
+
+    def test_native_profile_nested_orchestration_overrides_direct_fields(self):
+        profile = {
+            "orchestration": {"acquisition": "delegated", "acquirer_agent_id": "first", "max_attempts_per_request": 3},
+            "research_yml": {"orchestration": {"acquirer_agent_id": "second", "x-note": ["kept"]}},
+        }
+        overrides = INIT.profile_config_overrides(profile)
+        self.assertEqual(
+            {"acquisition": "delegated", "acquirer_agent_id": "second", "max_attempts_per_request": 3,
+             "x-note": ["kept"]}, overrides.get("orchestration"),
+        )
+        overrides["orchestration"]["x-note"].append("changed")
+        self.assertEqual(["kept"], profile["research_yml"]["orchestration"]["x-note"])
+
+    def test_native_profile_rejects_non_mapping_research_container(self):
+        for value in (None, False, 0, "", [], True, "delegated"):
+            with self.subTest(value=value):
+                self.assert_profile_refused_without_writes({"research_yml": value}, "research_yml must be a mapping")
+
+    def test_native_profile_rejects_unsupported_research_sections(self):
+        for key in ("orchestraton", "normalization", "project", "x-unsupported"):
+            with self.subTest(key=key):
+                self.assert_profile_refused_without_writes({"research_yml": {key: {}}}, "research_yml")
+        self.assert_profile_refused_without_writes({"research_yml": {1: {}, "orchestration": {}}}, "keys must be strings")
+
+    def test_native_profile_rejects_malformed_orchestration_without_writes(self):
+        cases = (
+            (None, "orchestration must be a mapping"),
+            ([], "orchestration must be a mapping"),
+            ({1: "unknown"}, "keys must be strings"),
+            ({"acquisition": "other"}, "orchestration.acquisition"),
+            ({"acquisition": "delegated"}, "acquirer_agent_id"),
+            ({"acquisition": "delegated", "acquirer_agent_id": " "}, "acquirer_agent_id"),
+            ({"acquisition": "delegated", "acquirer_agent_id": "a\x00b"}, "acquirer_agent_id"),
+            ({"acquisition": "delegated", "acquirer_agent_id": "a" * 161}, "acquirer_agent_id"),
+            ({"acquisition": "delegated", "acquirer_agent_id": "a", "max_attempts_per_request": True}, "max_attempts_per_request"),
+            ({"acquisition": "delegated", "acquirer_agent_id": "a", "max_attempts_per_request": 11}, "max_attempts_per_request"),
+            ({"acquisition": "providers", "acquirer_agent_id": "unused"}, "declares acquirer_agent_id"),
+            ({"acquisition_mode": "delegated"}, "unknown keys"),
+        )
+        for declaration, expected in cases:
+            with self.subTest(declaration=declaration):
+                self.assert_profile_refused_without_writes({"research_yml": {"orchestration": declaration}}, expected)
+
+    def test_native_profile_refuses_active_provider_conflicts_after_cli_overrides(self):
+        declared = {"orchestration": {"acquisition": "delegated", "acquirer_agent_id": "external-acquirer"}}
+        self.assert_profile_refused_without_writes(
+            {"research_yml": {**declared, "integrations": {"acquisition": {"enabled": True, "providers": ["arxiv"]}}}},
+            "exactly one of them acquires evidence",
+        )
+        self.assert_profile_refused_without_writes(
+            {"research_yml": declared}, "exactly one of them acquires evidence",
+            extra_args=("--acquisition-provider", "arxiv"),
+        )
+
+    def test_native_profile_summaries_describe_the_effective_acquirer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            target = root / "workspace"
+            profile = self.fixture_profile(target)
+            profile["workspace_init"].update(
+                orchestration={"acquisition": "delegated", "acquirer_agent_id": "overridden", "max_attempts_per_request": 3},
+                research_yml={"orchestration": {"acquirer_agent_id": "  selected-acquirer  ", "max_attempts_per_request": 4}},
+            )
+            path = root / "profile.yml"
+            path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+            preview = self.run_init("--profile", str(path), "--dry-run")
+            self.assertIn("acquisition: disabled (none)", preview)
+            self.assertIn("acquisition mode: delegated", preview)
+            self.assertIn("acquirer agent: selected-acquirer", preview)
+            self.assertIn("attempts per request: 4", preview)
+            self.assertNotIn("overridden", preview)
+            self.assertFalse(target.exists())
+            self.run_init("--profile", str(path))
+            report = (target / "docs/workspace-init-report.md").read_text(encoding="utf-8")
+            self.assertIn("## Acquisition Responsibility", report)
+            self.assertIn("- mode: delegated", report)
+            self.assertIn("- acquirer_agent_id: selected-acquirer", report)
+            self.assertIn("- max_attempts_per_request: 4", report)
+
+    def test_native_profile_empty_overrides_keep_provider_defaults(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            target = root / "workspace"
+            profile = self.fixture_profile(target)
+            profile["workspace_init"]["research_yml"] = {}
+            path = root / "profile.yml"
+            path.write_text(yaml.safe_dump(profile), encoding="utf-8")
+            output = self.run_init("--profile", str(path))
+            self.assertIn("acquisition mode: providers", output)
+            self.assertNotIn("acquirer agent:", output)
+            self.assertNotIn("attempts per request:", output)
+            self.assertNotIn("orchestration", self.load_config(target))
+            report = (target / "docs/workspace-init-report.md").read_text(encoding="utf-8")
+            self.assertIn("- mode: providers", report)
+            self.assertNotIn("max_attempts_per_request", report)
+
+    def test_native_profile_keeps_disabled_provider_lists_inert(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            target = root / "workspace"
+            profile = self.fixture_profile(target)
+            profile["workspace_init"]["research_yml"] = {
+                "orchestration": {"acquisition": "delegated", "acquirer_agent_id": "external-acquirer"},
+                "integrations": {"acquisition": {"enabled": False, "providers": ["arxiv"]}},
+            }
+            path = root / "profile.yml"
+            path.write_text(yaml.safe_dump(profile), encoding="utf-8")
+            self.run_init("--profile", str(path))
+            config = self.load_config(target)
+            controller = INIT.load_workspace_module(target / "scripts", "orchestration_controller")
+            self.assertEqual("delegated", controller.acquisition_policy(config)["acquisition_mode"])
+            self.assertEqual(["arxiv"], config["integrations"]["acquisition"]["providers"])
+            self.assertFalse(controller.provider_policy(config)["acquisition"]["enabled"])
+
+    def test_native_profile_validates_starter_and_pack_orchestration(self):
+        for layer in ("starter", "pack"):
+            for invalid in ("missing_acquirer", "active_providers", "mode_transition"):
+                for dry_run in (False, True):
+                    with self.subTest(layer=layer, invalid=invalid, dry_run=dry_run), tempfile.TemporaryDirectory() as tmpdir:
+                        root = Path(tmpdir).resolve()
+                        target = root / "workspace"
+                        profile = self.fixture_profile(target)
+                        args = []
+                        if layer == "starter":
+                            selected = root / "starter"
+                            selected.mkdir()
+                            for name in INIT.REQUIRED_STARTER_FILES:
+                                shutil.copy2(INIT.default_starter_root() / name, selected / name)
+                            config_path = selected / "research.yml"
+                            args = ["--starter-root", str(selected)]
+                        else:
+                            selected = root / "general-science"
+                            shutil.copytree(REPO_ROOT / "domain-packs/general-science", selected)
+                            config_path = selected / "research.overlay.yml"
+                            profile["workspace_init"]["domain_guidance"] = {"mode": "domain_pack", "rationale": "Explicit selection."}
+                            profile["workspace_init"]["domain_pack"] = {"enabled": True, "path": str(selected)}
+                        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                        config["orchestration"] = {"acquisition": "delegated", "acquirer_agent_id": "inherited"}
+                        if invalid == "missing_acquirer":
+                            del config["orchestration"]["acquirer_agent_id"]
+                        elif invalid == "active_providers":
+                            args.extend(["--acquisition-provider", "arxiv"])
+                        else:
+                            profile["workspace_init"]["orchestration"] = {"acquisition": "providers"}
+                        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+                        path = root / "profile.yml"
+                        path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+                        before = initialization_snapshot(root)
+                        if dry_run:
+                            args.append("--dry-run")
+                        with self.assertRaises(SystemExit) as caught:
+                            self.run_init("--profile", str(path), "--scope-root", str(root), *args)
+                        expected = "exactly one of them acquires evidence" if invalid == "active_providers" else "acquirer_agent_id"
+                        self.assertIn(expected, str(caught.exception))
+                        self.assertEqual(before, initialization_snapshot(root))
+
+    def test_native_profile_explicit_orchestration_remains_operator_owned(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            target, pack = root / "workspace", root / "general-science"
+            shutil.copytree(REPO_ROOT / "domain-packs/general-science", pack)
+            overlay_path = pack / "research.overlay.yml"
+            overlay = yaml.safe_load(overlay_path.read_text(encoding="utf-8"))
+            declaration = {"acquisition": "delegated", "acquirer_agent_id": "same-value", "max_attempts_per_request": 3}
+            overlay["orchestration"] = declaration
+            overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False), encoding="utf-8")
+            profile = self.fixture_profile(target)
+            profile["workspace_init"].update(
+                domain_guidance={"mode": "domain_pack", "rationale": "Explicit selection."},
+                domain_pack={"enabled": True, "path": str(pack)}, orchestration=declaration,
+            )
+            path = root / "profile.yml"
+            path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+            self.run_init("--profile", str(path))
+            self.assertEqual(declaration, self.load_config(target)["orchestration"])
+            state = yaml.safe_load((target / INIT.DOMAIN_PACK_STATE_RELATIVE).read_text(encoding="utf-8"))
+            self.assertFalse(any(row["path"].startswith("/orchestration") for row in state["config_ownership"]))
+
+    def test_native_profile_refusals_are_structured_at_both_cli_entrypoints(self):
+        for prefix in ([sys.executable, str(INIT_SCRIPT_PATH)], [sys.executable, "-m", "evidence_wiki.cli", "init"]):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir).resolve()
+                profile = self.fixture_profile(root / "workspace")
+                profile["workspace_init"]["research_yml"] = {1: {}, "unknown": {}}
+                path = root / "profile.yml"
+                path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+                before = initialization_snapshot(root)
+                completed = subprocess.run([*prefix, "--profile", str(path)], capture_output=True, text=True, check=False)
+                self.assertEqual(2, completed.returncode, completed.stderr)
+                self.assertIn("research_yml keys must be strings", completed.stderr)
+                self.assertIn("Preserved:", completed.stderr)
+                self.assertNotIn("Traceback", completed.stderr)
+                self.assertEqual(before, initialization_snapshot(root))
+
+    def test_native_profile_unknown_section_diagnostics_are_bounded(self):
+        with self.assertRaises(SystemExit) as caught:
+            INIT.profile_config_overrides({"research_yml": {"unrecognized" + str(i) + "x" * 500: {} for i in range(20)}})
+        self.assertLess(len(str(caught.exception)), 500)
 
     def project_local_profile(self, target: Path) -> dict:
         profile = self.fixture_profile(target)
@@ -1484,7 +1747,7 @@ class InitResearchWorkspaceTests(unittest.TestCase):
             self.assertIn("Recommended discovery providers: arxiv, openalex.", report)
             self.assertIn("Recommended acquisition providers: arxiv, openalex.", report)
             self.assertIn(
-                "Acquisition remains disabled unless integrations.acquisition.enabled is explicitly true.",
+                "Package acquisition providers remain disabled unless integrations.acquisition.enabled is explicitly true.",
                 report,
             )
 

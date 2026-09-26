@@ -107,8 +107,10 @@ def orchestration_section(config: dict[str, Any]) -> dict[str, Any]:
         return {}
     if not isinstance(section, dict):
         raise OrchestrationConfigError("CONFIG_INVALID", "research.yml orchestration must be a mapping.")
+    if any(not isinstance(key, str) for key in section):
+        raise OrchestrationConfigError("CONFIG_INVALID", "research.yml orchestration keys must be strings.")
     unknown = sorted(
-        key for key in section if key not in ORCHESTRATION_SECTION_KEYS and not str(key).startswith("x-")
+        key for key in section if key not in ORCHESTRATION_SECTION_KEYS and not key.startswith("x-")
     )
     if unknown:
         raise OrchestrationConfigError(
@@ -219,3 +221,19 @@ def orchestration_config(config: dict[str, Any]) -> dict[str, Any]:
 def is_delegated(settings: dict[str, Any]) -> bool:
     """Return whether validated settings declare an external acquirer."""
     return settings.get("acquisition_mode") == ACQUISITION_MODE_DELEGATED
+
+
+def validate_acquisition_exclusivity(settings: dict[str, Any], *, providers_enabled: bool) -> None:
+    """Refuse competing acquirers using the caller's validated provider enablement."""
+    if is_delegated(settings) and providers_enabled:
+        raise OrchestrationConfigError(
+            "CONFIG_INVALID",
+            (
+                "research.yml declares orchestration.acquisition: delegated while "
+                "integrations.acquisition is enabled; exactly one of them acquires evidence"
+            ),
+            remediation=(
+                "Disable integrations.acquisition.providers, or remove "
+                "orchestration.acquisition: delegated."
+            ),
+        )
