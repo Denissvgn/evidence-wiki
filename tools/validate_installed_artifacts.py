@@ -297,6 +297,7 @@ def create_venv_with_wheel(root: Path, wheel: Path) -> Path:
 
 def fixture_members():
     members = ["tools/smoke_installed_orchestration.py", "tools/qualify_journeys.py",
+               "workspace-template/workspace-system.yml",
                "tools/probe_installed_extensions.py", "tests/_docx_fixture.py",
                "tools/_journey_cases.py", "tools/_journey_driver.py", "tools/_journey_authoring.py", "tools/_qualification_process.py",
                "tests/fixtures/onboarding-journeys/cases.json", "tests/_computation_fixture.py", "tests/fixtures/fake_codex_cli.py",
@@ -396,6 +397,154 @@ INSTALLED_PROBE = textwrap.dedent(
     print(json.dumps({"version": evidence_wiki.__version__, "installed_from": str(installed_path)}))
     '''
 )
+
+
+NATIVE_INITIALIZATION_PROBE = textwrap.dedent(r'''
+    import copy
+    import hashlib
+    import json
+    import stat
+    import subprocess
+    import sys
+    from datetime import datetime, timezone
+    from pathlib import Path
+    import yaml
+    import evidence_wiki
+
+    cli, fixture, root = map(Path, sys.argv[1:])
+    assert Path(evidence_wiki.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+    root.mkdir()
+    template = yaml.safe_load(fixture.read_text())
+    declaration = {'acquisition': 'delegated', 'acquirer_agent_id': 'external-acquirer', 'max_attempts_per_request': 3}
+
+    def initialize(profile, *flags):
+        return subprocess.run([str(cli), 'init', '--profile', str(profile), '--scope-root', str(root), *flags],
+                              text=True, capture_output=True, timeout=60)
+
+    def snapshot():
+        return {str(p.relative_to(root)): (stat.S_IMODE(p.stat().st_mode), p.stat().st_ino, p.stat().st_mtime_ns,
+                    p.read_bytes() if p.is_file() else None) for p in [root, *root.rglob('*')]}
+
+    for name, nested in [('direct', False), ('nested', True), ('planned', None)]:
+        workspace = root/name
+        if nested is None:
+            def command(*args):
+                result = subprocess.run([str(cli), 'agent', *map(str, args)], cwd=root,
+                    text=True, capture_output=True, timeout=300)
+                assert result.returncode == 0, result.stdout + result.stderr
+                return json.loads(result.stdout)
+            schema = command('plan-schemas', '--schema-id', 'evidence-research-setup/v1')
+            assert 'orchestration' in schema['properties']['decisions']['properties']
+            guide = command('plan-guide')['content'].split('### Complete delegated setup example', 1)[1]
+            request = json.loads(guide.split('```json\n', 1)[1].split('\n```', 1)[0])
+            request['request']['payload']['target'] = {'writable_root':str(root), 'relative_path':name}
+            request['request']['payload']['authority']['writable_roots'] = [str(root)]
+            source, saved = root/'request.json', root/'plan.json'
+            source.write_text(json.dumps(request, ensure_ascii=False), encoding='utf-8')
+            plan = command('plan', '--from-file', source, '--output', saved)
+            assert plan['setup_ready'] and not plan['research_ready'] and not plan['actions_executed']
+            before = snapshot()
+            assert command('plan-check', '--from-file', saved)['status'] == 'current'
+            assert snapshot() == before and not workspace.exists()
+            applied = command('apply', '--from-file', saved)
+            assert applied['setup_ready'] and not applied['research_complete'] and not applied['claims_verified']
+            before = {str(p.relative_to(workspace)):p.read_bytes() for p in workspace.rglob('*') if p.is_file()}
+            assert command('apply', '--from-file', saved)['transaction_id'] == applied['transaction_id']
+            assert before == {str(p.relative_to(workspace)):p.read_bytes() for p in workspace.rglob('*') if p.is_file()}
+            assert yaml.safe_load((workspace/'research.yml').read_bytes()) == plan['initialization']['effective_config']
+            frozen = (workspace/'docs/research-requirements.json').read_bytes()
+            assert json.loads(frozen)['decisions']['orchestration'] == declaration
+            policy = plan['initialization']['effective_config']['strict_evidence']
+            assert policy['instructions']['docs/research-requirements.json'] == 'sha256:'+hashlib.sha256(frozen).hexdigest()
+            selected = request['request']['payload']['strict_evidence']
+            assert (policy['policy_id'], policy['revision'], policy['assurance']) == (
+                selected['policy_id'], selected['policy_revision'], selected['assurance'])
+            metadata = yaml.safe_load((workspace/'wiki/questions/needs-evidence.md').read_text(encoding='utf-8').split('---')[1])['metadata']
+            assert metadata['original_text'] == request['request']['payload']['questions'][0]['text']
+            assert plan['questions']['rows'][0]['original_ids'] == ['needs-evidence']
+        else:
+            profile = copy.deepcopy(template)
+            profile['workspace_init'].update(target_path=str(workspace),
+                raw={'immutable':True, 'source_roots':['raw/data']},
+                questions=[{'id':'needs-evidence', 'question':'What does the supplier quote?', 'priority':'high'}])
+            destination = profile['workspace_init'].setdefault('research_yml', {}) if nested else profile['workspace_init']
+            destination['orchestration'] = declaration
+            path = root/(name+'.yml')
+            path.write_text(yaml.safe_dump(profile, sort_keys=False))
+            before = snapshot()
+            preview = initialize(path, '--dry-run')
+            assert preview.returncode == 0, preview.stderr
+            assert snapshot() == before
+            created = initialize(path)
+            assert created.returncode == 0, created.stderr
+        config_bytes = (workspace/'research.yml').read_bytes()
+        config = yaml.safe_load(config_bytes)
+        assert config['orchestration'] == declaration
+        assert config['integrations']['acquisition']['enabled'] is False
+
+        def script(module, *args):
+            result = subprocess.run([sys.executable, '-B', str(workspace/'scripts'/(module+'.py')),
+                '--project-root', str(workspace), *args, '--format', 'json'], text=True, capture_output=True, timeout=60)
+            assert result.returncode == 0, result.stdout + result.stderr
+            return json.loads(result.stdout)
+
+        script('question_claim', 'claim', '--slug', 'needs-evidence', '--agent-id', 'research-agent')
+        request = script('source_requests', 'add', '--kind', 'other', '--query-or-identifier', 'Supplier quote',
+            '--rationale', 'The question needs retained evidence.', '--priority', 'high', '--question-slug', 'needs-evidence')
+        request_id = request['request']['request_id']
+        script('question_resolve', 'block', '--slug', 'needs-evidence', '--agent-id', 'research-agent',
+            '--blocked-reason', 'Evidence has not arrived.', '--request-id', request_id)
+        session = script('orchestration_controller', 'start', '--orchestration-id', 'native-profile', '--agent-id', 'parent')
+        assert session['acquisition_mode'] == 'delegated' and session['acquirer_agent_id'] == declaration['acquirer_agent_id']
+        assert session['max_attempts_per_request'] == 3
+        assert session['provider_policy']['acquisition'] == {'enabled':False, 'providers':[]}
+        order = script('orchestration_controller', 'next', '--orchestration-id', 'native-profile')
+        assert order['phase'] == 'acquisition' and order['acquisition_mode'] == 'delegated'
+        assert order['assigned_agent_id'] == declaration['acquirer_agent_id']
+        assert order['scope']['request_ids'] == [request_id]
+        payload = workspace/'raw/data/quote.csv'
+        payload.write_text('supplier,currency,unit_price\nacme,EUR,12.50\nglobex,EUR,13.75\n', encoding='utf-8', newline='\n')
+        provenance = {'origin_url':'https://example.test/quote.csv', 'license':'CC-BY-4.0',
+            'retrieved_at':datetime.now(timezone.utc).isoformat(), 'retrieved_by':declaration['acquirer_agent_id'],
+            'request_id':request_id, 'checksum':'sha256:'+hashlib.sha256(payload.read_bytes()).hexdigest()}
+        payload.with_name(payload.name+'.provenance.yml').write_text(yaml.safe_dump(provenance))
+        script('source_inventory', '--report')
+        script('normalize_sources', '--all')
+        records = [json.loads(line) for line in (workspace/config['sources']['manifest_path']).read_text().splitlines() if line.strip()]
+        source_id = next(row['id'] for row in records if 'raw/data/quote.csv' in row.get('raw_paths', []))
+        script('source_requests', 'fulfill', '--request-id', request_id, '--source-id', source_id)
+        script('question_resolve', 'reopen', '--slug', 'needs-evidence', '--agent-id', declaration['acquirer_agent_id'],
+            '--source-id', source_id, '--request-id', request_id)
+        result_file = root/(name+'-result.json')
+        result_file.write_text(json.dumps({'schema_version':'1.0', 'action_id':order['action_id'], 'outcome':'completed',
+            'summary':'Delivered the requested quote.', 'artifacts':['raw/data/quote.csv']}))
+        completed = script('orchestration_controller', 'submit', '--orchestration-id', 'native-profile',
+            '--action-id', order['action_id'], '--result-file', str(result_file))
+        assert completed['last_completed_action_id'] == order['action_id'] and completed['phase'] == 'research'
+        assert (workspace/'research.yml').read_bytes() == config_bytes
+
+    invalid = [False, {'unsupported':{}}, {'orchestration':{'acquisition':'delegated'}},
+        {'orchestration':declaration, 'integrations':{'acquisition':{'enabled':True, 'providers':['arxiv']}}}]
+    for index, value in enumerate(invalid):
+        for existing in (False, True):
+            workspace = root/('refused-'+str(index)+'-'+str(existing))
+            if existing:
+                workspace.mkdir()
+            profile = copy.deepcopy(template)
+            profile['workspace_init'].update(target_path=str(workspace), research_yml=value)
+            path = root/'refused.yml'
+            path.write_text(yaml.safe_dump(profile, sort_keys=False))
+            before = snapshot()
+            for flags in ([], ['--dry-run']):
+                refused = initialize(path, *flags)
+                assert refused.returncode == 2, refused.stdout + refused.stderr
+                assert 'Traceback' not in refused.stderr
+                assert snapshot() == before
+    print(json.dumps({'native_initialization':{'direct_profile':'passed', 'nested_profile':'passed',
+        'no_write_refusals':'passed', 'controller_submission':'passed'},
+        'planned_delegation':{'schema_discovery':'passed', 'plan_check':'passed', 'apply_replay':'passed',
+            'strict_bindings':'passed', 'controller_submission':'passed'}}))
+''')
 
 
 PUBLICATION_PROBE = textwrap.dedent(
@@ -900,7 +1049,7 @@ HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
     del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
     del os.environ["EVIDENCE_WIKI_STATE_DIR"]
     assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
-    assert contract()["library_api"]["version"] == "13"
+    assert contract()["library_api"]["version"] == "14"
     print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
     '''
 )
@@ -1028,7 +1177,7 @@ ASSESSMENT_PROBE = textwrap.dedent(
         assert workspace.assessments.apply_refresh(application) == applied
         assert workspace.assessments.check(envelope)["reasons"] == ["assessment_invalidated"]
         assert command("plan-refresh", host.refresh())["plan"]["entries"] == []
-        assert contract()["library_api"]["version"] == "13"
+        assert contract()["library_api"]["version"] == "14"
     print(json.dumps({"evidence_assessments": "authenticated_cli_api_parity", "assessment_refresh": "revocation_and_idempotent_apply"}))
     '''
 )
@@ -1538,6 +1687,8 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     run([str(cli), "--version"], cwd=outside)
     agent_probe = run([str(python), "-c", AGENT_PROBE, str(cli)], cwd=outside)
     pack_probe = run([str(python), "-c", PACK_PROBE, str(cli), str(scratch / "pack-discovery")], cwd=outside)
+    native_initialization = run([str(python), "-B", "-c", NATIVE_INITIALIZATION_PROBE, str(cli),
+        str(fixture_root / "tests/fixtures/workspace-init-profile.yml"), str(scratch / "native-initialization")], cwd=outside)
     contract_path = scratch / "contract.json"
     contract_path.write_text(run([str(cli), "contract"], cwd=outside), encoding="utf-8", newline="\n")
     run(
@@ -1652,7 +1803,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
             **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research), **json.loads(revisions),
-            **json.loads(extensions),
+            **json.loads(extensions), **json.loads(native_initialization),
             "journeys": journeys}
 
 

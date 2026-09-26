@@ -42,6 +42,14 @@ with Onboarding.open(allowed_roots=["/research"], allow=["apply"]) as host:
         result = host.apply(proposed)
 ```
 
+Library API `14` adds the typed setup decision `decisions.orchestration` for
+provider or delegated acquisition. Use `agent plan-schemas` and
+`contract()["research_planning"]["orchestration_selection"]` to discover its shape.
+Older requests remain supported; older installations reject the new field.
+See [research planning](research-planning.md#acquisition-responsibility) for
+inheritance, normalization and a complete request. The selection grants no new
+operation or source authority; the operation matrix remains version `2`.
+
 Use the interpreter containing the selected package. The handle binds package
 code, resource catalog, API version and interpreter identity. Restart the host
 process after an installation change: another handle cannot reload cached Python

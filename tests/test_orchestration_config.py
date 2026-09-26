@@ -62,6 +62,27 @@ class OrchestrationConfigTests(unittest.TestCase):
             CONFIG.orchestration_config({"orchestration": {"acquisition": "providers"}}),
         )
 
+    def test_non_string_keys_use_the_config_error_path(self):
+        for section in ({1: "bad"}, {False: {}, "unknown": True}, {(1, 2): []}):
+            with self.subTest(section=section):
+                self.assertRejected({"orchestration": section}, contains="keys must be strings")
+
+    def test_only_active_providers_conflict_with_delegation(self):
+        for document in ({}, delegated()):
+            settings = CONFIG.orchestration_config(document)
+            original = settings.copy()
+            for enabled in (False, True):
+                with self.subTest(settings=settings, enabled=enabled):
+                    if enabled and CONFIG.is_delegated(settings):
+                        with self.assertRaises(CONFIG.OrchestrationConfigError) as caught:
+                            CONFIG.validate_acquisition_exclusivity(settings, providers_enabled=enabled)
+                        self.assertEqual("CONFIG_INVALID", caught.exception.error_code)
+                        self.assertIn("exactly one of them acquires evidence", caught.exception.message)
+                        self.assertIn("Disable", caught.exception.remediation)
+                    else:
+                        CONFIG.validate_acquisition_exclusivity(settings, providers_enabled=enabled)
+                    self.assertEqual(original, settings)
+
     def test_a_non_dict_config_is_treated_as_absent(self):
         # Callers pass whatever `research.yml` parsed to; a scalar document has no section.
         self.assertEqual(PROVIDERS_DEFAULTS, CONFIG.orchestration_config(None))

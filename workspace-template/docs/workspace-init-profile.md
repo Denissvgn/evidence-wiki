@@ -297,14 +297,54 @@ Supported top-level config sections are merged into `research.yml`:
 - `lint`
 - `outputs`
 - `integrations`
+- `computation`
+- `strict_evidence`
+- `evidence_trust`
+- `orchestration`
 
 The same sections may also be nested under `research_yml`. Dictionaries are
-deep-merged; list values replace the starter list. Core `project`, `raw`,
+deep-merged; list values replace the earlier list. The precedence is starter,
+domain pack, direct profile sections, nested sections, then explicit provider
+CLI flags. A present `research_yml` must be a mapping, including when empty:
+omit it or use `{}`, not `null`, `false`, an empty string, or a list. Unsupported
+section names and non-string keys refuse rather than being ignored. Each
+section override must also be a mapping. Put project identity in the dedicated
+top-level `project` field, not under `research_yml`.
+
+Core `project`, `raw`,
 `ingest`, and `outputs` mappings reject unknown keys; an experimental extension
 key in those mappings must use an explicit `x-` prefix. Unknown setup-profile
 top-level keys are always refused. Other namespaced integration and domain-pack
 configuration remains additive, but its owning provider or pack must validate
 the nested contract before use.
+
+`orchestration` accepts the same [acquisition declaration](research-yml.md) as a
+workspace configuration. For example, this fragment belongs inside a complete
+`workspace_init` profile:
+
+```yaml
+orchestration:
+  acquisition: delegated
+  acquirer_agent_id: evidence-host
+  max_attempts_per_request: 2
+integrations:
+  acquisition:
+    enabled: false
+    providers: []
+```
+
+Alternatively place these sections under `research_yml`. The final merged
+declaration is validated before any workspace writes in both preview and
+creation. Invalid acquirers, attempts limits, unknown non-extension fields,
+delegated-only fields under provider mode, and competing enabled acquisition
+providers refuse. Supported `x-` fields inside orchestration are preserved;
+an `x-` prefix does not authorize an unsupported section under `research_yml`.
+Provider mode remains the default when no declaration is inherited or selected.
+
+The setup preview and generated report show the effective acquisition
+responsibility. Declaring a host does not verify its capability or confer
+permission to fetch evidence. Package-managed run/resume remain unavailable for
+delegated workspaces; use the external orchestration protocol.
 
 `integrations.acquisition` is optional and default-disabled. When present,
 `enabled` must be boolean, `providers` must list supported provider IDs

@@ -64,7 +64,7 @@ def index():
         "server": "evidence-wiki serve-onboarding-mcp", "discovery": "evidence-wiki agent extensions",
         "guide": "guide/contracts/v1", "schema_ids": list(schemas()), "allowed_roots_maximum": 16,
         "authority": "explicit host roots and operation grants; ordinary local observations, no OS isolation claim",
-        "preserved_surfaces": ["Workspace", "serve-mcp"], "python_api_version": "13",
+        "preserved_surfaces": ["Workspace", "serve-mcp"], "python_api_version": "14",
         "commands": ["pack migration-plan", "pack migration-apply", "pack compose-plan", "pack compose",
             "pack fleet-plan", "pack fleet-apply", "agent transition-plan", "agent transition-apply",
             "agent recipes", "agent instructions-plan", "agent instructions-apply", "agent instructions-remove"],

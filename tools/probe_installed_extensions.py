@@ -66,7 +66,7 @@ def run(root, fixture):
     require("Northern observations" in json.dumps(retrieved) and source.read_bytes() == original, "DOCX retrieval/original bytes")
     require(owner("_docx_capture").extract(original)["structured"]["tables"][0]["rows"][1] == ["007", "0.10"], "DOCX exact cells")
     with Onboarding.open(allowed_roots=[root], allow=["migration_apply", "composition_apply", "fleet_apply", "transition_apply", "instructions_apply", "instructions_remove"]) as host:
-        require(host.bootstrap()["payload"]["installation"]["library_api_version"] == "13", "API generation")
+        require(host.bootstrap()["payload"]["installation"]["library_api_version"] == "14", "API generation")
         require(host.contracts()["mcp"]["protocol_version"] == "2024-11-05", "MCP discovery")
         candidate = shared_assets_root() / "domain-packs/general-science"
         request = {"schema_version": "evidence-pack-migration-request/v1", "target": str(target), "path": str(candidate),

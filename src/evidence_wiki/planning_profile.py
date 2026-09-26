@@ -25,6 +25,8 @@ def compile_profile(request, target, pack, blockers, *, _owned_target=False):
         skipped_decisions=payload["open_decisions"] or ["Execution and evidence acceptance require their owning checks."],
         questions=[], frozen_requirements={"schema_version": "evidence-research-requirements/v1",
             "request": copy.deepcopy(request["request"]), "decisions": copy.deepcopy(decisions)})
+    if decisions["orchestration"] is not None:
+        profile["orchestration"] = copy.deepcopy(decisions["orchestration"])
     domain = payload["domain"]
     profile["domain_guidance"] = {"mode": domain["mode"], "rationale": domain["rationale"]}
     if domain["mode"] == "project_local":
@@ -103,6 +105,12 @@ def compile_profile(request, target, pack, blockers, *, _owned_target=False):
         profile_path=None, profile=profile, dry_run=True, force=False)
     selection = owned_call("/request/payload/domain/pack", init.resolve_domain_pack, options.domain_pack, options.starter_root)
     config = owned_call("/profile/effective_configuration", init.build_config, options, selection)
+    # Inherited delegation must also account for requested providers removed by
+    # authority, budget or adapter filtering above.
+    orchestration = owner("_orchestration_config")
+    settings = owned_call("/profile/effective_configuration/orchestration", orchestration.orchestration_config, config)
+    owned_call("/decisions/acquisition", orchestration.validate_acquisition_exclusivity, settings,
+               providers_enabled=bool(decisions["acquisition"]))
     normalization = owned_call("/profile/normalization", owner("_normalization_config").normalization_config, config)
     if normalization["adapters"]:
         blockers.append(blocker("normalization_adapter_qualification_required", field="/request/payload/domain/pack"))

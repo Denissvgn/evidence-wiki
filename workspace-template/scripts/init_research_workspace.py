@@ -32,6 +32,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 # resolved path to stay inside an already-resolved root. Reused here for the
 # init/upgrade *writer* paths so the readers and writers cannot drift.
 from _handoff_signature import handoff_secret, sign_handoff
+from _orchestration_config import OrchestrationConfigError, orchestration_config, validate_acquisition_exclusivity
 from _pack_selection import selection_metadata
 from _provider_plugins import ProviderPluginError, registered_ids, require_registration
 
@@ -93,6 +94,7 @@ PROFILE_CONFIG_SECTIONS = (
     "computation",
     "strict_evidence",
     "evidence_trust",
+    "orchestration",
 )
 ALLOWED_PACK_FILE_SUFFIXES = {".csv", ".json", ".md", ".txt", ".yaml", ".yml"}
 FORBIDDEN_PACK_PATH_CHARACTERS = '<>:"|?*\\'
@@ -121,18 +123,7 @@ PROFILE_ALLOWED_KEYS = frozenset(
         "assumptions",
         "skipped_decisions",
         "next_actions",
-        "raw",
-        "sources",
-        "wiki",
-        "taxonomy",
-        "ingest",
-        "run",
-        "lint",
-        "outputs",
-        "integrations",
-        "computation",
-        "strict_evidence",
-        "evidence_trust",
+        *PROFILE_CONFIG_SECTIONS,
         "research_yml",
         "init_report",
         "handoff",
@@ -534,10 +525,24 @@ def validate_source_roots(values: list[str], label: str) -> None:
                 raise SystemExit(f"{label} has overlapping roots that would scan evidence twice: {left_value!r} and {right_value!r}")
 
 
-def validate_profile_config_sections(profile: dict[str, Any]) -> None:
-    research_yml = profile.get("research_yml") or {}
-    if research_yml and not isinstance(research_yml, dict):
+def profile_research_overrides(profile: dict[str, Any]) -> dict[str, Any]:
+    """Read only supported nested configuration sections without discarding supplied input."""
+    research_yml = profile.get("research_yml", {})
+    if not isinstance(research_yml, dict):
         raise SystemExit("setup profile research_yml must be a mapping")
+    if any(not isinstance(key, str) for key in research_yml):
+        raise SystemExit("setup profile research_yml keys must be strings")
+    unknown = sorted(set(research_yml) - set(PROFILE_CONFIG_SECTIONS))
+    if unknown:
+        names = ", ".join(ascii(key)[:80] for key in unknown[:5])
+        suffix = ", ..." if len(unknown) > 5 else ""
+        hint = "; use the top-level project mapping for project identity" if "project" in unknown else ""
+        raise SystemExit(f"setup profile research_yml has unsupported sections: {names}{suffix}{hint}")
+    return research_yml
+
+
+def validate_profile_config_sections(profile: dict[str, Any]) -> None:
+    research_yml = profile_research_overrides(profile)
 
     for section in PROFILE_CONFIG_SECTIONS:
         if section in profile and not isinstance(profile[section], dict):
@@ -997,6 +1002,8 @@ def validate_validation_metadata(profile: dict[str, Any]) -> None:
 
 
 def validate_profile(profile: dict[str, Any]) -> None:
+    if any(not isinstance(key, str) for key in profile):
+        raise SystemExit("setup profile top-level keys must be strings")
     unknown = sorted(set(profile) - PROFILE_ALLOWED_KEYS)
     if unknown:
         raise SystemExit(f"setup profile has unknown top-level keys: {', '.join(unknown)}")
@@ -1461,9 +1468,7 @@ def derive_run_release_budget_override(overrides: dict[str, Any]) -> None:
 
 def profile_config_overrides(profile: dict[str, Any]) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
-    research_yml = profile.get("research_yml") or {}
-    if research_yml and not isinstance(research_yml, dict):
-        raise SystemExit("setup profile research_yml must be a mapping")
+    research_yml = profile_research_overrides(profile)
 
     for section in PROFILE_CONFIG_SECTIONS:
         if section in profile:
@@ -1918,6 +1923,14 @@ def validate_config_paths(config: dict[str, Any]) -> None:
     validate_codebase_analysis_integration(integrations_config, "research.yml integrations.codebase_analysis")
     validate_acquisition_integration(integrations_config, "research.yml integrations.acquisition")
     validate_discovery_integration(integrations_config, "research.yml integrations.discovery")
+    try:
+        settings = orchestration_config(config)
+        acquisition = integrations_config.get("acquisition") or {}
+        validate_acquisition_exclusivity(
+            settings, providers_enabled=acquisition.get("enabled") is True and bool(acquisition.get("providers")),
+        )
+    except OrchestrationConfigError as exc:
+        raise SystemExit(exc.message) from None
 
 
 def domain_guidance_config(profile: dict[str, Any]) -> dict[str, Any]:
@@ -2124,7 +2137,7 @@ def render_domain_report_lines(
         lines.append("- Discovery remains disabled unless integrations.discovery.enabled is explicitly true.")
     if recommended_acquisition:
         lines.append(f"- Recommended acquisition providers: {', '.join(recommended_acquisition)}.")
-        lines.append("- Acquisition remains disabled unless integrations.acquisition.enabled is explicitly true.")
+        lines.append("- Package acquisition providers remain disabled unless integrations.acquisition.enabled is explicitly true.")
     local_guidance = project_domain_guidance_path(profile)
     if local_guidance is not None:
         lines.append(f"- Project-local guidance: `{local_guidance}`.")
@@ -2180,6 +2193,12 @@ def render_init_report(config: dict[str, Any], options: InitOptions, domain_pack
         ]
     )
     append_report_mapping_section(lines, "Integrations", integrations_config)
+    settings = orchestration_config(config)
+    responsibility = {"mode": settings["acquisition_mode"]}
+    if settings["acquisition_mode"] == "delegated":
+        responsibility.update(acquirer_agent_id=settings["acquirer_agent_id"],
+                              max_attempts_per_request=settings["max_attempts_per_request"])
+    append_report_mapping_section(lines, "Acquisition Responsibility", responsibility)
     render_validation_section(lines, options.profile)
     append_report_list_section(lines, "Assumptions", guidance_list_items(options.profile.get("assumptions")))
     append_report_list_section(lines, "Skipped Decisions", guidance_list_items(options.profile.get("skipped_decisions")))
@@ -2551,6 +2570,11 @@ def print_plan(
         providers = phase_config.get("providers")
         provider_text = ", ".join(providers) if isinstance(providers, list) and providers else "none"
         print(f"- {phase}: {'enabled' if enabled else 'disabled'} ({provider_text})")
+    settings = orchestration_config(config)
+    print(f"- acquisition mode: {settings['acquisition_mode']}")
+    if settings["acquisition_mode"] == "delegated":
+        print(f"- acquirer agent: {settings['acquirer_agent_id']}")
+        print(f"- attempts per request: {settings['max_attempts_per_request']}")
     if guidance_path is not None:
         print(f"- project-local domain guidance: {guidance_path}")
     if report_path is not None:

@@ -199,11 +199,60 @@ Supported top-level profile config sections are merged into `research.yml`:
 - `wiki`
 - `taxonomy`
 - `ingest`
+- `run`
 - `lint`
 - `outputs`
 - `integrations`
+- `computation`
+- `strict_evidence`
+- `evidence_trust`
+- `orchestration`
 
-The same sections may also be nested under `research_yml`. Dictionary values are deep-merged; list values replace the starter list. Unknown nested config keys are allowed for forward compatibility, but unknown profile top-level keys are refused.
+The same sections may also be nested under `research_yml`. Dictionary values
+are deep-merged; list values replace the earlier list. Precedence is starter,
+domain-pack overlay, direct profile sections, nested `research_yml` sections,
+then explicit provider CLI flags. Final project identity comes from its
+dedicated profile fields and CLI options.
+
+The `research_yml` container must be a mapping when present; omit it or use
+`{}` for no nested overrides. Unsupported section names, non-string keys, and
+non-mapping section values are refused before workspace writes. This also
+refuses `research_yml: null`, `false`, or `[]`; these values are not empty
+override mappings. Use the top-level `project` mapping for project identity.
+Fields within each supported section retain that section's own validation.
+
+To delegate acquisition, add this fragment to a complete profile:
+
+```yaml
+workspace_init:
+  research_yml:
+    orchestration:
+      acquisition: delegated
+      acquirer_agent_id: evidence-host
+      max_attempts_per_request: 2
+    integrations:
+      acquisition:
+        enabled: false
+        providers: []
+```
+
+The same declaration can be placed directly at `workspace_init.orchestration`.
+The initializer validates the effective acquirer, attempts limit, and provider
+configuration in both preview and creation. An active acquisition provider,
+including one selected with `--acquisition-provider`, conflicts with delegation
+and refuses before target creation. A valid disabled provider list may remain
+stored, but an empty list makes a delegated profile's intent clear. Switching
+an inherited delegated configuration to providers must not leave delegated-only
+fields behind; incompatible merged settings refuse instead of deleting fields.
+
+Preview and the generated initialization report show the effective acquisition
+mode, acquirer, and delegated attempts limit. The declaration does not contact
+the host or grant network access. Drive a delegated workspace through the
+external start/next/submit protocol described in [orchestration](orchestration.md).
+
+Tooling upgrades preserve `research.yml` and cannot recover choices omitted by
+an older initializer. Use a reviewed profile for a new workspace; do not apply
+an implicit YAML repair to an existing frozen setup transaction.
 
 ## Domain Packs
 

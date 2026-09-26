@@ -8,6 +8,14 @@ operation matrix is version `2`; `agent extensions` returns the optional MCP
 schemas and lifecycle request shapes. Strict evidence and final export gates
 remain authoritative across these surfaces.
 
+Version `14` adds typed acquisition responsibility to saved setup requests.
+`contract()["research_planning"]["orchestration_selection"]` advertises the
+selector used by `Onboarding.plan`, `check_plan` and `apply`. See the
+[complete delegated setup example](../workspace-template/docs/research-planning.md#complete-delegated-setup-example).
+Old requests remain accepted; old installations reject the new decision field.
+Plans bind installed code and resources, so restart hosts and recompile after
+an upgrade rather than editing a saved identity or adopting a partial target.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
