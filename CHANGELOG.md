@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 1.1.0 - 2026-09-26
+
 - Add typed acquisition responsibility to saved setup requests through
   `decisions.orchestration`, discoverable in Library API 14. Preserve delegation
   through plan/check/apply, strict requirement bindings and owned replay;
@@ -12,6 +14,11 @@
   profiles. Reject unsupported nested sections and invalid or conflicting
   acquisition settings before workspace writes, and show the effective
   acquisition responsibility in preview and initialization reports.
+
+- Update the reusable starter to 1.0.1. Existing workspace metadata and
+  research configuration contracts remain compatible. Recompile saved setup
+  plans after updating the installation; older installations reject the new
+  orchestration decision field.
 
 ## 1.0.0 - 2026-09-25
 
