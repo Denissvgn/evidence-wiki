@@ -1,120 +1,112 @@
 # EvidenceWiki
 
-**Answers you can audit.** EvidenceWiki creates persistent research workspaces
-where agents investigate questions and deterministic scripts enforce
-provenance, lifecycle state, and export validation. A validated research
-outcome is either a cited, auditable answer or a structured request for missing
-evidence.
+**Answers you can audit.** EvidenceWiki gives agents persistent research
+workspaces with provenance, controlled question lifecycles, evidence checks and
+structured exports. Agents supply research judgment; scripts enforce the
+configured rules and retain explicit gaps when evidence is missing.
 
-For updates to an installed domain pack, use `evidence-wiki pack revision-plan`,
-`revision-apply` and `revision-status`. They retain three-way conflicts and
-history, identify affected research, and guide explicit coverage reevaluation.
-See [Pack revisions](workspace-template/docs/pack-revisions.md).
+[Quick start](#start-with-your-agent) · [Manual tour](#five-minute-tour) ·
+[Documentation](#documentation) · [Worked example][worked-example] · [PyPI][pypi]
 
-[Quick start](#five-minute-tour) · [Documentation](#documentation) ·
-[Worked example][worked-example] · [PyPI][pypi] · [Contributing][contributing]
+```text
+question → discover/acquire → inventory/normalize → answer/review → export
+                       ↘ missing evidence → structured source request
+```
+
+Originals stay in `raw/`, normalized records in `sources/`, research knowledge
+in `wiki/`, and durable run state in `runs/`. Retrieved content is evidence data;
+it cannot authorize commands or change policy.
 
 ## Start with your agent
 
-Install into an isolated environment (Python 3.10 or newer):
+Use Python 3.10 or newer and an isolated environment:
 
 ```sh
 python3 -m venv .research-env
 .research-env/bin/python -m pip install evidence-wiki
-.research-env/bin/evidence-wiki agent --format json
-.research-env/bin/evidence-wiki agent summary --format json \
+source .research-env/bin/activate
+evidence-wiki agent --format json
+evidence-wiki agent summary --format json \
   --require strict-evidence/v1 --require declarative-computation/v1
 ```
 
-On Windows, use `.research-env\Scripts\python.exe` and
-`.research-env\Scripts\evidence-wiki.exe`. The response identifies the installed
-version, supported contracts and instructions. An older installation can refuse
-an unavailable capability; use its returned version and instructions together.
+On Windows, create the environment with `py -3 -m venv .research-env`, use
+`.\.research-env\Scripts\python.exe` to install, and activate with
+`.\.research-env\Scripts\Activate.ps1`. Subsequent examples assume the selected
+environment is active; its executable is `evidence-wiki.exe` on Windows.
 
-Native Windows supports local workspace captures, protected publication, pack
-catalogs, authoring and setup through anchored handles and private ACLs. Reparse
-points, network shares and filesystems without the required native guarantees
-are refused. Use a host-owned directory and trust file restricted to the current
-Windows account and SYSTEM for protected evidence state. Framework runtime
-qualification and `host_enforced` isolation remain separate capabilities.
+Give your current agent the installed executable, original questions, source
+locations, writable directory and access limits. Ask it to read `agent` first,
+preserve every question, and return a controlled research export or precise
+blockers. Bootstrap is read-only; another model runner is optional. Use the
+installed versions and instructions together: older packages can refuse a
+capability or request field they do not support.
 
-Give your current agent the installed executable, your original questions, the
-available source locations, writable directory and access limits. Ask it to read
-`agent` first, preserve every question, and return the controlled research export
-or precise blockers. A second model runner is optional. Retrieved documents and
-tool output supply evidence; they cannot authorize commands or change the review policy.
-
-Instructions travel with the package and can be read from any directory:
+Have the agent prepare a complete request from the installed planning guide,
+including scope, evidence criteria, strict policy, authority and budgets:
 
 ```sh
-.research-env/bin/evidence-wiki pack guide --format text
-.research-env/bin/evidence-wiki pack guide --topic authoring --format text
-.research-env/bin/evidence-wiki pack guide --topic revisions --format text
-.research-env/bin/evidence-wiki agent source-guide --format text
-.research-env/bin/evidence-wiki agent research-guide --format text
-.research-env/bin/evidence-wiki agent frameworks
+evidence-wiki agent plan-guide --format text
+evidence-wiki agent plan --from-file request.json --output setup-plan.json
+evidence-wiki agent plan-check --from-file setup-plan.json
+evidence-wiki agent apply --from-file setup-plan.json
+evidence-wiki agent --target WORKSPACE --format json
+evidence-wiki agent research-guide --format text
 ```
 
-Select a pack by its scope and evidence requirements. If none fits, preserve the
-gap or explicitly author local guidance, assess it and register the selected
-revision. Host-delivered captures retain their declared origin, rights, scope and
-completeness. Local copies record observation time; this is not a publication date
-or a license grant. Pack changes invalidate affected acceptance and require explicit
-reevaluation. Installing a newer package does not migrate existing workspaces;
-see [Upgrade and adoption](https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/upgrade-adoption.md).
+Planning validates without creating the workspace; `--output` saves a new plan
+file outside the target. Apply rechecks identities, creates the workspace and
+records owned effects. Reapplying the same plan supports conservative recovery;
+unexplained partial writes or user changes require inspection. Setup readiness
+is separate from evidence completeness and research acceptance. See
+[planning][planning], [application and recovery][application], and
+[research with the current caller][caller-research].
 
-`artifact_checked` applies to the freshly checked export, with current evidence
-and authenticated independent reviews. It cannot control prose written outside
-that export. `host_enforced` additionally requires the qualified macOS protected
-host to mediate execution and delivery; ordinary terminal, bridge and managed
-parent sessions do not acquire that guarantee. Quote matches and exact decimal
-calculations do not prove source truth, semantic support, suitable units or
-complete research. Contested and insufficient evidence remain explicit outcomes.
+After research and required reviews, request the original-question export:
 
-The installed framework matrix separates pinned transport/resource observations
-from model behavior. Pi, OpenCode and Gemini have observed modes on macOS arm64;
-live-model research and other platform/version combinations need their own
-qualification. Read the exact modes with `agent frameworks` before selecting one.
-
-### How This Project Was Built
-
-EvidenceWiki was planned, written, and tested entirely with AI coding agents.
-Most of the work was done with OpenAI Codex using GPT-5.5 and GPT-5.6, with
-Anthropic Claude also used for parts of the project. No code in this repository
-was manually authored by a human.
-
-## Why EvidenceWiki
-
-- **Traceable answers.** Every citation resolves through a stable source ID to
-  a normalized record and its provenance-tracked original.
-- **Evidence-aware failure.** Configured coverage requirements block weakly
-  supported answers and produce machine-readable source requests.
-- **Deterministic control.** Scripts own critical question-lifecycle
-  transitions, validation, and export; agents supply research judgment.
-- **Reusable workspaces.** The starter, domain packs, agent skills, and
-  orchestration protocol work across research domains and agent harnesses.
-
-```text
-question → discover/acquire → inventory/normalize → answer/verify → export
-                       ↘ missing evidence → structured source request
+```sh
+evidence-wiki agent research-export --target WORKSPACE --format json
 ```
 
-The workspace keeps original evidence in `raw/`, generated evidence records in
-`sources/`, and maintained research knowledge in `wiki/`. Source content is
-treated as data, never as agent instructions; see [prompt-injection
-hardening][prompt-injection].
+Unresolved questions, source gaps and review requirements remain explicit.
+Partial output does not report complete research.
+
+### Hosts with their own acquisition tools
+
+A saved request can select an external acquirer in `decisions`:
+
+```json
+{
+  "orchestration": {
+    "acquisition": "delegated",
+    "acquirer_agent_id": "external-acquirer"
+  },
+  "acquisition": []
+}
+```
+
+This is a decision fragment; the [planning guide][planning] supplies a complete
+request and `agent plan-schemas` exposes the installed schema. Omission or `null`
+retains starter/pack inheritance. Native [initialization profiles][init-profile]
+also preserve orchestration declarations. Conflicting package-acquisition
+choices refuse before workspace writes.
+
+Delegation assigns responsibility without granting connector access,
+credentials or execution authority. Drive it through the external protocol
+below; managed `orchestrate run` and `resume` refuse delegated workspaces.
 
 ## Five-Minute Tour
 
-These commands set up the workflow; research time varies with the question,
-providers, and agent runner. The examples use a POSIX-compatible shell; on
-Windows, create `batch.yaml` in an editor or adapt that one heredoc step for
-PowerShell. Python 3.10 or newer is required.
+This direct-initialization example creates a basic scientific workspace. Without
+an explicit strict policy it uses legacy QA; its `export` command reports
+answers without strict review assurance. Use the agent-led strict setup above
+for controlled release. Research duration depends on sources and the runner.
 
-Install the package and create a provider-enabled scientific workspace:
+Inspect a pack's scope, exclusions and review requirements before selecting it:
 
 ```bash
-python3 -m pip install evidence-wiki
+evidence-wiki pack list
+evidence-wiki pack show bundled:general-science
 evidence-wiki deploy \
   --target solid-state-batteries \
   --project-name solid-state-batteries \
@@ -127,67 +119,11 @@ evidence-wiki deploy \
 cd solid-state-batteries
 ```
 
-`init` and `deploy` invoke the same workspace initializer. The repeated
-provider flags explicitly authorize network-backed discovery and acquisition;
-a domain pack never enables providers by itself. arXiv needs no credential,
-while OpenAlex can use `OPENALEX_API_KEY` from the process environment. See
-[workspace initialization][workspace-initialization], [source
-discovery][source-discovery], and [acquisition][acquisition] for the full
-contracts.
+`init` and `deploy` share the initializer; `--dry-run` previews without workspace
+writes. Provider flags explicitly configure separate discovery and acquisition
+permissions. Domain packs never enable providers on their own.
 
-Check credentials before the first command that needs external services:
-
-```bash
-evidence-wiki env check --service openalex --service github --format json
-```
-
-`env check` reports variable names and presence only. `env run --prompt` asks
-for missing values with terminal echo disabled and passes them to the selected
-command and its children. Values are never saved by this helper or added to your
-parent shell. Inject persistent credentials through your host secret manager.
-Select `openai`, `anthropic`, `github` or `openalex`, or use `--require-env NAME`
-for another integration. Select only the credentials your workflow needs;
-initialization and offline work require none, and agent runners may use their
-own login. See [environment setup](workspace-template/docs/environment-setup.md).
-
-Inspect guidance before selecting it with `evidence-wiki pack list` and
-`evidence-wiki pack show bundled:general-science`. Packs expose scope inputs,
-exclusions and review requirements. Use `evidence-wiki pack guide --format text`
-for explicit local catalogs and requirement-based selection; see
-[pack selection](workspace-template/docs/pack-selection.md).
-
-Use `evidence-wiki agent inspect --target WORKSPACE` to distinguish installed
-capabilities from configured access and source usability. Select source IDs with
-`agent source-status`; `agent source-guide --format text` explains host captures,
-route choices and remediation. Inspection does not activate providers or run
-normalization. See [source usability](workspace-template/docs/source-usability.md).
-
-`agent recipes` describes bounded native DOCX text/table capture. Use
-`agent extensions` for explicit pack identity migration, composition, fleet
-proposals and host transitions. Python hosts can use `Onboarding.open` with
-selected roots and operation grants; `serve-onboarding-mcp` exposes the same
-scoped owners. See [onboarding contracts](workspace-template/docs/agent-contracts.md#scoped-python-onboarding)
-and [optional native skill installation](workspace-template/docs/frameworks.md#optional-native-instruction-installation).
-
-Use `evidence-wiki agent plan --from-file request.json` to compile a read-only
-setup plan with original question mappings, evidence criteria, source routes and
-explicit assurance blockers. Save with `--output` and recheck input identities
-with `agent plan-check`. See [research planning](workspace-template/docs/research-planning.md).
-
-Use `evidence-wiki pack guide --topic authoring` to scaffold or derive local
-guidance, freeze assessment cases, qualify a revision and resume setup planning.
-Apply a saved plan with `evidence-wiki agent apply --from-file PLAN`.
-[Workspace application](workspace-template/docs/workspace-application.md) describes
-local delivery, observed readiness, locking and conservative recovery.
-
-For an existing workspace, `evidence-wiki agent --target WORKSPACE` returns current
-next-action advice. Use `agent research-guide` for the caller-driven loop,
-verified source ingestion, original-question export and optional local progress.
-[Caller research](workspace-template/docs/caller-research.md) uses the current
-agent and canonical owners; no additional model runner is required.
-Structural and arithmetic checks retain separate domain-review requirements.
-
-Add a question using the [question API][question-api]:
+Add a question (on PowerShell, create `batch.yaml` in an editor):
 
 ```bash
 cat > batch.yaml <<'EOF'
@@ -200,14 +136,12 @@ EOF
 evidence-wiki questions add --target . --from-file batch.yaml
 ```
 
-Codex CLI 0.138 or newer must already be installed for the managed Codex
-adapter. Check the environment before launching it:
+Install a supported [managed runner](#drive-it-with-an-agent) separately, check
+the environment, then run:
 
 ```bash
 evidence-wiki doctor --format json
 ```
-
-Run the managed orchestrator:
 
 ```bash
 evidence-wiki orchestrate run \
@@ -216,81 +150,45 @@ evidence-wiki orchestrate run \
   --agent-id battery-demo
 ```
 
-Use `--runner claude` for the managed Claude Code adapter. Then inspect the
-durable parent session and export the answer:
-
 ```bash
 evidence-wiki orchestrate status --target . --format json
 evidence-wiki export --target . --format json
 ```
 
-The orchestrator can discover candidate sources, ask an agent to select them,
-acquire and normalize the selected evidence, reopen a blocked question, and
-verify the final artifacts. If allowed providers cannot satisfy the request,
-the session ends as `blocked_on_sources` instead of inventing an answer. The
-[orchestration guide][orchestration] covers execution, recovery, and security
-boundaries.
+The controller coordinates discovery, selected acquisition, normalization and
+verification. Unavailable evidence remains `blocked_on_sources`. Use `resume`
+for a retained managed session after runner failure; see [orchestration][orchestration].
 
-### Local-files-only alternative
-
-Discovery and acquisition are optional. Omit provider flags, deliver reviewed
-files with provenance sidecars under the configured `raw/` roots, then run:
+For offline work, omit provider flags and deliver reviewed originals with
+[provenance sidecars][source-delivery] under configured raw roots. From the
+workspace, using its selected Python environment:
 
 ```bash
-python3 scripts/source_inventory.py --report
-python3 scripts/normalize_sources.py --all
+python -B scripts/source_inventory.py --report
+python -B scripts/normalize_sources.py --all
 ```
 
-Inventory and normalization process only files already present. Continue with
-the [research-run skill][research-run], or use the external protocol described
-below. The [source-delivery contract][source-delivery] defines provenance
-sidecars and atomic delivery.
+Inventory writes the source manifest; normalization writes evidence records.
+Use `--dry-run` to preview these operations. Keep raw evidence immutable and
+continue with the [research workflow][research-run].
 
 ## Drive It With An Agent
 
-Start with your current agent and terminal, before creating a workspace:
+| Mode | Entry point and boundary |
+| --- | --- |
+| Current caller | `agent research-guide` describes advice, claims, ingestion and controlled export without another model runner. |
+| Managed adapters | `orchestrate run` / `resume` support Codex CLI 0.138+ and Claude Code. Managed Claude is unavailable on native Windows. |
+| External host | `start` / `next` / `submit` / `status` support an operator-controlled host, including OpenCode, Pi, Aider or Gemini CLI. |
 
-```bash
-evidence-wiki agent
-evidence-wiki agent summary --format json
-evidence-wiki agent resource guide/pack-authoring/v1
-evidence-wiki agent frameworks
-```
-
-Bootstrap is read-only and includes the installed operating guide, versioned
-resource references and a strict-policy template. It requires no secondary model
-CLI. Resource access does not apply policy or establish host enforcement; the
-guide explains configuration, independent review and explicit evidence gaps.
-
-Portable skills and an optional Pi native tool/RPC bridge reuse these contracts.
-Inspect exact framework versions and qualified modes before use, then create a
-caller-local bundle with `evidence-wiki agent bundle --target NEW_DIRECTORY`.
-No global agent settings or trust choices are changed. See the installed
-`guide/frameworks/v1` resource for Pi, OpenCode and Gemini CLI recipes and limits.
-
-EvidenceWiki supports agent harnesses at three levels:
-
-- **Managed adapters:** Codex and Claude Code are the registered runners for
-  package-owned `run` and `resume` execution.
-- **External protocol:** OpenCode, Pi, Aider, Gemini CLI, and other harnesses
-  can drive `start`, `next`, `submit`, and `status` from an operator-controlled
-  host. They are not package-managed runners.
-- **Instruction compatibility:** any worker can follow the workspace
-  `AGENTS.md`, selected skill, and bounded work order. `CLAUDE.md` points
-  Claude-style agents to the same contract.
-
-Managed Codex execution requires Codex CLI 0.138 or newer. Managed Claude
-execution is unavailable on native Windows; use macOS, Linux, WSL2, a
-container, or the external protocol. If the required isolation boundary cannot
-be enforced, the host returns `RUNNER_ISOLATION_UNAVAILABLE` before starting a
-worker. The parent exclusively owns `runs/orchestrations/`; workers never write
-that tree or invoke the parent controller. Use `resume` for a retained session
-after a runner failure. See [parent orchestration][orchestration] for
-isolation, leases, tamper recovery, and upgrade rules.
+Managed execution refuses with `RUNNER_ISOLATION_UNAVAILABLE` when its required
+boundary is unavailable. The parent owns `runs/orchestrations/`; workers follow
+bounded work orders and never invoke the parent controller or write its state.
+`AGENTS.md` and the selected skill define worker instructions; `CLAUDE.md` points
+to the same contract.
 
 ### External protocol
 
-A PM, planner, or custom host can drive the model-neutral protocol directly:
+Replace placeholders with the workspace and IDs returned by the controller:
 
 ```bash
 evidence-wiki orchestrate start --target PATH --agent-id parent-agent --format json
@@ -300,287 +198,191 @@ evidence-wiki orchestrate submit --target PATH --orchestration-id ORCH_ID \
 evidence-wiki orchestrate status --target PATH --orchestration-id ORCH_ID --format json
 ```
 
-`next` is idempotent, and `submit` verifies workspace postconditions before
-advancing. External hosts must provide process isolation, single-driver
-coordination, and crash replay; see the [orchestrator handoff
-contract][orchestrator-handoff]. The packaged [research-orchestrate
-playbook][research-orchestrate] lives under `orchestrator/skills/` and can be
-located without a source checkout:
+`next` is idempotent; `submit` checks workspace postconditions before advancing.
+External hosts own isolation, single-driver coordination, authorization and
+crash replay. Read the [handoff contract][handoff] and retrieve the packaged
+playbook with `evidence-wiki orchestrator-guide --print`.
 
-```bash
-evidence-wiki orchestrator-guide
-evidence-wiki orchestrator-guide --print
-```
+Use `agent frameworks` for the installed Pi, OpenCode and Gemini version/mode
+matrix, and `agent bundle --target NEW_DIRECTORY` for a portable bundle. Bundle
+export changes no global agent settings or trust decisions. Transport support
+does not establish model behavior or host isolation. See [frameworks][frameworks].
 
-For MCP clients, an optional stdio server exposes status, retrieval, question
-intake, answer export, and source-request listing:
-
-```bash
-evidence-wiki serve-mcp --target /path/to/workspace
-```
-
-See the [MCP server contract][mcp-server] for its tool list and read/append-only
-boundary.
+For MCP, `serve-mcp --target WORKSPACE` exposes the [workspace read/append
+interface][mcp]. `serve-onboarding-mcp --allow-root ROOT --allow-operation apply`
+exposes [scoped onboarding][agent-contracts] with host-selected roots and explicit
+mutation grants. These interfaces share the canonical owners.
 
 ## Drive It From Python
 
-A host that embeds EvidenceWiki — an ASGI service, a scheduler, a batch worker —
-can call the package in-process instead of spawning the CLI per operation:
+Open an existing workspace through the library:
 
 ```python
 from evidence_wiki import Workspace
 
 with Workspace.open("/path/to/workspace") as ws:
-    report = ws.coverage.evaluate("electrolyte-conductivity")
+    status = ws.status()
 ```
 
-Twenty-six operations return the same documents the matching `--format json`
-commands print, and refuse with typed exceptions carrying the same stable error
-codes. Both doors render from one seam per operation, so they cannot disagree.
-Orchestration keeps a subprocess to the workspace's own deployed controller,
-which is version-matched to the session state it owns. The package ships no HTTP
-server; hosts build their own. See the [library API][library-api] for the full
-surface, the error families, thread-safety guarantees, and a worked embedding
-example.
+`Workspace` operations reuse CLI owners and return plain dictionaries, with typed
+exceptions carrying stable error codes. `Onboarding.open` covers setup and
+lifecycle work through explicit roots and operation grants. Discover the current
+surface with `evidence-wiki contract`; see the [library API][library-api] for
+operation effects, lifetime and thread-safety rules. Orchestration retains the
+workspace's deployed controller subprocess. The package supplies no HTTP server.
+
+## Evidence, Permissions and Assurance
+
+Discovery proposes candidates; acquisition retrieves selected evidence. Their
+permissions and credentials are independent. A token, installed runner, pack
+recommendation or discovered URL does not grant access. Use [provider
+configuration][acquisition] and [source inspection][source-usability] to distinguish
+capability, authorization, capture completeness and usable evidence.
+
+```sh
+evidence-wiki env check --service openalex --format json
+evidence-wiki agent inspect --target WORKSPACE
+```
+
+`env check` reports names and presence only. `env run --prompt` reads missing
+credentials without terminal echo and passes them only to the selected command
+and its children; it saves nothing and does not change the parent shell. Select
+only needed services or `--require-env NAME`, and use your host secret manager
+for persistence. Initialization and offline work require no credentials; agent
+runners may use their own login. See [environment setup][environment].
+
+Host-delivered captures retain declared origin, rights, scope and completeness.
+A local observation timestamp is neither a publication date nor a license grant.
+Native DOCX recipes are available through `agent recipes`. External normalizers
+can supply [contract-conforming records][normalized-source], checked by
+`normalize verify`; source truth and fitness still require review.
+
+For accepted research exports, the assurance modes require distinct boundaries:
+
+| Assurance | Required acceptance boundary |
+| --- | --- |
+| `artifact_checked` | Current artifact checks and authenticated independent reviews; no control over prose outside the accepted export. |
+| `host_enforced` | Additionally requires the qualified macOS protected host to mediate execution and delivery. A terminal, bridge or managed parent alone does not provide it. |
+
+Quote matching and exact arithmetic do not prove semantic support, correct
+scope/units or complete research. Contested and insufficient evidence stay
+explicit. Read [strict evidence][strict-evidence], [computation][computation],
+and [prompt-injection boundaries][prompt-injection].
 
 ## Requirements and Diagnostics
 
-Required:
+Python 3.10+ is required. Installation includes PyYAML, ruamel.yaml, pypdf and
+tzdata; [package metadata][package-metadata] owns their supported version bounds.
+pypdf provides portable PDF extraction. Poppler is optional unless explicitly
+selected as the PDF backend; Git snapshots and managed model CLIs are optional.
+Run `evidence-wiki doctor --format json` for available capabilities and
+`evidence-wiki status --target WORKSPACE --format json` for workspace health.
+See [workspace validation][workspace-status] for lower-level checks and completion.
 
-- Python 3.10 or newer.
-- PyYAML 6.0 or newer, ruamel.yaml 0.19.1 or newer within the 0.19 series, and
-  pypdf 6.14 or newer within major version 6. All are installed with
-  `evidence-wiki`; ruamel.yaml preserves live YAML comments and quoting during
-  pack refresh, while the portable pypdf backend requires no separate PDF tool.
-
-Optional capabilities include Codex CLI or Claude Code for managed runs, Git
-for snapshots, and the Poppler compatibility backend for explicitly configured
-`pdftotext` extraction. Platform installation is covered by [workspace
-initialization][workspace-initialization]; managed-runner sandbox requirements
-are covered by [parent orchestration][orchestration].
-
-Check dependencies and optional capabilities from any directory:
-
-```bash
-evidence-wiki doctor --format json
-```
-
-An initialized workspace includes the same preflight:
-
-```bash
-python3 scripts/doctor.py --format json
-```
-
-Missing pypdf is a required failure. Missing Poppler is informational unless
-the workspace explicitly selects the Poppler compatibility backend.
+Native Windows supports local captures, protected publication, pack catalogs
+and setup through anchored handles and private ACLs. Reparse points, network
+shares and filesystems lacking required guarantees refuse. Restrict protected
+host state and trust files to the current account and SYSTEM. Framework
+qualification and `host_enforced` isolation remain separate; see
+[platform and authority boundaries][agent-contracts].
 
 ## Create and Maintain a Workspace
 
-Create a generic workspace from explicit fields:
+Choose domain guidance by scope and evidence requirements. When no pack fits,
+retain the gap or explicitly author, assess and register local guidance using
+`pack guide --topic authoring`. [Pack selection][pack-selection] and
+[authoring][pack-authoring] describe the decisions; `agent extensions` covers
+identity migration, composition, fleet proposals and host transitions.
 
-```bash
-evidence-wiki init \
-  --target ../my-research-workspace \
-  --project-name my-research-workspace \
-  --project-description "Research workspace for a specific topic" \
-  --owner-goal "Build a source-grounded knowledge base for decisions"
+Installing a newer package does not migrate existing workspaces. Preview and
+apply starter-managed updates explicitly:
+
+```sh
+evidence-wiki upgrade --target WORKSPACE --dry-run
+evidence-wiki upgrade --target WORKSPACE
 ```
 
-Add `--dry-run` to preview without writing files. For minimal-preparation,
-agent-assisted setup, ask an agent to follow the [research-init
-skill][research-init]; it can prepare a reviewable [workspace init
-profile][workspace-init-profile].
+Upgrade preserves `research.yml`, `raw/`, `sources/`, `wiki/`, `index.md` and prior
+history. It may update starter metadata and append an
+audit entry. Pending orders or an active orchestration driver block both modes
+with `UPGRADE_PENDING_ORDER`; drain them first. Optional docs/skills have separate
+conflict rules. See [upgrade and adoption][upgrade].
 
-After upgrading the package, preview and apply starter-managed script updates:
+Packs have their own lifecycle. `pack revision-plan`, `revision-apply` and
+`revision-status` retain conflicts/history and identify research requiring
+coverage reevaluation. Legacy adoption/refresh and identity changes remain
+explicit; unresolved conflicts prevent workspace writes. See [pack revisions][pack-revisions]
+and [domain packs][domain-packs].
 
-```bash
-evidence-wiki upgrade --target ../my-research-workspace --dry-run
-evidence-wiki upgrade --target ../my-research-workspace
-```
-
-Write-mode `upgrade` refreshes only starter-managed tooling, may update
-`workspace-system.yml`, uses `.locks/`, and conditionally appends one audit
-entry to `log.md` when it applies material changes. It preserves prior log
-history, `research.yml`, `raw/`, `sources/`, `wiki/`, `index.md`, and other user
-data. `--dry-run` writes nothing. Both modes refuse with `UPGRADE_PENDING_ORDER`
-while an orchestration session holds a pending work order or an active driver,
-naming the session and order: drain orchestration before upgrading. Optional
-skills and docs have additional conflict rules documented in
-[workspace initialization][workspace-initialization].
-
-Domain packs have a separate, explicit lifecycle. Preview and apply a new
-revision of the already-installed pack with:
-
-```bash
-evidence-wiki pack refresh \
-  --target ../my-research-workspace \
-  --path general-science \
-  --dry-run
-evidence-wiki pack refresh \
-  --target ../my-research-workspace \
-  --path general-science
-```
-
-An older workspace whose pack predates lifecycle state must first run
-`evidence-wiki pack adopt --target ../my-research-workspace --dry-run`, review
-the result, and repeat without `--dry-run`. Refresh never switches pack names,
-and an unresolved local/pack conflict produces zero writes. See [domain
-packs][domain-packs] for adoption, path-specific conflict resolution, and
-transaction recovery.
-
-## Validate A Created Workspace
-
-For manual or operator-level validation, the copied workspace exposes its
-lower-level checks directly. Run these commands from the workspace root:
-
-```bash
-python3 scripts/doctor.py --format json
-python3 scripts/smoke_validate_workspace.py --format text
-python3 scripts/source_inventory.py --report
-python3 scripts/normalize_sources.py --all --dry-run
-python3 scripts/normalize_verify.py --format text
-python3 scripts/lint.py --format text
-```
-
-`source_inventory.py --report` writes `sources/manifest.jsonl`, so
-normalize_sources.py --all --dry-run reads `sources/manifest.jsonl` and can
-preview normalized records without writing them. For aggregate health and a
-machine-readable completion verdict, run:
-
-```bash
-python3 scripts/workspace_status.py --format json
-python3 scripts/workspace_status.py --check-complete --format json
-```
-
-Question intake and structured answer export are also available inside a
-workspace:
-
-```bash
-python3 scripts/intake_questions.py --from-file batch.yaml --dry-run
-python3 scripts/intake_questions.py --from-file batch.yaml --format json
-python3 scripts/export_answers.py --format json
-```
-
-The installed equivalents are `evidence-wiki status`, `evidence-wiki
-questions add`, and `evidence-wiki export`; see [workspace status][workspace-status]
-and the [question API][question-api].
-
-To preview inventory records without writing the manifest:
-
-```bash
-python3 scripts/source_inventory.py --dry-run --report
-```
-
-## Evidence and Provider Permissions
-
-Discovery and acquisition are separate permissions. Discovery providers
-(`arxiv`, `openalex`, `github`, `search`, and `standards`) propose metadata;
-candidates are not evidence until selected, acquired into `raw/`, and recorded
-with provenance. Acquisition providers (`arxiv`, `openalex`, `github`, and
-allow-listed `web`) retrieve selected evidence under configured limits.
-
-Three controls remain independent:
-
-1. `integrations.discovery` authorizes candidate lookup.
-2. `integrations.acquisition` authorizes retrieval.
-3. Environment credentials authenticate an already-authorized provider.
-
-A token, installed runner, domain-pack recommendation, or discovered URL never
-grants provider permission. See [source discovery][source-discovery],
-[acquisition][acquisition], and the [workspace init
-profile][workspace-init-profile] for provider configuration. For reviewed
-local evidence, follow the [source-delivery contract][source-delivery], keep
-raw files immutable, then inventory and normalize them.
-
-Evidence is not limited to the source kinds this package extracts. [Normalized
-records][normalized-source] are a versioned public contract, so an external
-normalizer can supply records for evidence the package does not read itself —
-structured API payloads, instrument output — and those records count on exactly
-the same terms as records the package wrote. The terms are enforced, not assumed:
-`evidence-wiki normalize verify` checks a record against the contract and names
-each breach with a stable code, and lint accepts an externally written record only
-when it conforms.
-
-## Repository Layout
-
-- [`workspace-template/`][workspace-template] is copied into each research
-  workspace and contains its scripts, skills, and operator documentation.
-- [`domain-packs/`][domain-packs] contains optional, reusable domain guidance.
-- [`examples/`][examples] includes a [complete public-safe
-  workspace][worked-example] built from synthetic evidence.
-- [`orchestrator/`][orchestrator-readme] contains the external parent-agent
-  playbook.
-- [`tests/`][tests] contains regression tests and synthetic fixtures with
-  documented usage rights.
+Saved plans bind installation and input identities. Recompile after upgrades;
+preserve partial workspaces for [owned recovery][application] instead of
+silently adopting them or repairing frozen configuration by hand.
 
 ## Documentation
 
-- **Start a workspace:** [new project guide][new-project], [workspace
-  initialization][workspace-initialization], [setup profile
-  schema][workspace-init-profile], [`research.yml` configuration][research-yml],
-  [domain packs][domain-packs], and the [worked example][worked-example].
-- **Research and evidence:** [question API][question-api], [source
-  discovery][source-discovery], [acquisition][acquisition], [source
-  delivery][source-delivery], [source manifest][source-manifest], [normalized
-  records][normalized-source], [coverage manifests][coverage-manifest],
-  [evidence policies][evidence-policies], and [citation
-  verification][citation-verification].
-- **Agents and integrations:** [parent orchestration][orchestration],
-  [orchestrator handoff][orchestrator-handoff], [workspace
-  status][workspace-status], [run controller][run-controller], [library
-  API][library-api], [MCP server][mcp-server], and [orchestrator
-  playbooks][orchestrator-readme].
-- **Safety and operations:** [prompt-injection hardening][prompt-injection],
-  [human editing and snapshots][human-editing], [codebase
-  analysis][codebase-analysis], [production readiness][production-readiness],
-  and [publication readiness][publication-readiness].
-- **Project development:** [contributing][contributing], [changelog][changelog],
-  [publishing workflow][publishing-workflow], [third-party notices][third-party],
-  and [license][license]. Architecture notes live in the workspace documents
-  above, starting with [workspace initialization][workspace-initialization] and
-  [orchestration][orchestration].
+| Need | Guides |
+| --- | --- |
+| Setup | [New project][new-project] · [Initialization][initialization] · [Profiles][init-profile] · [`research.yml`][research-yml] · [Planning][planning] · [Apply/recovery][application] |
+| Research | [Caller workflow][caller-research] · [Questions][questions] · [Discovery][discovery] · [Acquisition][acquisition] · [Delivery][source-delivery] |
+| Evidence | [Source manifest][source-manifest] · [Normalized records][normalized-source] · [Coverage][coverage] · [Evidence policies][evidence-policies] · [Citation checks][citations] · [Strict evidence][strict-evidence] |
+| Integrations | [Orchestration][orchestration] · [Handoff][handoff] · [Frameworks][frameworks] · [Python API][library-api] · [MCP][mcp] · [Scoped onboarding][agent-contracts] · [Codebase analysis][codebase] |
+| Operations | [Environment][environment] · [Workspace status][workspace-status] · [Run controller][run-controller] · [Human editing/snapshots][human-editing] · [Publication readiness][publication-readiness] · [Production readiness][production-readiness] |
+| Project | [Contributing][contributing] · [Changelog][changelog] · [Publishing workflow][publishing-workflow] · [Third-party notices][third-party] |
 
-Development setup, repository boundaries, style rules, and the full verification
-suite are documented in [CONTRIBUTING.md][contributing].
+The repository separates the reusable [starter][starter], optional [domain
+packs][domain-packs], [external orchestrator playbook][orchestrator-readme] and
+[worked examples][worked-example] built from synthetic evidence.
 
-## License
+## License and Authorship
 
-EvidenceWiki is available under the [MIT License][license].
+EvidenceWiki is available under the [MIT License][license]. It was authored
+entirely with AI coding agents, primarily OpenAI Codex (GPT-5.5 and GPT-5.6),
+with Anthropic Claude also contributing.
 
 [pypi]: https://pypi.org/project/evidence-wiki/
-[workspace-template]: https://github.com/Denissvgn/evidence-wiki/tree/main/workspace-template
+[starter]: https://github.com/Denissvgn/evidence-wiki/tree/main/workspace-template
 [domain-packs]: https://github.com/Denissvgn/evidence-wiki/blob/main/domain-packs/README.md
-[examples]: https://github.com/Denissvgn/evidence-wiki/tree/main/examples
 [worked-example]: https://github.com/Denissvgn/evidence-wiki/blob/main/examples/urban-heat-resilience-workspace/README.md
 [orchestrator-readme]: https://github.com/Denissvgn/evidence-wiki/blob/main/orchestrator/README.md
-[tests]: https://github.com/Denissvgn/evidence-wiki/tree/main/tests
 [new-project]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/new-project-guide.md
-[workspace-initialization]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-initialization.md
-[workspace-init-profile]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-init-profile.md
+[initialization]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-initialization.md
+[init-profile]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-init-profile.md
 [research-yml]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/research-yml.md
-[question-api]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/question-api.md
-[source-discovery]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/source-discovery.md
+[planning]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/research-planning.md
+[application]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-application.md
+[caller-research]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/caller-research.md
+[questions]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/question-api.md
+[discovery]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/source-discovery.md
 [acquisition]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/acquisition.md
 [source-delivery]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/source-delivery.md
+[source-usability]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/source-usability.md
+[environment]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/environment-setup.md
 [source-manifest]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/source-manifest.md
 [normalized-source]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/normalized-source-format.md
-[coverage-manifest]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/coverage-manifest.md
+[coverage]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/coverage-manifest.md
 [evidence-policies]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/evidence-policies.md
-[citation-verification]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/citation-verification.md
+[citations]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/citation-verification.md
+[strict-evidence]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/strict-evidence.md
+[computation]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/declarative-computation.md
 [orchestration]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/orchestration.md
-[orchestrator-handoff]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/orchestrator-handoff.md
+[handoff]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/orchestrator-handoff.md
+[frameworks]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/frameworks.md
+[library-api]: https://github.com/Denissvgn/evidence-wiki/blob/main/docs/library-api.md
+[mcp]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/mcp-server.md
+[agent-contracts]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/agent-contracts.md
 [workspace-status]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/workspace-status.md
 [run-controller]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/run-controller.md
-[library-api]: https://github.com/Denissvgn/evidence-wiki/blob/main/docs/library-api.md
-[mcp-server]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/mcp-server.md
 [prompt-injection]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/prompt-injection-hardening.md
 [human-editing]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/human-editing.md
-[codebase-analysis]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/codebase-analysis.md
+[codebase]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/codebase-analysis.md
 [production-readiness]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/production-readiness-checklist.md
 [publication-readiness]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/publication-readiness.md
-[research-init]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/skills/research-init.md
+[pack-selection]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/pack-selection.md
+[pack-authoring]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/pack-authoring.md
+[pack-revisions]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/pack-revisions.md
+[upgrade]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/docs/upgrade-adoption.md
 [research-run]: https://github.com/Denissvgn/evidence-wiki/blob/main/workspace-template/skills/research-run.md
-[research-orchestrate]: https://github.com/Denissvgn/evidence-wiki/blob/main/orchestrator/skills/research-orchestrate.md
+[package-metadata]: https://github.com/Denissvgn/evidence-wiki/blob/main/pyproject.toml
 [contributing]: https://github.com/Denissvgn/evidence-wiki/blob/main/CONTRIBUTING.md
 [changelog]: https://github.com/Denissvgn/evidence-wiki/blob/main/CHANGELOG.md
 [publishing-workflow]: https://github.com/Denissvgn/evidence-wiki/blob/main/.github/workflows/publish.yml
