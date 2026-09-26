@@ -297,6 +297,7 @@ def create_venv_with_wheel(root: Path, wheel: Path) -> Path:
 
 def fixture_members():
     members = ["tools/smoke_installed_orchestration.py", "tools/qualify_journeys.py",
+               "workspace-template/workspace-system.yml",
                "tools/probe_installed_extensions.py", "tests/_docx_fixture.py",
                "tools/_journey_cases.py", "tools/_journey_driver.py", "tools/_journey_authoring.py", "tools/_qualification_process.py",
                "tests/fixtures/onboarding-journeys/cases.json", "tests/_computation_fixture.py", "tests/fixtures/fake_codex_cli.py",

@@ -12,10 +12,26 @@ import sys
 import tempfile
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_CODEX = REPO_ROOT / "tests" / "fixtures" / "fake_codex_cli.py"
 FAKE_CODEX_WORKSPACE_PYTHON = "EVIDENCE_WIKI_FAKE_CODEX_WORKSPACE_PYTHON"
-EXPECTED_STARTER_VERSION = "1.0.0"
+
+
+def verify_starter_version(contract: dict) -> None:
+    """Compare the installed CLI with the independently captured starter metadata."""
+    metadata_path = REPO_ROOT / "workspace-template" / "workspace-system.yml"
+    try:
+        metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+        expected = metadata["workspace_system"]["starter_version"]
+    except (OSError, UnicodeError, yaml.YAMLError, KeyError, TypeError):
+        raise SystemExit("Cannot read the expected starter version from qualification metadata") from None
+    if not isinstance(expected, str) or not expected.strip() or expected != expected.strip():
+        raise SystemExit("Qualification metadata must declare a nonempty starter version string")
+    actual = contract.get("starter_version") if isinstance(contract, dict) else None
+    if actual != expected:
+        raise SystemExit(f"installed CLI reported an unexpected starter version: {actual!r}; expected {expected!r}")
 
 
 def tiny_pdf_bytes() -> bytes:
@@ -245,8 +261,7 @@ def main() -> int:
     cli = str(args.cli.resolve())
 
     contract = json.loads(run([cli, "contract", "--format", "json"]).stdout)
-    if contract.get("starter_version") != EXPECTED_STARTER_VERSION:
-        raise SystemExit(f"installed CLI reported an unexpected starter version: {contract.get('starter_version')}")
+    verify_starter_version(contract)
     schema_documents = contract.get("artifact_schema_documents")
     expected_schemas = {
         "orchestration_session",
