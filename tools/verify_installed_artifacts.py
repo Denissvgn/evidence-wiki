@@ -53,6 +53,11 @@ def verify(dist_dir, evidence, *, commit, run_id, expected_version=None):
             "no_write_refusals": "passed", "controller_submission": "passed",
         }:
             raise ValueError("native initialization scenarios did not all complete")
+        if installed.get("planned_delegation") != {
+            "schema_discovery": "passed", "plan_check": "passed", "apply_replay": "passed",
+            "strict_bindings": "passed", "controller_submission": "passed",
+        }:
+            raise ValueError("planned delegation scenarios did not all complete")
         journeys = installed["journeys"]
         observed = [{"case_id": row["case_id"], "trial": row["trial"]} for row in journeys["trials"]]
         if (journeys["status"] != "passed" or journeys["candidate_unchanged"] is not True

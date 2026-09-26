@@ -139,7 +139,9 @@ def installation_reports(tmp_path):
             "checks": {"membership": artifacts.check_archive_membership(wheel, sdist), "installed_" + kind: {
                 "label": kind, "checkout_imports": "disabled", "version": verification.__version__,
                 "native_initialization": {"direct_profile": "passed", "nested_profile": "passed",
-                    "no_write_refusals": "passed", "controller_submission": "passed"}, "journeys": {
+                    "no_write_refusals": "passed", "controller_submission": "passed"},
+                "planned_delegation": {"schema_discovery": "passed", "plan_check": "passed", "apply_replay": "passed",
+                    "strict_bindings": "passed", "controller_submission": "passed"}, "journeys": {
                     "status": "passed", "candidate_unchanged": True, "package_version": verification.__version__,
                     "planned_trials": [{"case_id": row["case_id"], "trial": 1} for row in trials], "trials": copy.deepcopy(trials)}}}}
         reports[kind] = report
@@ -148,7 +150,7 @@ def installation_reports(tmp_path):
 
 @pytest.mark.parametrize("defect", [None, "missing", "duplicate", "commit", "run", "inputs", "bytes", "unfinished",
                                     "missing-case", "duplicate-case", "wrong-outcome", "failed-command", "candidate-changed",
-                                    "native-missing", "native-incomplete"])
+                                    "native-missing", "native-incomplete", "planned-missing", "planned-incomplete"])
 def test_final_gate_requires_exact_bytes_and_every_scenario(tmp_path, defect):
     dist, reports = installation_reports(tmp_path)
     report = reports["sdist"]
@@ -159,6 +161,10 @@ def test_final_gate_requires_exact_bytes_and_every_scenario(tmp_path, defect):
         del report["checks"]["installed_sdist"]["native_initialization"]
     elif defect == "native-incomplete":
         report["checks"]["installed_sdist"]["native_initialization"]["controller_submission"] = "not_run"
+    elif defect == "planned-missing":
+        del report["checks"]["installed_sdist"]["planned_delegation"]
+    elif defect == "planned-incomplete":
+        report["checks"]["installed_sdist"]["planned_delegation"]["strict_bindings"] = "not_run"
     elif defect == "duplicate":
         reports["duplicate"] = report
     elif defect == "commit":

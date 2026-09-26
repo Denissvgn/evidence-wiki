@@ -19,6 +19,7 @@ from .source_contracts import schema_document as source_schema
 REQUEST = "evidence-research-setup/v1"
 PLAN = "evidence-setup-plan/v1"
 MAX_BYTES = 1_048_576
+ORCHESTRATION_STRING_LIMIT = 4096
 
 
 def refuse(field, code="ONBOARDING_INVALID"):
@@ -28,6 +29,33 @@ def refuse(field, code="ONBOARDING_INVALID"):
 
 def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def orchestration_schema():
+    """Describe bounded raw selectors while retaining the owner's trimming rules."""
+    config = owner("_orchestration_config")
+    # Spell out Python's strip whitespace so JSON Schema consumers do not depend
+    # on their regex engine's different interpretation of \s.
+    whitespace = r"\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000"
+    identifier = {
+        **string(ORCHESTRATION_STRING_LIMIT),
+        "pattern": (rf"^[{whitespace}]*[^{whitespace}\u0000-\u001f\u007f](?:[^\u0000-\u001f\u007f]{{0,"
+                    + str(config.MAX_AGENT_ID_LENGTH - 2)
+                    + rf"}}[^{whitespace}\u0000-\u001f\u007f])?[{whitespace}]*$(?![\s\S])"),
+        "description": "Trim surrounding whitespace; the remaining agent ID follows the workspace runtime contract.",
+    }
+    variants = []
+    for mode in config.ACQUISITION_MODES:
+        variant = obj(acquisition={**string(ORCHESTRATION_STRING_LIMIT),
+                                   "pattern": rf"^[{whitespace}]*{mode}[{whitespace}]*$(?![\s\S])"})
+        if mode == config.ACQUISITION_MODE_DELEGATED:
+            variant["properties"].update(acquirer_agent_id=identifier, max_attempts_per_request={
+                "type": "integer", "minimum": 1, "maximum": config.MAX_MAX_ATTEMPTS_PER_REQUEST,
+                "default": config.DEFAULT_MAX_ATTEMPTS_PER_REQUEST})
+            variant["required"].append("acquirer_agent_id")
+        variants.append(variant)
+    return {"anyOf": [{"type": "null"}, *variants], "default": None,
+            "description": "Null retains starter/pack inheritance. A declaration grants no execution or source access."}
 
 
 def schemas():
@@ -49,6 +77,7 @@ def schemas():
         host_reference=nullable(string(256)), question_plans=array(question, 300),
         computation=nullable(opaque), framework=nullable(obj(id=string(128), version=string(128), mode=string(128))),
         discovery=array(string(128), 16), acquisition=array(string(128), 16), allowed_domains=array(string(256), 32),
+        orchestration=orchestration_schema(),
         source_requirements=array(requirement, 200), host_tools=source_schema(HOST_TOOLS),
         host_token_limit=nullable({"type": "integer", "minimum": 1, "maximum": 1_000_000_000}),
         codebase=nullable(obj(provider=string(128), question_ids=array(ident, 100, 1))),
@@ -97,11 +126,22 @@ def normalize(value):
         "question_plans": [], "computation": None, "framework": None, "discovery": [], "acquisition": [],
         "allowed_domains": [], "source_requirements": [], "host_tools": {"schema_version": HOST_TOOLS, "tools": []},
         "host_token_limit": None, "codebase": None, "project_local": None,
-        "pack_authoring": None, "accepted_pack": None,
+        "pack_authoring": None, "accepted_pack": None, "orchestration": None,
     }
     basis = {"caller_fields": sorted(choices), "default_fields": sorted(set(defaults) - set(choices)),
              "authority_basis": "caller_declaration_only"}
     result["decisions"] = {**defaults, **choices}
+    selection = result["decisions"]["orchestration"]
+    if selection is not None:
+        config = owner("_orchestration_config")
+        settings = owned_call("/decisions/orchestration", config.orchestration_config, {"orchestration": selection})
+        owned_call("/decisions/acquisition", config.validate_acquisition_exclusivity, settings,
+                   providers_enabled=bool(result["decisions"]["acquisition"]))
+        normalized = {"acquisition": settings["acquisition_mode"]}
+        if config.is_delegated(settings):
+            normalized.update(acquirer_agent_id=settings["acquirer_agent_id"],
+                              max_attempts_per_request=settings["max_attempts_per_request"])
+        result["decisions"]["orchestration"] = normalized
     # Arrays that represent sets are normalized; question and decomposition order is retained.
     for field in ("discovery", "acquisition", "allowed_domains"):
         values = result["decisions"][field]
@@ -134,4 +174,7 @@ def contract_index():
             "commands": ["agent plan", "agent plan-check", "agent plan-schemas", "agent plan-guide"],
             "default_effect": "read_only", "apply_available": False, "document_bytes": MAX_BYTES,
             "question_limit": owner("_strict_contract").MAX_CLAIMS,
+            "orchestration_selection": {"field": "/decisions/orchestration", "default": None,
+                "schema": orchestration_schema(), "input_string_characters": ORCHESTRATION_STRING_LIMIT,
+                "authority": "declaration_only"},
             "source_of_authority": "external host verification required; plan declarations confer none"}

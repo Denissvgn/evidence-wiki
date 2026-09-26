@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Add typed acquisition responsibility to saved setup requests through
+  `decisions.orchestration`, discoverable in Library API 14. Preserve delegation
+  through plan/check/apply, strict requirement bindings and owned replay;
+  reject conflicting provider choices and retain independent access and review
+  requirements. Include a complete installed delegated setup example.
+
 - Preserve acquisition orchestration declarations in native initialization
   profiles. Reject unsupported nested sections and invalid or conflicting
   acquisition settings before workspace writes, and show the effective

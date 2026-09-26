@@ -424,22 +424,58 @@ NATIVE_INITIALIZATION_PROBE = textwrap.dedent(r'''
         return {str(p.relative_to(root)): (stat.S_IMODE(p.stat().st_mode), p.stat().st_ino, p.stat().st_mtime_ns,
                     p.read_bytes() if p.is_file() else None) for p in [root, *root.rglob('*')]}
 
-    for name, nested in [('direct', False), ('nested', True)]:
+    for name, nested in [('direct', False), ('nested', True), ('planned', None)]:
         workspace = root/name
-        profile = copy.deepcopy(template)
-        profile['workspace_init'].update(target_path=str(workspace),
-            raw={'immutable':True, 'source_roots':['raw/data']},
-            questions=[{'id':'needs-evidence', 'question':'What does the supplier quote?', 'priority':'high'}])
-        destination = profile['workspace_init'].setdefault('research_yml', {}) if nested else profile['workspace_init']
-        destination['orchestration'] = declaration
-        path = root/(name+'.yml')
-        path.write_text(yaml.safe_dump(profile, sort_keys=False))
-        before = snapshot()
-        preview = initialize(path, '--dry-run')
-        assert preview.returncode == 0, preview.stderr
-        assert snapshot() == before
-        created = initialize(path)
-        assert created.returncode == 0, created.stderr
+        if nested is None:
+            def command(*args):
+                result = subprocess.run([str(cli), 'agent', *map(str, args)], cwd=root,
+                    text=True, capture_output=True, timeout=300)
+                assert result.returncode == 0, result.stdout + result.stderr
+                return json.loads(result.stdout)
+            schema = command('plan-schemas', '--schema-id', 'evidence-research-setup/v1')
+            assert 'orchestration' in schema['properties']['decisions']['properties']
+            guide = command('plan-guide')['content'].split('### Complete delegated setup example', 1)[1]
+            request = json.loads(guide.split('```json\n', 1)[1].split('\n```', 1)[0])
+            request['request']['payload']['target'] = {'writable_root':str(root), 'relative_path':name}
+            request['request']['payload']['authority']['writable_roots'] = [str(root)]
+            source, saved = root/'request.json', root/'plan.json'
+            source.write_text(json.dumps(request, ensure_ascii=False), encoding='utf-8')
+            plan = command('plan', '--from-file', source, '--output', saved)
+            assert plan['setup_ready'] and not plan['research_ready'] and not plan['actions_executed']
+            before = snapshot()
+            assert command('plan-check', '--from-file', saved)['status'] == 'current'
+            assert snapshot() == before and not workspace.exists()
+            applied = command('apply', '--from-file', saved)
+            assert applied['setup_ready'] and not applied['research_complete'] and not applied['claims_verified']
+            before = {str(p.relative_to(workspace)):p.read_bytes() for p in workspace.rglob('*') if p.is_file()}
+            assert command('apply', '--from-file', saved)['transaction_id'] == applied['transaction_id']
+            assert before == {str(p.relative_to(workspace)):p.read_bytes() for p in workspace.rglob('*') if p.is_file()}
+            assert yaml.safe_load((workspace/'research.yml').read_bytes()) == plan['initialization']['effective_config']
+            frozen = (workspace/'docs/research-requirements.json').read_bytes()
+            assert json.loads(frozen)['decisions']['orchestration'] == declaration
+            policy = plan['initialization']['effective_config']['strict_evidence']
+            assert policy['instructions']['docs/research-requirements.json'] == 'sha256:'+hashlib.sha256(frozen).hexdigest()
+            selected = request['request']['payload']['strict_evidence']
+            assert (policy['policy_id'], policy['revision'], policy['assurance']) == (
+                selected['policy_id'], selected['policy_revision'], selected['assurance'])
+            metadata = yaml.safe_load((workspace/'wiki/questions/needs-evidence.md').read_text(encoding='utf-8').split('---')[1])['metadata']
+            assert metadata['original_text'] == request['request']['payload']['questions'][0]['text']
+            assert plan['questions']['rows'][0]['original_ids'] == ['needs-evidence']
+        else:
+            profile = copy.deepcopy(template)
+            profile['workspace_init'].update(target_path=str(workspace),
+                raw={'immutable':True, 'source_roots':['raw/data']},
+                questions=[{'id':'needs-evidence', 'question':'What does the supplier quote?', 'priority':'high'}])
+            destination = profile['workspace_init'].setdefault('research_yml', {}) if nested else profile['workspace_init']
+            destination['orchestration'] = declaration
+            path = root/(name+'.yml')
+            path.write_text(yaml.safe_dump(profile, sort_keys=False))
+            before = snapshot()
+            preview = initialize(path, '--dry-run')
+            assert preview.returncode == 0, preview.stderr
+            assert snapshot() == before
+            created = initialize(path)
+            assert created.returncode == 0, created.stderr
         config_bytes = (workspace/'research.yml').read_bytes()
         config = yaml.safe_load(config_bytes)
         assert config['orchestration'] == declaration
@@ -504,7 +540,9 @@ NATIVE_INITIALIZATION_PROBE = textwrap.dedent(r'''
                 assert 'Traceback' not in refused.stderr
                 assert snapshot() == before
     print(json.dumps({'native_initialization':{'direct_profile':'passed', 'nested_profile':'passed',
-        'no_write_refusals':'passed', 'controller_submission':'passed'}}))
+        'no_write_refusals':'passed', 'controller_submission':'passed'},
+        'planned_delegation':{'schema_discovery':'passed', 'plan_check':'passed', 'apply_replay':'passed',
+            'strict_bindings':'passed', 'controller_submission':'passed'}}))
 ''')
 
 
@@ -1010,7 +1048,7 @@ HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
     del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
     del os.environ["EVIDENCE_WIKI_STATE_DIR"]
     assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
-    assert contract()["library_api"]["version"] == "13"
+    assert contract()["library_api"]["version"] == "14"
     print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
     '''
 )
@@ -1138,7 +1176,7 @@ ASSESSMENT_PROBE = textwrap.dedent(
         assert workspace.assessments.apply_refresh(application) == applied
         assert workspace.assessments.check(envelope)["reasons"] == ["assessment_invalidated"]
         assert command("plan-refresh", host.refresh())["plan"]["entries"] == []
-        assert contract()["library_api"]["version"] == "13"
+        assert contract()["library_api"]["version"] == "14"
     print(json.dumps({"evidence_assessments": "authenticated_cli_api_parity", "assessment_refresh": "revocation_and_idempotent_apply"}))
     '''
 )

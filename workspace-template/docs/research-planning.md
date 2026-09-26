@@ -57,6 +57,199 @@ with the exact name, version, research contract and tree/overlay digests. Bundle
 locators are the pack name or `bundled:NAME`; caller-local locators are explicit
 directories. Project-local guidance uses the initializer's existing schema.
 
+## Acquisition responsibility
+
+Library API `14` adds the optional `decisions.orchestration` selector to
+`evidence-research-setup/v1`. Discover its schema with `agent plan-schemas`; the
+installation contract also describes it under `research_planning.orchestration_selection`.
+CLI planning, `Onboarding.plan` and `onboarding_plan` use the same contract.
+Existing requests remain accepted. Older installations have a closed decision
+schema and reject this new field, including newly normalized requests carrying
+`orchestration: null`. Restart embedding hosts and recompile plans after upgrading.
+
+Omission or `"orchestration": null` emits no override and retains starter/pack
+inheritance. Without an inherited declaration, acquisition uses provider mode.
+An explicit provider selection is `"orchestration": {"acquisition": "providers"}`.
+Delegation uses this decision:
+
+```json
+{
+  "orchestration": {
+    "acquisition": "delegated",
+    "acquirer_agent_id": "external-acquirer",
+    "max_attempts_per_request": 3
+  },
+  "acquisition": []
+}
+```
+
+Every non-null selector requires `acquisition`. Delegation requires a nonempty
+agent ID of at most 160 characters after trimming surrounding whitespace; ASCII
+control characters inside the trimmed ID are refused. Mode and ID input strings
+are bounded to 4,096 characters before trimming. Attempts default to `2` and must
+be an integer from `1` through `10`. Provider mode refuses delegated-only fields.
+Unknown fields, including `x-` metadata, are refused by this typed selector.
+
+An explicit nonempty `decisions.acquisition` conflicts with delegation, even if
+provider qualification, budgets or authority would disable those providers.
+Discovery remains independent. The initializer validates the merged starter,
+pack and profile; switching an inherited delegated declaration to providers
+does not silently delete its incompatible delegated-only fields.
+
+The choice is frozen in the normalized request, native profile, effective
+configuration and `docs/research-requirements.json`, including its strict
+instruction hash. Naming an acquirer grants no connector, credentials, source
+access or execution authority. Host capability and source routes require their
+own declarations and checks; research and release gaps remain visible.
+
+### Complete delegated setup example
+
+Retrieve this guide with `evidence-wiki agent plan-guide --format text`. Save the
+complete request below as `request.json` outside the target. It retains original
+question text, evidence criteria, policy selection and delegation. It declares
+local setup only and leaves evidence and host access unverified.
+
+```json
+{
+  "decisions": {
+    "acquisition": [],
+    "orchestration": {
+      "acquirer_agent_id": "external-acquirer",
+      "acquisition": "delegated",
+      "max_attempts_per_request": 3
+    },
+    "question_plans": [
+      {
+        "criteria": [
+          {
+            "counterevidence": "Retain contrary evidence",
+            "facet_id": "primary",
+            "inference": "Label all derivations",
+            "quantitative": null,
+            "required_scope": [
+              "jurisdiction"
+            ],
+            "source_classes": [
+              "official guidance"
+            ],
+            "stopping": "Support or explicit gaps for all facets",
+            "time": "Keep observation dates",
+            "units": "Keep quoted currencies and units"
+          }
+        ],
+        "facets": [
+          {
+            "description": "Retained primary evidence",
+            "evidence_path": "official_guidance",
+            "facet_id": "primary",
+            "freshness_policy": "no_staleness_check",
+            "identity_policy": "official_domain_match",
+            "min_sources": 1,
+            "required": true,
+            "source_policy": "official_primary"
+          }
+        ],
+        "question_id": "needs-evidence",
+        "template": null
+      }
+    ],
+    "raw_roots": [
+      "raw/data"
+    ]
+  },
+  "request": {
+    "kind": "research_request",
+    "payload": {
+      "assumptions": [],
+      "authority": {
+        "allowed_actions": [
+          "local_setup"
+        ],
+        "credential_references": [],
+        "reference": "local setup only",
+        "role": "caller",
+        "source_scope": [],
+        "writable_roots": [
+          "/tmp/evidence-research"
+        ]
+      },
+      "budgets": {
+        "bytes": 1048576,
+        "downloads": 5,
+        "questions": 5,
+        "seconds": 300,
+        "source_requests": 5
+      },
+      "derived_questions": [],
+      "domain": {
+        "mode": "none",
+        "pack": null,
+        "rationale": "Generic guidance is sufficient for this question."
+      },
+      "goal": "Answer the original question using retained evidence and explicit gaps.",
+      "host_tools": [],
+      "open_decisions": [],
+      "outputs": [
+        "markdown",
+        "json"
+      ],
+      "questions": [
+        {
+          "id": "needs-evidence",
+          "text": "What does the supplier quote?\nRetain stated conditions and units."
+        }
+      ],
+      "scope": [
+        {
+          "name": "jurisdiction",
+          "value": "Spain"
+        }
+      ],
+      "sources": [],
+      "strict_evidence": {
+        "assurance": "artifact_checked",
+        "mode": "strict",
+        "policy_id": "reviewed-evidence",
+        "policy_revision": "1"
+      },
+      "target": {
+        "relative_path": "workspace",
+        "writable_root": "/tmp/evidence-research"
+      }
+    },
+    "request_id": "delegated-research",
+    "schema_version": "2.0"
+  },
+  "schema_version": "evidence-research-setup/v1"
+}
+```
+
+Create the fresh `/tmp/evidence-research` parent before planning. From the
+directory containing `request.json`, run:
+
+```sh
+mkdir /tmp/evidence-research
+evidence-wiki agent plan --from-file request.json --output setup-plan.json
+evidence-wiki agent plan-check --from-file setup-plan.json
+evidence-wiki agent apply --from-file setup-plan.json
+evidence-wiki agent apply --from-file setup-plan.json
+```
+
+For another location, including Windows, choose an existing absolute writable
+parent and set both `request.payload.target.writable_root` and
+`request.payload.authority.writable_roots` to it before planning. Keep the target
+new or empty and save the request and plan outside it. The second apply verifies
+and reuses the same owned transaction. Do this before research changes its files.
+
+After setup, drive external orchestration with `orchestrate start`, `next` and
+`submit`. Retrieve the protocol with
+`evidence-wiki agent resource guide/orchestrator/v1 --format text`.
+When a question is blocked on a source request, the controller can address an
+acquisition order to `external-acquirer`. The host must authorize delivery and
+fulfil only requests scoped by that pending order. Managed `orchestrate run` and
+`resume` refuse delegated workspaces. Do not rewrite `research.yml` after apply
+to enable delegation; it is already part of the accepted setup.
+
 ## Evidence criteria
 
 Each `question_plans` entry identifies one question and supplies a selected pack
@@ -132,6 +325,16 @@ pack contents, target directory identities, declared credential presence and
 selected local file observations. `plan-check` recompiles read-only and refuses
 drift or tampering. An absent file becoming present is a change. Authority must
 still be checked when executing; revalidation is not a reservation or lock.
+
+Package, starter or interpreter changes can make an old plan stale even when its
+request is unchanged. Compile a new plan for a fresh target under the current
+installation. An old partial or populated target cannot be adopted by that new
+plan. Preserve its files and setup state for inspection; use the documented
+[recovery boundaries](workspace-application.md#recovery-boundaries) for an
+interrupted transaction. For a workspace initialized without its intended
+delegation, recreate it from the intended request when safe, or arrange an
+explicit owner-reviewed migration that accounts for existing research and
+strict bindings. Neither upgrade nor apply silently repairs its configuration.
 
 Documents and output are bounded to 1 MiB. Local input files are at most 16 MiB
 each and 32 MiB in aggregate. Installed trees have bounded file/byte counts.
