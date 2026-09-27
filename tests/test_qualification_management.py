@@ -155,7 +155,7 @@ def test_installed_setup_actions_require_selected_workspace_postconditions(tmp_p
     retained = target / "retained.txt"
     retained.write_text("original", encoding="utf-8")
     paths = ["raw/source.txt"] if kind == "local_source" else []
-    inspect = ["selected-python", "-B", "-m", "evidence_wiki", "agent", "inspect" if paths else "source-status",
+    inspect = ["selected-python", "-B", "-m", "evidence_wiki", "agent", "source-status" if paths else "inspect",
                "--target", str(target), "--format", "json"]
     for path in paths:
         inspect.extend(["--source-path", path])
