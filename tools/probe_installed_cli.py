@@ -251,7 +251,7 @@ def entrypoint_report(commands):
     outcomes, reference = {}, {}
     with tempfile.TemporaryDirectory(prefix="entrypoint inputs ", dir=commands.cwd) as directory:
         plan = Path(directory) / "invalid plan.json"
-        plan.write_text("{}", encoding="utf-8")
+        plan.write_text("{}", encoding="utf-8", newline="\n")
         cases = {
             "help": ["--help"], "version": ["--version"],
             "schemas": ["agent", "source-schemas", "--format", "json"],
