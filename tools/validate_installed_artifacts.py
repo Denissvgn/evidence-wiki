@@ -54,6 +54,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from evidence_wiki import resources  # noqa: E402 - the checkout's manifest names what the archives must carry.
 from tools._qualification_process import CommandRunner, interruptible, positive_seconds  # noqa: E402
+from tools.probe_installed_cli import checked_outcomes  # noqa: E402
 
 _RUNNER = CommandRunner()
 _OPTIONS = argparse.Namespace(command_timeout=900, journey_timeout=5400, case_timeout=1200,
@@ -105,6 +106,7 @@ FORBIDDEN_SUFFIXES = (".pyc", ".pyo")
 #: Members every wheel must carry: the package plus every asset the contract names.
 REQUIRED_WHEEL_MEMBERS = (
     "evidence_wiki/__init__.py",
+    "evidence_wiki/__main__.py",
     "evidence_wiki/cli.py",
     "evidence_wiki/agent.py",
     "evidence_wiki/frameworks.py",
@@ -143,12 +145,14 @@ REQUIRED_SDIST_MEMBERS = (
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "src/evidence_wiki/__init__.py",
+    "src/evidence_wiki/__main__.py",
     "tools/smoke_installed_orchestration.py",
     "tools/validate_installed_artifacts.py",
     "tools/_qualification_process.py",
     "tools/qualify_journeys.py",
     "tools/sync_agent_resources.py",
     "tools/probe_installed_extensions.py",
+    "tools/probe_installed_cli.py",
     "tests/_docx_fixture.py",
     "tests/_publication_fixture.py",
     "tests/fixtures/fake_codex_cli.py",
@@ -298,7 +302,7 @@ def create_venv_with_wheel(root: Path, wheel: Path) -> Path:
 def fixture_members():
     members = ["tools/smoke_installed_orchestration.py", "tools/qualify_journeys.py",
                "workspace-template/workspace-system.yml",
-               "tools/probe_installed_extensions.py", "tests/_docx_fixture.py",
+               "tools/probe_installed_extensions.py", "tools/probe_installed_cli.py", "tests/_docx_fixture.py",
                "tools/_journey_cases.py", "tools/_journey_driver.py", "tools/_journey_authoring.py", "tools/_qualification_process.py",
                "tests/fixtures/onboarding-journeys/cases.json", "tests/_computation_fixture.py", "tests/fixtures/fake_codex_cli.py",
                "tests/fixtures/strict-evidence/review-cases.json",
@@ -1670,6 +1674,17 @@ RESEARCH_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.y
 ''')
 
 
+def validate_cli_entrypoints(python, cli, *, outside, fixture_root, output, expected_version=None):
+    """Run the same isolated entry-point probe for either selected distribution."""
+    argv = [str(python), "-B", "-I", str(fixture_root / "tools/probe_installed_cli.py"),
+            "--cli", str(cli), "--cwd", str(outside), "--checkout-root", str(REPO_ROOT), "--output", str(output)]
+    if expected_version is not None:
+        argv.extend(["--expected-version", expected_version])
+    result = json.loads(run(argv, cwd=outside, label="cli-entrypoints"))
+    checked_outcomes("cli_entrypoints", result.get("cli_entrypoints") if isinstance(result, dict) else None)
+    return result
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     if scratch.resolve().is_relative_to(REPO_ROOT.resolve()) or venv.resolve().is_relative_to(REPO_ROOT.resolve()):
         raise ValidationError("installed execution must use an unrelated directory outside the checkout")
@@ -1684,7 +1699,10 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     workspace = scratch / "provider-workspace"
     # Every command runs from a directory that is not the checkout, so a module
     # resolved from the source tree instead of the install would be a failure here.
-    run([str(cli), "--version"], cwd=outside)
+    entrypoint_output = (_OPTIONS.evidence / label / "cli-entrypoint-commands" if _OPTIONS.evidence is not None
+                         else scratch / "cli-entrypoint-commands")
+    entrypoints = validate_cli_entrypoints(python, cli, outside=outside, fixture_root=fixture_root,
+        output=entrypoint_output, expected_version=expected_version)
     agent_probe = run([str(python), "-c", AGENT_PROBE, str(cli)], cwd=outside)
     pack_probe = run([str(python), "-c", PACK_PROBE, str(cli), str(scratch / "pack-discovery")], cwd=outside)
     native_initialization = run([str(python), "-B", "-c", NATIVE_INITIALIZATION_PROBE, str(cli),
@@ -1803,7 +1821,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
             **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research), **json.loads(revisions),
-            **json.loads(extensions), **json.loads(native_initialization),
+            **json.loads(extensions), **json.loads(native_initialization), **entrypoints,
             "journeys": journeys}
 
 

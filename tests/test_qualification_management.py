@@ -10,14 +10,235 @@ import sys
 import tarfile
 import time
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
 from tests.test_release_workflow import inline_python, make_sdist, make_wheel, run_inline_python
+from tools import probe_installed_cli as installed_cli
 from tools import qualify_journeys as journeys
 from tools import validate_installed_artifacts as artifacts
 from tools import verify_installed_artifacts as verification
 from tools._qualification_process import CommandRunner, positive_seconds, stop_process
+
+
+@pytest.fixture
+def installed_commands_fixture(tmp_path):
+    """Model process observations without presenting the synthetic layout as an installed artifact."""
+    environment = tmp_path / "environment"
+    python, cli = artifacts.venv_python(environment), artifacts.venv_cli(environment)
+    python.parent.mkdir(parents=True)
+    python.touch()
+    cli.touch()
+    (environment / "pyvenv.cfg").write_text("include-system-site-packages = false\n", encoding="utf-8")
+    site = environment / "lib/site-packages"
+    package = site / "evidence_wiki"
+    package.mkdir(parents=True)
+    modules = {name: str(package / filename) for name, filename in (
+        ("evidence_wiki", "__init__.py"), ("evidence_wiki.cli", "cli.py"), ("evidence_wiki.__main__", "__main__.py"))}
+    for filename in modules.values():
+        with open(filename, "w", encoding="utf-8"):
+            pass
+    identity = {"executable": str(python), "prefix": str(environment), "base_prefix": str(tmp_path / "host"),
+                "package_version": "9.9.9", "distribution_version": "9.9.9", "distribution_root": str(site), "modules": modules}
+    outside, checkout = tmp_path / "outside directory", tmp_path / "checkout"
+    outside.mkdir()
+    checkout.mkdir()
+    calls = []
+    reply = SimpleNamespace(returncode=0, stdout="result\n", stderr="")
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if kwargs["label"] == "installation-identity":
+            return subprocess.CompletedProcess(argv, 0, json.dumps(identity), "")
+        return subprocess.CompletedProcess(argv, reply.returncode, reply.stdout, reply.stderr)
+
+    def create(**overrides):
+        options = {"cwd": outside, "checkout_root": checkout, "expected_version": "9.9.9",
+                   "runner": SimpleNamespace(run=run, records=[]), **overrides}
+        return installed_cli.InstalledCommands(python, cli, **options)
+
+    return SimpleNamespace(create=create, identity=identity, calls=calls, reply=reply,
+                           python=python, cli=cli, checkout=checkout, outside=outside)
+
+
+@pytest.mark.parametrize("defect", ["prefix", "executable", "base_prefix", "distribution_version", "candidate_version", "distribution_root",
+                                   "package_origin", "cli_origin", "main_origin", "missing_main"])
+def test_installed_commands_reject_incompatible_identity(installed_commands_fixture, defect):
+    """A selected version alone cannot substitute for matching interpreter and module origins."""
+    fixture = installed_commands_fixture
+    if defect in {"package_origin", "cli_origin", "main_origin", "missing_main"}:
+        name = {"package_origin": "evidence_wiki", "cli_origin": "evidence_wiki.cli"}.get(defect, "evidence_wiki.__main__")
+        fixture.identity["modules"][name] = None if defect == "missing_main" else str(fixture.checkout / "foreign.py")
+    elif defect == "candidate_version":
+        fixture.identity.update(package_version="8.8.8", distribution_version="8.8.8")
+    else:
+        fixture.identity[defect] = fixture.identity["prefix"] if defect == "base_prefix" else "different"
+    with pytest.raises(ValueError):
+        fixture.create()
+    assert len(fixture.calls) == 1
+
+
+@pytest.mark.parametrize("location", ["cwd", "environment"])
+def test_installed_commands_require_external_execution_locations(installed_commands_fixture, location):
+    fixture = installed_commands_fixture
+    options = {"cwd": fixture.checkout} if location == "cwd" else {"checkout_root": fixture.python.parent.parent}
+    with pytest.raises(ValueError, match="outside the checkout"):
+        fixture.create(**options)
+    assert fixture.calls == []
+
+
+def test_installed_commands_preserve_argv_expected_exit_and_environment(installed_commands_fixture, monkeypatch):
+    fixture = installed_commands_fixture
+    monkeypatch.setenv("PYTHONPATH", str(fixture.checkout))
+    monkeypatch.setenv("PYTHONHOME", str(fixture.checkout))
+    monkeypatch.setenv("PATH", str(fixture.python.parent) + os.pathsep + str(fixture.outside))
+    commands = fixture.create()
+    argv = [str(fixture.python), "-B", "-m", "evidence_wiki", "agent", "apply", "--from-file", "plan with spaces.json"]
+    original = list(argv)
+    fixture.reply.returncode = 3
+    result = commands.command(argv, label="refusal", expected=3, timeout=17)
+    called, options = fixture.calls[-1]
+    assert called is argv and argv == original and result.returncode == 3
+    assert options["expected"] == (3,) and options["timeout"] == 17
+    assert options["cwd"] == fixture.outside.resolve()
+    assert "PYTHONPATH" not in options["env"] and "PYTHONHOME" not in options["env"]
+    assert options["env"]["PATH"] == str(fixture.outside)
+    assert options["env"]["PYTHONNOUSERSITE"] == options["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+def test_installed_commands_do_not_fallback_after_failure(installed_commands_fixture):
+    fixture = installed_commands_fixture
+    commands = fixture.create()
+    fixture.reply.returncode, fixture.reply.stderr = 1, "package entry point missing"
+    argv = [str(fixture.python), "-B", "-m", "evidence_wiki", "--version"]
+    with pytest.raises(ValueError, match="package entry point missing"):
+        commands.command(argv, label="package-version")
+    assert len(fixture.calls) == 2 and fixture.calls[-1][0] is argv
+    with pytest.raises(ValueError, match="observed installation launcher"):
+        commands.command(["evidence-wiki", "--version"], label="unbound")
+    assert len(fixture.calls) == 2
+
+
+@pytest.mark.parametrize("group", installed_cli.OUTCOME_CASES)
+@pytest.mark.parametrize("defect", [None, "missing", "extra", "failed", "not_run", "unknown", "not_mapping"])
+def test_installed_outcomes_require_every_successful_case(group, defect):
+    outcomes = dict.fromkeys(installed_cli.OUTCOME_CASES[group], "passed")
+    first = next(iter(outcomes))
+    if defect == "missing":
+        outcomes.pop(first)
+    elif defect == "extra":
+        outcomes["unobserved"] = "passed"
+    elif defect in {"failed", "not_run", "unknown"}:
+        outcomes[first] = defect
+    elif defect == "not_mapping":
+        outcomes = list(outcomes)
+    if defect is None:
+        assert installed_cli.checked_outcomes(group, outcomes) == outcomes
+    else:
+        with pytest.raises(ValueError, match="Incomplete installed outcomes"):
+            installed_cli.checked_outcomes(group, outcomes)
+
+
+def test_installed_command_helper_is_a_bound_qualification_input():
+    path = "tools/probe_installed_cli.py"
+    assert path in artifacts.REQUIRED_SDIST_MEMBERS and path in artifacts.fixture_members()
+    assert path in artifacts.validation_identity()
+
+
+@pytest.mark.parametrize("defect", [None, "empty_package", "wrong_version", "missing_schema", "wrong_refusal", "stderr", "help_parity"])
+def test_installed_entrypoint_report_requires_real_case_results(installed_commands_fixture, defect):
+    """All three launchers must satisfy the complete behavior matrix before any report is returned."""
+    fixture = installed_commands_fixture
+    commands = fixture.create()
+    calls = []
+
+    def run(argv, **options):
+        calls.append((list(argv), options))
+        arguments = argv[1:] if argv[0] == str(fixture.cli) else argv[4:]
+        case = options["label"].split("-", 1)[1]
+        stderr = ""
+        if case == "help":
+            assert arguments == ["--help"]
+            stdout = "evidence-wiki: research\nUsage:\nevidence-wiki agent apply\n"
+        elif case == "version":
+            assert arguments == ["--version"]
+            stdout = "evidence-wiki 9.9.9\n"
+        elif case == "schemas":
+            assert arguments == ["agent", "source-schemas", "--format", "json"]
+            stdout = json.dumps({"schema_ids": ["evidence-source-inspection/v1"]})
+        elif case == "unknown_command":
+            assert arguments == ["unknown-command"]
+            stdout, stderr = "", "usage: evidence-wiki\nerror: unknown command: unknown-command\n"
+        else:
+            assert arguments[:3] == ["agent", "apply", "--from-file"]
+            with open(arguments[3], encoding="utf-8") as source:
+                assert json.load(source) == {}
+            stdout = json.dumps({"schema_version": "1.0", "error_code": "ONBOARDING_INVALID", "recoverable": False,
+                                 "details": {}, "message": "Invalid input", "remediation": "Inspect the input"})
+        if options["label"].startswith("package_module-"):
+            if defect == "empty_package":
+                stdout, stderr = "", ""
+            elif defect == "wrong_version" and case == "version":
+                stdout = "evidence-wiki 8.8.8\n"
+            elif defect == "missing_schema" and case == "schemas":
+                stdout = '{"schema_ids":[]}'
+            elif defect == "wrong_refusal" and case == "invalid_plan":
+                stdout = stdout.replace("ONBOARDING_INVALID", "ONBOARDING_WRITE_FAILED")
+            elif defect == "stderr" and case == "schemas":
+                stderr = "unexpected diagnostic\n"
+            elif defect == "help_parity" and case == "help":
+                stdout += "Extra text\n"
+        commands.runner.records.append({"stage": options["label"], "status": "passed", "exit_code": options["expected"][0]})
+        return subprocess.CompletedProcess(argv, options["expected"][0], stdout, stderr)
+
+    commands.runner.run = run
+    if defect:
+        with pytest.raises(ValueError):
+            installed_cli.entrypoint_report(commands)
+    else:
+        report = installed_cli.entrypoint_report(commands)
+        assert report["cli_entrypoints"] == dict.fromkeys(installed_cli.OUTCOME_CASES["cli_entrypoints"], "passed")
+        assert report["cli_entrypoint_identity"] == {**fixture.identity, "console_script": str(fixture.cli)}
+        assert len(calls) == 15
+        assert sum(options["expected"] == (2,) for _, options in calls) == 6
+        assert not list(fixture.outside.iterdir())
+
+
+@pytest.mark.parametrize("payload", [None, [], {}, {"cli_entrypoints": {"package_module": "passed"}}])
+def test_installed_cli_adapter_refuses_incomplete_probe_reports(tmp_path, monkeypatch, payload):
+    monkeypatch.setattr(artifacts, "run", lambda *args, **kwargs: json.dumps(payload))
+    with pytest.raises(ValueError, match="Incomplete installed outcomes"):
+        artifacts.validate_cli_entrypoints(tmp_path/"python", tmp_path/"evidence-wiki", outside=tmp_path,
+                                            fixture_root=tmp_path, output=tmp_path/"commands")
+
+
+@pytest.mark.parametrize("label", ["wheel", "sdist"])
+@pytest.mark.parametrize("retain", [False, True])
+def test_installed_validation_runs_the_cli_probe_with_retained_diagnostics(tmp_path, monkeypatch, label, retain):
+    """Both installation paths enter the shared probe and honor the chosen diagnostics destination."""
+    environment, scratch = tmp_path/"environment", tmp_path/"execution"
+    cli = artifacts.venv_cli(environment)
+    cli.parent.mkdir(parents=True)
+    cli.touch()
+    scratch.mkdir()
+    fixtures = scratch/"qualification-inputs"
+    evidence = tmp_path/"evidence" if retain else None
+    monkeypatch.setattr(artifacts._OPTIONS, "evidence", evidence)
+    monkeypatch.setattr(artifacts, "isolated_fixtures", lambda root: fixtures)
+    monkeypatch.setattr(artifacts, "run", lambda *args, **kwargs: pytest.fail("unselected legacy probe"))
+
+    def probe(python, selected_cli, **options):
+        assert python == artifacts.venv_python(environment) and selected_cli == cli
+        assert options["outside"] == scratch/"outside-checkout" and options["outside"].is_dir()
+        assert options["fixture_root"] == fixtures and options["expected_version"] == "9.9.9"
+        expected = evidence/label/"cli-entrypoint-commands" if retain else scratch/"cli-entrypoint-commands"
+        assert options["output"] == expected
+        raise RuntimeError("entrypoint probe reached")
+
+    monkeypatch.setattr(artifacts, "validate_cli_entrypoints", probe)
+    with pytest.raises(RuntimeError, match="entrypoint probe reached"):
+        artifacts.validate_installed(environment, scratch, "9.9.9", label)
 
 
 def test_progress_is_live_and_json_stdout_remains_separate(tmp_path, capsys):

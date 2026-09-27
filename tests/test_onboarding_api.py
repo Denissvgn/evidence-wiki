@@ -140,6 +140,30 @@ def test_setup_next_actions_execute_unchanged(tmp_path, run_package_command, wit
         assert before == {str(path.relative_to(target)): path.read_bytes() for path in target.rglob("*") if path.is_file()}
 
 
+def test_setup_replay_command_preserves_changed_workspace(tmp_path, run_package_command):
+    """An emitted replay command retains caller edits and propagates the owning refusal."""
+    root = (tmp_path / "changed setup").resolve()
+    root.mkdir()
+    with Onboarding.open(allowed_roots=[root], allow=["apply"]) as host:
+        result = host.apply(host.plan(request(root)))
+    assert result["setup_ready"]
+    target = Path(result["target"])
+    question = target / "wiki/questions/q1.md"
+    question.write_text(question.read_text(encoding="utf-8") + "\nCaller annotation.\n", encoding="utf-8")
+    (target / "caller-note.txt").write_text("Keep this observation.\n", encoding="utf-8")
+    before = {str(path.relative_to(target)): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+    saved_plan = Path(result["checkpoint"]).with_name("plan.json")
+    plan_bytes = saved_plan.read_bytes()
+    action = next(row for row in result["next_actions"] if row["action"] == "resume_setup")
+    process = run_package_command(action["argv"], timeout=120)
+    assert process.returncode == 3 and process.stderr == "", process.stdout + process.stderr
+    refusal = json.loads(process.stdout)
+    assert refusal["error_code"] == "ONBOARDING_OWNERSHIP_CONFLICT"
+    assert refusal["details"]["field"] == "setup_owned_files_changed_or_interrupted_write"
+    assert before == {str(path.relative_to(target)): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+    assert saved_plan.read_bytes() == plan_bytes
+
+
 def test_catalog_cannot_delegate_a_root_outside_the_host_scope(tmp_path, monkeypatch):
     from evidence_wiki import pack_catalog
     from evidence_wiki._onboarding_scope import Scope

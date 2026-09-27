@@ -220,6 +220,40 @@ def test_completed_setup_refuses_drift(tmp_path, in_process, mutation):
     assert snapshot(target) == before
 
 
+@pytest.mark.parametrize('binding,field,changed_value', [
+    ('package_code', 'sha256', '0'*64), ('installation', 'package_version', '999.0.0'),
+])
+def test_completed_setup_refuses_changed_installation(tmp_path, monkeypatch, in_process, binding, field, changed_value):
+    """Changed installation inputs invalidate replay without rewriting the plan or workspace."""
+    import copy
+
+    from evidence_wiki import planning
+    from evidence_wiki.errors import EvidenceWikiError
+    from evidence_wiki.setup_store import snapshot
+
+    plan = compile_plan(canonical(request(tmp_path)))
+    original_plan = canonical(plan)
+    result = apply_plan(original_plan)
+    assert result['setup_ready']
+    target = tmp_path/'workspace'
+    before = snapshot(target)
+    saved_plan = Path(result['checkpoint']).with_name('plan.json')
+    saved_bytes = saved_plan.read_bytes()
+    observe_installation = planning.installation_basis
+    installed = observe_installation()
+    changed = copy.deepcopy(installed)
+    assert changed[binding][field] != changed_value
+    changed[binding][field] = changed_value
+    monkeypatch.setattr(planning, 'installation_basis', lambda: copy.deepcopy(changed))
+    with pytest.raises(EvidenceWikiError) as caught:
+        apply_plan(original_plan)
+    assert caught.value.error_code == 'ONBOARDING_PLAN_STALE'
+    assert caught.value.details['field'] == 'saved_plan_preconditions_changed'
+    assert snapshot(target) == before
+    assert saved_plan.read_bytes() == saved_bytes and canonical(plan) == original_plan
+    assert observe_installation() == installed
+
+
 def test_busy_lock_and_dead_process_lock_file(tmp_path, in_process):
     from evidence_wiki.errors import EvidenceWikiError
     from evidence_wiki.setup_store import SetupStore
