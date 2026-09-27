@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Support `python -B -m evidence_wiki` alongside the console command and CLI
+  module, so generated setup inspection/replay and research start/heartbeat
+  commands execute with their selected interpreter. Document the same-environment
+  workaround for affected installations and preserve saved-plan recovery checks.
+
 ## 1.1.0 - 2026-09-26
 
 - Add typed acquisition responsibility to saved setup requests through

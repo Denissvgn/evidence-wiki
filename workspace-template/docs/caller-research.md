@@ -16,6 +16,21 @@ evidence-wiki agent resume --target WORKSPACE --agent-id CALLER --run-id RUN
 evidence-wiki agent heartbeat --target WORKSPACE --agent-id CALLER --run-id RUN
 ```
 
+Generated package commands use the selected interpreter with
+`-B -m evidence_wiki`. The console form above and `-B -m evidence_wiki.cli`
+are also supported. Retain the exact interpreter, flags and remaining arguments
+when your task authority permits the operation. After `start`, use the run ID in its
+result and refresh guidance before selecting the next action.
+
+If an affected installation reports `No module named evidence_wiki.__main__`,
+invoke that operation with the same interpreter, `-B -m evidence_wiki.cli`, and
+the unchanged remaining arguments. Leave stored advice and action IDs as issued;
+the workaround does not grant authority or extend an action's validity interval.
+Copied-script commands retain their script paths, and parameter-only advice still
+requires the named owning operation. See [application and recovery](workspace-application.md)
+for installation changes, process restart and saved-plan boundaries. Existing
+research workspaces continue through their canonical research/status owners.
+
 `next` and `resume` are read-only. Advice uses uncached canonical status and current
 question, request, run, strict-review and computation observations, bracketed by a
 workspace revision check. Setup receipts are historical, caller-editable observations.

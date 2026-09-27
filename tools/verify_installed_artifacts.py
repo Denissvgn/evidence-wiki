@@ -8,6 +8,7 @@ from pathlib import Path
 
 from evidence_wiki import __version__
 from tools._journey_cases import load_cases, reference_cases
+from tools.probe_installed_cli import OUTCOME_CASES, checked_outcomes
 from tools.validate_installed_artifacts import (
     REPO_ROOT,
     check_archive_membership,
@@ -18,6 +19,7 @@ from tools.validate_installed_artifacts import (
 
 
 def verify(dist_dir, evidence, *, commit, run_id, expected_version=None):
+    """Require exact artifact bindings, complete installed CLI/action groups and every frozen journey."""
     if not commit or not run_id:
         raise ValueError("commit and run ID are required")
     if expected_version is not None and expected_version != __version__:
@@ -48,6 +50,8 @@ def verify(dist_dir, evidence, *, commit, run_id, expected_version=None):
         installed = checks["installed_" + kind]
         if installed["label"] != kind or installed["checkout_imports"] != "disabled" or installed["version"] != __version__:
             raise ValueError("installed package identity differs")
+        for group in OUTCOME_CASES:
+            checked_outcomes(group, installed.get(group))
         if installed.get("native_initialization") != {
             "direct_profile": "passed", "nested_profile": "passed",
             "no_write_refusals": "passed", "controller_submission": "passed",

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import runpy
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -53,6 +55,82 @@ def checked_outcomes(group, outcomes):
             or any(value != "passed" for value in outcomes.values())):
         raise ValueError(f"Incomplete installed outcomes: {group}")
     return {name: outcomes[name] for name in expected}
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def workspace_files(root):
+    """Compare file contents in the explicitly selected disposable workspace."""
+    return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in root.rglob("*") if path.is_file()}
+
+
+def setup_next_actions(commands, receipt, *, target, kind):
+    """Execute the public inspection/replay arrays and verify their workspace postconditions."""
+    require(kind in {"empty", "local_source"}, "Unknown setup scenario")
+    require(receipt["target"] == str(target), "Setup receipt selected a different target")
+    inspections = [row for row in receipt["next_actions"] if row["action"] == "inspect_sources"]
+    resumes = [row for row in receipt["next_actions"] if row["action"] == "resume_setup"]
+    require(len(inspections) == len(resumes) == 1, "Setup action inventory is incomplete or duplicated")
+    expected_paths = {path for row in receipt["sources"] for item in row["observations"] for path in item["raw_paths"]}
+    require(bool(expected_paths) == (kind == "local_source"), "Setup source scenario differs")
+    argv = inspections[0]["argv"]
+    require(argv[argv.index("--target") + 1] == str(target), "Inspection command selected a different target")
+    selectors = {argv[index + 1] for index, value in enumerate(argv) if value == "--source-path"}
+    require(selectors == expected_paths, "Inspection command selected different sources")
+    argv = resumes[0]["argv"]
+    require(argv[argv.index("--from-file") + 1] == str(Path(receipt["checkpoint"]).with_name("plan.json")),
+            "Replay command selected a different saved plan")
+    before = workspace_files(target)
+    inspection = commands.command(inspections[0]["argv"], label=kind + "-inspection", timeout=120)
+    require(inspection.returncode == 0 and not inspection.stderr, "Setup inspection failed")
+    observed = json.loads(inspection.stdout)
+    require(observed["schema_version"] == "evidence-source-inspection/v1"
+            and observed["target"]["selected"] and observed["target"]["state"] == "present"
+            and observed["research_ready"] is False, "Setup inspection result differs")
+    selected = {path for row in observed["sources"] for path in row["raw_paths"]}
+    require(selected == expected_paths and all(row["usability"] == "usable" for row in observed["sources"]),
+            "Setup inspection did not observe the selected usable sources")
+    require(workspace_files(target) == before, "Setup inspection changed workspace content")
+    replay = commands.command(resumes[0]["argv"], label=kind + "-replay", timeout=120)
+    require(replay.returncode == 0 and not replay.stderr, "Setup replay failed")
+    resumed = json.loads(replay.stdout)
+    require(resumed["schema_version"] == "evidence-setup-result/v1" and resumed["status"] == "ready"
+            and resumed["setup_ready"] and resumed["plan_id"] == receipt["plan_id"]
+            and resumed["transaction_id"] == receipt["transaction_id"]
+            and resumed["research_complete"] is False and resumed["claims_verified"] is False,
+            "Setup replay changed identity or readiness semantics")
+    require(workspace_files(target) == before, "Setup replay changed workspace content")
+    return {kind + "_inspection": "passed", kind + "_replay": "passed"}
+
+
+def research_next_action(commands, advice, *, operation, target, agent_id, run_id=None):
+    """Execute only an explicitly selected, fresh caller action without granting authority to advice."""
+    require(operation in {"start", "heartbeat"}, "Unknown research observation")
+    require(advice["actions_executed"] is False and advice["research_complete"] is False,
+            "Guidance claimed execution or completion")
+    require(all(row["authorized"] is False and row["evidence_accepted"] is False for row in advice["actions"]),
+            "Guidance changed authority semantics")
+    selected = [row for row in advice["actions"] if row["operation"] == operation]
+    require(len(selected) == 1, "Research action is missing or duplicated")
+    action = selected[0]
+    require(datetime.fromisoformat(action["expires_at"]) > datetime.now(timezone.utc), "Research action expired")
+    argv = action["argv"]
+    require(argv[4:6] == ["agent", operation] and argv[argv.index("--target") + 1] == str(target)
+            and argv[argv.index("--agent-id") + 1] == agent_id, "Research command selected a different operation or caller")
+    if run_id is not None:
+        require(argv[argv.index("--run-id") + 1] == run_id, "Research command selected a different run")
+    observed = commands.command(argv, label=operation, timeout=120)
+    require(observed.returncode == 0 and not observed.stderr, "Research command failed")
+    result = json.loads(observed.stdout)
+    require(result["schema_version"] == "evidence-caller-run-result/v1" and result["operation"] == operation
+            and result["research_complete"] is False and result["run"]["agent_id"] == agent_id
+            and result["run"]["caller_context"]["context_id"] and result["run"]["run_id"]
+            and (run_id is None or result["run"]["run_id"] == run_id), "Research result changed caller or run identity")
+    return result
 
 
 class InstalledCommands:
