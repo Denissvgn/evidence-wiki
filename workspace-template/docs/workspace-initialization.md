@@ -338,10 +338,15 @@ inventory, normalization, or broader lint checks run.
 Then run the broader workspace checks:
 
 ```bash
-python3 scripts/source_inventory.py --dry-run --report
+python3 scripts/source_inventory.py --report
 python3 scripts/normalize_sources.py --all --dry-run
 python3 scripts/lint.py --format text
 ```
+
+Inventory writes `sources/manifest.jsonl`, which normalization needs even in
+dry-run mode. To preview inventory alone without writing that manifest, use
+`python3 scripts/source_inventory.py --dry-run --report`; its output cannot
+replace a written manifest for normalization.
 
 These are setup and early health gates. After the workspace has completed an initial source cycle and is being considered for sustained use, evaluate it with `docs/production-readiness-checklist.md`.
 

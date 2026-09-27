@@ -3,6 +3,7 @@ import io
 import json
 import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -100,6 +101,22 @@ def _markdown_link_destinations(text: str):
         yield next(value for value in match.groups() if value is not None)
 
 
+def _documented_shell_commands(text: str) -> list[list[str]]:
+    """Extract Python and public CLI examples without depending on headings."""
+    commands = []
+    for block in re.findall(r"```(?:bash|sh)\n(.*?)```", text, re.DOTALL):
+        for line in block.replace("\\\n", " ").splitlines():
+            if re.match(r"^(?:python3?|evidence-wiki)\s", line):
+                commands.append(shlex.split(line, comments=True))
+    return commands
+
+
+def _documented_command(text: str, *prefix: str) -> list[str]:
+    matches = [argv for argv in _documented_shell_commands(text) if argv[:len(prefix)] == list(prefix)]
+    assert len(matches) == 1, f"expected one documented command starting with {prefix!r}, found {matches!r}"
+    return matches[0]
+
+
 def test_documentation_local_links_resolve_to_shipped_files():
     tracked = _tracked_repository_files()
     documents = [
@@ -171,13 +188,25 @@ def test_public_contribution_guidance_excludes_internal_verification_content():
 
 
 def test_upgrade_documentation_agrees_on_locks_conditional_log_and_dry_run():
-    for path in (README, WORKSPACE_INIT_DOC, ORCHESTRATE_SKILL):
+    readme = " ".join(README.read_text(encoding="utf-8").split())
+    for guarantee in (
+        "Write mode uses `.locks/`", "may update starter metadata",
+        "appends to `log.md` only when material changes occur",
+        "`--dry-run` writes nothing", "prior log history",
+        "Pending orders or an active orchestration driver block both modes",
+        "`UPGRADE_PENDING_ORDER`",
+    ):
+        assert guarantee in readme, guarantee
+    for path in (WORKSPACE_INIT_DOC, ORCHESTRATE_SKILL):
         text = path.read_text(encoding="utf-8")
         assert ".locks/" in text, path
         assert "log.md" in text, path
         assert "conditionally appends" in text, path
         assert "dry-run" in text and "writes nothing" in text, path
         assert "or log.md" not in text, path
+    initialization = " ".join(WORKSPACE_INIT_DOC.read_text(encoding="utf-8").split())
+    assert "including lock, backup, metadata, and log artifacts" in initialization
+    assert "when write mode applies material changes" in initialization
 
 
 INVENTORY = load_script_module("documented_workflows_inventory", "source_inventory.py")
@@ -335,12 +364,29 @@ class DocumentedWorkflowTests(unittest.TestCase):
     def test_documented_validation_sequence_writes_manifest_before_normalization_dry_run(self):
         readme = README.read_text()
         readiness = READINESS.read_text()
-        validation_section = readme.split("## Validate A Created Workspace", 1)[1].split("To preview inventory", 1)[0]
+        for path in (README, WORKSPACE_INIT_DOC, READINESS):
+            with self.subTest(document=path.name):
+                text = path.read_text(encoding="utf-8")
+                commands = _documented_shell_commands(text)
+                inventory = [i for i, argv in enumerate(commands) if "scripts/source_inventory.py" in argv]
+                normalization = [i for i, argv in enumerate(commands) if "scripts/normalize_sources.py" in argv]
+                self.assertEqual(1, len(inventory), f"expected one workspace inventory command in {path}")
+                self.assertEqual(1, len(normalization), f"expected one workspace normalization command in {path}")
+                self.assertLess(inventory[0], normalization[0], "write inventory before normalization")
+                self.assertIn("--report", commands[inventory[0]])
+                self.assertNotIn("--dry-run", commands[inventory[0]], "inventory must write the manifest")
+                self.assertIn("--all", commands[normalization[0]])
+                if path != README:
+                    self.assertIn("--dry-run", commands[normalization[0]])
+                self.assertIn("`sources/manifest.jsonl`", text)
 
-        self.assertIn("python3 scripts/source_inventory.py --report", readme)
-        self.assertNotIn("python3 scripts/source_inventory.py --dry-run --report", validation_section)
-        self.assertIn("python3 scripts/source_inventory.py --dry-run --report", readme)
-        self.assertIn("normalize_sources.py --all --dry-run reads `sources/manifest.jsonl`", readme)
+        readme_words = " ".join(readme.split())
+        self.assertIn("normalization previews still require a written manifest", readme_words)
+        self.assertIn("inventory dry-run output cannot replace it", readme_words)
+        initialization = " ".join(WORKSPACE_INIT_DOC.read_text().split())
+        self.assertIn("python3 scripts/source_inventory.py --dry-run --report", initialization)
+        self.assertIn("cannot replace a written manifest for normalization", initialization)
+        self.assertIn("`normalize_sources.py --all --dry-run` reads `sources/manifest.jsonl`", " ".join(readiness.split()))
         self.assertIn("python3 scripts/source_inventory.py --report", readiness)
         self.assertIn("python3 -B workspace-template/scripts/source_inventory.py --project-root tests/fixtures/arxiv-source-project --report", readiness)
 
@@ -376,9 +422,24 @@ class DocumentedWorkflowTests(unittest.TestCase):
         questions_skill = QUESTIONS_SKILL.read_text()
         answer_skill = ANSWER_SKILL.read_text()
 
-        for text in (readme, handoff, question_api, questions_skill):
+        self.assertEqual(
+            ["evidence-wiki", "questions", "add", "--target", ".", "--from-file", "batch.yaml"],
+            _documented_command(readme, "evidence-wiki", "questions", "add"),
+        )
+        self.assertEqual(
+            ["evidence-wiki", "export", "--target", ".", "--format", "json"],
+            _documented_command(readme, "evidence-wiki", "export"),
+        )
+        self.assertEqual(
+            ["evidence-wiki", "agent", "research-export", "--target", "WORKSPACE", "--format", "json"],
+            _documented_command(readme, "evidence-wiki", "agent", "research-export"),
+        )
+        readme_words = " ".join(readme.split())
+        self.assertIn("uses legacy QA; its `export` command reports answers without strict review assurance", readme_words)
+        self.assertIn("After research and required reviews, request the original-question export", readme_words)
+        for text in (handoff, question_api, questions_skill):
             self.assertIn("scripts/intake_questions.py --from-file batch.yaml", text)
-        for text in (readme, handoff, question_api, answer_skill):
+        for text in (handoff, question_api, answer_skill):
             self.assertIn("scripts/export_answers.py --format json", text)
         self.assertIn("evidence-wiki questions add", question_api)
         self.assertIn("evidence-wiki questions export", question_api)
@@ -1199,8 +1260,15 @@ class DocumentedWorkflowTests(unittest.TestCase):
         # The executable skill is cross-linked from the canonical contract and README.
         self.assertIn("research-orchestrate", HANDOFF_DOC.read_text())
         self.assertIn("evidence-wiki orchestrator-guide", HANDOFF_DOC.read_text())
-        self.assertIn("orchestrator/skills/", README.read_text())
-        self.assertIn("evidence-wiki orchestrator-guide", README.read_text())
+        readme = README.read_text()
+        self.assertIn("`evidence-wiki orchestrator-guide --print`", readme)
+        for reference, destination in (
+            ("handoff", "workspace-template/docs/orchestrator-handoff.md"),
+            ("orchestrator-readme", "orchestrator/README.md"),
+        ):
+            self.assertRegex(readme, rf"\[[^\]\n]+\]\[{reference}\]")
+            self.assertIn(f"[{reference}]: https://github.com/Denissvgn/evidence-wiki/blob/main/{destination}", readme)
+            self.assertTrue((REPO_ROOT / destination).is_file())
 
     def test_research_acquire_default_workspace_is_inert(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1513,11 +1581,18 @@ class DocumentedWorkflowTests(unittest.TestCase):
         readme = README.read_text()
         handoff = HANDOFF_DOC.read_text()
 
+        self.assertEqual(
+            ["evidence-wiki", "doctor", "--format", "json"],
+            _documented_command(readme, "evidence-wiki", "doctor"),
+        )
+        readme_words = " ".join(readme.split())
+        self.assertIn("pypdf provides portable PDF extraction", readme_words)
+        self.assertIn("Poppler is optional unless explicitly selected as the PDF backend", readme_words)
         for text in (readme, handoff):
             self.assertIn("evidence-wiki doctor --format json", text)
-            self.assertIn("python3 scripts/doctor.py --format json", text)
             self.assertIn("pypdf", text)
-            self.assertIn("Poppler compatibility", text)
+        self.assertIn("python3 scripts/doctor.py --format json", handoff)
+        self.assertIn("Poppler compatibility", handoff)
 
     def test_mcp_threat_model_is_documented(self):
         mcp_doc = " ".join(MCP_DOC.read_text().split())
@@ -2076,7 +2151,25 @@ class DocumentedWorkflowTests(unittest.TestCase):
                 self.assertIn("aider", normalized_words)
                 self.assertIn("gemini cli", normalized_words)
                 self.assertIn("agents.md", normalized_words)
-                self.assertIn("not package managed runners", normalized_words)
+                if label == "README.md":
+                    rows = {}
+                    for mode in ("Managed adapters", "External host"):
+                        matches = re.findall(rf"^\| {mode} \| (.*?) \|$", text, re.MULTILINE)
+                        self.assertEqual(1, len(matches), f"expected one support-table row for {mode}")
+                        rows[mode] = matches[0].casefold()
+                    managed, external = rows["Managed adapters"], rows["External host"]
+                    for runner in ("codex", "claude"):
+                        self.assertIn(runner, managed)
+                        self.assertNotIn(runner, external)
+                    for host in ("opencode", "pi", "aider", "gemini cli"):
+                        self.assertRegex(external, rf"\b{host}\b")
+                        self.assertNotRegex(managed, rf"\b{host}\b")
+                    self.assertIn("`orchestrate run` / `resume`", managed)
+                    self.assertIn("managed claude is unavailable on native windows", managed)
+                    self.assertIn("operator-controlled host", external)
+                    self.assertIn("`start` / `next` / `submit` / `status`", external)
+                else:
+                    self.assertIn("not package managed runners", normalized_words)
                 self.assertNotIn("--runner opencode", normalized)
                 self.assertNotIn("--runner pi", normalized)
                 self.assertNotIn("managed opencode", normalized)

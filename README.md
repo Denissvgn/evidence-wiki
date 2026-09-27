@@ -168,9 +168,10 @@ python -B scripts/source_inventory.py --report
 python -B scripts/normalize_sources.py --all
 ```
 
-Inventory writes the source manifest; normalization writes evidence records.
-Use `--dry-run` to preview these operations. Keep raw evidence immutable and
-continue with the [research workflow][research-run].
+Inventory writes `sources/manifest.jsonl`; normalization writes evidence records.
+Use `--dry-run` to preview either operation, but normalization previews still
+require a written manifest; inventory dry-run output cannot replace it. Keep raw
+evidence immutable and continue with the [research workflow][research-run].
 
 ## Drive It With An Agent
 
@@ -303,8 +304,9 @@ evidence-wiki upgrade --target WORKSPACE
 ```
 
 Upgrade preserves `research.yml`, `raw/`, `sources/`, `wiki/`, `index.md` and prior
-history. It may update starter metadata and append an
-audit entry. Pending orders or an active orchestration driver block both modes
+log history. Write mode uses `.locks/`, may update starter metadata, and appends
+to `log.md` only when material changes occur. `--dry-run` writes nothing.
+Pending orders or an active orchestration driver block both modes
 with `UPGRADE_PENDING_ORDER`; drain them first. Optional docs/skills have separate
 conflict rules. See [upgrade and adoption][upgrade].
 
