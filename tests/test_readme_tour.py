@@ -24,17 +24,25 @@ def shell_argv(command: str) -> list[str]:
     return shlex.split(command.replace("\\\n", " "))
 
 
+def command_block(blocks: list[str], command: str) -> str:
+    matches = [block for block in blocks if command in block]
+    assert len(matches) == 1, f"expected one README block containing {command!r}, found {len(matches)}"
+    return matches[0]
+
+
 class ReadmeAutonomousTourTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        for heading in ("## Five-Minute Tour", "## Drive It With An Agent"):
+            assert heading in cls.readme, f"missing README section: {heading}"
         tour = cls.readme.split("## Five-Minute Tour", 1)[1].split("## Drive It With An Agent", 1)[0]
         cls.tour_blocks = bash_blocks(tour)
 
     def test_primary_tour_deploy_question_and_runner_commands_parse_and_execute(self):
-        deploy_block = next(block for block in self.tour_blocks if "evidence-wiki deploy" in block)
-        question_block = next(block for block in self.tour_blocks if "questions add" in block)
-        run_block = next(block for block in self.tour_blocks if "orchestrate run" in block)
+        deploy_block = command_block(self.tour_blocks, "evidence-wiki deploy")
+        question_block = command_block(self.tour_blocks, "evidence-wiki questions add")
+        run_block = command_block(self.tour_blocks, "evidence-wiki orchestrate run")
 
         deploy_command = deploy_block.split("evidence-wiki deploy", 1)[1]
         deploy_command = "evidence-wiki deploy" + deploy_command.split("\ncd ", 1)[0]
@@ -74,11 +82,8 @@ class ReadmeAutonomousTourTests(unittest.TestCase):
             self.assertEqual("battery-demo", parsed.agent_id)
 
     def test_documented_external_protocol_start_next_and_status_execute(self):
-        protocol_block = next(
-            block
-            for block in bash_blocks(self.readme)
-            if "orchestrate start" in block and "orchestrate submit" in block
-        )
+        protocol_block = command_block(bash_blocks(self.readme), "evidence-wiki orchestrate start")
+        self.assertIn("evidence-wiki orchestrate submit", protocol_block)
         commands = [line for line in protocol_block.splitlines() if line.startswith("evidence-wiki orchestrate")]
         self.assertEqual(4, len(commands))
 
