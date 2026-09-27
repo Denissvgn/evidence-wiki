@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 1.1.1 - 2026-09-27
+
 - Support `python -B -m evidence_wiki` alongside the console command and CLI
   module, so generated setup inspection/replay and research start/heartbeat
   commands execute with their selected interpreter. Document the same-environment
