@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
 import yaml
 
 from tests._script_loader import load_module as load_script_module
@@ -20,6 +21,59 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from evidence_wiki import cli, resources
+
+
+@pytest.mark.parametrize("launcher", ["package", "cli_module", "console"])
+@pytest.mark.parametrize("command", ["help", "version", "schemas", "unknown_command", "invalid_plan"])
+def test_subprocess_entrypoints_preserve_cli_contract(tmp_path, run_package_command, launcher, command):
+    invalid_plan = tmp_path / "invalid plan.json"
+    invalid_plan.write_text("{}", encoding="utf-8")
+    arguments = {
+        "help": ["--help"],
+        "version": ["--version"],
+        "schemas": ["agent", "source-schemas", "--format", "json"],
+        "unknown_command": ["unknown-command"],
+        "invalid_plan": ["agent", "apply", "--from-file", str(invalid_plan), "--format", "json"],
+    }[command]
+    launchers = {
+        "package": [sys.executable, "-B", "-m", "evidence_wiki"],
+        "cli_module": [sys.executable, "-B", "-m", "evidence_wiki.cli"],
+        "console": [str(Path(sys.executable).with_name("evidence-wiki.exe" if os.name == "nt" else "evidence-wiki"))],
+    }
+    result = run_package_command([*launchers[launcher], *arguments])
+    assert result.returncode == (2 if command in {"unknown_command", "invalid_plan"} else 0), result.stderr
+    if command == "unknown_command":
+        assert result.stdout == ""
+        assert "unknown command: unknown-command" in result.stderr
+        assert result.stderr.startswith("usage: evidence-wiki")
+    else:
+        assert result.stderr == ""
+        if command == "help":
+            assert result.stdout.startswith("evidence-wiki: ")
+            assert "Usage:" in result.stdout and "evidence-wiki agent apply" in result.stdout
+        elif command == "version":
+            assert result.stdout == f"evidence-wiki {cli.__version__}\n"
+        elif command == "schemas":
+            assert "evidence-source-inspection/v1" in json.loads(result.stdout)["schema_ids"]
+        else:
+            payload = json.loads(result.stdout)
+            assert payload["error_code"] == "ONBOARDING_INVALID"
+            assert payload["schema_version"] == "1.0" and payload["recoverable"] is False
+    if launcher != "cli_module":
+        reference = run_package_command([*launchers["cli_module"], *arguments])
+        assert (result.returncode, result.stdout, result.stderr) == (
+            reference.returncode, reference.stdout, reference.stderr,
+        )
+
+
+def test_package_entrypoint_import_does_not_execute_cli(run_package_command):
+    result = run_package_command([
+        sys.executable, "-B", "-c",
+        "import sys; import evidence_wiki; assert 'evidence_wiki.cli' not in sys.modules; "
+        "import evidence_wiki.__main__; print('imported')",
+        "unknown-command",
+    ])
+    assert (result.returncode, result.stdout, result.stderr) == (0, "imported\n", "")
 
 
 class PackageCliTests(unittest.TestCase):

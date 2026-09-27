@@ -453,6 +453,20 @@ def test_archive_membership_refuses_a_wheel_missing_a_required_asset(tmp_path: P
     assert "research-orchestrate.md" in str(refusal.value)
 
 
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+def test_archive_membership_requires_the_package_entrypoint(tmp_path, artifact):
+    """Each distribution must contain the module required by generated commands."""
+    missing = "evidence_wiki/__main__.py" if artifact == "wheel" else "src/evidence_wiki/__main__.py"
+    wheel = make_wheel(tmp_path / "evidence_wiki-9.9.9-py3-none-any.whl",
+                       sorted(set(VALIDATOR.REQUIRED_WHEEL_MEMBERS) - {missing}))
+    sdist = make_sdist(tmp_path / "evidence_wiki-9.9.9.tar.gz",
+                       sorted(set(VALIDATOR.REQUIRED_SDIST_MEMBERS) - {missing}))
+    with pytest.raises(SystemExit) as refusal:
+        VALIDATOR.check_archive_membership(wheel, sdist)
+    assert "missing required members" in str(refusal.value)
+    assert missing in str(refusal.value)
+
+
 def test_find_artifacts_refuses_an_ambiguous_dist_directory(tmp_path: Path) -> None:
     make_wheel(tmp_path / "a-1-py3-none-any.whl", ["a"])
     make_wheel(tmp_path / "a-2-py3-none-any.whl", ["a"])

@@ -3,10 +3,12 @@
 import contextlib
 import io
 import json
+import sys
 from datetime import datetime, timezone
 
 import pytest
 
+from evidence_wiki import Onboarding
 from evidence_wiki._filesystem import os
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.pack_discovery import owner
@@ -57,6 +59,59 @@ def test_caller_run_start_resume_heartbeat_and_owned_claim(workspace):
     assert any(action["operation"] == "retrieve" for action in result["actions"])
     with pytest.raises(owner("question_claim").ClaimError):
         owner("question_claim").run_claim(workspace, slug="q1", agent_id="another")
+
+
+def test_research_guidance_commands_execute_with_current_caller(workspace, run_package_command):
+    """Run returned start and heartbeat arrays and preserve read-only advice and owner refusals."""
+    before = files(workspace)
+    controller = owner("run_controller")
+    with Onboarding.open(allowed_roots=[workspace]) as host:
+        advice = host.research_next(workspace, agent_id="caller")
+        assert not advice["actions_executed"] and not advice["research_complete"]
+        assert all(not row["authorized"] for row in advice["actions"])
+        assert files(workspace) == before
+        start = next(row for row in advice["actions"] if row["operation"] == "start")
+        assert start["argv"][:4] == [sys.executable, "-B", "-m", "evidence_wiki"]
+        assert start["argv"][start["argv"].index("--agent-id") + 1] == "caller"
+        process = run_package_command(start["argv"])
+        assert process.returncode == 0, process.stdout + process.stderr
+        assert process.stderr == ""
+        started = json.loads(process.stdout)
+        assert started["schema_version"] == "evidence-caller-run-result/v1" and started["operation"] == "start"
+        assert not started["research_complete"]
+        run_id = started["run"]["run_id"]
+        stored = controller.load_run_state(workspace, run_id)
+        assert stored["agent_id"] == "caller" and stored["state"]["current"] == "initialized"
+        assert stored["caller_context"] == started["run"]["caller_context"]
+        assert stored["last_heartbeat_at"] is None
+        before_advice = files(workspace)
+        fresh = host.research_next(workspace, agent_id="caller", run_id=run_id)
+        assert not fresh["actions_executed"] and not fresh["research_complete"]
+        assert all(not row["authorized"] for row in fresh["actions"])
+        assert files(workspace) == before_advice
+        script_resume = next(row for row in fresh["actions"] if row["operation"] == "resume")
+        assert script_resume["argv"][:3] == [sys.executable, "-B", str(workspace / "scripts/run_controller.py")]
+        heartbeat = next(row for row in fresh["actions"] if row["operation"] == "heartbeat")
+        assert heartbeat["argv"][:4] == [sys.executable, "-B", "-m", "evidence_wiki"]
+        assert heartbeat["argv"][heartbeat["argv"].index("--run-id") + 1] == run_id
+        process = run_package_command(heartbeat["argv"])
+        assert process.returncode == 0, process.stdout + process.stderr
+        assert process.stderr == ""
+        observed = json.loads(process.stdout)
+        assert observed["operation"] == "heartbeat" and observed["run"]["run_id"] == run_id
+        current = controller.load_run_state(workspace, run_id)
+        assert current["agent_id"] == "caller" and current["state"] == stored["state"]
+        assert current["last_heartbeat_at"] and current["last_heartbeat_at"] == observed["run"]["last_heartbeat_at"]
+        assert current["caller_context"] == stored["caller_context"]
+
+    before_refusal = files(workspace)
+    wrong_caller = list(heartbeat["argv"])
+    wrong_caller[wrong_caller.index("--agent-id") + 1] = "another"
+    refused = run_package_command(wrong_caller)
+    assert refused.returncode == 3 and refused.stderr == "", refused.stdout + refused.stderr
+    assert json.loads(refused.stdout)["error_code"] == "ONBOARDING_OWNERSHIP_CONFLICT"
+    assert heartbeat["argv"][heartbeat["argv"].index("--agent-id") + 1] == "caller"
+    assert files(workspace) == before_refusal
 
 
 @pytest.mark.parametrize("operation", ["heartbeat", "transition", "event", "finish", "recover"])

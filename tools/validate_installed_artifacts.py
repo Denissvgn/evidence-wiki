@@ -54,6 +54,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from evidence_wiki import resources  # noqa: E402 - the checkout's manifest names what the archives must carry.
 from tools._qualification_process import CommandRunner, interruptible, positive_seconds  # noqa: E402
+from tools.probe_installed_cli import checked_outcomes  # noqa: E402
 
 _RUNNER = CommandRunner()
 _OPTIONS = argparse.Namespace(command_timeout=900, journey_timeout=5400, case_timeout=1200,
@@ -105,6 +106,7 @@ FORBIDDEN_SUFFIXES = (".pyc", ".pyo")
 #: Members every wheel must carry: the package plus every asset the contract names.
 REQUIRED_WHEEL_MEMBERS = (
     "evidence_wiki/__init__.py",
+    "evidence_wiki/__main__.py",
     "evidence_wiki/cli.py",
     "evidence_wiki/agent.py",
     "evidence_wiki/frameworks.py",
@@ -143,12 +145,14 @@ REQUIRED_SDIST_MEMBERS = (
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "src/evidence_wiki/__init__.py",
+    "src/evidence_wiki/__main__.py",
     "tools/smoke_installed_orchestration.py",
     "tools/validate_installed_artifacts.py",
     "tools/_qualification_process.py",
     "tools/qualify_journeys.py",
     "tools/sync_agent_resources.py",
     "tools/probe_installed_extensions.py",
+    "tools/probe_installed_cli.py",
     "tests/_docx_fixture.py",
     "tests/_publication_fixture.py",
     "tests/fixtures/fake_codex_cli.py",
@@ -298,7 +302,7 @@ def create_venv_with_wheel(root: Path, wheel: Path) -> Path:
 def fixture_members():
     members = ["tools/smoke_installed_orchestration.py", "tools/qualify_journeys.py",
                "workspace-template/workspace-system.yml",
-               "tools/probe_installed_extensions.py", "tests/_docx_fixture.py",
+               "tools/probe_installed_extensions.py", "tools/probe_installed_cli.py", "tests/_docx_fixture.py",
                "tools/_journey_cases.py", "tools/_journey_driver.py", "tools/_journey_authoring.py", "tools/_qualification_process.py",
                "tests/fixtures/onboarding-journeys/cases.json", "tests/_computation_fixture.py", "tests/fixtures/fake_codex_cli.py",
                "tests/fixtures/strict-evidence/review-cases.json",
@@ -1565,19 +1569,27 @@ PACK_AUTHORING_PROBE = textwrap.dedent(r'''
 
 
 SETUP_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'")] + textwrap.dedent(r'''
-    result = command('apply','--from-file',saved)
+    import runpy
+    from evidence_wiki import Onboarding
+    support = runpy.run_path(sys.argv[3])
+    commands = support['InstalledCommands'](sys.executable,cli,cwd=root.parent,checkout_root=sys.argv[4],output=sys.argv[5])
+    with Onboarding.open(allowed_roots=[root],allow=['apply']) as host:
+        prepared = host.plan(request)
+        assert prepared['plan_id'] == plan['plan_id']
+        result = host.apply(prepared)
     assert result['status'] == 'ready' and result['setup_ready'] and result['evidence_empty'], result
     assert not result['research_complete'] and not result['strict']['reviewer_authenticated']
     assert result['strict']['effective_assurance'] == 'artifact_checked'
     assert command('setup-guide')['content'].startswith('# Apply and recover')
     assert 'evidence-setup-result/v1' in command('setup-schemas')['schema_ids']
     target = root/'workspace'
+    outcomes = support['setup_next_actions'](commands,result,target=target,kind='empty')
     before = {str(path.relative_to(target)):path.read_bytes() for path in target.rglob('*') if path.is_file()}
     replay = command('apply','--from-file',saved)
     assert replay['transaction_id'] == result['transaction_id']
     assert before == {str(path.relative_to(target)):path.read_bytes() for path in target.rglob('*') if path.is_file()}
     assert yaml.safe_load((target/'wiki/questions/q1.md').read_text().split('---')[1])['metadata']['original_text'] == text
-    original['payload']['target']['relative_path'] = 'sources-workspace'
+    original['payload']['target']['relative_path'] = 'sources workspace'
     original['payload']['budgets']['bytes'] = 100000
     original['payload']['authority']['source_scope'] = [str(root)]
     source = root/'original.html'
@@ -1586,14 +1598,22 @@ SETUP_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'
     request['decisions']['source_requirements'] = [{'source_id':'original','output_format':'html','needs_complete':True,'scope':{'jurisdiction':'Spain'}}]
     request_file.write_text(json.dumps(request,ensure_ascii=False))
     source_plan = root/'source-plan.json'
-    command('plan','--from-file',request_file,'--output',source_plan)
-    observed = command('apply','--from-file',source_plan)
+    console_plan = command('plan','--from-file',request_file,'--output',source_plan)
+    with Onboarding.open(allowed_roots=[root],allow=['apply']) as host:
+        prepared = host.plan(request)
+        assert prepared['plan_id'] == console_plan['plan_id']
+        observed = host.apply(prepared)
     assert observed['status'] == 'ready' and observed['sources'][0]['usable'], observed
     assert not observed['claims_verified'] and observed['usable_source_count'] == 1
+    outcomes.update(support['setup_next_actions'](commands,observed,target=root/'sources workspace',kind='local_source'))
+    raw_paths = observed['sources'][0]['observations'][0]['raw_paths']
+    assert len(raw_paths) == 1 and (root/'sources workspace'/raw_paths[0]).read_bytes() == source.read_bytes()
     (target/'user-note.txt').write_text('User changes are retained')
     assert command('apply','--from-file',saved,expected=3)['error_code'] == 'ONBOARDING_OWNERSHIP_CONFLICT'
     assert (target/'user-note.txt').read_text() == 'User changes are retained'
-    print(json.dumps({'workspace_application':'passed','setup_replay':'passed','local_source_observation':'passed','setup_conflict_preservation':'passed'}))
+    print(json.dumps({'workspace_application':'passed','setup_replay':'passed','local_source_observation':'passed',
+        'setup_conflict_preservation':'passed','generated_setup_actions':support['checked_outcomes']('generated_setup_actions',outcomes),
+        'setup_action_commands':commands.runner.records,'setup_action_log_directory':str(commands.runner.output)}))
 ''')
 
 
@@ -1644,30 +1664,73 @@ REVISION_PROBE = textwrap.dedent(r'''
 
 RESEARCH_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.yml'")].replace(
     "'allowed_actions':['local_setup']", "'allowed_actions':['local_setup','local_research']") + textwrap.dedent(r'''
+    import runpy
+    support = runpy.run_path(sys.argv[3])
+    commands = support['InstalledCommands'](sys.executable,cli,cwd=root.parent,checkout_root=sys.argv[4],output=sys.argv[5])
     setup = command('apply','--from-file',saved)
     target = root/'workspace'
+    before = support['workspace_files'](target)
     advice = command('next','--target',target,'--agent-id','current')
-    assert not advice['actions_executed'] and not advice['research_complete']
-    assert advice['actions'][0]['operation'] == 'start'
-    started = command('start','--target',target,'--run-id','research','--agent-id','current')
-    assert started['run']['caller_context']['context_id']
-    before = {str(p.relative_to(target)):p.read_bytes() for p in target.rglob('*') if p.is_file()}
-    resumed = command('resume','--target',target,'--run-id','research','--agent-id','current')
+    assert support['workspace_files'](target) == before
+    started = support['research_next_action'](commands,advice,operation='start',target=target,agent_id='current')
+    run_id = started['run']['run_id']
+    controller = owner('run_controller')
+    stored = controller.load_run_state(target,run_id)
+    assert stored['agent_id'] == 'current' and stored['state']['current'] == 'initialized'
+    assert stored['caller_context'] == started['run']['caller_context'] and stored['last_heartbeat_at'] is None
+    before = support['workspace_files'](target)
+    resumed = command('resume','--target',target,'--run-id',run_id,'--agent-id','current')
     assert any(row['operation']=='claim' for row in resumed['actions'])
-    assert before == {str(p.relative_to(target)):p.read_bytes() for p in target.rglob('*') if p.is_file()}
-    command('heartbeat','--target',target,'--run-id','research','--agent-id','current')
-    refused = command('heartbeat','--target',target,'--run-id','research','--agent-id','other',expected=3)
+    assert support['workspace_files'](target) == before
+    fresh = command('next','--target',target,'--run-id',run_id,'--agent-id','current')
+    assert support['workspace_files'](target) == before
+    script_resume = next(row for row in fresh['actions'] if row['operation'] == 'resume')
+    assert script_resume['argv'][:3] == [sys.executable,'-B',str(target/'scripts/run_controller.py')]
+    observed = support['research_next_action'](commands,fresh,operation='heartbeat',target=target,agent_id='current',run_id=run_id)
+    current = controller.load_run_state(target,run_id)
+    assert current['agent_id'] == 'current' and current['state'] == stored['state']
+    assert current['last_heartbeat_at'] and current['last_heartbeat_at'] == observed['run']['last_heartbeat_at']
+    assert current['caller_context'] == stored['caller_context']
+    before = support['workspace_files'](target)
+    refused = command('heartbeat','--target',target,'--run-id',run_id,'--agent-id','other',expected=3)
     assert refused['error_code'] == 'ONBOARDING_OWNERSHIP_CONFLICT'
+    assert support['workspace_files'](target) == before
     output = command('research-export','--target',target,expected=3)
     assert not output['research_complete'] and output['original_outcomes'][0]['original_text'] == text
-    progress = command('progress','--target',target,'--run-id','research')
+    progress = command('progress','--target',target,'--run-id',run_id)
     assert progress['semantic_evaluation']['unsupported_claim_escapes']['value'] is None
     assert progress['measured']['question_outcomes'] == {'open':1}
     assert command('research-guide')['content'].startswith('# Research with the current caller')
     assert 'evidence-research-action/v1' in command('research-schemas')['schema_ids']
     print(json.dumps({'caller_guidance':'passed','caller_run_binding':'passed','caller_readonly_resume':'passed',
-        'caller_ownership_conflict':'passed','original_question_accounting':'passed','local_telemetry_unknown_grading':'passed'}))
+        'caller_ownership_conflict':'passed','original_question_accounting':'passed','local_telemetry_unknown_grading':'passed',
+        'generated_research_actions':support['checked_outcomes']('generated_research_actions',{'start':'passed','heartbeat':'passed'}),
+        'research_action_commands':commands.runner.records,'research_action_log_directory':str(commands.runner.output)}))
 ''')
+
+
+def validate_cli_entrypoints(python, cli, *, outside, fixture_root, output, expected_version=None):
+    """Run the same isolated entry-point probe for either selected distribution."""
+    argv = [str(python), "-B", "-I", str(fixture_root / "tools/probe_installed_cli.py"),
+            "--cli", str(cli), "--cwd", str(outside), "--checkout-root", str(REPO_ROOT), "--output", str(output)]
+    if expected_version is not None:
+        argv.extend(["--expected-version", expected_version])
+    result = json.loads(run(argv, cwd=outside, label="cli-entrypoints"))
+    checked_outcomes("cli_entrypoints", result.get("cli_entrypoints") if isinstance(result, dict) else None)
+    return result
+
+
+def validate_action_probe(python, cli, *, kind, root, outside, fixture_root, output):
+    """Require complete generated-action observations from the selected installation."""
+    probes = {"setup": (SETUP_PROBE, "generated_setup_actions"), "research": (RESEARCH_PROBE, "generated_research_actions")}
+    if kind not in probes:
+        raise ValueError("Unknown installed action probe")
+    program, group = probes[kind]
+    result = json.loads(run([str(python), "-B", "-I", "-c", program, str(cli), str(root),
+        str(fixture_root / "tools/probe_installed_cli.py"), str(REPO_ROOT), str(output)],
+        cwd=outside, label=kind + "-actions"))
+    checked_outcomes(group, result.get(group) if isinstance(result, dict) else None)
+    return result
 
 
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
@@ -1684,7 +1747,10 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     workspace = scratch / "provider-workspace"
     # Every command runs from a directory that is not the checkout, so a module
     # resolved from the source tree instead of the install would be a failure here.
-    run([str(cli), "--version"], cwd=outside)
+    entrypoint_output = (_OPTIONS.evidence / label / "cli-entrypoint-commands" if _OPTIONS.evidence is not None
+                         else scratch / "cli-entrypoint-commands")
+    entrypoints = validate_cli_entrypoints(python, cli, outside=outside, fixture_root=fixture_root,
+        output=entrypoint_output, expected_version=expected_version)
     agent_probe = run([str(python), "-c", AGENT_PROBE, str(cli)], cwd=outside)
     pack_probe = run([str(python), "-c", PACK_PROBE, str(cli), str(scratch / "pack-discovery")], cwd=outside)
     native_initialization = run([str(python), "-B", "-c", NATIVE_INITIALIZATION_PROBE, str(cli),
@@ -1783,9 +1849,15 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
     sources = run([str(python), "-c", SOURCE_PROBE, str(cli), str(scratch / "source-workspace")], cwd=outside)
     planning = run([str(python), "-c", PLANNING_PROBE, str(cli), str(scratch / "research-planning")], cwd=outside)
-    research = run([str(python), "-c", RESEARCH_PROBE, str(cli), str(scratch / "caller-research")], cwd=outside)
+    research_output = (_OPTIONS.evidence / label / "research-action-commands" if _OPTIONS.evidence is not None
+                       else scratch / "research-action-commands")
+    research = validate_action_probe(python, cli, kind="research", root=scratch / "caller research", outside=outside,
+                                     fixture_root=fixture_root, output=research_output)
     revisions = run([str(python), "-c", REVISION_PROBE, str(cli), str(scratch / "pack-revisions")], cwd=outside)
-    setup = run([str(python), "-c", SETUP_PROBE, str(cli), str(scratch / "workspace-application")], cwd=outside)
+    setup_output = (_OPTIONS.evidence / label / "setup-action-commands" if _OPTIONS.evidence is not None
+                    else scratch / "setup-action-commands")
+    setup = validate_action_probe(python, cli, kind="setup", root=scratch / "workspace application", outside=outside,
+                                  fixture_root=fixture_root, output=setup_output)
     extensions = run([str(python), "-I", str(fixture_root / "tools/probe_installed_extensions.py"), "--root", str(scratch / "scoped-extensions"),
                       "--docx-fixture", str(fixture_root / "tests/_docx_fixture.py")], cwd=outside) if os.name == "posix" else json.dumps({"scoped_extensions": "unsupported_platform"})
     authoring = run([str(python), "-c", PACK_AUTHORING_PROBE, str(cli), str(scratch / "pack-authoring"),
@@ -1802,8 +1874,8 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
-            **json.loads(planning), **json.loads(authoring), **json.loads(setup), **json.loads(research), **json.loads(revisions),
-            **json.loads(extensions), **json.loads(native_initialization),
+            **json.loads(planning), **json.loads(authoring), **setup, **research, **json.loads(revisions),
+            **json.loads(extensions), **json.loads(native_initialization), **entrypoints,
             "journeys": journeys}
 
 

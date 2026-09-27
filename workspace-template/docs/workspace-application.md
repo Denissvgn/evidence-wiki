@@ -8,6 +8,29 @@ evidence-wiki agent setup-guide --format text
 evidence-wiki agent apply --from-file setup-plan.json
 ```
 
+The package launch form selects the interpreter explicitly:
+
+```text
+PYTHON -B -m evidence_wiki agent apply --from-file setup-plan.json
+```
+
+`PYTHON` denotes the exact executable from the selected environment or returned
+command, not a PATH fallback. The console command and `-B -m evidence_wiki.cli`
+form remain supported. Execute returned inspection/replay argument arrays
+unchanged when your task authority permits the operation, retaining the interpreter, flags,
+target, source selectors and saved-plan path.
+
+If an affected installation reports `No module named evidence_wiki.__main__`,
+invoke the same operation through the CLI module in that same environment:
+
+```text
+PYTHON -B -m evidence_wiki.cli agent apply --from-file setup-plan.json
+```
+
+Keep the original plan and all remaining arguments. This workaround changes only
+how the command is launched. Do not edit or re-hash stored plans, receipts or
+action identifiers to repair dispatch; all existing preconditions still apply.
+
 Use the same `apply` command to resume. No `--force`, shell command field,
 installation, network acquisition or additional model is involved. An apply
 process requires native no-follow file operations and native coordination.
@@ -114,6 +137,13 @@ fresh target and plan when the exact owned state cannot be restored. Never force
 initialization or delete an unexplained path to make recovery pass.
 
 User edits, additional files, directory replacement, changed source inputs and
-package/pack/interpreter drift also refuse automatic replay. State cleanup is a
-separate explicit retention action. Once research changes the workspace, use the
-canonical research/status owners; setup is no longer its mutation authority.
+package/pack/interpreter drift also refuse automatic replay. An upgrade can restore
+command execution while an old plan correctly remains `ONBOARDING_PLAN_STALE`.
+After installation or code changes, restart the host Python process before opening
+new `Onboarding` handles; replacing a handle in the old process does not reload
+the installation. Compile a new plan for a fresh or otherwise eligible target.
+Replanning does not authorize overwriting an existing nonempty workspace.
+
+State cleanup is a separate explicit retention action. Once research changes the
+workspace, use the canonical research/status owners; setup is no longer its
+mutation authority. Preserve existing work and follow its owning recovery path.

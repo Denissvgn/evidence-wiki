@@ -3,12 +3,13 @@
 
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.planning import compile_plan
-from evidence_wiki.setup_application import apply_plan
+from evidence_wiki.setup_application import apply_plan, receipt
 from tests.test_research_planning import request
 
 
@@ -42,6 +43,35 @@ def local_request(root, *, suffix='.html', missing=False):
     value['decisions']['source_requirements'] = [{'source_id': 'local', 'output_format': 'html' if suffix == '.html' else 'markdown',
                                                'needs_complete': True, 'scope': {'jurisdiction': 'Spain'}}]
     return value
+
+
+@pytest.mark.parametrize('count,chunk_sizes', [(32, [32]), (33, [32, 1])])
+def test_receipt_inspection_batches_retain_every_selected_path(tmp_path, count, chunk_sizes):
+    """Bound every command's selectors while retaining the complete source selection."""
+    value = local_request(tmp_path)
+    source = value['request']['payload']['sources'][0]
+    requirement = value['decisions']['source_requirements'][0]
+    value['request']['payload']['sources'] = [{**source, 'id': f'local-{index}'} for index in range(count)]
+    value['decisions']['source_requirements'] = [{**requirement, 'source_id': f'local-{index}'} for index in range(count)]
+    plan = compile_plan(canonical(value))
+    assert plan['setup_ready']
+    store = SimpleNamespace(target=tmp_path/'workspace', root=tmp_path,
+                            transaction_id='a'*32, transaction_path=tmp_path/'transaction')
+    checkpoint = {'state': 'prepared', 'results': {}, 'completed': [], 'observations': {}, 'pending': None}
+    result = receipt(plan, store, checkpoint)
+    actions = [row for row in result['next_actions'] if row['action'] == 'inspect_sources']
+    chunks = [[argv[index + 1] for index, arg in enumerate(argv) if arg == '--source-path']
+              for argv in (row['argv'] for row in actions)]
+    assert [len(chunk) for chunk in chunks] == chunk_sizes
+    paths = [path for chunk in chunks for path in chunk]
+    assert len(set(paths)) == count
+    assert paths == [path for row in result['sources'] for observation in row['observations'] for path in observation['raw_paths']]
+    assert {row['input_id'] for row in result['sources']} == {f'local-{index}' for index in range(count)}
+    for action in actions:
+        assert action['argv'][:6] == [plan['bindings']['interpreter']['invocation'], '-B', '-m',
+                                     'evidence_wiki', 'agent', 'source-status']
+        assert action['argv'][action['argv'].index('--target') + 1] == str(store.target)
+    assert not store.target.exists()
 
 
 @pytest.fixture
@@ -188,6 +218,40 @@ def test_completed_setup_refuses_drift(tmp_path, in_process, mutation):
     with pytest.raises(EvidenceWikiError):
         apply_plan(canonical(plan))
     assert snapshot(target) == before
+
+
+@pytest.mark.parametrize('binding,field,changed_value', [
+    ('package_code', 'sha256', '0'*64), ('installation', 'package_version', '999.0.0'),
+])
+def test_completed_setup_refuses_changed_installation(tmp_path, monkeypatch, in_process, binding, field, changed_value):
+    """Changed installation inputs invalidate replay without rewriting the plan or workspace."""
+    import copy
+
+    from evidence_wiki import planning
+    from evidence_wiki.errors import EvidenceWikiError
+    from evidence_wiki.setup_store import snapshot
+
+    plan = compile_plan(canonical(request(tmp_path)))
+    original_plan = canonical(plan)
+    result = apply_plan(original_plan)
+    assert result['setup_ready']
+    target = tmp_path/'workspace'
+    before = snapshot(target)
+    saved_plan = Path(result['checkpoint']).with_name('plan.json')
+    saved_bytes = saved_plan.read_bytes()
+    observe_installation = planning.installation_basis
+    installed = observe_installation()
+    changed = copy.deepcopy(installed)
+    assert changed[binding][field] != changed_value
+    changed[binding][field] = changed_value
+    monkeypatch.setattr(planning, 'installation_basis', lambda: copy.deepcopy(changed))
+    with pytest.raises(EvidenceWikiError) as caught:
+        apply_plan(original_plan)
+    assert caught.value.error_code == 'ONBOARDING_PLAN_STALE'
+    assert caught.value.details['field'] == 'saved_plan_preconditions_changed'
+    assert snapshot(target) == before
+    assert saved_plan.read_bytes() == saved_bytes and canonical(plan) == original_plan
+    assert observe_installation() == installed
 
 
 def test_busy_lock_and_dead_process_lock_file(tmp_path, in_process):

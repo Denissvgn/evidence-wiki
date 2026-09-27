@@ -35,6 +35,18 @@ On Windows, create the environment with `py -3 -m venv .research-env`, use
 `.\.research-env\Scripts\Activate.ps1`. Subsequent examples assume the selected
 environment is active; its executable is `evidence-wiki.exe` on Windows.
 
+You can select the interpreter explicitly without activating the environment:
+
+```sh
+.research-env/bin/python -B -m evidence_wiki agent --format json
+```
+
+The `evidence-wiki` console command and `-B -m evidence_wiki.cli` module form
+remain supported. Generated commands include the selected Python executable;
+retain that interpreter and its arguments. For affected installations missing
+the package entry point, see the [same-environment workaround and recovery
+boundaries][application].
+
 Give your current agent the installed executable, original questions, source
 locations, writable directory and access limits. Ask it to read `agent` first,
 preserve every question, and return a controlled research export or precise
