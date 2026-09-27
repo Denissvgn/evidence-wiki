@@ -1,6 +1,8 @@
 """Scoped API values, effects, lifecycle and malformed-input boundaries."""
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +11,7 @@ from evidence_wiki._pack_io import canonical
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.planning import compile_plan
 from tests.test_research_planning import request
+from tests.test_workspace_application import local_request
 
 
 def test_bootstrap_cli_parity_and_closed_lifetime(capsys):
@@ -86,6 +89,55 @@ def test_setup_can_apply_via_scoped_api_and_reconcile_over_mcp(tmp_path):
         assert len(list((tmp_path / "workspace/wiki/questions").glob("*.md"))) == 1
     finally:
         server.close()
+
+
+@pytest.mark.parametrize("with_source", [False, True], ids=["empty", "local_source"])
+def test_setup_next_actions_execute_unchanged(tmp_path, run_package_command, with_source):
+    """Execute public setup inspection and replay arrays without rebuilding their transport."""
+    root = (tmp_path / "public setup").resolve()
+    root.mkdir()
+    value = local_request(root) if with_source else request(root)
+    with Onboarding.open(allowed_roots=[root], allow=["apply"]) as host:
+        plan = host.plan(value)
+        result = host.apply(plan)
+    assert result["status"] == "ready" and result["setup_ready"]
+    assert not result["research_complete"] and not result["claims_verified"]
+    target = Path(result["target"])
+    before = {str(path.relative_to(target)): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+    executable = [row for row in result["next_actions"] if "argv" in row]
+    assert [row["action"] for row in executable] == ["inspect_sources", "resume_setup"]
+    assert plan["bindings"]["interpreter"]["invocation"] == sys.executable
+    for action in executable:
+        argv = action["argv"]
+        assert argv[:4] == [plan["bindings"]["interpreter"]["invocation"], "-B", "-m", "evidence_wiki"]
+        process = run_package_command(argv, timeout=120)
+        assert process.returncode == 0, process.stdout + process.stderr
+        assert process.stderr == ""
+        observed = json.loads(process.stdout)
+        if action["action"] == "inspect_sources":
+            assert argv[argv.index("--target") + 1] == str(target)
+            assert observed["schema_version"] == "evidence-source-inspection/v1"
+            assert observed["target"]["selected"] and observed["target"]["state"] == "present"
+            assert not observed["research_ready"]
+            if with_source:
+                assert argv[4:6] == ["agent", "source-status"]
+                expected_paths = result["sources"][0]["observations"][0]["raw_paths"]
+                assert [argv[index + 1] for index, arg in enumerate(argv) if arg == "--source-path"] == expected_paths
+                assert len(observed["sources"]) == 1
+                assert observed["sources"][0]["raw_paths"] == expected_paths
+                assert observed["sources"][0]["usability"] == "usable"
+                assert result["sources"][0]["semantic_scope"] == "not_evaluated"
+                assert (target / expected_paths[0]).read_bytes() == (root / "originals/paper.html").read_bytes()
+            else:
+                assert argv[4:6] == ["agent", "inspect"] and "--source-path" not in argv
+                assert observed["sources"] == []
+        else:
+            assert argv[argv.index("--from-file") + 1] == str(Path(result["checkpoint"]).with_name("plan.json"))
+            assert observed["schema_version"] == "evidence-setup-result/v1"
+            assert observed["status"] == "ready" and observed["setup_ready"]
+            assert observed["plan_id"] == result["plan_id"]
+            assert observed["transaction_id"] == result["transaction_id"]
+        assert before == {str(path.relative_to(target)): path.read_bytes() for path in target.rglob("*") if path.is_file()}
 
 
 def test_catalog_cannot_delegate_a_root_outside_the_host_scope(tmp_path, monkeypatch):

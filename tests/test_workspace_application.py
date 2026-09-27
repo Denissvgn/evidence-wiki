@@ -3,12 +3,13 @@
 
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.planning import compile_plan
-from evidence_wiki.setup_application import apply_plan
+from evidence_wiki.setup_application import apply_plan, receipt
 from tests.test_research_planning import request
 
 
@@ -42,6 +43,35 @@ def local_request(root, *, suffix='.html', missing=False):
     value['decisions']['source_requirements'] = [{'source_id': 'local', 'output_format': 'html' if suffix == '.html' else 'markdown',
                                                'needs_complete': True, 'scope': {'jurisdiction': 'Spain'}}]
     return value
+
+
+@pytest.mark.parametrize('count,chunk_sizes', [(32, [32]), (33, [32, 1])])
+def test_receipt_inspection_batches_retain_every_selected_path(tmp_path, count, chunk_sizes):
+    """Bound every command's selectors while retaining the complete source selection."""
+    value = local_request(tmp_path)
+    source = value['request']['payload']['sources'][0]
+    requirement = value['decisions']['source_requirements'][0]
+    value['request']['payload']['sources'] = [{**source, 'id': f'local-{index}'} for index in range(count)]
+    value['decisions']['source_requirements'] = [{**requirement, 'source_id': f'local-{index}'} for index in range(count)]
+    plan = compile_plan(canonical(value))
+    assert plan['setup_ready']
+    store = SimpleNamespace(target=tmp_path/'workspace', root=tmp_path,
+                            transaction_id='a'*32, transaction_path=tmp_path/'transaction')
+    checkpoint = {'state': 'prepared', 'results': {}, 'completed': [], 'observations': {}, 'pending': None}
+    result = receipt(plan, store, checkpoint)
+    actions = [row for row in result['next_actions'] if row['action'] == 'inspect_sources']
+    chunks = [[argv[index + 1] for index, arg in enumerate(argv) if arg == '--source-path']
+              for argv in (row['argv'] for row in actions)]
+    assert [len(chunk) for chunk in chunks] == chunk_sizes
+    paths = [path for chunk in chunks for path in chunk]
+    assert len(set(paths)) == count
+    assert paths == [path for row in result['sources'] for observation in row['observations'] for path in observation['raw_paths']]
+    assert {row['input_id'] for row in result['sources']} == {f'local-{index}' for index in range(count)}
+    for action in actions:
+        assert action['argv'][:6] == [plan['bindings']['interpreter']['invocation'], '-B', '-m',
+                                     'evidence_wiki', 'agent', 'source-status']
+        assert action['argv'][action['argv'].index('--target') + 1] == str(store.target)
+    assert not store.target.exists()
 
 
 @pytest.fixture
