@@ -56,6 +56,17 @@ HTML_BLOCK_TAGS = {
 }
 HTML_MAX_OUTLINE_ENTRIES = 80
 HTML_MAX_LINKS = 100
+# Classification observations have their own bounds and never replace retained text.
+HTML_CONTEXT_MAX_CHARS = 4096
+HTML_CONTEXT_MAX_BLOCKS = 128
+HTML_CONTEXT_MAX_DEPTH = 64
+HTML_CONTEXT_MAX_FORMS = 32
+HTML_CONTEXT_EXAMPLE_TAGS = {"code", "pre", "blockquote", "q", "kbd", "samp", "textarea"}
+HTML_CONTEXT_BOUNDARY_TAGS = HTML_CONTEXT_EXAMPLE_TAGS | {"title", "a", "button", "label", "select", "option"}
+HTML_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
+}
+HTML_MATCHING_HYPHENS = str.maketrans({"\u2010": "-", "\u2011": "-"})
 # Tabular extraction caps: input bytes (plus one byte to detect truncation)
 # and sample rows rendered into the normalized record.
 TABLE_MAX_BYTES = 5_000_000
@@ -2646,11 +2657,214 @@ def normalize_link_record(record: dict[str, Any]) -> NormalizedSource:
     )
 
 
+def normalize_html_matching_text(text: str) -> str:
+    """Normalize matching text without changing retained source evidence."""
+    return " ".join(text.translate(HTML_MATCHING_HYPHENS).casefold().split())
+
+
+@dataclass(frozen=True)
+class HTMLClassificationBlock:
+    """One parsed text region, retaining form association and example context."""
+
+    text: str
+    tag: str
+    form_id: int | None
+    is_example: bool
+
+
+@dataclass(frozen=True)
+class HTMLClassificationContext:
+    """Bounded observations; incomplete views cannot establish whole-page content."""
+
+    blocks: tuple[HTMLClassificationBlock, ...]
+    password_form_ids: tuple[int, ...]
+    degraded: bool
+    truncated: bool
+
+    @property
+    def title(self) -> str:
+        """Actual unprotected title text, excluding inferred source titles."""
+        return " ".join(block.text for block in self.blocks if block.tag == "title" and not block.is_example)
+
+    @property
+    def body_text(self) -> str:
+        """Body and protected example text, excluding primary titles."""
+        return " ".join(block.text for block in self.blocks if block.tag != "title" or block.is_example)
+
+
+@dataclass(frozen=True)
+class _HTMLContextFrame:
+    """Lexical ancestry and exclusions, without inferring browser visibility."""
+
+    tag: str
+    block_tag: str
+    form_id: int | None
+    suppressed: bool
+    is_example: bool
+    disabled: bool
+    in_head: bool
+
+
+class _HTMLClassificationCollector:
+    """Collect context from existing parser callbacks without building a DOM."""
+
+    def __init__(self) -> None:
+        self.blocks: list[HTMLClassificationBlock] = []
+        self.password_form_ids: set[int] = set()
+        self.degraded = False
+        self.truncated = False
+        self._stack: list[_HTMLContextFrame] = []
+        self._parts: list[str] = []
+        self._pending_key: tuple[str, int | None, bool] | None = None
+        self._retained_chars = 0
+        self._normalized_chars = 0
+        self._form_count = 0
+        self._title_count = 0
+        self._finished = False
+
+    def begin(self) -> None:
+        self._finished = False
+
+    def _key(self) -> tuple[str, int | None, bool] | None:
+        if not self._stack:
+            return ("body", None, False)
+        frame = self._stack[-1]
+        if frame.suppressed or (frame.in_head and frame.block_tag != "title"):
+            return None
+        return frame.block_tag, frame.form_id, frame.is_example
+
+    def _flush(self) -> None:
+        text = normalize_html_matching_text("".join(self._parts))
+        self._parts.clear()
+        if not text or self._pending_key is None:
+            return
+        remaining = HTML_CONTEXT_MAX_CHARS - self._normalized_chars - bool(self.blocks)
+        if len(self.blocks) >= HTML_CONTEXT_MAX_BLOCKS or remaining <= 0:
+            self.truncated = True
+            return
+        if len(text) > remaining:
+            text = text[:remaining]
+            self.truncated = True
+        tag, form_id, is_example = self._pending_key
+        self._normalized_chars += len(text) + bool(self.blocks)
+        self.blocks.append(HTMLClassificationBlock(text, tag, form_id, is_example))
+
+    def start(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._finished = False
+        if self.truncated:
+            return
+        if tag in HTML_BLOCK_TAGS or tag in HTML_CONTEXT_BOUNDARY_TAGS:
+            self._flush()
+        if self.truncated:
+            return
+        if tag not in HTML_VOID_TAGS and len(self._stack) >= HTML_CONTEXT_MAX_DEPTH:
+            self._flush()
+            self.truncated = True
+            return
+        attributes: dict[str, str | None] = {}
+        ambiguous_attributes = False
+        for name, value in attrs:
+            if name in {"hidden", "aria-hidden", "disabled", "type", "form"}:
+                if name in attributes:
+                    ambiguous_attributes = True
+                    self.degraded = True
+                attributes[name] = value
+        parent = self._stack[-1] if self._stack else None
+        suppressed = bool(parent and parent.suppressed) or tag in HTML_SKIP_TAGS or "hidden" in attributes
+        suppressed |= (attributes.get("aria-hidden") or "").strip().casefold() == "true"
+        is_example = bool(parent and parent.is_example) or tag in HTML_CONTEXT_EXAMPLE_TAGS
+        disabled = bool(parent and parent.disabled) or (
+            tag in {"fieldset", "input", "button", "select", "textarea", "option", "optgroup"}
+            and "disabled" in attributes
+        )
+        form_id = parent.form_id if parent else None
+        if tag == "form":
+            if self._form_count >= HTML_CONTEXT_MAX_FORMS:
+                self.truncated = True
+                return
+            self._form_count += 1
+            if any(frame.tag == "form" for frame in self._stack):
+                self.degraded = True
+                form_id = None
+            else:
+                form_id = self._form_count
+        block_tag = tag if tag in HTML_BLOCK_TAGS or tag in HTML_CONTEXT_BOUNDARY_TAGS else (
+            parent.block_tag if parent else "body"
+        )
+        in_head = bool(parent and parent.in_head) or tag == "head"
+        if tag == "title" and not suppressed and not is_example:
+            self._title_count = min(2, self._title_count + 1)
+            self.degraded |= self._title_count > 1
+        if (
+            tag == "input" and (attributes.get("type") or "").strip().casefold() == "password"
+            and form_id is not None and not suppressed and not is_example and not disabled
+            and not in_head and not ambiguous_attributes and "form" not in attributes
+        ):
+            self.password_form_ids.add(form_id)
+        if tag not in HTML_VOID_TAGS:
+            self._stack.append(_HTMLContextFrame(tag, block_tag, form_id, suppressed, is_example, disabled, in_head))
+
+    def end(self, tag: str) -> None:
+        self._finished = False
+        if self.truncated:
+            return
+        if tag in HTML_VOID_TAGS:
+            if tag in HTML_BLOCK_TAGS:
+                self._flush()
+            return
+        index = next((index for index in range(len(self._stack) - 1, -1, -1) if self._stack[index].tag == tag), None)
+        if index is None:
+            self.degraded = True
+            self._flush()
+            return
+        before = self._key()
+        if index != len(self._stack) - 1:
+            self.degraded = True
+        del self._stack[index:]
+        if tag in HTML_BLOCK_TAGS or tag in HTML_CONTEXT_BOUNDARY_TAGS or before != self._key():
+            self._flush()
+
+    def data(self, data: str) -> None:
+        self._finished = False
+        if self.truncated:
+            return
+        key = self._key()
+        if key is None:
+            return
+        if key != self._pending_key:
+            self._flush()
+        if self.truncated:
+            return
+        self._pending_key = key
+        remaining = HTML_CONTEXT_MAX_CHARS - self._retained_chars
+        sample = data[:remaining]
+        if sample:
+            self._parts.append(sample)
+            self._retained_chars += len(sample)
+        if len(data) > remaining:
+            self._flush()
+            self.truncated = True
+
+    def finish(self) -> None:
+        self._flush()
+        self.degraded |= bool(self._stack)
+        self._finished = True
+
+    def snapshot(self, *, degraded: bool = False) -> HTMLClassificationContext:
+        return HTMLClassificationContext(
+            tuple(self.blocks), tuple(sorted(self.password_form_ids)),
+            self.degraded or degraded or not self._finished, self.truncated,
+        )
+
+
 class HTMLContentExtractor(HTMLParser):
     """Deterministic stdlib extraction of title, outline, links, and body text.
 
     Boundaries: no JS rendering, no remote asset fetching. Content inside
     script/style/nav (and other non-content tags) is dropped.
+    Separate bounded classification observations retain actual text regions,
+    protected examples, form signals, and incomplete-context qualifications
+    without changing the extracted evidence or inferring CSS visibility.
     """
 
     def __init__(self) -> None:
@@ -2665,8 +2879,14 @@ class HTMLContentExtractor(HTMLParser):
         self._in_title = False
         self._heading_level: int | None = None
         self._heading_parts: list[str] = []
+        self._classification = _HTMLClassificationCollector()
+
+    def feed(self, data: str) -> None:
+        self._classification.begin()
+        super().feed(data)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._classification.start(tag, attrs)
         if tag in HTML_SKIP_TAGS:
             self._skip_depth += 1
             return
@@ -2693,10 +2913,12 @@ class HTMLContentExtractor(HTMLParser):
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
+        self._classification.end(tag)
         if tag in HTML_SKIP_TAGS:
             self._skip_depth = max(0, self._skip_depth - 1)
 
     def handle_endtag(self, tag: str) -> None:
+        self._classification.end(tag)
         if tag in HTML_SKIP_TAGS:
             if self._skip_depth == 0:
                 self.unbalanced_skip_tags = True
@@ -2714,6 +2936,7 @@ class HTMLContentExtractor(HTMLParser):
             self.text_chunks.append("\n")
 
     def handle_data(self, data: str) -> None:
+        self._classification.data(data)
         if self._skip_depth or not data.strip():
             return
         if self._in_title:
@@ -2737,6 +2960,11 @@ class HTMLContentExtractor(HTMLParser):
         if self._skip_depth:
             self.unbalanced_skip_tags = True
         super().close()
+        self._classification.finish()
+
+    def classification_context(self, *, degraded: bool = False) -> HTMLClassificationContext:
+        """Return qualified parser observations separately from extracted evidence."""
+        return self._classification.snapshot(degraded=degraded or self.unbalanced_skip_tags)
 
 
 def normalize_html_body_text(chunks: list[str]) -> str:
@@ -2772,7 +3000,10 @@ def read_html_text(html_path: Path, relative_path: str) -> tuple[str, list[str]]
     return data.decode("utf-8", errors="replace"), warnings
 
 
-def html_unusable_evidence_reasons(title: str, body_text: str, raw_html: str) -> list[str]:
+def html_unusable_evidence_reasons(
+    title: str, body_text: str, raw_html: str, *, context: HTMLClassificationContext | None = None
+) -> list[str]:
+    """Return existing refusal reasons; parser context does not change these rules."""
     reasons: list[str] = []
     visible = normalize_markdown_spacing(body_text)
     haystack = single_line(f"{title} {visible}").lower()
@@ -2822,11 +3053,13 @@ def normalize_html_record(project_root: Path, record: dict[str, Any]) -> Normali
     text, read_warnings = read_html_text(html_path, raw_path)
     warnings.extend(read_warnings)
     extractor = HTMLContentExtractor()
+    parse_failed = False
     try:
         extractor.feed(text)
         extractor.close()
         body_text = normalize_html_body_text(extractor.text_chunks)
     except Exception as exc:  # html.parser is lenient; guard against pathological input
+        parse_failed = True
         warnings.append(f"{raw_path}: malformed HTML markup ({exc}); degraded to tag-stripped text")
         body_text = normalize_html_body_text([strip_html_tags(text)])
     if extractor.unbalanced_skip_tags:
@@ -2839,7 +3072,8 @@ def normalize_html_record(project_root: Path, record: dict[str, Any]) -> Normali
         title = first_heading or PurePosixPath(raw_path).stem
         title_confidence = "low" if first_heading else "none"
         warnings.append(f"{raw_path}: no <title> element; title inferred from {'first heading' if first_heading else 'file name'}")
-    unusable_reasons = html_unusable_evidence_reasons(title, body_text, text)
+    context = extractor.classification_context(degraded=parse_failed or bool(read_warnings))
+    unusable_reasons = html_unusable_evidence_reasons(title, body_text, text, context=context)
     if unusable_reasons:
         set_record_unusable_evidence(record, [*record_unusable_evidence_reasons(record), *unusable_reasons])
         warnings.extend(f"{source_id}: unusable evidence: {reason}" for reason in unusable_reasons)
