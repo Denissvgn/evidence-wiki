@@ -147,6 +147,31 @@ def test_changed_basis_or_failed_evidence_never_reuses_approval(host, mutation):
     assert result["questions"][0]["claims"] == []
 
 
+@pytest.mark.parametrize("marker", [b"", b"html_usability_version: 2\n"])
+def test_html_qualification_only_change_cannot_reuse_a_review_receipt(host, marker):
+    review(host)
+    assert CORE.publication(host.root)["verdict"] == "ship"
+    original = host.normalized_path.read_bytes()
+    contract = CORE.sibling("_normalized_contract")
+    metadata, body, error = contract.split_record(original.decode())
+    assert error is None and metadata["html_usability_version"] == 1
+    state = (host.host / "evidence-state.json").read_bytes()
+    updated = original.replace(b"html_usability_version: 1\n", marker, 1)
+    assert updated != original
+    host.normalized_path.write_bytes(updated)
+    changed, changed_body, error = contract.split_record(updated.decode())
+    assert error is None and changed_body == body and changed["content_hash"] == metadata["content_hash"]
+    assert "sha256:" + hashlib.sha256(updated).hexdigest() != host.claims["claims"][0]["evidence"][0]["record_sha256"]
+    with pytest.raises(CORE.ScriptRefusal) as refusal:
+        CORE.publication(host.root)
+    assert refusal.value.error_code == "STRICT_EVIDENCE_REFUSED"
+    assert refusal.value.details["reason"] == "usage_revision_missing_or_ambiguous"
+    assert (host.host / "evidence-state.json").read_bytes() == state
+    host.normalized_path.write_bytes(original)
+    assert CORE.publication(host.root)["verdict"] == "ship"
+    assert (host.host / "evidence-state.json").read_bytes() == state
+
+
 def test_forged_signature_and_observation_cannot_enter_host_state(host):
     envelope = review(host)
     before = (host.host / "evidence-state.json").read_bytes()

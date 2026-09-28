@@ -754,7 +754,7 @@ class AdapterStructuredViewStalenessTests(StructuredViewWorkspaceMixin, unittest
         self.assertIsNone(frontmatter["structured_view"])
         self.assertEqual([], settled["actions"], stderr)
 
-    def test_only_methods_that_can_emit_a_sidecar_are_stale_for_the_missing_key(self):
+    def test_only_sidecar_methods_require_the_structured_view_key(self):
         """Papers, PDFs, web links and codebase records are untouched by the rule.
 
         They have no structured view to gain, so marking them stale would rewrite every
@@ -775,12 +775,15 @@ class AdapterStructuredViewStalenessTests(StructuredViewWorkspaceMixin, unittest
                         f"extraction_method: {method}\n"
                     )
                     output.write_text(header + "---\n\n# x\n", encoding="utf-8")
-                    self.assertEqual(method in eligible, NORMALIZE.is_stale({}, output))
+                    # This migration is independent of other extraction-profile checks.
+                    self.assertEqual(
+                        method in eligible, NORMALIZE.missing_structured_view_key(NORMALIZE.read_output_frontmatter(output))
+                    )
                     # Whatever its value, the key's presence settles the question.
                     output.write_text(
                         header + "structured_view: null\n---\n\n# x\n", encoding="utf-8"
                     )
-                    self.assertFalse(NORMALIZE.is_stale({}, output))
+                    self.assertFalse(NORMALIZE.missing_structured_view_key(NORMALIZE.read_output_frontmatter(output)))
 
 
 class AdapterStalenessTests(AdapterWorkspaceMixin, unittest.TestCase):

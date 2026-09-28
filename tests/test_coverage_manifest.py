@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tests._html_fixture import normalize_html_fixture  # noqa: E402
 from tests._pack_policy_rule_fixture import (  # noqa: E402
     ALL_RULES,
     ALL_RULES_WITH_ABSENCE_REVIEW,
@@ -1295,6 +1296,8 @@ class CoverageManifestCliTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            (target / "raw/web/seg-social-current.html").write_text("<p>Official current fee observation.</p>\n")
+            normalize_html_fixture(target, json.loads(manifest.read_text()))
             candidates = target / "sources" / "discovery" / "candidates.jsonl"
             candidates.parent.mkdir(parents=True, exist_ok=True)
             candidates.write_text(
@@ -1377,6 +1380,8 @@ class CoverageManifestCliTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            (target / "raw/web/fire-risk-guidance.html").write_text("<p>Retained fire risk guidance.</p>\n")
+            normalize_html_fixture(target, json.loads(manifest.read_text()))
             jurisdictions = target / "sources" / "jurisdictions.yml"
             jurisdictions.write_text(
                 yaml.safe_dump(

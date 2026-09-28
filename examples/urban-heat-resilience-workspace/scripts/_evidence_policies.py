@@ -30,6 +30,7 @@ from _workspace_module_loader import load_workspace_module
 
 _source_failure_taxonomy = load_workspace_module(_SCRIPT_DIR, "source_failure_taxonomy")
 delivery_unusable_evidence_reasons = _source_failure_taxonomy.unusable_evidence_reasons
+_html_usability_profile = load_workspace_module(_SCRIPT_DIR, "_html_usability_profile")
 
 # Neither module imports this one, so both bind at import time. `_policy_primitives`
 # decides a domain pack's declarative policy rules and performs no filesystem I/O of its
@@ -615,11 +616,16 @@ def explicit_unusable_reasons(document: dict[str, Any]) -> list[str]:
 
 
 def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> list[str]:
+    """Aggregate selected-source refusals, including native classification currency."""
     record = inputs.manifest_records.get(source_id, {})
     normalized = inputs.normalized_records.get(source_id, {})
     metadata = source_metadata(inputs, source_id)
     provenance = inputs.provenance_by_source_id.get(source_id, {})
     reasons: list[str] = []
+    profile = _html_usability_profile.evaluate_html_usability(
+        normalized, source_kind=record.get("kind") if isinstance(record.get("kind"), str) else "")
+    if profile.reason:
+        reasons.append(profile.reason)
     usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate")
     reasons.extend(usage.normalized_issues(inputs.project_root, inputs.config, record, normalized))
     packet = load_workspace_module(_SCRIPT_DIR, "_qualified_packet")
@@ -635,9 +641,14 @@ def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> li
 
 def unusable_evidence_result(policy: str, ids: list[str], present: list[str], inputs: PolicyInputs) -> PolicyResult | None:
     reasons: list[str] = []
+    recheck = False
     for source_id in present:
         for reason in source_unusable_evidence_reasons(inputs, source_id):
-            reasons.append(f"{source_id} is marked unusable evidence ({reason}).")
+            if reason.startswith("html_usability_"):
+                recheck = True
+                reasons.append(f"{source_id} lacks a current native HTML classification ({reason}).")
+            else:
+                reasons.append(f"{source_id} is marked unusable evidence ({reason}).")
     if not reasons:
         return None
     return result(
@@ -645,7 +656,9 @@ def unusable_evidence_result(policy: str, ids: list[str], present: list[str], in
         VERDICT_FAIL,
         ids,
         reasons,
-        "Redeliver or replace unusable source captures before accepting them for required coverage facets.",
+        ("Recheck selected HTML through native normalization from retained originals; use a compatible producer for future revisions. "
+         "Preserve records and originals, and resolve any independent unusable-evidence reasons before required coverage."
+         if recheck else "Redeliver or replace unusable source captures before accepting them for required coverage facets."),
     )
 
 

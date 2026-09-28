@@ -20,6 +20,18 @@ Statuses distinguish missing inventory, unperformed extraction, stale originals,
 invalid records, OCR needs, partial renderings and lexically indexable content.
 Semantic adequacy and evidence acceptance remain separate.
 
+Native HTML readiness also checks the recorded classification revision. An older
+or absent revision reports `html_usability_recheck_required`; an inconsistent
+native claim reports `html_usability_profile_invalid`; a newer revision reports
+`html_usability_profile_unsupported`. Missing classification metadata does not
+establish that the content is a shell. A format-valid record may retain its
+historical `evidence_usable: true` while current `usability` is `not_ready`.
+Completeness and lexical indexing do not clear this blocker, including for
+partial extractions. Inspection and route planning remain read-only: explicitly
+normalize the selected legacy record to recheck it, or use a compatible producer
+for a future revision. Foreign producers and other native methods retain their
+own contracts.
+
 ## Declare host tools
 
 Retrieve `evidence-host-tools/v1` with

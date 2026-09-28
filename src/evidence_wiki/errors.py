@@ -329,6 +329,7 @@ ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     # The normalized-record contract. A record that breaches it is a
     # statement about a source, not about the workspace.
     "NORMALIZED_CONTRACT_": SourceError,
+    "NORMALIZATION_PROFILE_UNSUPPORTED": SourceError,
     "SIDECAR_INVALID": SourceError,
     "SIDECAR_MISSING": SourceError,
     # Discovery candidates and the provider budgets discovery spends.

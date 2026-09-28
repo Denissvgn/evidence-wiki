@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 
+from tests._html_fixture import normalize_html_fixture
 from tests._publication_fixture import write_ship_ready_vendor_fixture
 from tests._script_loader import load_module as load_script_module
 
@@ -395,17 +396,14 @@ class PublicationReadinessTests(unittest.TestCase):
         )
         (normalized_dir / f"{safe_id}.structured.json").write_bytes(sidecar_bytes)
         record = normalized_dir / f"{safe_id}.md"
-        declaration_anchor = "  date_not_available: Official vendor spec page exposes no publication date.\n---"
+        _, header, body = record.read_text(encoding="utf-8").split("---", 2)
+        metadata = yaml.safe_load(header)
+        metadata["structured_view"] = {
+            "path": f"sources/normalized/{safe_id}.structured.json",
+            "content_hash": "sha256:" + hashlib.sha256(sidecar_bytes).hexdigest(),
+        }
         record.write_text(
-            record.read_text(encoding="utf-8").replace(
-                declaration_anchor,
-                "  date_not_available: Official vendor spec page exposes no publication date.\n"
-                "structured_view:\n"
-                f"  path: sources/normalized/{safe_id}.structured.json\n"
-                f"  content_hash: sha256:{hashlib.sha256(sidecar_bytes).hexdigest()}\n"
-                "---",
-                1,
-            ),
+            "---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---" + body,
             encoding="utf-8",
         )
         question = target / "wiki" / "questions" / "vendor-product-spec.md"
@@ -536,6 +534,32 @@ class PublicationReadinessTests(unittest.TestCase):
         self.assertTrue(
             any("actionable research questions" in reason for reason in document["reasons"]["source_quality"])
         )
+
+    def test_publication_readiness_preserves_html_classification_blockers(self):
+        for state, reason in (("legacy", "html_usability_recheck_required"),
+                              ("future", "html_usability_profile_unsupported"),
+                              ("shell", "html_error_page:official_error_page")):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmpdir:
+                target = self.init_workspace(Path(tmpdir))
+                self.write_ship_ready_vendor_fixture(target)
+                normalized = target / "sources/normalized/web--vendor-official-product-spec.md"
+                if state == "shell":
+                    raw = target / "raw/web/vendor-product.html"
+                    raw.write_text("<p>502 Bad Gateway. Please try again later.</p>\n")
+                    manifest = target / "sources/manifest.jsonl"
+                    record = json.loads(manifest.read_text())
+                    record["provenance"]["checksum"] = "sha256:" + hashlib.sha256(raw.read_bytes()).hexdigest()
+                    manifest.write_text(json.dumps(record) + "\n")
+                    normalize_html_fixture(target, record)
+                else:
+                    original = normalized.read_text()
+                    self.assertIn("html_usability_version: 1\n", original)
+                    normalized.write_text(original.replace("html_usability_version: 1\n",
+                        "" if state == "legacy" else "html_usability_version: 2\n", 1))
+                code, document = self.run_readiness(target)
+                self.assertEqual(1, code)
+                self.assertEqual("no_ship", document["verdict"])
+                self.assertIn(reason, json.dumps(document["reasons"]["coverage"]))
 
     def test_publication_readiness_blocks_on_failed_coverage(self):
         with tempfile.TemporaryDirectory() as tmpdir:

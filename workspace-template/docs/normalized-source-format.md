@@ -107,6 +107,7 @@ Required field meanings:
 | `status` | Normalization lifecycle status. |
 | `evidence_usable` | `true` when the normalized record can be considered by coverage policies, `false` when delivery metadata or deterministic HTML checks mark it as unusable evidence. |
 | `unusable_evidence_reasons` | Stable reason codes when `evidence_usable` is `false`; otherwise `null` or omitted in older records. |
+| `html_usability_version` | Optional native `html_text` classification revision, currently positive integer `1`. Written only after classification runs on retained original bytes; it identifies the policy revision, not semantic acceptance or authenticity. Legacy absence remains format-valid. A future positive integer can be structurally valid without being supported by the current classifier. External producers and other extraction methods retain their own contracts. |
 | `created` | Date the normalized record was first created, `YYYY-MM-DD`. |
 | `updated` | Date the normalized record was last updated, `YYYY-MM-DD`. |
 | `normalized_at` | Exact UTC timestamp when `normalize_sources.py` wrote or updated the record, `YYYY-MM-DDTHH:MM:SSZ`. Legacy records created before this field existed may omit it. |

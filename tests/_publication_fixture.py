@@ -1,10 +1,29 @@
-"""Data-only publication fixture shared with isolated distribution checks."""
+"""Publication inputs normalized by copied tooling, including isolated distributions."""
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import yaml
+
+_NORMALIZE_HTML = """
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+import normalize_sources
+
+record = json.loads((root / "sources/manifest.jsonl").read_text())
+source = normalize_sources.normalize_html_record(root, record)
+output = root / "sources/normalized" / (normalize_sources.safe_source_id(record["id"]) + ".md")
+output.parent.mkdir(parents=True, exist_ok=True)
+metadata = normalize_sources.frontmatter_for(source, "sources/manifest.jsonl", output, "2026-07-02")
+output.write_text(normalize_sources.render_markdown(source, metadata), encoding="utf-8")
+"""
 
 
 def write_ship_ready_vendor_fixture(target: Path) -> None:
@@ -43,25 +62,11 @@ def write_ship_ready_vendor_fixture(target: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    normalized = target / "sources" / "normalized" / "web--vendor-official-product-spec.md"
-    normalized.parent.mkdir(parents=True, exist_ok=True)
-    normalized.write_text(
-        f"""---
-type: normalized_source
-source_id: {source_id}
-source_kind: html
-title: Official product spec
-provenance:
-  origin_url: https://docs.vendor.example/product/spec
-  retrieved_at: "2026-07-02T12:00:00Z"
-  date_not_available: Official vendor spec page exposes no publication date.
----
-
-# Official product spec
-
-Vendor-controlled product specification.
-""",
-        encoding="utf-8",
+    # Construct real classifier output before the host fixture deposits its source
+    # revision. Running workspace normalization here would require that deposit.
+    subprocess.run(
+        [sys.executable, "-B", "-c", _NORMALIZE_HTML, str(target)],
+        check=True, capture_output=True, text=True,
     )
     candidates = target / "sources" / "discovery" / "candidates.jsonl"
     candidates.parent.mkdir(parents=True, exist_ok=True)
@@ -177,4 +182,3 @@ evidence_strength: corroborated""",
         ),
         encoding="utf-8",
     )
-

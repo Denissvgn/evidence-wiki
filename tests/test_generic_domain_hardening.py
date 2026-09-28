@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests._html_fixture import normalize_html_manifest
 from tests._script_loader import load_module as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,7 @@ QUESTION_SLUG = "curbside-battery-recycling-pilot-safety"
 def copy_fixture(root: Path) -> Path:
     target = root / "workspace"
     shutil.copytree(FIXTURE, target)
+    normalize_html_manifest(target)
     return target
 
 

@@ -233,6 +233,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 import _execution_evidence
 import _market_evidence
 import _qualified_packet
+from _html_usability_profile import HTML_USABILITY_VERSION, evaluate_html_usability, valid_html_usability_version
 from _normalization_config import NormalizationConfigError, adapter_for_kind, normalization_config
 from _normalized_contract import (
     NORMALIZED_FORMAT_VERSION,
@@ -309,6 +310,7 @@ class NormalizedSource:
     # is every source that is not structured evidence.
     structured: dict[str, Any] | None = None
     capture_status: str | None = None
+    html_usability_version: int | None = None
 
 
 @dataclass
@@ -626,6 +628,7 @@ def is_stale(
     *,
     pdf_extractor: str | None = None,
     adapter: Any = None,
+    effective_method: str | None = None,
 ) -> bool:
     """True when raw inputs or the deterministic extraction profile changed.
 
@@ -647,11 +650,29 @@ def is_stale(
     — so each run would re-execute the adapter to reproduce a record it already had.
     They are stale when the configured adapter identity changes or the raw payload does.
 
+    Native HTML also refreshes missing or invalid classification revisions. A future
+    revision refuses before writes, including force and dry-run; it is not repairable
+    by an older classifier. Both pending selection and explicit selection share this check.
+
     One further trigger, narrow and one-shot: a record whose extraction method can emit a
     structured-view sidecar but which carries no `structured_view` key at all — see
     ``missing_structured_view_key``.
     """
     frontmatter = read_output_frontmatter(output_path)
+    profile = evaluate_html_usability(
+        frontmatter, source_kind=record.get("kind"), effective_method=effective_method,
+    )
+    if profile.state == "unsupported":
+        raise ScriptRefusal(
+            "NORMALIZATION_PROFILE_UNSUPPORTED",
+            "The selected HTML classification revision needs a compatible producer.",
+            exit_code=2, recoverable=True,
+            details={"source_id": record_id(record), "reason": profile.reason,
+                     "stored_version": frontmatter.get("html_usability_version"),
+                     "supported_version": HTML_USABILITY_VERSION},
+        )
+    if profile.requires_recheck:
+        return True
     if missing_structured_view_key(frontmatter):
         return True
     if adapter is not None:
@@ -1038,6 +1059,7 @@ def select_eligible_records(
             output_path,
             pdf_extractor=desired_pdf_extractor,
             adapter=staleness_adapter(item, adapters),
+            effective_method=item.method,
         ):
             pending.append(item)
     return pending, skipped_unsupported, "pending"
@@ -3222,6 +3244,7 @@ def normalize_html_record(project_root: Path, record: dict[str, Any]) -> Normali
         warnings.append(f"{raw_path}: no <title> element; title inferred from {'first heading' if first_heading else 'file name'}")
     context = extractor.classification_context(degraded=parse_failed or bool(read_warnings))
     unusable_reasons = html_unusable_evidence_reasons(title, body_text, text, context=context)
+    classification_version = HTML_USABILITY_VERSION if text or not read_warnings else None
     if unusable_reasons:
         set_record_unusable_evidence(record, [*record_unusable_evidence_reasons(record), *unusable_reasons])
         effective_reasons = record_unusable_evidence_reasons(record)
@@ -3248,6 +3271,7 @@ def normalize_html_record(project_root: Path, record: dict[str, Any]) -> Normali
         included_paths=[],
         warnings=unique_values(warnings),
         title_confidence=title_confidence,
+        html_usability_version=classification_version,
     )
 
 
@@ -4198,6 +4222,12 @@ def frontmatter_for(
     openalex_id = academic.get("openalex_work_id") if academic else None
     arxiv_id = arxiv_id_from_record(record)
     unusable_reasons = record_unusable_evidence_reasons(record)
+    native_html = source.extraction_method == "html_text" and record.get("kind") == "html" and not source.adapter_name
+    if native_html and source.html_usability_version is not None and (
+        not valid_html_usability_version(source.html_usability_version)
+        or source.html_usability_version != HTML_USABILITY_VERSION
+    ):
+        raise ValueError("The native HTML writer cannot stamp an invalid or unsupported classification revision.")
     frontmatter: dict[str, Any] = {
         "type": "normalized_source",
         "normalized_format": NORMALIZED_FORMAT_VERSION,
@@ -4207,6 +4237,8 @@ def frontmatter_for(
         "status": status_for(source),
         "evidence_usable": not unusable_reasons,
         "unusable_evidence_reasons": unusable_reasons or None,
+        **({"html_usability_version": source.html_usability_version}
+           if native_html and source.html_usability_version is not None else {}),
         "created": created,
         "updated": date_text,
         "normalized_at": normalized_at,
@@ -4841,6 +4873,7 @@ def run_normalization(args: argparse.Namespace) -> int:
             output_path,
             pdf_extractor=desired_pdf_extractor,
             adapter=staleness_adapter(item, configured_adapters),
+            effective_method=item.method,
         )
         if existed and not args.force and not stale:
             summary["skipped_existing"] += 1

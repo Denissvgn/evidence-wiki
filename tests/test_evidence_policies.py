@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tests._html_fixture import normalize_html_fixture  # noqa: E402
 from tests._pack_policy_rule_fixture import (  # noqa: E402
     CANDIDATE_SKU,
     FRESHNESS_DEFINITION,
@@ -199,19 +200,10 @@ class EvidencePolicyHelperTests(unittest.TestCase):
                 "parse_warnings": [],
             },
         )
-        write_frontmatter(
-            workspace / "sources" / "normalized" / "web--bare-secondary.md",
-            {
-                "type": "normalized_source",
-                "source_id": "web:bare-secondary",
-                "source_kind": "html",
-                "status": "content_extracted",
-                "raw_paths": ["raw/web/bare-secondary.html"],
-                "manifest_path": "sources/manifest.jsonl",
-                "url": "https://blog.example/current-fee",
-                "parse_warnings": [],
-            },
-        )
+        for record in manifest_records:
+            if record["kind"] == "html":
+                metadata = {**record, "url": "https://blog.example/current-fee"} if record["id"] == "web:bare-secondary" else record
+                normalize_html_fixture(workspace, metadata)
 
         (workspace / "sources" / "discovery" / "candidates.jsonl").write_text(
             json.dumps(
@@ -484,20 +476,17 @@ class EvidencePolicyHelperTests(unittest.TestCase):
             encoding="utf-8",
         )
         manifest = workspace / "sources" / "manifest.jsonl"
+        record = {"id": source_id, "kind": "html", "raw_paths": [raw_path],
+                  "status": "normalized", "detected_at": "2026-07-07T12:00:00Z"}
         with manifest.open("a", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(
-                    {
-                        "id": source_id,
-                        "kind": "html",
-                        "raw_paths": [raw_path],
-                        "status": "normalized",
-                        "detected_at": "2026-07-07T12:00:00Z",
-                    },
+                    record,
                     sort_keys=True,
                 )
                 + "\n"
             )
+        normalize_html_fixture(workspace, record)
         candidate = {
             "schema_version": "1.0",
             "candidate_id": f"cand-{source_id.replace(':', '-')}",
@@ -625,6 +614,9 @@ class EvidencePolicyHelperTests(unittest.TestCase):
                 ]
             )
             manifest.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
+            for record in records[-2:]:
+                (workspace / record["raw_paths"][0]).write_text("<p>Retained battery collection guidance.</p>\n")
+                normalize_html_fixture(workspace, record)
             jurisdictions_path = workspace / "sources" / "jurisdictions.yml"
             jurisdictions = yaml.safe_load(jurisdictions_path.read_text(encoding="utf-8"))
             jurisdictions["jurisdiction_profiles"].append(
