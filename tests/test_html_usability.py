@@ -1,11 +1,13 @@
 """HTML usability counterexamples, extraction compatibility, and capture contracts."""
 
 import contextlib
+import copy
 import hashlib
 import io
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from unittest.mock import mock_open
 
 import pytest
 import yaml
@@ -18,23 +20,16 @@ PAGES = json.loads((CORPUS_ROOT / "pages.json").read_text(encoding="utf-8"))
 NORMALIZE = owner("normalize_sources")
 
 
-def verdict_case(page):
-    marks = ()
-    if page["rule"] in {"gateway", "authentication"}:
-        marks = pytest.mark.xfail(
-            strict=True,
-            raises=AssertionError,
-            reason=f"Native {page['rule']} shell detection is absent.",
-        )
-    return pytest.param(page, id=page["name"], marks=marks)
-
-
-def normalize_page(root, page):
+def normalize_page(root, page, *, record_changes=None, raw_bytes=None):
     relative = "raw/web/" + page["file_name"]
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(page["html"], encoding="utf-8")
+    if raw_bytes is None:
+        path.write_text(page["html"], encoding="utf-8")
+    else:
+        path.write_bytes(raw_bytes)
     record = {"id": "web:" + page["name"], "kind": "html", "raw_paths": [relative], "status": "discovered"}
+    record.update(copy.deepcopy(record_changes or {}))
     source = NORMALIZE.normalize_html_record(root, record)
     metadata = NORMALIZE.frontmatter_for(
         source, "sources/manifest.jsonl", root / "sources/normalized/capture.md", "2026-09-28"
@@ -54,7 +49,7 @@ def test_html_extraction_preserves_retained_evidence(tmp_path, page):
     assert actual == page["extraction"]
 
 
-@pytest.mark.parametrize("page", [verdict_case(page) for page in PAGES])
+@pytest.mark.parametrize("page", PAGES, ids=lambda page: page["name"])
 def test_html_page_evidence_usability(tmp_path, page):
     source, metadata = normalize_page(tmp_path, page)
     assert (metadata["unusable_evidence_reasons"] or []) == page["expected_reasons"]
@@ -66,7 +61,7 @@ def test_html_page_evidence_usability(tmp_path, page):
 MESSAGE_NAMES = {"gateway-body", "signin-body", "maintenance", "short-http-definition", "authentication-guide"}
 
 
-@pytest.mark.parametrize("page", [verdict_case(page) for page in PAGES if page["name"] in MESSAGE_NAMES])
+@pytest.mark.parametrize("page", [page for page in PAGES if page["name"] in MESSAGE_NAMES], ids=lambda page: page["name"])
 def test_html_message_helper_retains_positional_contract(page):
     expected = page["extraction"]
     reasons = NORMALIZE.html_unusable_evidence_reasons(expected["title"], expected["extracted_text"], page["html"])
@@ -120,7 +115,7 @@ def test_html_capture_format_and_readonly_observation(captured_html):
     assert before == after
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="Native shell captures are still classified as usable.")
+@pytest.mark.parametrize("captured_html", CAPTURE_PAGES, ids=lambda page: page["name"], indirect=True)
 def test_html_capture_shell_is_unusable(captured_html):
     page, _, row, _, _ = captured_html
     assert row["evidence_usable"] is False
@@ -381,3 +376,513 @@ def test_degraded_extraction_cannot_supply_unqualified_classification_context(tm
     source, _ = normalize_page(tmp_path, page)
     assert observed[0].degraded
     assert any("malformed HTML" in warning or "truncated" in warning for warning in source.warnings)
+
+
+@pytest.mark.parametrize("message", [
+    "Bad Gateway", "502 Bad Gateway", "HTTP 502 Bad Gateway", "HTTP Error 502 Bad Gateway",
+    "HTTP Error 502: Bad Gateway", "Gateway Timeout", "Gateway Time-out", "504 Gateway Timeout",
+    "504 Gateway Time-out", "HTTP 504 Gateway Timeout", "HTTP 504 Gateway Time-out",
+    "HTTP Error 504 Gateway Timeout", "HTTP Error 504: Gateway Timeout",
+    "HTTP Error 504 Gateway Time-out", "HTTP Error 504: Gateway Time-out",
+])
+def test_canonical_gateway_messages_are_shells(message):
+    assert NORMALIZE.html_gateway_shell(parse_context(f'<p>{message}. Please try again later.</p>'))
+
+
+@pytest.mark.parametrize("html", [
+    '<p>502</p>', '<p>504</p>', '<p>HTTP 502: Bad Gateway</p>',
+    '<p>HTTP Error 502: Gateway Timeout</p>', '<p>HTTP Error 504: Bad Gateway</p>',
+    '<p>502 Bad Gateway means an invalid upstream response.</p>',
+    '<title>Bad Gateway</title><p>A proxy received an invalid response.</p>',
+    '<p>A prior outage returned 504 Gateway Timeout; the service recovered.</p>',
+    '<h1>502 Bad Gateway</h1><pre>Measured value: 42.</pre>',
+    '<blockquote>502 Bad Gateway.</blockquote>', '<p>"502 Bad Gateway."</p>',
+    '<a href="/guide"><h1>502 Bad Gateway</h1></a>',
+    '<button><div>504 Gateway Timeout</div></button>',
+    '<label><div>Bad Gateway</div></label>',
+    '<meta name="description" content="502 Bad Gateway">',
+    '<p data-error="502 Bad Gateway">Measured value: 42.</p>',
+    '<!-- 502 Bad Gateway --><p>Measured value: 42.</p>',
+    '<script>const message = "502 Bad Gateway";</script><p>Measured value: 42.</p>',
+])
+def test_gateway_mentions_and_control_ancestry_are_not_primary_error_pages(html):
+    assert not NORMALIZE.html_gateway_shell(parse_context(html))
+
+
+@pytest.mark.parametrize("flag", ["degraded", "truncated"])
+def test_incomplete_gateway_context_cannot_establish_a_shell(flag):
+    context = replace(parse_context('<p>502 Bad Gateway.</p>'), **{flag: True})
+    assert not NORMALIZE.html_gateway_shell(context)
+
+
+def test_gateway_detection_never_promotes_a_caller_supplied_title():
+    assert NORMALIZE.html_unusable_evidence_reasons('502 Bad Gateway', 'Measured value: 42.', '<p>Measured value: 42.</p>') == []
+
+
+def test_native_html_normalization_reuses_its_single_parse(tmp_path, monkeypatch):
+    calls = []
+    original = NORMALIZE.HTMLContentExtractor.feed
+
+    def observe_feed(self, data):
+        calls.append(data)
+        return original(self, data)
+
+    monkeypatch.setattr(NORMALIZE.HTMLContentExtractor, "feed", observe_feed)
+    page = next(page for page in PAGES if page["name"] == "gateway-body")
+    _, metadata = normalize_page(tmp_path, page)
+    assert not metadata["evidence_usable"]
+    assert calls == [page["html"]]
+
+
+def test_direct_parser_fallback_enforces_byte_limit_before_parsing(monkeypatch):
+    monkeypatch.setattr(NORMALIZE, "HTML_MAX_BYTES", 32)
+
+    def forbidden_feed(self, data):
+        pytest.fail("Oversized direct context input reached the parser")
+
+    monkeypatch.setattr(NORMALIZE.HTMLContentExtractor, "feed", forbidden_feed)
+    context = NORMALIZE.html_context_from_text('é' * 20)
+    assert context.degraded and context.truncated
+
+
+@pytest.mark.parametrize("length", [999, 1000, 1001])
+def test_gateway_body_character_boundary_is_strict(length):
+    repeat, padding = divmod(length - len("bad gateway"), len(". try again later"))
+    body = "bad gateway" + ". try again later" * repeat + "." * padding
+    context = parse_context('<p>' + body + '</p>')
+    assert len(context.body_text) == length
+    assert NORMALIZE.html_gateway_shell(context) is (length < 1000)
+
+
+@pytest.mark.parametrize("prefix", ["", "Please "])
+@pytest.mark.parametrize("action", ["sign in", "sign-in", "log in", "log-in", "login"])
+@pytest.mark.parametrize("destination", [
+    "continue", "continue reading", "view this page", "view this content", "view the content",
+    "read this page", "read this content", "read the content", "access this page", "access this content",
+    "access the content",
+])
+def test_supported_access_directives_require_no_form(prefix, action, destination):
+    context = parse_context(f'<p>{prefix}{action} to {destination}.</p>')
+    assert NORMALIZE.html_authentication_shell(context)
+
+
+@pytest.mark.parametrize("message", [
+    "Authentication required", "Login required", "Sign-in required", "Please enter your password to continue",
+])
+def test_explicit_authentication_requirements_are_shells(message):
+    assert NORMALIZE.html_authentication_shell(parse_context(f'<h1>{message}!</h1>'))
+
+
+@pytest.mark.parametrize("html", [
+    '<p>Password required.</p>', '<p>Password</p>', '<p>Login</p>', '<h1>Sign in</h1>',
+    '<p>Password required length is twelve characters.</p>',
+    '<p>Authentication required by the protocol is explained here.</p>',
+    '<p>Please sign in to continue. This guide explains the old login prompt.</p>',
+    '<p>"Please sign in to continue."</p>', '<blockquote>Please sign in to continue.</blockquote>',
+    '<code>Please sign in to continue.</code>', '<a href="/login">Please sign in to continue.</a>',
+    '<a href="/login"><h1>Please sign in to continue.</h1></a>',
+    '<button><div>Please sign in to continue.</div></button>',
+    '<h1>Authentication required</h1><pre>Measured result: 42.</pre>',
+    '<form><p>Please sign in to continue.</p><p>This guide explains authentication failures.</p></form>',
+    '<meta name="description" content="Please sign in to continue.">',
+    '<div hidden>Please sign in to continue.</div><p>Measured result: 42.</p>',
+])
+def test_authentication_subjects_examples_and_controls_do_not_supply_a_gate(html):
+    assert not NORMALIZE.html_authentication_shell(parse_context(html))
+
+
+def test_authentication_title_and_password_corroboration_preserve_textual_gate():
+    context = parse_context('<title>Sign in</title><p>Please sign in to continue. Password required.</p>')
+    assert NORMALIZE.html_authentication_shell(context)
+
+
+@pytest.mark.parametrize("length", [199, 200, 201])
+def test_authentication_body_character_boundary_is_strict(length):
+    base = "authentication required"
+    repeat, padding = divmod(length - len(base), len(". try again later"))
+    body = base + ". try again later" * repeat + "." * padding
+    context = parse_context('<p>' + body + '</p>')
+    assert len(context.body_text) == length
+    assert NORMALIZE.html_authentication_shell(context) is (length < 200)
+
+
+@pytest.mark.parametrize("flag", ["degraded", "truncated"])
+def test_incomplete_authentication_context_cannot_establish_a_gate(flag):
+    context = replace(parse_context('<p>Please sign in to continue.</p>'), **{flag: True})
+    assert not NORMALIZE.html_authentication_shell(context)
+
+
+@pytest.mark.parametrize("html", [
+    '<title>Sign in</title><form><label>Password<input type=password></label></form>',
+    '<h1>Login</h1><form><input name=p type="PASSWORD" /></form>',
+    '<form><label>Password<input type=password></label><button>Log in</button></form>',
+    '<form><h2>Password required</h2><input type=password></form>',
+    '<h1>Password required</h1><form><input type=password></form>',
+    '<form><input type=password><button>Please sign in to continue.</button></form>',
+    '<title>Sign-in</title><form><label>Username<input name=user></label>'
+    '<label>Password<input type=password></label><a href="/reset">Forgot password</a></form>',
+])
+def test_credential_form_requires_a_corresponding_authentication_cue(html):
+    context = parse_context(html)
+    assert context.password_form_ids
+    assert NORMALIZE.html_authentication_shell(context)
+
+
+@pytest.mark.parametrize("html", [
+    '<form><label>Password<input type=password></label></form>',
+    '<h1>Sign in</h1><input type=password>',
+    '<h1>Sign in</h1><form><input type=text></form>',
+    '<h1>Sign in</h1><form><input type=password disabled></form>',
+    '<h1>Sign in</h1><form><fieldset disabled><input type=password></fieldset></form>',
+    '<h1>Sign in</h1><form hidden><input type=password></form>',
+    '<h1>Sign in</h1><form aria-hidden="true"><input type=password></form>',
+    '<h1>Sign in</h1><form><input type=password form="other"></form>',
+    '<form><input type=password></form><form><button>Sign in</button></form>',
+    '<form><input type=password></form><form><h1>Sign in</h1></form>',
+    '<a href="/login"><h1>Sign in</h1></a><form><input type=password></form>',
+    '<h1>Sign in</h1><form><p>This document explains credential controls.</p><input type=password></form>',
+    '<p>Measured value: 42.</p><form><input type=password><button>Sign in</button></form>',
+    '<h1>Sign in</h1><form><form><input type=password></form></form>',
+    '<h1>Sign in</h1><form><input type=text type=password></form>',
+    '<h1>Sign in</h1><pre><form><input type=password></form></pre>',
+    '<h1>Sign in</h1><textarea><form><input type=password></form></textarea>',
+])
+def test_unrelated_inactive_ambiguous_and_example_forms_do_not_establish_a_gate(html):
+    assert not NORMALIZE.html_authentication_shell(parse_context(html))
+
+
+@pytest.mark.parametrize("control", ["a", "button", "select", "option"])
+def test_password_inputs_inside_other_interactive_controls_are_not_eligible(control):
+    html = f'<h1>Sign in</h1><form><{control}><input type=password></{control}></form>'
+    context = parse_context(html)
+    assert context.password_form_ids == ()
+    assert not NORMALIZE.html_authentication_shell(context)
+
+
+def html_page(html):
+    return {"name": "captured-content", "file_name": "capture.html", "html": html}
+
+
+def audited_override():
+    return {
+        "usable": True, "reviewed_by": "fixture-reviewer", "reviewed_at": "2026-09-28T10:00:00Z",
+        "reason": "Reviewer verified the retained content beyond the generic JavaScript heuristic.",
+    }
+
+
+@pytest.mark.parametrize("html,reasons", [
+    ('<p>502 Bad Gateway. Please sign in to continue. Password required.</p>',
+     ["html_error_page:official_error_page", "html_authentication_shell"]),
+    ('<p>502 Bad Gateway. Please sign in to continue.</p><script src="a.js"></script><script src="b.js"></script>',
+     ["html_error_page:official_error_page", "html_javascript_shell", "html_authentication_shell"]),
+    ('<p>Please sign in to continue. Please enable JavaScript.</p>',
+     ["html_javascript_shell", "html_authentication_shell"]),
+    ('<p>Service temporarily unavailable. Please sign in to continue.</p>',
+     ["html_error_page:official_error_page", "html_authentication_shell"]),
+    ('<p>404 Not Found. Please sign in to continue.</p>',
+     ["html_error_page:not_found", "html_authentication_shell"]),
+    ('<p>502 Bad Gateway. 502 Bad Gateway. Please sign in to continue. Please sign in to continue.</p>',
+     ["html_error_page:official_error_page", "html_authentication_shell"]),
+])
+def test_independent_shell_reasons_compose_and_remain_unique(tmp_path, html, reasons):
+    source, metadata = normalize_page(tmp_path, html_page(html))
+    assert metadata["unusable_evidence_reasons"] == reasons
+    assert not metadata["evidence_usable"]
+    for reason in reasons:
+        assert source.warnings.count(f"web:captured-content: unusable evidence: {reason}") == 1
+
+
+@pytest.mark.parametrize("gate,remaining", [
+    ('502 Bad Gateway.', ["html_error_page:official_error_page"]),
+    ('Please sign in to continue.', ["html_authentication_shell"]),
+    ('502 Bad Gateway. Please sign in to continue.', ["html_error_page:official_error_page", "html_authentication_shell"]),
+])
+def test_javascript_override_cannot_clear_other_shell_reasons(tmp_path, gate, remaining):
+    html = f'<p>{gate}</p><script src="a.js"></script><script src="b.js"></script>'
+    source, metadata = normalize_page(tmp_path, html_page(html), record_changes={
+        "provenance": {"evidence_usability_override": audited_override(), "evidence_usability_override_applied": True},
+    })
+    assert not metadata["evidence_usable"]
+    assert metadata["unusable_evidence_reasons"] == remaining
+    assert "evidence_usability_override_applied" not in metadata["provenance"]
+    assert not any("unusable evidence: html_javascript_shell" in warning for warning in source.warnings)
+    assert any("override cleared: html_javascript_shell" in warning for warning in source.warnings)
+
+
+def test_javascript_only_override_records_clearance_without_an_active_refusal_warning(tmp_path):
+    html = '<p>Measured reflectance: 0.74.</p><script src="a.js"></script><script src="b.js"></script>'
+    source, metadata = normalize_page(tmp_path, html_page(html), record_changes={
+        "provenance": {"evidence_usability_override": audited_override()},
+    })
+    assert metadata["evidence_usable"] and metadata["unusable_evidence_reasons"] is None
+    assert metadata["provenance"]["evidence_usability_override_applied"] is True
+    assert not any("unusable evidence:" in warning for warning in source.warnings)
+    assert any("override cleared: html_javascript_shell" in warning for warning in source.warnings)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("usable", False), ("usable", 1), ("usable", "true"), ("reviewed_by", None),
+    ("reviewed_by", ""), ("reviewed_at", 42), ("reviewed_at", "  "), ("reason", ""), ("reason", []),
+])
+def test_invalid_overrides_cannot_clear_javascript_refusal(tmp_path, field, value):
+    review = audited_override()
+    review[field] = value
+    page = next(page for page in PAGES if page["name"] == "javascript-only")
+    _, metadata = normalize_page(tmp_path, page, record_changes={"provenance": {
+        "evidence_usability_override": review, "evidence_usability_override_applied": True,
+    }})
+    assert not metadata["evidence_usable"]
+    assert metadata["unusable_evidence_reasons"] == ["html_javascript_shell"]
+    assert "evidence_usability_override_applied" not in metadata["provenance"]
+
+
+@pytest.mark.parametrize("field", ["usable", "reviewed_by", "reviewed_at", "reason"])
+def test_incomplete_overrides_cannot_clear_javascript_refusal(tmp_path, field):
+    review = audited_override()
+    del review[field]
+    page = next(page for page in PAGES if page["name"] == "javascript-only")
+    _, metadata = normalize_page(tmp_path, page, record_changes={"provenance": {"evidence_usability_override": review}})
+    assert metadata["unusable_evidence_reasons"] == ["html_javascript_shell"]
+
+
+@pytest.mark.parametrize("review", [None, {}, "reviewed", {"usable": True}, audited_override()])
+def test_an_applied_marker_is_not_authority_to_erase_explicit_unusability(review):
+    record = {"evidence_usable": False, "provenance": {
+        "evidence_usability_override": review, "evidence_usability_override_applied": True,
+    }}
+    NORMALIZE.apply_record_usability_override(record)
+    assert record["evidence_usable"] is False
+    assert record["unusable_evidence_reasons"] == ["evidence_usable:false"]
+    assert "evidence_usability_override_applied" not in record["provenance"]
+
+
+def test_remaining_explicit_reasons_remove_stale_full_clearance_marker():
+    record = {"evidence_usable": False, "unusable_evidence_reasons": ["html_authentication_shell"], "provenance": {
+        "evidence_usability_override": audited_override(), "evidence_usability_override_applied": True,
+    }}
+    assert NORMALIZE.record_unusable_evidence_reasons(record) == ["html_authentication_shell"]
+    assert "evidence_usability_override_applied" not in record["provenance"]
+
+
+@pytest.mark.parametrize("failure", ["source_status", "delivery_failure_code", "explicit_flag", "explicit_reason"])
+def test_existing_refusals_survive_clean_content_and_a_review(tmp_path, failure):
+    changes = {"provenance": {"evidence_usability_override": audited_override()}}
+    if failure == "source_status":
+        changes["provenance"]["source_status"] = "unavailable"
+        expected = "source_status:unavailable"
+    elif failure == "delivery_failure_code":
+        changes["provenance"]["delivery_failure_code"] = "http_error"
+        expected = "delivery_failure_code:http_error"
+    elif failure == "explicit_flag":
+        changes["evidence_usable"] = False
+        expected = "evidence_usable:false"
+    else:
+        changes["unusable_evidence_reasons"] = ["manual_review_required", "manual_review_required"]
+        expected = "manual_review_required"
+    _, metadata = normalize_page(tmp_path, html_page('<p>Measured reflectance: 0.74.</p>'), record_changes=changes)
+    assert not metadata["evidence_usable"] and metadata["unusable_evidence_reasons"] == [expected]
+
+
+def test_available_provenance_does_not_overrule_detected_authentication(tmp_path):
+    _, metadata = normalize_page(tmp_path, html_page('<p>Please sign in to continue.</p>'), record_changes={
+        "provenance": {"source_status": "available", "checksum_verified": True},
+    })
+    assert metadata["unusable_evidence_reasons"] == ["html_authentication_shell"]
+
+
+@pytest.mark.parametrize("retain_failure", [False, True])
+def test_fresh_inventory_replacement_recomputes_native_reasons_without_changing_raw_evidence(tmp_path, retain_failure):
+    root = tmp_path / "workspace"
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        assert main(["init", "--target", str(root), "--project-name", "capture-replacement",
+                     "--project-description", "Recompute capture observations."]) == 0
+    raw = root / "raw/web/capture.html"
+    sidecar = raw.with_name(raw.name + ".provenance.yml")
+    results = []
+    for html in ('<p>Please sign in to continue.</p>', '<p>Measured reflectance: 0.74.</p>'):
+        raw.write_text(html, encoding="utf-8")
+        provenance = {"origin_url": "https://example.org/capture", "retrieved_at": "2026-09-28T10:00:00Z",
+                      "retrieved_by": "fixture", "source_type": "official_web", "license": "CC0-1.0",
+                      "checksum": "sha256:" + hashlib.sha256(raw.read_bytes()).hexdigest()}
+        if retain_failure:
+            provenance["delivery_failure_code"] = "http_error"
+        sidecar.write_text(yaml.safe_dump(provenance), encoding="utf-8")
+        originals = raw.read_bytes(), sidecar.read_bytes()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            assert owner("source_inventory").main(["--project-root", str(root)]) == 0
+            manifest = (root / "sources/manifest.jsonl").read_bytes()
+            record = json.loads(manifest.decode().strip())
+            assert NORMALIZE.main(["--project-root", str(root), "--source-id", record["id"], "--format", "json"]) == 0
+        path = root / "sources/normalized" / (NORMALIZE.safe_source_id(record["id"]) + ".md")
+        results.append(NORMALIZE.read_output_frontmatter(path))
+        assert originals == (raw.read_bytes(), sidecar.read_bytes())
+        assert (root / "sources/manifest.jsonl").read_bytes() == manifest
+    assert "html_authentication_shell" in results[0]["unusable_evidence_reasons"]
+    assert "html_authentication_shell" not in (results[1]["unusable_evidence_reasons"] or [])
+    assert results[1]["evidence_usable"] is (not retain_failure)
+    if retain_failure:
+        assert results[1]["unusable_evidence_reasons"] == ["delivery_failure_code:http_error"]
+
+
+@pytest.mark.parametrize("body,reason,retained_hash", [
+    ("502 Bad Gateway.", "html_error_page:official_error_page",
+     "sha256:6e288c37f1804cb5a539f2d7d47e1804c664d3f12ce9583ea97e7392476076aa"),
+    ("Please sign in to continue.", "html_authentication_shell",
+     "sha256:9d71c9c5a1bb46d2d49465eb5059c94bf751702bad8aa236df97531ea20c710d"),
+])
+def test_initial_bom_does_not_change_shell_verdict_or_retained_evidence(tmp_path, body, reason, retained_hash):
+    source, metadata = normalize_page(tmp_path, html_page('\ufeff<p>' + body + '</p>'))
+    assert metadata["unusable_evidence_reasons"] == [reason]
+    assert source.extracted_text == '\ufeff\n' + body
+    assert NORMALIZE.content_hash(source) == retained_hash
+
+
+@pytest.mark.parametrize("html", [
+    '<p>\ufeff502 Bad Gateway.</p>', '&#xfeff;<p>502 Bad Gateway.</p>',
+    '\ufeff\ufeff<p>502 Bad Gateway.</p>', '<!-- before -->\ufeff<p>502 Bad Gateway.</p>',
+])
+def test_only_a_single_stream_initial_bom_is_ignored_for_matching(html):
+    assert not NORMALIZE.html_gateway_shell(parse_context(html))
+
+
+def test_initial_bom_matching_is_invariant_under_empty_and_chunked_feeds():
+    html = '\ufeff<p>502 Bad Gateway.</p>'
+    extractor = NORMALIZE.HTMLContentExtractor()
+    extractor.feed('')
+    for character in html:
+        extractor.feed(character)
+    extractor.close()
+    assert extractor.classification_context() == parse_context(html)
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_html_input_byte_cap_qualifies_new_shell_inference(tmp_path, offset):
+    prefix, suffix = b'<p>502 Bad Gateway.</p><!--', b'-->'
+    size = NORMALIZE.HTML_MAX_BYTES + offset
+    data = prefix + b'x' * (size - len(prefix) - len(suffix)) + suffix
+    source, metadata = normalize_page(tmp_path, html_page(''), raw_bytes=data)
+    assert len(data) == size
+    assert any('extraction truncated' in warning for warning in source.warnings) is (offset > 0)
+    assert ('html_error_page:official_error_page' in (metadata['unusable_evidence_reasons'] or [])) is (offset <= 0)
+    assert (tmp_path / 'raw/web/capture.html').read_bytes() == data
+
+
+def test_html_reader_requests_one_bounded_read_with_a_truncation_sentinel(monkeypatch):
+    opened = mock_open(read_data=b'<p>Measured value: 42.</p>')
+    monkeypatch.setattr(Path, 'open', opened)
+    text, warnings = NORMALIZE.read_html_text(Path('capture.html'), 'raw/web/capture.html')
+    opened.assert_called_once_with('rb')
+    opened().read.assert_called_once_with(NORMALIZE.HTML_MAX_BYTES + 1)
+    assert text == '<p>Measured value: 42.</p>' and warnings == []
+
+
+def test_message_cut_at_byte_limit_cannot_become_a_complete_gate(tmp_path, monkeypatch):
+    data = b'<p>Please sign in to continue.</p>'
+    monkeypatch.setattr(NORMALIZE, 'HTML_MAX_BYTES', len(data) - 5)
+    source, metadata = normalize_page(tmp_path, html_page(''), raw_bytes=data)
+    assert any('extraction truncated' in warning for warning in source.warnings)
+    assert 'html_authentication_shell' not in (metadata['unusable_evidence_reasons'] or [])
+
+
+@pytest.mark.parametrize("file_name", ['capture.html', 'capture.htm', 'capture.xhtml'])
+@pytest.mark.parametrize("html,reason", [
+    ('<p>502 Bad Gateway.</p>', 'html_error_page:official_error_page'),
+    ('<p>Please sign in to continue.</p>', 'html_authentication_shell'),
+])
+def test_supported_html_extensions_share_classification(tmp_path, file_name, html, reason):
+    page = {**html_page(html), 'file_name': file_name}
+    _, metadata = normalize_page(tmp_path, page)
+    assert metadata['unusable_evidence_reasons'] == [reason]
+
+
+@pytest.mark.parametrize("html,reason", [
+    ('<P>HTTP Error 502: BAD GATEWAY.</P>', 'html_error_page:official_error_page'),
+    ('<!doctype html><html><body><main><p>502 Bad Gateway.</p></main></body></html>', 'html_error_page:official_error_page'),
+    ('<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>502 Bad Gateway.</p></body></html>',
+     'html_error_page:official_error_page'),
+    ('<p>502\tBad\nGateway.</p>', 'html_error_page:official_error_page'),
+    ('<p><span>502</span> <strong>Bad</strong>&nbsp;Gateway.</p>', 'html_error_page:official_error_page'),
+    ('<p>502 Bad<!-- inert --> Gateway.</p>', 'html_error_page:official_error_page'),
+    ('<p>Please <strong>SIGN&#x2010;IN</strong>&nbsp;to continue.</p>', 'html_authentication_shell'),
+    ('<main><section><p>Please sign in to continue.</p></section></main>', 'html_authentication_shell'),
+])
+def test_supported_markup_and_text_transformations_preserve_the_verdict(tmp_path, html, reason):
+    _, metadata = normalize_page(tmp_path, html_page(html))
+    assert metadata['unusable_evidence_reasons'] == [reason]
+
+
+@pytest.mark.parametrize("gate", ['502 Bad Gateway.', 'Please sign in to continue.'])
+@pytest.mark.parametrize("container", ['p', 'article', 'pre', 'blockquote', 'form'])
+def test_adding_independent_content_prevents_new_whole_page_refusal(tmp_path, gate, container):
+    html = f'<h1>{gate}</h1><{container}>The measured reflectance is 0.74.</{container}>'
+    _, metadata = normalize_page(tmp_path, html_page(html))
+    assert metadata['unusable_evidence_reasons'] is None
+    assert metadata['evidence_usable'] is True
+
+
+@pytest.mark.parametrize("html", [
+    '<p>502 Bad Gateway.', '<form><p>Please sign in to continue.</p>',
+    '<div><p>502 Bad Gateway.</div>', '<p>Please sign in to continue.</unknown>',
+    '<script>unfinished', '<title>502 Bad Gateway</title><nav>unfinished',
+])
+def test_unbalanced_markup_does_not_create_structural_certainty(html):
+    context = parse_context(html)
+    assert context.degraded
+    assert not NORMALIZE.html_gateway_shell(context)
+    assert not NORMALIZE.html_authentication_shell(context)
+
+
+@pytest.mark.parametrize("html,reasons", [
+    ('', []), ('<meta name="description" content="Please sign in to continue.">', []),
+    ('<title>502 Bad Gateway</title>', ['html_error_page:official_error_page']),
+    ('<title>Authentication required</title>', ['html_authentication_shell']),
+])
+def test_empty_or_title_only_captures_do_not_manufacture_body_content(tmp_path, html, reasons):
+    source, metadata = normalize_page(tmp_path, html_page(html))
+    assert source.extracted_text == 'None extracted.'
+    assert metadata['status'] == 'failed'
+    assert (metadata['unusable_evidence_reasons'] or []) == reasons
+
+
+def test_missing_html_original_preserves_extraction_failure(tmp_path):
+    source = NORMALIZE.normalize_html_record(tmp_path, {'id': 'web:missing', 'kind': 'html', 'raw_paths': ['raw/web/missing.html']})
+    assert NORMALIZE.status_for(source) == 'failed'
+    assert source.extracted_text == 'None extracted.'
+    assert any('raw HTML file not found' in warning for warning in source.warnings)
+
+
+def test_unreadable_html_original_preserves_diagnostics(tmp_path, monkeypatch):
+    original_open = Path.open
+
+    def refuse_raw_read(path, mode='r', *args, **kwargs):
+        if path == tmp_path / 'raw/web/capture.html' and mode == 'rb':
+            raise PermissionError('Unreadable fixture')
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'open', refuse_raw_read)
+    source, metadata = normalize_page(tmp_path, html_page('<p>502 Bad Gateway.</p>'))
+    assert metadata['status'] == 'failed'
+    assert source.extracted_text == 'None extracted.'
+    assert any('cannot read HTML file' in warning for warning in source.warnings)
+    assert metadata['unusable_evidence_reasons'] is None
+
+
+def test_invalid_utf8_is_retained_as_replacement_text_and_not_invented_as_a_message(tmp_path):
+    source, metadata = normalize_page(tmp_path, html_page(''), raw_bytes=b'<p>502 Bad Gateway.\xff</p>')
+    assert '\ufffd' in source.extracted_text
+    assert metadata['unusable_evidence_reasons'] is None
+
+
+@pytest.mark.parametrize("html", [
+    '<p>502 Bad Gateway.</p>' * 5000,
+    '<p>Please sign in to continue.</p>' + '<p>Useful explanation.</p>' * 1000,
+    '<p>Useful observation.</p>' * 1000 + '<script></script>' * 100,
+])
+def test_large_inputs_keep_new_matching_bounded_and_qualified(html):
+    context = parse_context(html)
+    assert context.truncated
+    assert len(context.blocks) <= NORMALIZE.HTML_CONTEXT_MAX_BLOCKS
+    assert len(context.body_text) <= NORMALIZE.HTML_CONTEXT_MAX_CHARS
+    assert not NORMALIZE.html_gateway_shell(context)
+    assert not NORMALIZE.html_authentication_shell(context)

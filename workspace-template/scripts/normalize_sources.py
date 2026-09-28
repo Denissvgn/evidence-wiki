@@ -61,12 +61,43 @@ HTML_CONTEXT_MAX_CHARS = 4096
 HTML_CONTEXT_MAX_BLOCKS = 128
 HTML_CONTEXT_MAX_DEPTH = 64
 HTML_CONTEXT_MAX_FORMS = 32
+HTML_GATEWAY_MAX_CHARS = 1000
+HTML_AUTHENTICATION_MAX_CHARS = 200
+HTML_CONTROL_TAGS = {"a", "button", "label", "select", "option"}
 HTML_CONTEXT_EXAMPLE_TAGS = {"code", "pre", "blockquote", "q", "kbd", "samp", "textarea"}
-HTML_CONTEXT_BOUNDARY_TAGS = HTML_CONTEXT_EXAMPLE_TAGS | {"title", "a", "button", "label", "select", "option"}
+HTML_CONTEXT_BOUNDARY_TAGS = HTML_CONTEXT_EXAMPLE_TAGS | HTML_CONTROL_TAGS | {"title"}
 HTML_VOID_TAGS = {
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
 }
 HTML_MATCHING_HYPHENS = str.maketrans({"\u2010": "-", "\u2011": "-"})
+HTML_GATEWAY_MESSAGES = frozenset(
+    prefix + message
+    for code, message in (("502", "bad gateway"), ("504", "gateway timeout"), ("504", "gateway time-out"))
+    for prefix in ("", f"{code} ", f"http {code} ", f"http error {code} ", f"http error {code}: ")
+)
+HTML_RETRY_MESSAGES = frozenset({"please try again later", "try again later", "please retry later"})
+HTML_AUTHENTICATION_ACTIONS = frozenset({"sign in", "sign-in", "log in", "log-in", "login"})
+HTML_AUTHENTICATION_MESSAGES = frozenset(
+    prefix + action + " to " + destination
+    for prefix in ("", "please ")
+    for action in HTML_AUTHENTICATION_ACTIONS
+    for destination in (
+        "continue", "continue reading", "view this page", "view this content", "view the content",
+        "read this page", "read this content", "read the content", "access this page", "access this content",
+        "access the content",
+    )
+) | {"authentication required", "login required", "sign-in required", "please enter your password to continue"}
+HTML_AUTHENTICATION_LABELS = HTML_AUTHENTICATION_ACTIONS | {
+    "password required", "password", "username", "email", "remember me", "forgot password",
+}
+HTML_AUTHENTICATION_FORM_CUES = HTML_AUTHENTICATION_ACTIONS | HTML_AUTHENTICATION_MESSAGES | {"password required"}
+HTML_SHELL_NOTICES = frozenset({
+    "enable javascript", "please enable javascript", "please enable javascript to continue",
+    "you need to enable javascript to run this app", "javascript required", "javascript is required",
+    "javascript is disabled", "404 not found", "page not found", "not found",
+    "service unavailable", "temporarily unavailable", "service temporarily unavailable",
+    "down for maintenance", "the website is down for maintenance", "maintenance mode", "maintenance in progress",
+})
 # Tabular extraction caps: input bytes (plus one byte to detect truncation)
 # and sample rows rendered into the normalized record.
 TABLE_MAX_BYTES = 5_000_000
@@ -709,7 +740,9 @@ def complete_evidence_usability_override(provenance: dict[str, Any]) -> dict[str
 
 
 def record_unusable_evidence_reasons(record: dict[str, Any]) -> list[str]:
+    """Preserve refusals; an applied-override marker alone never clears an explicit refusal."""
     reasons: list[str] = []
+    override_cleared_reasons = False
     execution = record_metadata(record).get("execution_evidence")
     if isinstance(execution, dict) and execution.get("valid") is not True:
         reasons.append("execution_evidence_invalid")
@@ -727,12 +760,19 @@ def record_unusable_evidence_reasons(record: dict[str, Any]) -> list[str]:
             remaining = [
                 reason for reason in reasons if reason not in OVERRIDABLE_EVIDENCE_USABILITY_REASONS
             ]
-            if len(remaining) != len(reasons) and not remaining:
+            override_cleared_reasons = len(remaining) != len(reasons) and not remaining
+            if override_cleared_reasons:
                 provenance["evidence_usability_override_applied"] = True
+            else:
+                provenance.pop("evidence_usability_override_applied", None)
             reasons = remaining
+        elif override is None:
+            provenance.pop("evidence_usability_override_applied", None)
     if record.get("evidence_usable") is False and not reasons:
-        if not (isinstance(provenance, dict) and provenance.get("evidence_usability_override_applied") is True):
+        if not override_cleared_reasons:
             reasons.append("evidence_usable:false")
+    if reasons and isinstance(provenance, dict):
+        provenance.pop("evidence_usability_override_applied", None)
     return unique_values(reasons)
 
 
@@ -2670,6 +2710,7 @@ class HTMLClassificationBlock:
     tag: str
     form_id: int | None
     is_example: bool
+    is_control: bool = False
 
 
 @dataclass(frozen=True)
@@ -2703,6 +2744,7 @@ class _HTMLContextFrame:
     is_example: bool
     disabled: bool
     in_head: bool
+    is_control: bool
 
 
 class _HTMLClassificationCollector:
@@ -2715,23 +2757,29 @@ class _HTMLClassificationCollector:
         self.truncated = False
         self._stack: list[_HTMLContextFrame] = []
         self._parts: list[str] = []
-        self._pending_key: tuple[str, int | None, bool] | None = None
+        self._pending_key: tuple[str, int | None, bool, bool] | None = None
         self._retained_chars = 0
         self._normalized_chars = 0
         self._form_count = 0
         self._title_count = 0
         self._finished = False
+        self._input_started = False
+        self._strip_initial_bom = False
 
-    def begin(self) -> None:
+    def begin(self, data: str) -> None:
+        """Start a feed, recognizing only a stream-initial BOM as an encoding marker."""
         self._finished = False
+        if data and not self._input_started:
+            self._input_started = True
+            self._strip_initial_bom = data.startswith("\ufeff")
 
-    def _key(self) -> tuple[str, int | None, bool] | None:
+    def _key(self) -> tuple[str, int | None, bool, bool] | None:
         if not self._stack:
-            return ("body", None, False)
+            return ("body", None, False, False)
         frame = self._stack[-1]
         if frame.suppressed or (frame.in_head and frame.block_tag != "title"):
             return None
-        return frame.block_tag, frame.form_id, frame.is_example
+        return frame.block_tag, frame.form_id, frame.is_example, frame.is_control
 
     def _flush(self) -> None:
         text = normalize_html_matching_text("".join(self._parts))
@@ -2745,9 +2793,9 @@ class _HTMLClassificationCollector:
         if len(text) > remaining:
             text = text[:remaining]
             self.truncated = True
-        tag, form_id, is_example = self._pending_key
+        tag, form_id, is_example, is_control = self._pending_key
         self._normalized_chars += len(text) + bool(self.blocks)
-        self.blocks.append(HTMLClassificationBlock(text, tag, form_id, is_example))
+        self.blocks.append(HTMLClassificationBlock(text, tag, form_id, is_example, is_control))
 
     def start(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._finished = False
@@ -2773,6 +2821,7 @@ class _HTMLClassificationCollector:
         suppressed = bool(parent and parent.suppressed) or tag in HTML_SKIP_TAGS or "hidden" in attributes
         suppressed |= (attributes.get("aria-hidden") or "").strip().casefold() == "true"
         is_example = bool(parent and parent.is_example) or tag in HTML_CONTEXT_EXAMPLE_TAGS
+        is_control = bool(parent and parent.is_control) or tag in HTML_CONTROL_TAGS
         disabled = bool(parent and parent.disabled) or (
             tag in {"fieldset", "input", "button", "select", "textarea", "option", "optgroup"}
             and "disabled" in attributes
@@ -2799,10 +2848,13 @@ class _HTMLClassificationCollector:
             tag == "input" and (attributes.get("type") or "").strip().casefold() == "password"
             and form_id is not None and not suppressed and not is_example and not disabled
             and not in_head and not ambiguous_attributes and "form" not in attributes
+            and not any(frame.tag in {"a", "button", "select", "option"} for frame in self._stack)
         ):
             self.password_form_ids.add(form_id)
         if tag not in HTML_VOID_TAGS:
-            self._stack.append(_HTMLContextFrame(tag, block_tag, form_id, suppressed, is_example, disabled, in_head))
+            self._stack.append(
+                _HTMLContextFrame(tag, block_tag, form_id, suppressed, is_example, disabled, in_head, is_control)
+            )
 
     def end(self, tag: str) -> None:
         self._finished = False
@@ -2826,6 +2878,9 @@ class _HTMLClassificationCollector:
 
     def data(self, data: str) -> None:
         self._finished = False
+        if self._strip_initial_bom and data:
+            data = data.removeprefix("\ufeff")
+            self._strip_initial_bom = False
         if self.truncated:
             return
         key = self._key()
@@ -2882,7 +2937,7 @@ class HTMLContentExtractor(HTMLParser):
         self._classification = _HTMLClassificationCollector()
 
     def feed(self, data: str) -> None:
-        self._classification.begin()
+        self._classification.begin(data)
         super().feed(data)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -3000,10 +3055,92 @@ def read_html_text(html_path: Path, relative_path: str) -> tuple[str, list[str]]
     return data.decode("utf-8", errors="replace"), warnings
 
 
+def html_context_from_text(raw_html: str) -> HTMLClassificationContext:
+    """Provide bounded parsed observations for callers without an extraction context."""
+    if len(raw_html) > HTML_MAX_BYTES or len(raw_html.encode("utf-8", errors="replace")) > HTML_MAX_BYTES:
+        return HTMLClassificationContext((), (), True, True)
+    extractor = HTMLContentExtractor()
+    try:
+        extractor.feed(raw_html)
+        extractor.close()
+    except Exception:
+        return extractor.classification_context(degraded=True)
+    return extractor.classification_context()
+
+
+def html_shell_messages(text: str) -> list[str]:
+    """Split whole normalized messages without discarding quotes or explanatory clauses."""
+    return [part.strip() for part in re.split(r"[.!?]+", text) if part.strip()]
+
+
+def html_shell_message_allowed(message: str, block: HTMLClassificationBlock) -> bool:
+    """Allow finite companion notices without making them independent shell evidence."""
+    return (
+        message in HTML_GATEWAY_MESSAGES or message in HTML_AUTHENTICATION_MESSAGES
+        or message in HTML_RETRY_MESSAGES or message in HTML_SHELL_NOTICES
+        or html_authentication_label(message, block)
+    )
+
+
+def html_gateway_shell(context: HTMLClassificationContext) -> bool:
+    """Recognize thin gateway messages only when every retained region is shell text."""
+    if context.degraded or context.truncated or len(context.body_text) >= HTML_GATEWAY_MAX_CHARS:
+        return False
+    primary_message = False
+    for block in context.blocks:
+        if block.is_example:
+            return False
+        for message in html_shell_messages(block.text):
+            if message in HTML_GATEWAY_MESSAGES:
+                primary_message |= not block.is_control
+            elif not html_shell_message_allowed(message, block):
+                return False
+    return primary_message
+
+
+def html_authentication_label(message: str, block: HTMLClassificationBlock) -> bool:
+    """Allow narrow corroborating labels without promoting them to primary messages."""
+    if message == "password required":
+        return True
+    if message not in HTML_AUTHENTICATION_LABELS:
+        return False
+    return block.is_control or block.form_id is not None or (
+        message in HTML_AUTHENTICATION_ACTIONS and block.tag in {"title", "h1", "h2", "h3", "h4", "h5", "h6"}
+    )
+
+
+def html_authentication_form_cue(
+    message: str, block: HTMLClassificationBlock, context: HTMLClassificationContext
+) -> bool:
+    """Associate authentication cues with eligible credential forms, never unrelated controls."""
+    if not context.password_form_ids or message not in HTML_AUTHENTICATION_FORM_CUES or block.is_example:
+        return False
+    if block.form_id in context.password_form_ids:
+        return True
+    return block.form_id is None and not block.is_control and block.tag in {"title", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+
+def html_authentication_shell(context: HTMLClassificationContext) -> bool:
+    """Require a thin access directive or corroborated form, with no independent document content."""
+    if context.degraded or context.truncated or len(context.body_text) >= HTML_AUTHENTICATION_MAX_CHARS:
+        return False
+    primary_message = False
+    for block in context.blocks:
+        if block.is_example:
+            return False
+        for message in html_shell_messages(block.text):
+            primary_message |= html_authentication_form_cue(message, block, context)
+            if message in HTML_AUTHENTICATION_MESSAGES:
+                primary_message |= not block.is_control
+            elif not html_shell_message_allowed(message, block):
+                return False
+    return primary_message
+
+
 def html_unusable_evidence_reasons(
     title: str, body_text: str, raw_html: str, *, context: HTMLClassificationContext | None = None
 ) -> list[str]:
-    """Return existing refusal reasons; parser context does not change these rules."""
+    """Combine legacy refusals with qualified parser-based shell observations."""
     reasons: list[str] = []
     visible = normalize_markdown_spacing(body_text)
     haystack = single_line(f"{title} {visible}").lower()
@@ -3017,6 +3154,11 @@ def html_unusable_evidence_reasons(
     ):
         reasons.append("html_error_page:official_error_page")
 
+    if context is None:
+        context = html_context_from_text(raw_html)
+    if html_gateway_shell(context):
+        reasons.append("html_error_page:official_error_page")
+
     script_count = len(re.findall(r"<script\b", raw_lower))
     javascript_required = re.search(
         r"(enable|requires?|need).{0,80}javascript|javascript.{0,80}(required|disabled|enable)",
@@ -3025,12 +3167,18 @@ def html_unusable_evidence_reasons(
     content_thin = len(visible) < 200
     if (javascript_required and content_thin) or (script_count >= 2 and content_thin):
         reasons.append("html_javascript_shell")
+    if html_authentication_shell(context):
+        reasons.append("html_authentication_shell")
     return unique_values(reasons)
 
 
 def normalize_html_record(project_root: Path, record: dict[str, Any]) -> NormalizedSource:
     source_id = record_id(record)
     warnings = manifest_warnings(record)
+    provenance = record.get("provenance")
+    if isinstance(provenance, dict):
+        # This flag describes an override applied by this normalization, not an input authority.
+        provenance.pop("evidence_usability_override_applied", None)
     raw_path = html_raw_path(record)
     html_path = safe_workspace_path(project_root, raw_path) if raw_path else None
     if raw_path is None or html_path is None or not html_path.is_file():
@@ -3076,7 +3224,12 @@ def normalize_html_record(project_root: Path, record: dict[str, Any]) -> Normali
     unusable_reasons = html_unusable_evidence_reasons(title, body_text, text, context=context)
     if unusable_reasons:
         set_record_unusable_evidence(record, [*record_unusable_evidence_reasons(record), *unusable_reasons])
-        warnings.extend(f"{source_id}: unusable evidence: {reason}" for reason in unusable_reasons)
+        effective_reasons = record_unusable_evidence_reasons(record)
+        for reason in unusable_reasons:
+            if reason in effective_reasons:
+                warnings.append(f"{source_id}: unusable evidence: {reason}")
+            elif reason in OVERRIDABLE_EVIDENCE_USABILITY_REASONS:
+                warnings.append(f"{source_id}: evidence usability override cleared: {reason}")
     if not body_text:
         warnings.append(f"{raw_path}: no visible body text extracted")
         body_text = "None extracted."

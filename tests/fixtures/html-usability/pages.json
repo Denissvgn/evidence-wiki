@@ -214,7 +214,7 @@
   },
   {
     "name": "password-form",
-    "rule": "authentication",
+    "rule": "authentication-form",
     "file_name": "password-form.html",
     "html": "<title>Sign in</title><form><label>Password<input type=\"password\"></label><button>Sign in</button></form>",
     "expected_reasons": [
@@ -232,7 +232,7 @@
   },
   {
     "name": "password-form-attributes",
-    "rule": "authentication",
+    "rule": "authentication-form",
     "file_name": "password-form-attributes.html",
     "html": "<h1>LOGIN</h1><FORM><INPUT name=p TYPE=PASSWORD /><button>Login</button></FORM>",
     "expected_reasons": [
