@@ -1178,16 +1178,20 @@ class DocumentedWorkflowTests(unittest.TestCase):
                 self.assertIn("orchestrator-handoff.md", text)
 
     def test_external_normalizer_workflow_is_documented(self):
-        normalized_format_doc = NORMALIZED_SOURCE_FORMAT_DOC.read_text()
+        normalized_format_doc = re.sub(r"\s+", " ", NORMALIZED_SOURCE_FORMAT_DOC.read_text())
 
         self.assertIn("Writing Records From an External Normalizer", normalized_format_doc)
         # Acceptance is earned per record, not granted by origin — the promise the CR
         # makes to a maintainer reviewing this change.
         self.assertIn("only when the record conforms", normalized_format_doc)
         self.assertIn("normalized_record_contract_violation", normalized_format_doc)
-        # An external writer must be told which records normalization will overwrite,
-        # because the loss is silent and needs no --force.
-        self.assertIn("will be overwritten", normalized_format_doc)
+        # External writers need the selection condition and future-profile protection.
+        self.assertIn("**can be overwritten** when selected as stale by", normalized_format_doc)
+        self.assertIn("with no `--force` required", normalized_format_doc)
+        self.assertIn(
+            "Unsupported future native HTML classification revisions are protected by a "
+            "preflight refusal, including when force is requested.", normalized_format_doc,
+        )
 
     def test_source_delivery_states_a_delivery_is_not_yet_evidence(self):
         delivery_doc = SOURCE_DELIVERY_DOC.read_text()

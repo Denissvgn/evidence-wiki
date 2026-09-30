@@ -64,7 +64,7 @@ def read_record(path):
 
 
 def write_record(path, metadata, body):
-    path.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---" + body, encoding="utf-8")
+    path.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---" + body, encoding="utf-8", newline="\n")
 
 
 def coverage_document(name, source_id):
@@ -92,26 +92,26 @@ def initialize(commands, pages):
     for page in pages:
         path = root / "raw/web" / page["file_name"]
         require(path.parent == root / "raw/web", "HTML corpus filenames must stay in the selected raw directory")
-        path.write_text(page["html"], encoding="utf-8")
+        path.write_text(page["html"], encoding="utf-8", newline="\n")
         path.with_name(path.name + ".provenance.yml").write_text(yaml.safe_dump({
             "origin_url": "https://example.org/" + page["name"], "retrieved_at": "2026-09-29T10:00:00Z",
             "retrieved_by": "local_fixture", "source_type": "official_web", "license": "CC0-1.0",
             "checksum": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
-        }), encoding="utf-8")
+        }), encoding="utf-8", newline="\n")
     commands.script("source_inventory", "--format", "json", "--report")
     records = {Path(row["raw_paths"][0]).name: row for row in
                map(json.loads, (root / "sources/manifest.jsonl").read_text(encoding="utf-8").splitlines())}
     require(len(records) == len(pages), "Inventory must account for every retained HTML input")
     batch = root.parent / "questions.json"
     batch.write_text(json.dumps({"schema_version": "1.0", "questions": [
-        {"question": page["name"], "priority": "high", "origin": "caller"} for page in pages]}), encoding="utf-8")
+        {"question": page["name"], "priority": "high", "origin": "caller"} for page in pages]}), encoding="utf-8", newline="\n")
     commands.package("questions", "add", "--target", root, "--from-file", batch, "--format", "json")
     (root / "sources/jurisdictions.yml").write_text(yaml.safe_dump({"jurisdiction_profiles": [
-        {"jurisdiction_id": "fixture-authority", "name": "Fixture authority", "official_domains": ["example.org"], "blocked_domains": []}]}), encoding="utf-8")
+        {"jurisdiction_id": "fixture-authority", "name": "Fixture authority", "official_domains": ["example.org"], "blocked_domains": []}]}), encoding="utf-8", newline="\n")
     (root / "sources/coverage").mkdir(parents=True, exist_ok=True)
     for page in pages:
         name, source_id = page["name"], records[page["file_name"]]["id"]
-        (root / "sources/coverage" / (name + ".yml")).write_text(yaml.safe_dump(coverage_document(name, source_id)), encoding="utf-8")
+        (root / "sources/coverage" / (name + ".yml")).write_text(yaml.safe_dump(coverage_document(name, source_id)), encoding="utf-8", newline="\n")
     return records
 
 
@@ -126,7 +126,7 @@ def normalized_path(root, source_id):
 def observe(commands, page, source_id, *, stale=False):
     root, name = commands.root, page["name"]
     route_path = root.parent / (name + "-routes.json")
-    route_path.write_text(json.dumps(route_document(name, source_id)), encoding="utf-8")
+    route_path.write_text(json.dumps(route_document(name, source_id)), encoding="utf-8", newline="\n")
     before = snapshot(root)
     verified = commands.package("normalize", "verify", "--target", root, "--source-id", source_id, "--format", "json")
     require(verified["overall_result"] == "verified", name + ": normalized format")
@@ -309,8 +309,8 @@ def upgrade_fixture(root, cli, corpus, fixture):
                 "Retained fixture path must remain within research artifacts")
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-    (root / "scripts/normalize_sources.py").write_text("# Tooling differs from the selected installation.\n", encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="\n")
+    (root / "scripts/normalize_sources.py").write_text("# Tooling differs from the selected installation.\n", encoding="utf-8", newline="\n")
     (root / "scripts/_html_usability_profile.py").unlink()
     return {**upgrade_records(root, cli, corpus), "fixture_producer": value["producer"]}
 
