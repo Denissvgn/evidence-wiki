@@ -389,6 +389,7 @@ def test_installed_validation_wires_both_action_probes_and_log_destinations(tmp_
     monkeypatch.setattr(artifacts._OPTIONS, "evidence", evidence)
     monkeypatch.setattr(artifacts, "isolated_fixtures", lambda root: fixtures)
     monkeypatch.setattr(artifacts, "validate_cli_entrypoints", lambda *args, **kwargs: {})
+    monkeypatch.setattr(artifacts, "validate_html_installation", lambda *args, **kwargs: html_observations())
 
     def legacy(argv, **options):
         assert artifacts.SETUP_PROBE not in argv and artifacts.RESEARCH_PROBE not in argv
@@ -512,6 +513,16 @@ def test_failed_case_does_not_hide_other_case_results(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "execution/observations.json").read_text())["status"] == "failed"
 
 
+def html_observations():
+    """Synthetic report-shape inputs; actual installed execution belongs to the artifact gate."""
+    def cases(names):
+        return [{"case": name, "evidence_accepted": False, "semantic_adequacy": "not_evaluated"} for name in names]
+    return {"fresh": {"html_cli_journeys": "passed", "cases": cases(artifacts.HTML_CASE_NAMES),
+                      "cached_refresh": "passed", "selected_replay": "passed"},
+            "upgrade": {"html_upgrade": "passed", "cases": cases(("gateway-body", "signin-body", "numeric-data")),
+                        "future_profile_refusal": "passed", "originals_preserved": True}}
+
+
 def installation_reports(tmp_path):
     dist = tmp_path / "dist"
     dist.mkdir()
@@ -533,6 +544,7 @@ def installation_reports(tmp_path):
             "commands": [{"stage": "probe", "status": "passed"}],
             "checks": {"membership": artifacts.check_archive_membership(wheel, sdist), "installed_" + kind: {
                 "label": kind, "checkout_imports": "disabled", "version": verification.__version__,
+                "html_usability": html_observations(),
                 **{group: dict.fromkeys(cases, "passed") for group, cases in installed_cli.OUTCOME_CASES.items()},
                 "native_initialization": {"direct_profile": "passed", "nested_profile": "passed",
                     "no_write_refusals": "passed", "controller_submission": "passed"},
@@ -542,6 +554,91 @@ def installation_reports(tmp_path):
                     "planned_trials": [{"case_id": row["case_id"], "trial": 1} for row in trials], "trials": copy.deepcopy(trials)}}}}
         reports[kind] = report
     return dist, reports
+
+
+@pytest.mark.parametrize("kind", ["wheel", "sdist"])
+@pytest.mark.parametrize("defect", ["missing", "failed", "missing_case", "duplicate_case", "acceptance", "semantic",
+                                   "no_refresh", "no_replay", "no_future_refusal", "originals_changed"])
+def test_final_gate_requires_complete_html_qualification(tmp_path, kind, defect):
+    dist, reports = installation_reports(tmp_path)
+    installed = reports[kind]["checks"]["installed_" + kind]
+    html = installed["html_usability"]
+    if defect == "missing":
+        del installed["html_usability"]
+    elif defect == "failed":
+        html["upgrade"]["html_upgrade"] = "failed"
+    elif defect == "missing_case":
+        html["fresh"]["cases"].pop()
+    elif defect == "duplicate_case":
+        html["fresh"]["cases"][-1] = dict(html["fresh"]["cases"][0])
+    elif defect == "acceptance":
+        html["fresh"]["cases"][0]["evidence_accepted"] = True
+    elif defect == "semantic":
+        html["fresh"]["cases"][0]["semantic_adequacy"] = "approved"
+    elif defect == "no_refresh":
+        html["fresh"]["cached_refresh"] = "not_run"
+    elif defect == "no_replay":
+        html["fresh"]["selected_replay"] = "not_run"
+    elif defect == "no_future_refusal":
+        html["upgrade"]["future_profile_refusal"] = "not_run"
+    else:
+        html["upgrade"]["originals_preserved"] = False
+    evidence = tmp_path / "reports"
+    for label, report in reports.items():
+        directory = evidence / label
+        directory.mkdir(parents=True)
+        (directory / "summary.json").write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="HTML"):
+        verification.verify(dist, evidence, commit="commit", run_id="run")
+
+
+def test_html_qualification_inputs_are_bound_and_copied(tmp_path):
+    required = {"tools/probe_html_usability.py", "tests/fixtures/html-usability/pages.json",
+                "tests/fixtures/html-usability/legacy-records.json"}
+    assert required <= set(artifacts.REQUIRED_SDIST_MEMBERS)
+    assert required <= set(artifacts.fixture_members())
+    copied = artifacts.isolated_fixtures(tmp_path)
+    hashes = json.loads((copied / "inputs.json").read_text())
+    for name in required:
+        assert hashes[name] == artifacts.validation_identity()[name]
+        assert (copied / name).read_bytes() == (artifacts.REPO_ROOT / name).read_bytes()
+
+
+def test_installed_html_checks_run_both_journeys_through_the_selected_environment(tmp_path, monkeypatch):
+    calls = []
+    observed = html_observations()
+    def run(argv, **options):
+        calls.append((argv, options))
+        return json.dumps(observed["upgrade" if "--legacy-fixture" in argv else "fresh"])
+    monkeypatch.setattr(artifacts, "run", run)
+    python, cli = tmp_path / "python", tmp_path / "cli"
+    result = artifacts.validate_html_installation(python, cli, scratch=tmp_path / "execution",
+                outside=tmp_path / "outside", fixture_root=tmp_path / "inputs")
+    assert result == observed and len(calls) == 2
+    for argv, options in calls:
+        assert argv[:2] == [str(python), "-I"] and argv[argv.index("--cli") + 1] == str(cli)
+        assert options["cwd"] == tmp_path / "outside"
+    assert calls[0][1]["label"] == "html-fresh" and calls[1][1]["label"] == "html-upgrade"
+
+
+@pytest.mark.parametrize("label", ["wheel", "sdist"])
+def test_both_installations_enter_the_html_qualification_owner(tmp_path, monkeypatch, label):
+    environment, scratch = tmp_path / "environment", tmp_path / "execution"
+    cli = artifacts.venv_cli(environment)
+    cli.parent.mkdir(parents=True)
+    cli.touch()
+    scratch.mkdir()
+    fixtures = scratch / "qualification-inputs"
+    monkeypatch.setattr(artifacts, "isolated_fixtures", lambda root: fixtures)
+    monkeypatch.setattr(artifacts, "validate_cli_entrypoints", lambda *args, **kwargs: {})
+    monkeypatch.setattr(artifacts, "run", lambda *args, **kwargs: pytest.fail("HTML owner was skipped"))
+    def probe(python, selected_cli, **options):
+        assert python == artifacts.venv_python(environment) and selected_cli == cli
+        assert options == {"scratch": scratch, "outside": scratch / "outside-checkout", "fixture_root": fixtures}
+        raise RuntimeError("HTML qualification reached")
+    monkeypatch.setattr(artifacts, "validate_html_installation", probe)
+    with pytest.raises(RuntimeError, match="HTML qualification reached"):
+        artifacts.validate_installed(environment, scratch, "9.9.9", label)
 
 
 @pytest.mark.parametrize("defect", [None, "missing", "duplicate", "commit", "run", "inputs", "bytes", "unfinished",

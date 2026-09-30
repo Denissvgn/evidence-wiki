@@ -474,9 +474,21 @@ def test_find_artifacts_refuses_an_ambiguous_dist_directory(tmp_path: Path) -> N
 
     with pytest.raises(SystemExit) as refusal:
         VALIDATOR.find_artifacts(tmp_path)
-
     assert "exactly one wheel and one sdist" in str(refusal.value)
 
+
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+@pytest.mark.parametrize("relative", ["scripts/_html_usability_profile.py", "scripts/_normalized_contract.py",
+    "scripts/_evidence_policies.py", "scripts/_script_errors.py", "scripts/normalize_sources.py",
+    "docs/normalized-source-format.md", "docs/source-usability.md", "docs/source-delivery.md", "docs/upgrade-adoption.md"])
+def test_html_runtime_and_contract_assets_are_required_in_both_archives(tmp_path, artifact, relative):
+    missing = ("evidence_wiki/assets/" if artifact == "wheel" else "") + "workspace-template/" + relative
+    wheel = make_wheel(tmp_path / "evidence_wiki-9.9.9-py3-none-any.whl",
+                       sorted(set(VALIDATOR.REQUIRED_WHEEL_MEMBERS) - {missing}))
+    sdist = make_sdist(tmp_path / "evidence_wiki-9.9.9.tar.gz", sorted(set(VALIDATOR.REQUIRED_SDIST_MEMBERS) - {missing}))
+    with pytest.raises(SystemExit, match="missing required members") as refusal:
+        VALIDATOR.check_archive_membership(wheel, sdist)
+    assert missing in str(refusal.value)
 
 def test_round_trip_yaml_runtime_dependency_is_pinned_and_noticed() -> None:
     pyproject = PYPROJECT_PATH.read_text(encoding="utf-8")

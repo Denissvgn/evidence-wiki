@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Reject thin native HTML gateway, timeout and authentication shells while
+  preserving short substantive documents, retained text and diagnostic search.
+  Keep independent usability reasons active; the audited JavaScript override
+  cannot clear authentication, gateway or delivery refusals.
+- Record a separate native HTML classification revision. Refresh selected legacy
+  records despite unchanged raw fingerprints, refuse future-revision downgrades,
+  and enforce currentness in source inspection, local routing and required
+  coverage. Preserve normalized-format and external/non-HTML compatibility;
+  workspace tooling upgrade and explicit record refresh remain separate steps.
+
 ## 1.1.1 - 2026-09-27
 
 - Support `python -B -m evidence_wiki` alongside the console command and CLI

@@ -32,6 +32,22 @@ normalize the selected legacy record to recheck it, or use a compatible producer
 for a future revision. Foreign producers and other native methods retain their
 own contracts.
 
+For native HTML, `html_error_page:official_error_page`,
+`html_authentication_shell` and `html_javascript_shell` describe deterministic
+content refusals. Multiple reasons can remain active. Short technical definitions,
+password-policy guidance and independent measurements remain distinct from a
+thin gate; the static classifier's [scope and bounds](normalized-source-format.md#html-shell-classification)
+do not establish semantic correctness or working authentication.
+
+Both local routing and direct required-coverage evaluation enforce classification
+currentness. A caller cannot avoid the check by skipping `source-status`, and an
+unrelated refused source does not block a separately selected healthy source.
+Read-only question exports re-evaluate coverage against retained inputs;
+`coverage_manifest.py evaluate` explicitly writes the resulting coverage verdict.
+Neither operation invents acceptance or a new review receipt. Use the
+[supported tooling upgrade and selected refresh](upgrade-adoption.md#refresh-native-html-classifications)
+for legacy records.
+
 ## Declare host tools
 
 Retrieve `evidence-host-tools/v1` with
