@@ -2,15 +2,26 @@
 
 ## [Unreleased]
 
+## 1.1.2 - 2026-09-30
+
 - Reject thin native HTML gateway, timeout and authentication shells while
-  preserving short substantive documents, retained text and diagnostic search.
-  Keep independent usability reasons active; the audited JavaScript override
+  preserving short substantive documents, retained extraction and diagnostic
+  search. Independent usability reasons remain active; the JavaScript override
   cannot clear authentication, gateway or delivery refusals.
-- Record a separate native HTML classification revision. Refresh selected legacy
-  records despite unchanged raw fingerprints, refuse future-revision downgrades,
-  and enforce currentness in source inspection, local routing and required
-  coverage. Preserve normalized-format and external/non-HTML compatibility;
-  workspace tooling upgrade and explicit record refresh remain separate steps.
+- Introduce native HTML classification revision 2. Unfinished markup at EOF
+  makes gateway/authentication rules abstain without changing retained text,
+  titles, links or outlines. Normalized-format and global-normalizer versions
+  remain unchanged.
+- Require current native HTML classifications for source inspection, local
+  routing, required coverage and acquisition reuse. Explicitly refresh absent
+  or revision-1 classifications from retained originals; future revisions refuse
+  downgrades, including force and preview operations. Foreign producers and
+  other source formats retain their existing contracts.
+- Bind selected coverage to canonical normalized-record identities. Refuse
+  duplicate, misplaced or mismatched claims with actionable paths while keeping
+  unrelated sources evaluable and preserving evidence.
+- Document tooling upgrades, selected HTML refresh and owner-controlled recovery
+  of pending acquisition orders before starting a fresh session.
 
 ## 1.1.1 - 2026-09-27
 

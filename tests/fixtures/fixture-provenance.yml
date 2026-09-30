@@ -20,6 +20,13 @@ synthetic_defaults: &synthetic_defaults
 
 fixtures:
   - <<: *synthetic_defaults
+    stable_id: html-prior-classification-records
+    source_work: Native HTML classification revision 1 outputs from project-authored captures
+    created_at: 2026-09-30
+    transformations: Retained raw, provenance and normalized artifacts generated offline; producer hashes identify the observed classifier and no historical executable code is included.
+    shipped_paths:
+      - tests/fixtures/html-usability/prior-classification-records.json
+  - <<: *synthetic_defaults
     stable_id: html-usability
     source_work: Project-authored HTML shell pages, extraction expectations and classification-revision reader inputs
     created_at: 2026-09-28

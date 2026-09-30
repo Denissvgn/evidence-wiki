@@ -147,16 +147,16 @@ def test_changed_basis_or_failed_evidence_never_reuses_approval(host, mutation):
     assert result["questions"][0]["claims"] == []
 
 
-@pytest.mark.parametrize("marker", [b"", b"html_usability_version: 2\n"])
+@pytest.mark.parametrize("marker", [b"", b"html_usability_version: 3\n"])
 def test_html_qualification_only_change_cannot_reuse_a_review_receipt(host, marker):
     review(host)
     assert CORE.publication(host.root)["verdict"] == "ship"
     original = host.normalized_path.read_bytes()
     contract = CORE.sibling("_normalized_contract")
     metadata, body, error = contract.split_record(original.decode())
-    assert error is None and metadata["html_usability_version"] == 1
+    assert error is None and metadata["html_usability_version"] == 2
     state = (host.host / "evidence-state.json").read_bytes()
-    updated = original.replace(b"html_usability_version: 1\n", marker, 1)
+    updated = original.replace(b"html_usability_version: 2\n", marker, 1)
     assert updated != original
     host.normalized_path.write_bytes(updated)
     changed, changed_body, error = contract.split_record(updated.decode())

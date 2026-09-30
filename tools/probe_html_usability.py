@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -177,7 +178,7 @@ def run(root, cli, corpus):
         output = normalized_path(root, source_id)
         require(changed(before, snapshot(root)) == {output.relative_to(root).as_posix()}, page["name"] + ": selected write scope")
         metadata, _ = read_record(output)
-        require(metadata["html_usability_version"] == 1, page["name"] + ": native revision")
+        require(metadata["html_usability_version"] == 2, page["name"] + ": native revision")
         require(metadata["content_hash"] == page["extraction"]["content_hash"], page["name"] + ": extraction identity")
         require((metadata["unusable_evidence_reasons"] or []) == page["expected_reasons"], page["name"] + ": normalized reasons")
         observations.append(observe(commands, page, source_id))
@@ -262,7 +263,7 @@ def upgrade_records(root, cli, corpus):
         require(report["summary"]["stale"] == report["summary"]["updated"] == 1, name + ": explicit legacy refresh")
         require(changed(before, snapshot(root)) == {path.relative_to(root).as_posix()}, name + ": scoped legacy refresh")
         fresh, _ = read_record(path)
-        require(fresh["html_usability_version"] == 1 and fresh["content_hash"] == metadata["content_hash"]
+        require(fresh["html_usability_version"] == 2 and fresh["content_hash"] == metadata["content_hash"]
                 and fresh["raw_fingerprint"] == metadata["raw_fingerprint"], name + ": preserved text/original identity")
         observations.append(observe(commands, cases[name], source_id))
         if names[index + 1:]:
@@ -275,7 +276,7 @@ def upgrade_records(root, cli, corpus):
     gateway_id = records["gateway-body.html"]["id"]
     gateway = normalized_path(root, gateway_id)
     metadata, body = read_record(gateway)
-    metadata["html_usability_version"] = 2
+    metadata["html_usability_version"] = 3
     write_record(gateway, metadata, body)
     before = snapshot(root)
     refusal = commands.script("normalize_sources", "--source-id", records["numeric-data.html"]["id"],
@@ -315,15 +316,125 @@ def upgrade_fixture(root, cli, corpus, fixture):
     return {**upgrade_records(root, cli, corpus), "fixture_producer": value["producer"]}
 
 
+def prior_classification_fixture(root, cli, fixture):
+    """Qualify real prior output, selected identity refusal and acquisition currentness."""
+    commands = Commands(cli, root)
+    root = commands.root
+    require(not root.exists(), "The revision journey requires a fresh workspace path")
+    root.parent.mkdir(parents=True, exist_ok=True)
+    commands.package("init", "--target", root, "--project-name", "retained-classifications",
+                     "--project-description", "Refresh retained classifications safely.", json_output=False)
+    value = json.loads(Path(fixture).read_text(encoding="utf-8"))
+    require(value["producer"]["html_usability_version"] == 1, "Expected retained revision-1 output")
+    for relative, content in value["files"].items():
+        path = Path(relative)
+        require(not path.is_absolute() and ".." not in path.parts and path.parts[0] in {"raw", "sources"},
+                "Retained classification fixture path is outside evidence")
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content.encode("utf-8"))
+    original_raw = {name: digest for name, digest in snapshot(root).items() if name.startswith("raw/")}
+    observations = []
+    for case in value["cases"]:
+        path = root / case["normalized_path"]
+        old, _ = read_record(path)
+        before = snapshot(root)
+        row = commands.package("agent", "source-status", "--target", root, "--source-id", case["source_id"])["sources"][0]
+        require(row["usability"] == "not_ready" and "html_usability_recheck_required" in row["reasons"], "Prior classification must be blocked")
+        require(snapshot(root) == before, "Prior inspection must preserve evidence")
+        updated = commands.script("normalize_sources", "--source-id", case["source_id"], "--format", "json")
+        require(updated["summary"]["updated"] == updated["summary"]["stale"] == 1, "Prior revision must refresh once")
+        require(changed(before, snapshot(root)) == {case["normalized_path"]}, "Prior refresh must remain selected")
+        current, _ = read_record(path)
+        require(current["html_usability_version"] == 2 and current["raw_fingerprint"] == old["raw_fingerprint"], "Current native qualification and original identity")
+        require((current["unusable_evidence_reasons"] or []) == case["expected_reasons"], "Incomplete EOF abstention/control")
+        if value["producer"]["python"] == platform.python_version() or case["name"].endswith("control"):
+            require(current["content_hash"] == old["content_hash"], "Retained extraction identity")
+        before = snapshot(root)
+        replay = commands.script("normalize_sources", "--source-id", case["source_id"], "--format", "json")
+        require(replay["summary"]["skipped_existing"] == 1 and snapshot(root) == before, "Prior refresh replay")
+        observations.append({"case": case["name"], "revision": 2, "reasons": case["expected_reasons"],
+                             "evidence_accepted": False, "semantic_adequacy": "not_evaluated"})
+    control = next(case for case in value["cases"] if case["name"] == "useful-control")
+    path = root / control["normalized_path"]
+    (root / "sources/jurisdictions.yml").write_text(yaml.safe_dump({"jurisdiction_profiles": [
+        {"jurisdiction_id": "fixture-authority", "name": "Fixture authority", "official_domains": ["example.org"], "blocked_domains": []}]}), encoding="utf-8", newline="\n")
+    batch = root.parent / "revision-questions.json"
+    batch.write_text(json.dumps({"schema_version": "1.0", "questions": [
+        {"question": "useful-control", "priority": "high", "origin": "caller"}]}), encoding="utf-8", newline="\n")
+    commands.package("questions", "add", "--target", root, "--from-file", batch, "--format", "json")
+    coverage = root / "sources/coverage/useful-control.yml"
+    coverage.parent.mkdir(exist_ok=True)
+    coverage.write_text(yaml.safe_dump(coverage_document("useful-control", control["source_id"])), encoding="utf-8", newline="\n")
+    require(commands.script("coverage_manifest", "evaluate", "--slug", "useful-control", "--format", "json")["coverage_verdict"] == "pass", "Useful canonical coverage control")
+    duplicate = path.parent / "nested/backup.md"
+    duplicate.parent.mkdir()
+    duplicate.write_bytes(path.read_bytes())
+    before = snapshot(root)
+    refused = commands.script("coverage_manifest", "evaluate", "--slug", "useful-control", "--format", "json")
+    require(refused["coverage_verdict"] == "blocked" and "normalized_record_ambiguous" in json.dumps(refused), "Duplicate coverage refusal")
+    require(changed(before, snapshot(root)) <= {"sources/coverage/useful-control.yml"}, "Duplicate evaluation must preserve evidence")
+    duplicate.unlink()
+    # Run only copied owners through the selected interpreter, without checkout imports.
+    acquisition_code = '''import json, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "scripts"))
+import orchestration_controller as c
+root, source_id = Path(sys.argv[1]), sys.argv[2]
+config = c.load_config(root)
+n = c.load_sibling_module("normalize_sources")
+record = next(r for r in n.load_manifest(root / "sources/manifest.jsonl") if r["id"] == source_id)
+path = n.normalized_output_path_for_record(record, root / "sources/normalized")
+quality = c.normalized_source_quality_failure(root, path, record, config=config)
+results = []
+for candidates in (None, ["candidate-html"]):
+    try:
+        matched, _, _ = c.acquisition_reuse_baselines(root, config, ["request-html"], candidates)
+        results.append({"matched": sorted(matched)})
+    except c.OrchestrationControllerError as exc:
+        results.append({"reason": exc.details["quality_failures"][0]["reason"]})
+print(json.dumps({"quality": quality, "baselines": results}))
+'''
+    manifest = root / "sources/manifest.jsonl"
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+    for row in rows:
+        if row["id"] == control["source_id"]:
+            row["provenance"].update(request_id="request-html", candidate_id="candidate-html")
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8", newline="\n")
+    metadata, body = read_record(path)
+    current_record = path.read_bytes()
+    for revision, reason in ((1, "html_usability_recheck_required"), (True, "html_usability_profile_invalid"),
+                             (3, "html_usability_profile_unsupported"), (2, None)):
+        if revision == 2:
+            path.write_bytes(current_record)
+        elif type(revision) is int and revision == 1:
+            path.write_bytes(value["files"][control["normalized_path"]].encode("utf-8"))
+        else:
+            metadata["html_usability_version"] = revision
+            write_record(path, metadata, body)
+        before = snapshot(root)
+        report = commands.run([commands.python, "-B", "-c", acquisition_code, root, control["source_id"]])
+        require(snapshot(root) == before, "Acquisition qualification must remain read-only")
+        require((report["quality"] or {}).get("reason") == reason, "Acquisition quality currentness")
+        require(all(row == ({"reason": reason} if reason else {"matched": [control["source_id"]]})
+                    for row in report["baselines"]), "Acquisition issuance currentness on both scopes")
+    require({name: digest for name, digest in snapshot(root).items() if name.startswith("raw/")} == original_raw, "Revision qualification preserves originals")
+    return {"html_revision_upgrade": "passed", "cases": observations, "duplicate_coverage": "passed",
+            "incomplete_eof": "passed", "acquisition_currentness": "passed", "originals_preserved": True}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--cli", type=Path, required=True)
     parser.add_argument("--corpus", type=Path, required=True)
     parser.add_argument("--legacy-fixture", type=Path)
+    parser.add_argument("--prior-classification-fixture", type=Path)
     args = parser.parse_args()
-    result = (upgrade_fixture(args.root, args.cli, args.corpus, args.legacy_fixture)
+    result = None if args.prior_classification_fixture else (upgrade_fixture(args.root, args.cli, args.corpus, args.legacy_fixture)
               if args.legacy_fixture else run(args.root, args.cli, args.corpus))
+    if args.prior_classification_fixture:
+        result = prior_classification_fixture(args.root, args.cli, args.prior_classification_fixture)
     print(json.dumps(result, sort_keys=True))
 
 

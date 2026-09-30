@@ -404,6 +404,22 @@ bibliography cross-references, and fails closed: a source whose normalization is
 not reproducible from the same bytes, or whose inputs this order does not
 fingerprint (a `codebase:` artifact bundle), is refused rather than reused.
 
+Before issuing acquisition, existing normalized HTML correlated to the scoped
+request/candidate must have a current native classification. Revision 1 or missing
+metadata yields `html_usability_recheck_required`; invalid native coordinates
+or markers yield `html_usability_profile_invalid`; future revisions yield
+`html_usability_profile_unsupported`. Refusals use the existing postcondition
+envelope and identify affected source IDs. Both acquisition arms repeat this
+qualification before committing request fulfilment or question reopening, using
+the actual manifest kind and effective normalization method.
+
+This preflight checks classification currency separately from ordinary usability:
+a current shell may remain in the baseline while the order acquires another usable
+capture. Genuinely unnormalized sources retain their authorized normalization path.
+The currentness check never normalizes evidence or rewrites a frozen baseline.
+For legacy records, follow the [explicit refresh and pending-order recovery](upgrade-adoption.md#refresh-native-html-classifications)
+procedure before issuing a fresh order.
+
 **A completed acquisition creates a closed set, on both arms.** A completed
 acquisition may append to the evidence manifest exactly the new ids its
 fulfilled scoped requests cite; may create under `raw/` and

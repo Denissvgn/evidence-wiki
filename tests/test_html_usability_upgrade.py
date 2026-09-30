@@ -5,19 +5,80 @@ faults cannot expose temporary records as current, and recovery retries only the
 unfinished source. Missing originals cannot acquire a completed-classification stamp.
 """
 
+import contextlib
+import io
 import json
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from evidence_wiki.cli import main
 from evidence_wiki.source_inspection import inspect
-from tests.test_html_usability_profile import NORMALIZE, edit_metadata, normalize_command, workspace_bytes
+from tests.test_html_usability_profile import (
+    CONTRACT,
+    CURRENT,
+    NORMALIZE,
+    edit_metadata,
+    normalize_command,
+    workspace_bytes,
+)
 from tests.test_html_usability_profile import html_workspace as html_workspace
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("selector", ["pending", "all", "single", "multiple", "force"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_retained_classification_refreshes_once_without_rewriting_originals(tmp_path, selector, dry_run):
+    fixture = json.loads((ROOT / "tests/fixtures/html-usability/prior-classification-records.json").read_text())
+    assert fixture["producer"]["html_usability_version"] == 1 and CURRENT == 2
+    root = tmp_path / "workspace"
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert main(["init", "--target", str(root), "--project-name", "prior-classification",
+                     "--project-description", "Refresh retained native HTML classifications."]) == 0
+    for relative, content in fixture["files"].items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content.encode("utf-8"))
+    cases = fixture["cases"]
+    selected = cases[:1] if selector == "single" else cases[:2] if selector == "multiple" else cases
+    if selector == "pending":
+        options = []
+    elif selector in {"all", "force"}:
+        options = ["--all", *(["--force"] if selector == "force" else [])]
+    else:
+        options = [value for case in selected for value in ("--source-id", case["source_id"])]
+    before = workspace_bytes(root)
+    for case in cases:
+        observed = inspect(target=root, source_ids=[case["source_id"]])["sources"][0]
+        assert observed["usability"] == "not_ready" and "html_usability_recheck_required" in observed["reasons"]
+    assert workspace_bytes(root) == before
+    code, report = normalize_command(root, *options, *(["--dry-run"] if dry_run else []))
+    assert code == 0 and report["summary"]["stale"] == len(selected)
+    after = workspace_bytes(root)
+    if dry_run:
+        assert before == after and report["summary"]["would_update"] == len(selected)
+        return
+    assert {name for name in before if before[name] != after[name]} == {case["normalized_path"] for case in selected}
+    for case in selected:
+        path = root / case["normalized_path"]
+        old, _, error = CONTRACT.split_record(fixture["files"][case["normalized_path"]])
+        assert error is None
+        metadata = NORMALIZE.read_output_frontmatter(path)
+        assert metadata["html_usability_version"] == CURRENT
+        assert metadata["raw_fingerprint"] == old["raw_fingerprint"] and metadata["created"] == old["created"]
+        assert (metadata["unusable_evidence_reasons"] or []) == case["expected_reasons"]
+        assert metadata["evidence_usable"] is (not case["expected_reasons"])
+        if fixture["producer"]["python"] == platform.python_version() or case["name"] in {"useful-control", "gateway-control"}:
+            assert metadata["content_hash"] == case["content_hash"]
+    replay_before = workspace_bytes(root)
+    code, replay = normalize_command(root, *[value for case in selected for value in ("--source-id", case["source_id"])])
+    assert code == 0 and replay["summary"]["skipped_existing"] == len(selected)
+    assert workspace_bytes(root) == replay_before
 
 
 def test_retained_producer_records_upgrade_through_public_owners(tmp_path):
@@ -56,7 +117,7 @@ def test_partial_tool_copy_cannot_refresh_until_the_upgrade_owner_restores_helpe
     assert "html_usability_version" not in NORMALIZE.read_output_frontmatter(workspace.paths["study"])
     refreshed = subprocess.run(arguments, cwd=workspace.root, capture_output=True, text=True, timeout=60, check=False)
     assert refreshed.returncode == 0, refreshed.stdout + refreshed.stderr
-    assert NORMALIZE.read_output_frontmatter(workspace.paths["study"])["html_usability_version"] == 1
+    assert NORMALIZE.read_output_frontmatter(workspace.paths["study"])["html_usability_version"] == CURRENT
 
 
 @pytest.mark.parametrize("fault", ["classification", "temporary_write", "publication"])
@@ -101,7 +162,7 @@ def test_failed_html_refresh_preserves_the_published_record_and_retries(html_wor
     code, result = normalize_command(workspace.root, "--source-id", source_id)
     assert code == 0 and result["summary"]["updated"] == 1
     fresh = NORMALIZE.read_output_frontmatter(path)
-    assert fresh["html_usability_version"] == 1 and fresh["content_hash"] == metadata["content_hash"]
+    assert fresh["html_usability_version"] == CURRENT and fresh["content_hash"] == metadata["content_hash"]
     assert not temporary.exists()
     settled = workspace_bytes(workspace.root)
     code, result = normalize_command(workspace.root, "--source-id", source_id)
@@ -127,7 +188,7 @@ def test_interrupted_selected_batch_recovers_only_unfinished_html(html_workspace
         patch.setattr(Path, "replace", interrupt)
         with pytest.raises(KeyboardInterrupt):
             normalize_command(workspace.root, *selected)
-    assert NORMALIZE.read_output_frontmatter(workspace.paths["gateway"])["html_usability_version"] == 1
+    assert NORMALIZE.read_output_frontmatter(workspace.paths["gateway"])["html_usability_version"] == CURRENT
     study = workspace.paths["study"].relative_to(workspace.root).as_posix()
     assert workspace.paths["study"].read_bytes() == before[study]
     completed = workspace.paths["gateway"].read_bytes()
@@ -161,6 +222,6 @@ def test_missing_original_never_receives_a_current_stamp_and_can_recover(html_wo
     code, report = normalize_command(workspace.root, "--source-id", record["id"])
     assert code == 0 and report["summary"]["updated"] == 1
     fresh = NORMALIZE.read_output_frontmatter(path)
-    assert fresh["html_usability_version"] == 1 and fresh["content_hash"] == old["content_hash"]
+    assert fresh["html_usability_version"] == CURRENT and fresh["content_hash"] == old["content_hash"]
     assert fresh["raw_fingerprint"] == old["raw_fingerprint"]
     assert inspect(target=workspace.root, source_ids=[record["id"]])["sources"][0]["usability"] == "usable"

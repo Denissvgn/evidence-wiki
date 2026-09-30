@@ -520,7 +520,9 @@ def html_observations():
     return {"fresh": {"html_cli_journeys": "passed", "cases": cases(artifacts.HTML_CASE_NAMES),
                       "cached_refresh": "passed", "selected_replay": "passed"},
             "upgrade": {"html_upgrade": "passed", "cases": cases(("gateway-body", "signin-body", "numeric-data")),
-                        "future_profile_refusal": "passed", "originals_preserved": True}}
+                        "future_profile_refusal": "passed", "originals_preserved": True},
+            "revision": {"html_revision_upgrade": "passed", "cases": cases(("incomplete-gateway", "incomplete-authentication", "useful-control", "gateway-control")),
+                         "duplicate_coverage": "passed", "incomplete_eof": "passed", "acquisition_currentness": "passed", "originals_preserved": True}}
 
 
 def installation_reports(tmp_path):
@@ -604,17 +606,17 @@ def test_html_qualification_inputs_are_bound_and_copied(tmp_path):
         assert (copied / name).read_bytes() == (artifacts.REPO_ROOT / name).read_bytes()
 
 
-def test_installed_html_checks_run_both_journeys_through_the_selected_environment(tmp_path, monkeypatch):
+def test_installed_html_checks_run_all_journeys_through_the_selected_environment(tmp_path, monkeypatch):
     calls = []
     observed = html_observations()
     def run(argv, **options):
         calls.append((argv, options))
-        return json.dumps(observed["upgrade" if "--legacy-fixture" in argv else "fresh"])
+        return json.dumps(observed["revision" if "--prior-classification-fixture" in argv else "upgrade" if "--legacy-fixture" in argv else "fresh"])
     monkeypatch.setattr(artifacts, "run", run)
     python, cli = tmp_path / "python", tmp_path / "cli"
     result = artifacts.validate_html_installation(python, cli, scratch=tmp_path / "execution",
                 outside=tmp_path / "outside", fixture_root=tmp_path / "inputs")
-    assert result == observed and len(calls) == 2
+    assert result == observed and len(calls) == 3
     for argv, options in calls:
         assert argv[:2] == [str(python), "-I"] and argv[argv.index("--cli") + 1] == str(cli)
         assert options["cwd"] == tmp_path / "outside"
@@ -795,3 +797,11 @@ def test_source_archive_refuses_unsafe_members_before_extraction(tmp_path, defec
     with pytest.raises(artifacts.ValidationError):
         artifacts.build_wheel_from_sdist(source, tmp_path)
     assert not (tmp_path.parent / "escape").exists()
+
+
+@pytest.mark.parametrize("key", ["duplicate_coverage", "incomplete_eof", "acquisition_currentness", "originals_preserved"])
+def test_installed_html_revision_qualification_refuses_missing_checks(key):
+    report = html_observations()
+    del report["revision"][key]
+    with pytest.raises(ValueError, match="Incomplete installed HTML revision"):
+        artifacts.checked_html_outcomes(report)

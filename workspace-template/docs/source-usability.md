@@ -48,6 +48,23 @@ Neither operation invents acceptance or a new review receipt. Use the
 [supported tooling upgrade and selected refresh](upgrade-adoption.md#refresh-native-html-classifications)
 for legacy records.
 
+## Resolve normalized-record identity conflicts
+
+Required coverage binds each selected source ID to its canonical normalized path.
+Multiple records claiming that ID fail with `normalized_record_ambiguous`, including
+identical or nested copies. Off-path claims fail with `normalized_record_noncanonical`;
+a missing, malformed or mismatched canonical identity reports
+`normalized_record_identity_invalid`. Remediation lists sorted relative paths.
+These checks run before source, freshness or identity policies can pass. Conflicts
+for unrelated, unselected IDs do not block an otherwise valid selection.
+
+Inspect the named records and preserve any needed originals or historical captures
+outside the normalized-record directory. Explicitly remove duplicate claims or
+restore the correct canonical record through the normalization owner, then
+re-evaluate coverage. The evaluator never chooses a filename-order winner,
+rewrites metadata or deletes records. A correctly located shell still fails its
+ordinary usability checks after the identity conflict is resolved.
+
 ## Declare host tools
 
 Retrieve `evidence-host-tools/v1` with

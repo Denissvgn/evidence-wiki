@@ -22,6 +22,7 @@ from tests.test_html_usability import html_page, normalize_page
 from tests.test_source_capabilities import route_request
 
 PROFILE = owner("_html_usability_profile")
+CURRENT = PROFILE.HTML_USABILITY_VERSION
 NORMALIZE = owner("normalize_sources")
 CONTRACT = owner("_normalized_contract")
 REVISION_INPUTS = json.loads(
@@ -48,7 +49,7 @@ def test_classification_revision_input_contract(case):
 ])
 def test_native_html_coordinate_contradictions_are_not_exemptions(change):
     metadata = {"source_kind": "html", "extraction_method": "html_text",
-                "normalizer": {"name": "normalize_sources.py", "version": 3}, "html_usability_version": 1}
+                "normalizer": {"name": "normalize_sources.py", "version": 3}, "html_usability_version": CURRENT}
     metadata.update(change)
     result = PROFILE.evaluate_html_usability(metadata, source_kind="html", effective_method="html")
     assert result.state == "invalid" and result.reason == "html_usability_profile_invalid"
@@ -63,6 +64,7 @@ def test_manifest_and_effective_method_qualify_native_claims():
 @pytest.mark.parametrize("change", [{"extraction_method": "future_html"}, {"normalizer": {}}, {"source_kind": None}])
 def test_future_html_claims_are_not_repairable_by_damaging_another_coordinate(change):
     metadata = copy.deepcopy(REVISION_INPUTS[2]["frontmatter"])
+    metadata["html_usability_version"] = CURRENT + 1
     metadata.update(change)
     assert PROFILE.evaluate_html_usability(metadata, source_kind="html", effective_method="html").state == "unsupported"
 
@@ -89,7 +91,7 @@ def test_declared_foreign_html_keeps_its_own_classification_contract(value):
 @pytest.mark.parametrize("html", ['<p>Measured value: 42.</p>', '<p>502 Bad Gateway.</p>', '', '<p>Unclosed'])
 def test_native_writer_stamps_observed_classification_without_claiming_usable_content(tmp_path, html):
     _, metadata = normalize_page(tmp_path, html_page(html))
-    assert metadata["html_usability_version"] == 1
+    assert metadata["html_usability_version"] == CURRENT
     assert PROFILE.evaluate_html_usability(metadata).state == "current"
 
 
@@ -114,7 +116,11 @@ def test_frontmatter_cannot_stamp_a_manual_construct_or_foreign_adapter_as_nativ
         assert "html_usability_version" not in metadata
 
 
-@pytest.mark.parametrize("version", [True, "1", 0, 2])
+def test_native_html_policy_revision_is_two():
+    assert CURRENT == 2
+
+
+@pytest.mark.parametrize("version", [True, "2", 0, -1, 1, 3])
 def test_native_writer_cannot_stamp_an_invalid_or_future_observation(tmp_path, version):
     source, _ = normalize_page(tmp_path, html_page('<p>Measured value: 42.</p>'))
     with pytest.raises(ValueError, match="classification revision"):
@@ -125,11 +131,11 @@ def test_native_writer_cannot_stamp_an_invalid_or_future_observation(tmp_path, v
 def test_bounded_abstention_is_a_current_policy_observation_not_acceptance(tmp_path, monkeypatch):
     monkeypatch.setattr(NORMALIZE, "HTML_MAX_BYTES", 12)
     _, metadata = normalize_page(tmp_path, html_page('<p>502 Bad Gateway.</p>'))
-    assert metadata["html_usability_version"] == 1
+    assert metadata["html_usability_version"] == CURRENT
     assert any("truncated" in warning for warning in metadata["parse_warnings"])
 
 
-@pytest.mark.parametrize("version,valid", [(1, True), (2, True), (None, False), (True, False), ("1", False),
+@pytest.mark.parametrize("version,valid", [(1, True), (2, True), (3, True), (None, False), (True, False), ("1", False),
                                          (0, False), (-1, False), ({}, False), ([], False)])
 def test_present_native_revision_is_typed_but_not_limited_to_the_current_value(tmp_path, version, valid):
     _, metadata = normalize_page(tmp_path, html_page('<p>Measured value: 42.</p>'))
@@ -218,7 +224,7 @@ def test_inspection_and_routes_preserve_classification_blockers_without_executio
     key = "gateway" if state == "shell" else "study"
     changes = {"status": status}
     if state in {"future", "invalid"}:
-        changes["html_usability_version"] = 2 if state == "future" else True
+        changes["html_usability_version"] = CURRENT + 1 if state == "future" else True
     edit_metadata(workspace.paths[key], changes=changes,
                   remove=("html_usability_version",) if state == "legacy" else ())
     source_id = workspace.records[key]["id"]
@@ -323,7 +329,7 @@ def test_legacy_html_refreshes_once_under_every_selector(html_workspace, selecto
         assert before == after and report["summary"]["would_update"] == 1
     else:
         metadata = NORMALIZE.read_output_frontmatter(target)
-        assert metadata["html_usability_version"] == 1
+        assert metadata["html_usability_version"] == CURRENT
         assert metadata["created"] == old["created"]
         assert metadata["raw_fingerprint"] == old["raw_fingerprint"]
         assert metadata["content_hash"] == old["content_hash"]
@@ -340,7 +346,7 @@ def test_malformed_html_revision_repairs_from_originals(html_workspace, version)
     edit_metadata(workspace.paths["study"], changes={"html_usability_version": version})
     code, report = normalize_command(workspace.root, "--source-id", workspace.records["study"]["id"])
     assert code == 0 and report["summary"]["updated"] == 1
-    assert NORMALIZE.read_output_frontmatter(workspace.paths["study"])["html_usability_version"] == 1
+    assert NORMALIZE.read_output_frontmatter(workspace.paths["study"])["html_usability_version"] == CURRENT
 
 
 @pytest.mark.parametrize("selector", ["pending", "all", "all-force", "force", "selected"])
@@ -348,14 +354,14 @@ def test_malformed_html_revision_repairs_from_originals(html_workspace, version)
 def test_future_revision_refuses_the_batch_before_any_selected_write(html_workspace, selector, dry_run):
     workspace = html_workspace
     edit_metadata(workspace.paths["gateway"], remove=("html_usability_version",))
-    edit_metadata(workspace.paths["study"], changes={"html_usability_version": 2})
+    edit_metadata(workspace.paths["study"], changes={"html_usability_version": CURRENT + 1})
     selected = ["--source-id", workspace.records["gateway"]["id"], "--source-id", workspace.records["study"]["id"]]
     options = {"pending": [], "all": ["--all"], "all-force": ["--all", "--force"],
                "force": [*selected, "--force"], "selected": selected}[selector]
     before = workspace_bytes(workspace.root)
     code, report = normalize_command(workspace.root, *options, *(["--dry-run"] if dry_run else []))
     assert code == 2 and report["error_code"] == "NORMALIZATION_PROFILE_UNSUPPORTED"
-    assert report["details"]["stored_version"] == 2 and report["details"]["supported_version"] == 1
+    assert report["details"]["stored_version"] == CURRENT + 1 and report["details"]["supported_version"] == CURRENT
     assert report["details"]["source_id"] == workspace.records["study"]["id"]
     assert isinstance(error_from_envelope(report), SourceError)
     assert before == workspace_bytes(workspace.root)
@@ -363,7 +369,7 @@ def test_future_revision_refuses_the_batch_before_any_selected_write(html_worksp
 
 def test_future_revision_guard_precedes_other_staleness_triggers(html_workspace):
     workspace = html_workspace
-    edit_metadata(workspace.paths["study"], changes={"html_usability_version": 2, "raw_fingerprint": "sha256:changed",
+    edit_metadata(workspace.paths["study"], changes={"html_usability_version": CURRENT + 1, "raw_fingerprint": "sha256:changed",
                                                    "normalizer": {"name": "normalize_sources.py", "version": 1},
                                                    "extraction_method": "future_html"})
     before = workspace_bytes(workspace.root)
@@ -374,7 +380,7 @@ def test_future_revision_guard_precedes_other_staleness_triggers(html_workspace)
 
 def test_unselected_future_html_does_not_expand_selected_normalization(html_workspace):
     workspace = html_workspace
-    edit_metadata(workspace.paths["gateway"], changes={"html_usability_version": 2})
+    edit_metadata(workspace.paths["gateway"], changes={"html_usability_version": CURRENT + 1})
     edit_metadata(workspace.paths["study"], remove=("html_usability_version",))
     untouched = workspace.paths["gateway"].read_bytes()
     code, report = normalize_command(workspace.root, "--source-id", workspace.records["study"]["id"])
@@ -397,7 +403,7 @@ def test_legacy_cached_gateway_verdict_is_recomputed_without_changing_body_hash(
     before = workspace.paths["gateway"].read_bytes()
     code, _ = normalize_command(workspace.root, "--source-id", record["id"])
     actual = NORMALIZE.read_output_frontmatter(workspace.paths["gateway"])
-    assert code == 0 and not actual["evidence_usable"] and actual["html_usability_version"] == 1
+    assert code == 0 and not actual["evidence_usable"] and actual["html_usability_version"] == CURRENT
     assert actual["content_hash"] == metadata["content_hash"]
     assert actual["raw_fingerprint"] == metadata["raw_fingerprint"]
     assert workspace.paths["gateway"].read_bytes() != before

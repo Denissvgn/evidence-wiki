@@ -114,7 +114,7 @@ Required field meanings:
 | `status` | Normalization lifecycle status. |
 | `evidence_usable` | The producer's recorded usability claim. `false` blocks evidence use; `true` still requires current classification where applicable and the consumer's other checks. A legacy native HTML record can retain `true` while inspection and required coverage refuse it pending reclassification. |
 | `unusable_evidence_reasons` | Stable reason codes when `evidence_usable` is `false`; otherwise `null` or omitted in older records. |
-| `html_usability_version` | Optional native `html_text` classification revision, currently positive integer `1`. Written only after classification runs on retained original bytes; it identifies the policy revision, not semantic acceptance or authenticity. Legacy absence remains format-valid. A future positive integer can be structurally valid without being supported by the current classifier. External producers and other extraction methods retain their own contracts. |
+| `html_usability_version` | Optional native `html_text` classification revision, currently positive integer `2`. Written only after classification runs on retained original bytes; it identifies the policy revision, not semantic acceptance or authenticity. Legacy absence remains format-valid. A future positive integer can be structurally valid without being supported by the current classifier. External producers and other extraction methods retain their own contracts. |
 | `created` | Date the normalized record was first created, `YYYY-MM-DD`. |
 | `updated` | Date the normalized record was last updated, `YYYY-MM-DD`. |
 | `normalized_at` | Exact UTC timestamp when `normalize_sources.py` wrote or updated the record, `YYYY-MM-DDTHH:MM:SSZ`. Legacy records created before this field existed may omit it. |
@@ -376,7 +376,11 @@ The gateway rule requires fewer than **1,000** normalized body characters; the
 authentication rule requires fewer than **200**. Classification context is
 limited to **4,096** retained characters, **128** text blocks, **64** open frames
 and **32** forms. Incomplete, degraded, truncated or unexplained context prevents
-the new whole-page gateway/authentication conclusions. Existing refusal rules
+the new whole-page gateway/authentication conclusions. Revision 2 also treats
+unfinished tags, attributes, comments, declarations and processing instructions
+at EOF as degraded context, while preserving valid trailing text, character
+references and literal angle brackets. This changes classification, not retained
+extraction, title selection, links, outlines or text hashes. Existing refusal rules
 remain independent. These limits bound a static heuristic: it does not render
 JavaScript/CSS, authenticate, establish browser visibility, cover every language
 or branded gate, or establish semantic adequacy when no reason is found.
@@ -389,7 +393,7 @@ acceptance.
 
 ### Native HTML classification revision
 
-The native producer writes `html_usability_version: 1` after classification runs.
+The native producer writes `html_usability_version: 2` after classification runs.
 It identifies the applied policy, including its bounds; it is not an authenticity
 or semantic-review receipt. It is independent of `normalized_format` and
 `normalizer.version`, which remain unchanged for this addition.
@@ -401,8 +405,8 @@ or semantic-review receipt. It is independent of `normalized_format` and
 | Malformed marker or inconsistent native claim | Malformed present marker fails validation | `html_usability_profile_invalid`; not ready / fail | Repair through native normalization |
 | Future positive integer | Can remain structurally valid | `html_usability_profile_unsupported`; not ready / fail | Refuse before selected output writes, even with `--force` or `--dry-run` |
 
-Zero, booleans, strings and null are invalid marker values; the first revision
-has no earlier positive revision. Missing producer identity is not a foreign
+Zero, booleans, strings and null are invalid marker values. Revision 1 is
+legacy and requires refresh; revisions greater than 2 are unsupported. Missing producer identity is not a foreign
 producer exemption. Explicit external producers and unrelated native methods
 retain their existing contracts and do not acquire this native field requirement.
 Inspection reads qualifications without reparsing HTML or running normalization.

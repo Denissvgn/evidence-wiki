@@ -886,3 +886,32 @@ def test_large_inputs_keep_new_matching_bounded_and_qualified(html):
     assert len(context.body_text) <= NORMALIZE.HTML_CONTEXT_MAX_CHARS
     assert not NORMALIZE.html_gateway_shell(context)
     assert not NORMALIZE.html_authentication_shell(context)
+
+
+@pytest.mark.parametrize("message", ["502 Bad Gateway.", "Please sign in to continue."])
+@pytest.mark.parametrize("tail", ['<!-- unfinished', '<!doctype', '<?unfinished', '<unfinished attr="', '</unfinished', '<![CDATA['])
+@pytest.mark.parametrize("chunk_size", [1, 7, None])
+def test_unfinished_markup_at_eof_keeps_classification_degraded(message, tail, chunk_size):
+    html = '<p>' + message + '</p>' + tail
+    parser = NORMALIZE.HTMLContentExtractor()
+    size = chunk_size or len(html)
+    for offset in range(0, len(html), size):
+        parser.feed(html[offset:offset + size])
+    before = parser.classification_context()
+    parser.close()
+    context = parser.classification_context()
+    assert before.degraded and context.degraded
+    assert not NORMALIZE.html_gateway_shell(context)
+    assert not NORMALIZE.html_authentication_shell(context)
+    parser.close()
+    assert parser.classification_context().degraded
+
+
+@pytest.mark.parametrize("tail,expected", [('&#46', True), ('&#x2e', True), ('&amp', False), ('<', False), ('</', False), ('<3', False)])
+def test_valid_eof_text_and_entities_do_not_degrade_classification(tail, expected):
+    parser = NORMALIZE.HTMLContentExtractor()
+    parser.feed('<p>Bad Gateway.</p>' + tail)
+    parser.close()
+    context = parser.classification_context()
+    assert not context.degraded
+    assert NORMALIZE.html_gateway_shell(context) is expected

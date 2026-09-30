@@ -2510,7 +2510,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
             normalized = target / "sources" / "normalized" / "raw--bench-survey-2026.md"
             normalized.parent.mkdir(parents=True, exist_ok=True)
             normalized.write_text(
-                "---\ntype: source\nsource_id: raw:bench-survey-2026\n"
+                "---\ntype: normalized_source\nsource_id: raw:bench-survey-2026\n"
                 "title: Benchmark Survey 2026\n---\n\n"
                 "# Benchmark Survey 2026\n\nGSM-Hard dominates 2026 reasoning evaluation.\n",
                 encoding="utf-8",

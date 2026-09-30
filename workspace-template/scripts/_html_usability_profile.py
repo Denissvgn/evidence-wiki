@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-HTML_USABILITY_VERSION = 1
+HTML_USABILITY_VERSION = 2
 HTML_USABILITY_FIELD = "html_usability_version"
 NATIVE_HTML_PRODUCER = "normalize_sources.py"
 

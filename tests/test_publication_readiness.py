@@ -553,9 +553,9 @@ class PublicationReadinessTests(unittest.TestCase):
                     normalize_html_fixture(target, record)
                 else:
                     original = normalized.read_text()
-                    self.assertIn("html_usability_version: 1\n", original)
-                    normalized.write_text(original.replace("html_usability_version: 1\n",
-                        "" if state == "legacy" else "html_usability_version: 2\n", 1))
+                    self.assertIn("html_usability_version: 2\n", original)
+                    normalized.write_text(original.replace("html_usability_version: 2\n",
+                        "" if state == "legacy" else "html_usability_version: 3\n", 1))
                 code, document = self.run_readiness(target)
                 self.assertEqual(1, code)
                 self.assertEqual("no_ship", document["verdict"])

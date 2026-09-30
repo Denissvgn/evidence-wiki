@@ -3033,6 +3033,15 @@ class HTMLContentExtractor(HTMLParser):
         self._heading_parts = []
 
     def close(self) -> None:  # noqa: D102 - inherited behavior plus heading flush
+        # The tokenizer can discard unfinished markup at EOF without a callback.
+        # Character references and literal '<' / '</' are still ordinary text.
+        pending = self.rawdata
+        unfinished_markup = (
+            re.match(r"<[A-Za-z]", pending) is not None
+            or pending.startswith(("<!", "<?"))
+            or (pending.startswith("</") and len(pending) > 2)
+        )
+        self._classification.degraded |= unfinished_markup
         self._flush_heading()
         if self._skip_depth:
             self.unbalanced_skip_tags = True

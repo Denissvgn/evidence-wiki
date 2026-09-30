@@ -157,6 +157,7 @@ REQUIRED_SDIST_MEMBERS = (
     "tools/probe_html_usability.py",
     "tests/fixtures/html-usability/pages.json",
     "tests/fixtures/html-usability/legacy-records.json",
+    "tests/fixtures/html-usability/prior-classification-records.json",
     "tests/_docx_fixture.py",
     "tests/_publication_fixture.py",
     "tests/fixtures/fake_codex_cli.py",
@@ -307,6 +308,7 @@ def fixture_members():
     members = ["tools/smoke_installed_orchestration.py", "tools/qualify_journeys.py",
                "tools/probe_html_usability.py", "tests/fixtures/html-usability/pages.json",
                "tests/fixtures/html-usability/legacy-records.json",
+    "tests/fixtures/html-usability/prior-classification-records.json",
                "workspace-template/workspace-system.yml",
                "tools/probe_installed_extensions.py", "tools/probe_installed_cli.py", "tests/_docx_fixture.py",
                "tools/_journey_cases.py", "tools/_journey_driver.py", "tools/_journey_authoring.py", "tools/_qualification_process.py",
@@ -1740,13 +1742,14 @@ def validate_action_probe(python, cli, *, kind, root, outside, fixture_root, out
 
 
 def checked_html_outcomes(observations):
-    """Require both complete HTML journeys before accepting installed qualification."""
-    expected = {"fresh": set(HTML_CASE_NAMES), "upgrade": {"gateway-body", "signin-body", "numeric-data"}}
+    """Require all complete HTML journeys before accepting installed qualification."""
+    expected = {"fresh": set(HTML_CASE_NAMES), "upgrade": {"gateway-body", "signin-body", "numeric-data"},
+                "revision": {"incomplete-gateway", "incomplete-authentication", "useful-control", "gateway-control"}}
     if not isinstance(observations, dict) or set(observations) != set(expected):
         raise ValueError("Incomplete installed HTML outcomes")
     for mode, names in expected.items():
         report = observations[mode]
-        key = "html_cli_journeys" if mode == "fresh" else "html_upgrade"
+        key = {"fresh": "html_cli_journeys", "upgrade": "html_upgrade", "revision": "html_revision_upgrade"}[mode]
         if not isinstance(report, dict) or report.get(key) != "passed":
             raise ValueError("Incomplete installed HTML outcomes: " + mode)
         rows = report.get("cases")
@@ -1758,17 +1761,22 @@ def checked_html_outcomes(observations):
             raise ValueError("Incomplete installed HTML refresh/replay")
         if mode == "upgrade" and (report.get("future_profile_refusal") != "passed" or report.get("originals_preserved") is not True):
             raise ValueError("Incomplete installed HTML upgrade/refusal")
+        if mode == "revision" and (any(report.get(key) != "passed" for key in
+                ("duplicate_coverage", "incomplete_eof", "acquisition_currentness")) or report.get("originals_preserved") is not True):
+            raise ValueError("Incomplete installed HTML revision qualification")
     return observations
 
 
 def validate_html_installation(python, cli, *, scratch, outside, fixture_root):
     """Reuse the public subprocess journeys inside each isolated installation."""
     observations = {}
-    for mode in ("fresh", "upgrade"):
+    for mode in ("fresh", "upgrade", "revision"):
         argv = [str(python), "-I", str(fixture_root / "tools/probe_html_usability.py"), "--cli", str(cli),
                 "--root", str(scratch / ("html-" + mode)), "--corpus", str(fixture_root / "tests/fixtures/html-usability/pages.json")]
         if mode == "upgrade":
             argv += ["--legacy-fixture", str(fixture_root / "tests/fixtures/html-usability/legacy-records.json")]
+        if mode == "revision":
+            argv += ["--prior-classification-fixture", str(fixture_root / "tests/fixtures/html-usability/prior-classification-records.json")]
         observations[mode] = json.loads(run(argv, cwd=outside, label="html-" + mode))
     return checked_html_outcomes(observations)
 

@@ -31,7 +31,7 @@ criteria are not silently adopted from a new installation.
 
 ## Refresh native HTML classifications
 
-Use an installed build that understands native HTML classification revision 1,
+Use an installed build that understands native HTML classification revision 2,
 then upgrade the workspace tooling through the commands above. Installing a
 package does not replace copied scripts, and upgrading scripts does not migrate
 normalized records. An older package's readers are not qualified to enforce a
@@ -51,7 +51,7 @@ evidence-wiki agent source-status --target research --source-id SOURCE_ID
 ```
 
 Repeat `--source-id` for an explicitly selected batch. Missing or older native
-classification metadata triggers refresh even when the raw fingerprint and global
+classification metadata, including revision 1, triggers refresh even when the raw fingerprint and global
 normalizer version are unchanged. The resulting revision records classification,
 not semantic approval. Current replay skips unchanged records, and selected refresh
 preserves unrelated outputs and original bytes. External producers and other native
@@ -75,6 +75,20 @@ A future positive classification revision reports
 `html_usability_profile_unsupported` during inspection/coverage. Use a compatible
 producer and preserve the retained record and originals. Both preview and force
 respect this refusal, and the selected batch is refused before output writes.
+
+Acquisition checks correlated existing HTML before freezing a reuse baseline and
+checks delivered classifications again before committing request fulfilment or
+question reopening. A retained useful record with revision 1 still requires
+refresh; a genuinely unnormalized source can be normalized within its authorized
+acquisition order. Current shell classifications do not prevent acquiring a
+different usable capture.
+
+For an already pending order, recover any pending submission through its owning
+controller first. Finish or explicitly abandon its child run, then abandon the
+parent session when required. Preserve the old order and baseline for audit;
+refresh the selected HTML explicitly outside that order and start a fresh session.
+Do not rewrite frozen baselines or stamp a revision by hand to resume old work.
+See [orchestration recovery](orchestration.md) for the owner commands and safeguards.
 
 Re-evaluate affected coverage through its owner after refresh. The retained text
 hash can stay unchanged while normalized bytes and their classifications change.
