@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Pure qualification of native HTML classification revisions, independent of admission."""
 
 from __future__ import annotations
