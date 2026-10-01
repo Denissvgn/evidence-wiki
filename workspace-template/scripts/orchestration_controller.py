@@ -4666,18 +4666,42 @@ def acquisition_reuse_baselines(
                 )
             continue
         record_fingerprint, _ = canonical_json_fingerprint(record, label="evidence manifest")
-        normalized_fingerprint = file_digest(
+        normalized_payload = bounded_regular_bytes(
             normalized_path,
             max_bytes=MAX_VERIFICATION_ARTIFACT_BYTES,
+            error_code="ORCHESTRATION_POSTCONDITION_FAILED",
+            label="verification artifact",
+            missing_ok=True,
             containment_root=project_root,
         )
-        if normalized_fingerprint is None:
+        if normalized_payload is None:
             raise OrchestrationControllerError(
                 "ORCHESTRATION_WORKSPACE_UNSAFE",
                 f"matching normalized evidence is unreadable or oversized: {source_id}",
                 recoverable=True,
                 remediation="Repair the normalized evidence record before starting acquisition.",
             )
+        contract = load_sibling_module("_normalized_contract")
+        try:
+            metadata, _, _ = contract.split_record(normalized_payload.decode("utf-8"))
+        except UnicodeError:
+            metadata = None
+        if (not isinstance(metadata, dict) or metadata.get("type") != "normalized_source"
+                or metadata.get("source_id") != source_id):
+            metadata = {}
+        failure = html_classification_failure(project_root, record, metadata, config=config)
+        if failure is not None:
+            raise OrchestrationControllerError(
+                "ORCHESTRATION_POSTCONDITION_FAILED",
+                "Acquisition reuse requires a current native HTML classification before order issuance.",
+                recoverable=True,
+                details={"quality_failures": [{"source_id": source_id, **failure}]},
+                remediation=("Refresh the selected legacy or invalid HTML record from retained originals before issuing acquisition; "
+                             "use a compatible producer for future revisions. Recover pending submissions and finish or abandon "
+                             "their child/session through the owning commands before refresh and a fresh session. Never rewrite frozen baselines."),
+            )
+        # Qualification and the frozen digest describe the same bounded observation.
+        normalized_fingerprint = f"sha256:{hashlib.sha256(normalized_payload).hexdigest()}"
         matching[source_id] = {
             "record_fingerprint": record_fingerprint,
             "normalized_fingerprint": normalized_fingerprint,
@@ -6646,10 +6670,37 @@ def verification_semantic_value(
     return strip_generated_timestamps(value)
 
 
+def html_classification_failure(
+    project_root: Path,
+    record: dict[str, Any],
+    frontmatter: dict[str, Any],
+    *,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Qualify native HTML metadata without executing its normalizer or changing evidence."""
+    profiles = load_sibling_module("_html_usability_profile")
+    kind = record.get("kind") if isinstance(record.get("kind"), str) else ""
+    if not profiles.evaluate_html_usability(frontmatter, source_kind=kind).applicable:
+        return None
+    normalize_sources = load_sibling_module("normalize_sources")
+    current_config = config if config is not None else load_config(project_root)
+    adapters = normalize_sources.normalization_config(current_config)["adapters"]
+    method = normalize_sources.normalization_method(project_root, record, adapters)
+    profile = profiles.evaluate_html_usability(frontmatter, source_kind=kind, effective_method=method or "unsupported")
+    if not profile.reason:
+        return None
+    stored = frontmatter.get(profiles.HTML_USABILITY_FIELD)
+    return {"reason": profile.reason,
+            "stored_version": stored if profiles.valid_html_usability_version(stored) else None,
+            "supported_version": profiles.HTML_USABILITY_VERSION}
+
+
 def normalized_source_quality_failure(
     project_root: Path,
     path: Path,
     record: dict[str, Any],
+    *,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return why a normalized source is unusable for acquisition fulfillment."""
     payload = bounded_regular_bytes(
@@ -6691,6 +6742,9 @@ def normalized_source_quality_failure(
             if isinstance(frontmatter, dict)
             else None,
         }
+    classification = html_classification_failure(project_root, record, frontmatter, config=config)
+    if classification is not None:
+        return classification
     status = frontmatter.get("status")
     if not isinstance(status, str) or not status.strip():
         return {"reason": "normalized evidence lacks a bounded extraction status"}
@@ -7464,7 +7518,7 @@ def verify_delegated_acquisition_postconditions(
         if not isinstance(normalized_path, Path) or not normalized_path.is_file():
             missing_normalized.append(source_id)
             continue
-        quality_failure = normalized_source_quality_failure(project_root, normalized_path, record)
+        quality_failure = normalized_source_quality_failure(project_root, normalized_path, record, config=config)
         if quality_failure is not None:
             unusable_normalized.append({"source_id": source_id, **quality_failure})
     require(
@@ -8427,7 +8481,7 @@ def verify_action_postconditions(
             if not isinstance(normalized_path, Path) or not normalized_path.is_file():
                 missing_normalized.append(source_id)
                 continue
-            quality_failure = normalized_source_quality_failure(project_root, normalized_path, record)
+            quality_failure = normalized_source_quality_failure(project_root, normalized_path, record, config=config)
             if quality_failure is not None:
                 unusable_normalized.append({"source_id": source_id, **quality_failure})
         require(

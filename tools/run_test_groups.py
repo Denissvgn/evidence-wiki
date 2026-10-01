@@ -105,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                          "Two combined module orders cover selected shared caches and registries only.",
                          "A module larger than the target runs alone; timeout is per process."],
               "python": sys.version, "platform": platform.platform(), "source_sha256": identity,
+              "expected_python": os.environ.get("EVIDENCE_WIKI_EXPECTED_PYTHON"),
               "shard": {"index": args.shard_index, "count": args.shard_count},
               "group_size": args.group_size, "targets": args.targets,
               "commit": commit.stdout.strip() if commit is not None and commit.returncode == 0 else None,
@@ -118,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
 
     save()
     try:
+        if report["expected_python"] and report["expected_python"] != ".".join(map(str, sys.version_info[:3])):
+            raise ValueError("Resolved Python patch differs from the expected qualification runtime")
         collected = run(root, output, "collection", args.targets, collect=True, timeout=args.timeout)
         report["collection"] = collected
         if collected["exit_code"] or "result" not in collected:

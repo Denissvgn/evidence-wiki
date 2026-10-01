@@ -12,6 +12,9 @@ it, so an external normalizer can produce records for source kinds this package 
 not extract itself — structured API payloads, instrument output, financial statements —
 without forking the package or tracking its internals.
 
+Conformance describes the record's shape. It does not establish currentness,
+usability, semantic adequacy or evidence acceptance.
+
 The contract version is declared per record in `normalized_format`:
 
 | Version | Meaning |
@@ -26,12 +29,16 @@ it writes. `evidence-wiki contract` reports both under
 
 `normalized_format` and `normalizer` answer different questions and move
 independently. `normalizer` records *who produced* a record, and for records this
-package produces it is also the regeneration trigger: a run re-normalizes any record
+package produces it is also a regeneration trigger: a run re-normalizes a selected record
 whose stored `normalizer.version` differs from the running normalizer's.
 `normalized_format` records *which contract shape* a record claims, and is the only
 field an external writer must track. A hand-written or externally produced record
 carries its own `normalizer.name`/`version`, which the package never interprets as a
 version of itself.
+
+Native HTML has a separate classification-revision trigger described below.
+An unsupported future native classification refuses regeneration rather than
+being overwritten by an older classifier.
 
 An externally written record must declare `normalized_format`. The legacy-absent rule
 above exists to carry this package's own pre-contract records forward, not to let a
@@ -40,8 +47,8 @@ foreign record decline to state which contract it targets.
 The rule exempts a legacy record from the version check only. Every other check still
 applies, so a record written before a required field existed can still be reported by
 `normalize_verify.py` — for example one predating `evidence_usable`. That is transient
-and self-repairing: the first run after upgrading re-normalizes every record this
-package produced, and the regenerated record carries the field. Lint does not report it
+and repaired by regeneration: the owning normalizer refreshes selected stale records,
+and the regenerated record carries its required fields. Lint does not report it
 in the meantime, because lint holds only externally produced records to the contract.
 
 ## File Path
@@ -105,8 +112,9 @@ Required field meanings:
 | `source_id` | Exact manifest `id`, or a stable manual ID for manual records. |
 | `source_kind` | Manifest `kind`, such as `paper`, `pdf`, `repo_link`, `web_link`, `codebase_architecture`, or `manual_note`. |
 | `status` | Normalization lifecycle status. |
-| `evidence_usable` | `true` when the normalized record can be considered by coverage policies, `false` when delivery metadata or deterministic HTML checks mark it as unusable evidence. |
+| `evidence_usable` | The producer's recorded usability claim. `false` blocks evidence use; `true` still requires current classification where applicable and the consumer's other checks. A legacy native HTML record can retain `true` while inspection and required coverage refuse it pending reclassification. |
 | `unusable_evidence_reasons` | Stable reason codes when `evidence_usable` is `false`; otherwise `null` or omitted in older records. |
+| `html_usability_version` | Optional native `html_text` classification revision, currently positive integer `2`. Written only after classification runs on retained original bytes; it identifies the policy revision, not semantic acceptance or authenticity. Legacy absence remains format-valid. A future positive integer can be structurally valid without being supported by the current classifier. External producers and other extraction methods retain their own contracts. |
 | `created` | Date the normalized record was first created, `YYYY-MM-DD`. |
 | `updated` | Date the normalized record was last updated, `YYYY-MM-DD`. |
 | `normalized_at` | Exact UTC timestamp when `normalize_sources.py` wrote or updated the record, `YYYY-MM-DDTHH:MM:SSZ`. Legacy records created before this field existed may omit it. |
@@ -244,7 +252,9 @@ usability. A successfully parsed official error page can still have
 `status: content_extracted`, but it carries `evidence_usable: false` so
 coverage policies reject it. The normalizer copies inventory usability reasons
 from the manifest and adds conservative HTML reasons for obvious 404/not-found
-pages, official unavailable/error pages, and sparse JavaScript shells.
+pages, official unavailable/error pages, thin gateway and authentication gates,
+and sparse JavaScript shells. Format validity, extraction completeness and
+searchability do not clear these evidence blockers.
 
 ## PDF Text Extraction Backends
 
@@ -337,6 +347,71 @@ Boundaries: extraction is deterministic and local-only. There is no JavaScript r
 The extraction reader uses a bounded read with one extra byte to detect
 truncation. The raw HTML file stays intact; fingerprinting still covers its
 complete contents.
+
+### HTML shell classification
+
+Native HTML classification uses the same parser pass as extraction. It recognizes
+bounded English gateway messages such as `502 Bad Gateway` and `504 Gateway
+Timeout`, access directives such as `Please sign in to continue`, and sign-in
+cues associated with an eligible password form. A password input alone, a link
+label, a filename-derived title, or an error word embedded in explanatory prose
+does not establish a new gateway/authentication verdict. Independent text in the
+classification view, including protected quoted/code examples, prevents those
+whole-page conclusions. Recognized hidden/skipped regions and disabled or
+unassociated controls cannot supply primary messages or credential evidence.
+
+| Retained capture | Native reason |
+| --- | --- |
+| Thin gateway/timeout message or existing maintenance/unavailable page | `html_error_page:official_error_page` |
+| Thin authentication directive or corroborated credential form | `html_authentication_shell` |
+| Existing sparse JavaScript shell | `html_javascript_shell` |
+
+Independent reasons remain together. For example, a thin sign-in page containing
+two scripts can retain both JavaScript and authentication reasons. These names
+describe retained content, not an independently observed HTTP status or a new
+`delivery_failure_code`. An available capture with a verified checksum can still
+contain an unusable shell.
+
+The gateway rule requires fewer than **1,000** normalized body characters; the
+authentication rule requires fewer than **200**. Classification context is
+limited to **4,096** retained characters, **128** text blocks, **64** open frames
+and **32** forms. Incomplete, degraded, truncated or unexplained context prevents
+the new whole-page gateway/authentication conclusions. Revision 2 also treats
+unfinished tags, attributes, comments, declarations and processing instructions
+at EOF as degraded context, while preserving valid trailing text, character
+references and literal angle brackets. This changes classification, not retained
+extraction, title selection, links, outlines or text hashes. Existing refusal rules
+remain independent. These limits bound a static heuristic: it does not render
+JavaScript/CSS, authenticate, establish browser visibility, cover every language
+or branded gate, or establish semantic adequacy when no reason is found.
+
+A classified shell can remain `content_extracted`, complete according to
+`normalizer_status`, format-valid and lexically searchable while carrying
+`evidence_usable: false`. Its retained text and warnings remain available for
+diagnosis. Search hits and successful format verification do not grant evidence
+acceptance.
+
+### Native HTML classification revision
+
+The native producer writes `html_usability_version: 2` after classification runs.
+It identifies the applied policy, including its bounds; it is not an authenticity
+or semantic-review receipt. It is independent of `normalized_format` and
+`normalizer.version`, which remain unchanged for this addition.
+
+| Native HTML metadata | Format verification | Inspection and required coverage | Selected normalization |
+| --- | --- | --- | --- |
+| Missing or older classification revision; legacy manual HTML | Legacy absence can remain valid | `html_usability_recheck_required`; not ready / fail | Reclassify from retained originals |
+| Exact current positive integer and consistent native producer/method/kind | Ordinary contract checks | Ordinary checks still apply; shell reasons still block | Existing input/producer staleness rules |
+| Malformed marker or inconsistent native claim | Malformed present marker fails validation | `html_usability_profile_invalid`; not ready / fail | Repair through native normalization |
+| Future positive integer | Can remain structurally valid | `html_usability_profile_unsupported`; not ready / fail | Refuse before selected output writes, even with `--force` or `--dry-run` |
+
+Zero, booleans, strings and null are invalid marker values. Revision 1 is
+legacy and requires refresh; revisions greater than 2 are unsupported. Missing producer identity is not a foreign
+producer exemption. Explicit external producers and unrelated native methods
+retain their existing contracts and do not acquire this native field requirement.
+Inspection reads qualifications without reparsing HTML or running normalization.
+Follow [upgrade and refresh](upgrade-adoption.md#refresh-native-html-classifications)
+to migrate retained records; do not edit revision/usability fields to simulate it.
 
 ## Tabular Records (CSV/TSV)
 
@@ -445,7 +520,7 @@ normalized-source directory, run flags, selected/planned/result counters,
 method counts, top-level warnings, and one action record per selected source
 that was skipped, planned, created, updated, partially extracted, or failed.
 Action warnings include unusable-evidence reasons when normalization detects an
-obvious official error page or sparse JavaScript shell.
+obvious error page, authentication gate or sparse JavaScript shell.
 
 `summary.methods` counts one key per extractor — `latex`, `pdf`, `links`, `html`,
 `tables`, `codebase`, and `adapter` — and an action produced by an external normalizer
@@ -509,14 +584,17 @@ Write records for sources nothing else normalizes. Those records are yours:
 normalization never considers them, so they are never rewritten.
 
 A record you write for a source that *is* normalized — by this package or by a
-configured adapter — **will be overwritten** by the next `normalize_sources.py` run,
-with no `--force` required. Two cases:
+configured adapter — **can be overwritten** when selected as stale by
+`normalize_sources.py`, with no `--force` required. Two cases:
 
 - Kinds this package extracts itself: `paper`, `pdf`, `repo_link`, `web_link`, `html`,
   and CSV/TSV `table`. A record whose `normalizer.version` is not the running
   normalizer's counts as stale, so the run regenerates it.
 - Kinds mapped in `normalization.adapters`. Mapping a kind hands it to that adapter; a
   record naming any other producer is stale (see "When an adapter re-runs").
+
+Unsupported future native HTML classification revisions are protected by a
+preflight refusal, including when force is requested.
 
 This is not a safeguard you can opt out of per record. Keep hand-written records to
 kinds nothing normalizes, and use `wiki/sources/` for curated interpretation of

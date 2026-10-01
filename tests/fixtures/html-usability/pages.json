@@ -1,0 +1,657 @@
+[
+  {
+    "name": "gateway-body",
+    "rule": "gateway",
+    "file_name": "gateway-body.html",
+    "html": "<html><body>502 Bad Gateway. Please try again later.</body></html>",
+    "expected_reasons": [
+      "html_error_page:official_error_page"
+    ],
+    "extraction": {
+      "title": "gateway-body",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "502 Bad Gateway. Please try again later.",
+      "links": [],
+      "content_hash": "sha256:17b7d5973a5ab10ca7f5cea9a4bbb259c411d304f8fe832deaa816a9e4372e34"
+    }
+  },
+  {
+    "name": "gateway-title",
+    "rule": "gateway",
+    "file_name": "gateway-title.html",
+    "html": "<title>502 Bad Gateway</title><p>Please try again later.</p>",
+    "expected_reasons": [
+      "html_error_page:official_error_page"
+    ],
+    "extraction": {
+      "title": "502 Bad Gateway",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Please try again later.",
+      "links": [],
+      "content_hash": "sha256:9de7b701aa3a8004ce2cbe0fdd5ce4a7806bcff6c261eb8ce8104c8e56686333"
+    }
+  },
+  {
+    "name": "gateway-heading",
+    "rule": "gateway",
+    "file_name": "gateway-heading.html",
+    "html": "<h1>Bad Gateway</h1><p>Please retry later.</p>",
+    "expected_reasons": [
+      "html_error_page:official_error_page"
+    ],
+    "extraction": {
+      "title": "Bad Gateway",
+      "title_confidence": "low",
+      "abstract": null,
+      "outline": [
+        [
+          2,
+          "Bad Gateway"
+        ]
+      ],
+      "extracted_text": "Bad Gateway\nPlease retry later.",
+      "links": [],
+      "content_hash": "sha256:a3a05e8fee80cd4eba10e859e47c2d454ddc8a9d82115fd82213424ccfc0f282"
+    }
+  },
+  {
+    "name": "gateway-http-prefix",
+    "rule": "gateway",
+    "file_name": "gateway-http-prefix.html",
+    "html": "<p>HTTP Error 502: Bad Gateway.</p>",
+    "expected_reasons": [
+      "html_error_page:official_error_page"
+    ],
+    "extraction": {
+      "title": "gateway-http-prefix",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "HTTP Error 502: Bad Gateway.",
+      "links": [],
+      "content_hash": "sha256:b5a96264c255e7be85806447749ec001a9ea2a86b8bbf919105142df8a19927e"
+    }
+  },
+  {
+    "name": "timeout-body",
+    "rule": "gateway",
+    "file_name": "timeout-body.html",
+    "html": "<p>504 Gateway Timeout. Try again later.</p>",
+    "expected_reasons": [
+      "html_error_page:official_error_page"
+    ],
+    "extraction": {
+      "title": "timeout-body",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "504 Gateway Timeout. Try again later.",
+      "links": [],
+      "content_hash": "sha256:8fdb2fa7fada62fae88eb676fa29e3f76aa6c06757988a6440073faf22319397"
+    }
+  },
+  {
+    "name": "timeout-title",
+    "rule": "gateway",
+    "file_name": "timeout-title.html",
+    "html": "<title>Gateway Time-out</title><p>Please try again later.</p>",
+    "expected_reasons": [
+      "html_error_page:official_error_page"
+    ],
+    "extraction": {
+      "title": "Gateway Time-out",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Please try again later.",
+      "links": [],
+      "content_hash": "sha256:75a689adcbda7a093ce1357eba5441f853d3894c7d196aac72baee20d68e27a0"
+    }
+  },
+  {
+    "name": "gateway-spaced",
+    "rule": "gateway",
+    "file_name": "gateway-spaced.html",
+    "html": "<h1>HTTP 502\nBad&nbsp;Gateway</h1>",
+    "expected_reasons": [
+      "html_error_page:official_error_page"
+    ],
+    "extraction": {
+      "title": "HTTP 502 Bad Gateway",
+      "title_confidence": "low",
+      "abstract": null,
+      "outline": [
+        [
+          2,
+          "HTTP 502 Bad Gateway"
+        ]
+      ],
+      "extracted_text": "HTTP 502\nBad Gateway",
+      "links": [],
+      "content_hash": "sha256:92cd93e5034b09faf0f867c325a69f0241363eae3665b5a052bf88d698021a93"
+    }
+  },
+  {
+    "name": "signin-body",
+    "rule": "authentication",
+    "file_name": "signin-body.html",
+    "html": "<html><body>Please sign in to continue. Password required.</body></html>",
+    "expected_reasons": [
+      "html_authentication_shell"
+    ],
+    "extraction": {
+      "title": "signin-body",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Please sign in to continue. Password required.",
+      "links": [],
+      "content_hash": "sha256:125e055042420c107144e3f0f1e05ad1a49da82ac6a51ce07f166589aa35eded"
+    }
+  },
+  {
+    "name": "login-access",
+    "rule": "authentication",
+    "file_name": "login-access.html",
+    "html": "<p>Please log-in to view this page.</p>",
+    "expected_reasons": [
+      "html_authentication_shell"
+    ],
+    "extraction": {
+      "title": "login-access",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Please log-in to view this page.",
+      "links": [],
+      "content_hash": "sha256:5609fb848f671b7731576f4b819a37cd4d4dfdeb9ddd71a1946ab4c753a74245"
+    }
+  },
+  {
+    "name": "authentication-required",
+    "rule": "authentication",
+    "file_name": "authentication-required.html",
+    "html": "<h1>Authentication required</h1>",
+    "expected_reasons": [
+      "html_authentication_shell"
+    ],
+    "extraction": {
+      "title": "Authentication required",
+      "title_confidence": "low",
+      "abstract": null,
+      "outline": [
+        [
+          2,
+          "Authentication required"
+        ]
+      ],
+      "extracted_text": "Authentication required",
+      "links": [],
+      "content_hash": "sha256:5f7f68fbcaf26fe73c3c8ca1b3ff386389474e42eeff635cc47e27abb6d12536"
+    }
+  },
+  {
+    "name": "password-directive",
+    "rule": "authentication",
+    "file_name": "password-directive.html",
+    "html": "<p>Please enter your password to continue.</p>",
+    "expected_reasons": [
+      "html_authentication_shell"
+    ],
+    "extraction": {
+      "title": "password-directive",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Please enter your password to continue.",
+      "links": [],
+      "content_hash": "sha256:35a09b2c265cdcf2eba6f91b90962625dd821b8fd766daace9cce44117e4cbf4"
+    }
+  },
+  {
+    "name": "password-form",
+    "rule": "authentication-form",
+    "file_name": "password-form.html",
+    "html": "<title>Sign in</title><form><label>Password<input type=\"password\"></label><button>Sign in</button></form>",
+    "expected_reasons": [
+      "html_authentication_shell"
+    ],
+    "extraction": {
+      "title": "Sign in",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "PasswordSign in",
+      "links": [],
+      "content_hash": "sha256:098e76e65558018cee48bdab090f61e2c15f7cc5fd017963f13b78624dd2bc3c"
+    }
+  },
+  {
+    "name": "password-form-attributes",
+    "rule": "authentication-form",
+    "file_name": "password-form-attributes.html",
+    "html": "<h1>LOGIN</h1><FORM><INPUT name=p TYPE=PASSWORD /><button>Login</button></FORM>",
+    "expected_reasons": [
+      "html_authentication_shell"
+    ],
+    "extraction": {
+      "title": "LOGIN",
+      "title_confidence": "low",
+      "abstract": null,
+      "outline": [
+        [
+          2,
+          "LOGIN"
+        ]
+      ],
+      "extracted_text": "LOGIN\nLogin",
+      "links": [],
+      "content_hash": "sha256:48712d952309f35b414278586b43148b5ed63c3bc8d6a5325537a8f7dd28649f"
+    }
+  },
+  {
+    "name": "signin-javascript",
+    "rule": "authentication",
+    "file_name": "signin-javascript.html",
+    "html": "<p>Please sign in to continue.</p><script src=\"a.js\"></script><script src=\"b.js\"></script>",
+    "expected_reasons": [
+      "html_javascript_shell",
+      "html_authentication_shell"
+    ],
+    "extraction": {
+      "title": "signin-javascript",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Please sign in to continue.",
+      "links": [],
+      "content_hash": "sha256:1f8b834ccb19af46dc89f1e1494cf29e0e8e115a68f523a9013b719f4f7d93cd"
+    }
+  },
+  {
+    "name": "gateway-javascript",
+    "rule": "gateway",
+    "file_name": "gateway-javascript.html",
+    "html": "<p>502 Bad Gateway.</p><script src=\"a.js\"></script><script src=\"b.js\"></script>",
+    "expected_reasons": [
+      "html_error_page:official_error_page",
+      "html_javascript_shell"
+    ],
+    "extraction": {
+      "title": "gateway-javascript",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "502 Bad Gateway.",
+      "links": [],
+      "content_hash": "sha256:75f6464c5ca6a081a2f8c29579e51e8d97204599b667ac41fc112a5ae4628909"
+    }
+  },
+  {
+    "name": "maintenance",
+    "rule": "existing",
+    "file_name": "maintenance.html",
+    "html": "<p>Service temporarily unavailable. Please try again later.</p>",
+    "expected_reasons": [
+      "html_error_page:official_error_page"
+    ],
+    "extraction": {
+      "title": "maintenance",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Service temporarily unavailable. Please try again later.",
+      "links": [],
+      "content_hash": "sha256:6225df4a92fc9583742a7cfb3a6eb3ab6df0161e716a485d82172185195c6388"
+    }
+  },
+  {
+    "name": "not-found",
+    "rule": "existing",
+    "file_name": "not-found.html",
+    "html": "<title>404 Not Found</title><h1>Page not found</h1>",
+    "expected_reasons": [
+      "html_error_page:not_found"
+    ],
+    "extraction": {
+      "title": "404 Not Found",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [
+        [
+          2,
+          "Page not found"
+        ]
+      ],
+      "extracted_text": "Page not found",
+      "links": [],
+      "content_hash": "sha256:886cbc0cb6db58796ecf196f3511505c4c4807bf2d3723265a5c86f45f41cacf"
+    }
+  },
+  {
+    "name": "javascript-only",
+    "rule": "existing",
+    "file_name": "javascript-only.html",
+    "html": "<noscript>Please enable JavaScript.</noscript><script src=\"a.js\"></script><script src=\"b.js\"></script>",
+    "expected_reasons": [
+      "html_javascript_shell"
+    ],
+    "extraction": {
+      "title": "javascript-only",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "None extracted.",
+      "links": [],
+      "content_hash": "sha256:9c21840c0e63dd03b65ec727fa24067d20f0d57e562cfe05f91f0baff9f1b218"
+    }
+  },
+  {
+    "name": "short-http-definition",
+    "rule": "none",
+    "file_name": "short-http-definition.html",
+    "html": "<title>HTTP status codes</title><p>502 Bad Gateway means a proxy received an invalid upstream response. 504 Gateway Timeout indicates an upstream timeout.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "HTTP status codes",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "502 Bad Gateway means a proxy received an invalid upstream response. 504 Gateway Timeout indicates an upstream timeout.",
+      "links": [],
+      "content_hash": "sha256:1a14046b0604bac8cdb9128481faeba289264f289181f339cbd50ee77e47c7fb"
+    }
+  },
+  {
+    "name": "gateway-definition-title",
+    "rule": "none",
+    "file_name": "gateway-definition-title.html",
+    "html": "<title>Bad Gateway</title><p>A proxy received an invalid upstream response.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "Bad Gateway",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "A proxy received an invalid upstream response.",
+      "links": [],
+      "content_hash": "sha256:de1839aa82d9166f5c4b72fae370dc337e1e6f5cc18671fff719b64f80bf1b22"
+    }
+  },
+  {
+    "name": "incident-report",
+    "rule": "none",
+    "file_name": "incident-report.html",
+    "html": "<p>A prior outage returned 504 Gateway Timeout; the service recovered.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "incident-report",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "A prior outage returned 504 Gateway Timeout; the service recovered.",
+      "links": [],
+      "content_hash": "sha256:dea9103d933e096318322713ff5bb2ff194ec41f27331c6c7e030f5fc71baa30"
+    }
+  },
+  {
+    "name": "status-table",
+    "rule": "none",
+    "file_name": "status-table.html",
+    "html": "<table><tr><td>502 Bad Gateway</td><td>Invalid upstream response</td></tr><tr><td>504 Gateway Timeout</td><td>Upstream timeout</td></tr></table>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "status-table",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "502 Bad Gateway\n\nInvalid upstream response\n\n504 Gateway Timeout\n\nUpstream timeout",
+      "links": [],
+      "content_hash": "sha256:5d575894d68fbd001e00500d580efdcd52cd21abe8be759b55f6b34ef208c7aa"
+    }
+  },
+  {
+    "name": "numeric-data",
+    "rule": "none",
+    "file_name": "numeric-data.html",
+    "html": "<title>Sample counts</title><p>There were 502 observations and 504 controls.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "Sample counts",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "There were 502 observations and 504 controls.",
+      "links": [],
+      "content_hash": "sha256:995d8979d1305890dad2546e0fa8653d808e7db91b4740f6e828d4aa23e8cd01"
+    }
+  },
+  {
+    "name": "authentication-guide",
+    "rule": "none",
+    "file_name": "authentication-guide.html",
+    "html": "<title>Account help</title><p>Please sign in to continue. Password required. These are the messages shown by the old login page; use the new account link.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "Account help",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Please sign in to continue. Password required. These are the messages shown by the old login page; use the new account link.",
+      "links": [],
+      "content_hash": "sha256:43a2669c6c18864773828ecc9b865e0ea6d53ab6e50a452ae13f513668196d9b"
+    }
+  },
+  {
+    "name": "password-policy",
+    "rule": "none",
+    "file_name": "password-policy.html",
+    "html": "<title>Password policy</title><p>Password required length is twelve characters. Use a password manager.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "Password policy",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Password required length is twelve characters. Use a password manager.",
+      "links": [],
+      "content_hash": "sha256:46e00bc66b70abc55b5c80dc54956e602a1640929a26b5bcf1e8eb35fd138158"
+    }
+  },
+  {
+    "name": "password-reset",
+    "rule": "none",
+    "file_name": "password-reset.html",
+    "html": "<p>Reset a forgotten password through your account settings.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "password-reset",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Reset a forgotten password through your account settings.",
+      "links": [],
+      "content_hash": "sha256:7d525d48a66cac5264df046e790a1bf5c1bb5dec6fe2fb0547de1dce03142e63"
+    }
+  },
+  {
+    "name": "article-login-form",
+    "rule": "none",
+    "file_name": "article-login-form.html",
+    "html": "<title>Measured reflectance</title><p>The roof reflectance was 0.74.</p><form><label>Password<input type=\"password\"></label><button>Sign in</button></form>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "Measured reflectance",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "The roof reflectance was 0.74.\n\nPasswordSign in",
+      "links": [],
+      "content_hash": "sha256:07483ecd061922992f5620b860559cd6e0969eac4dd40bfeb458e8f66ad7f98b"
+    }
+  },
+  {
+    "name": "optional-login-link",
+    "rule": "none",
+    "file_name": "optional-login-link.html",
+    "html": "<p>The observed sample mean is 12.3.</p><a href=\"/login\">Sign in</a>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "optional-login-link",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "The observed sample mean is 12.3.\nSign in",
+      "links": [],
+      "content_hash": "sha256:0c77a60b5264c00ce237fee9c66afd446683d3fd2307d10e9b13d55127bf4074"
+    }
+  },
+  {
+    "name": "quoted-gateway",
+    "rule": "none",
+    "file_name": "quoted-gateway.html",
+    "html": "<blockquote>502 Bad Gateway. Please try again later.</blockquote>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "quoted-gateway",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "502 Bad Gateway. Please try again later.",
+      "links": [],
+      "content_hash": "sha256:ecb7ec1460cf6527ae8e0ef1aa8b9233ceb822f4f38f6b0450cbf6b53edcd1c3"
+    }
+  },
+  {
+    "name": "sample-login-form",
+    "rule": "none",
+    "file_name": "sample-login-form.html",
+    "html": "<pre>&lt;form&gt;&lt;input type=\"password\"&gt;Please sign in to continue.&lt;/form&gt;</pre>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "sample-login-form",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "<form><input type=\"password\">Please sign in to continue.</form>",
+      "links": [],
+      "content_hash": "sha256:c8437e801ae879daaf06cb8ab0aef6b3e5f4f456100bb2593dae1750d2bc8e8c"
+    }
+  },
+  {
+    "name": "code-gateway",
+    "rule": "none",
+    "file_name": "code-gateway.html",
+    "html": "<code>502 Bad Gateway</code>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "code-gateway",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "502 Bad Gateway",
+      "links": [],
+      "content_hash": "sha256:97ee6b1bfe96262edb5b530ef47f0cc78163d31e80850fa09914c4b69515c023"
+    }
+  },
+  {
+    "name": "script-gateway",
+    "rule": "none",
+    "file_name": "script-gateway.html",
+    "html": "<p>Measured value: 42.</p><script>const message=\"502 Bad Gateway\";</script>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "script-gateway",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Measured value: 42.",
+      "links": [],
+      "content_hash": "sha256:faeb71a46c2ce86e66ec8795861833e7698022c6f95b7863a976c20b31e7bc67"
+    }
+  },
+  {
+    "name": "comment-authentication",
+    "rule": "none",
+    "file_name": "comment-authentication.html",
+    "html": "<!-- Please sign in to continue. Password required. --><p>Measured value: 42.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "comment-authentication",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Measured value: 42.",
+      "links": [],
+      "content_hash": "sha256:d19ddfa72aa052dcb7e5ca9d66e7fd6e3223a3d7b5d5b9ef97fad415ef1f2f64"
+    }
+  },
+  {
+    "name": "metadata-authentication",
+    "rule": "none",
+    "file_name": "metadata-authentication.html",
+    "html": "<meta name=\"description\" content=\"Please sign in to continue.\"><p>Measured value: 42.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "metadata-authentication",
+      "title_confidence": "none",
+      "abstract": "Please sign in to continue.",
+      "outline": [],
+      "extracted_text": "Measured value: 42.",
+      "links": [],
+      "content_hash": "sha256:3267c2e16472be2e3a3e89696fbecde0524ba43efccb7f26300595e5d9ccb9c5"
+    }
+  },
+  {
+    "name": "hidden-password-form",
+    "rule": "none",
+    "file_name": "hidden-password-form.html",
+    "html": "<p>Measured value: 42.</p><form hidden><input type=\"password\"><button>Sign in</button></form>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "hidden-password-form",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Measured value: 42.\n\nSign in",
+      "links": [],
+      "content_hash": "sha256:399aa378909115eb34776cd5ed10c4550f8f3555ecb9b00130b02679cc9c8b83"
+    }
+  },
+  {
+    "name": "disabled-password-form",
+    "rule": "none",
+    "file_name": "disabled-password-form.html",
+    "html": "<title>Sign in</title><form><input type=\"password\" disabled><button>Sign in</button></form>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "Sign in",
+      "title_confidence": "high",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Sign in",
+      "links": [],
+      "content_hash": "sha256:00b211c2eb13484409ee85b7beec64acad181229ff4a772e0783e1b400d9aa20"
+    }
+  },
+  {
+    "name": "filename-sign-in",
+    "rule": "none",
+    "file_name": "sign-in.html",
+    "html": "<p>Measured value: 42.</p>",
+    "expected_reasons": [],
+    "extraction": {
+      "title": "sign-in",
+      "title_confidence": "none",
+      "abstract": null,
+      "outline": [],
+      "extracted_text": "Measured value: 42.",
+      "links": [],
+      "content_hash": "sha256:85febc24f9d53d038bd707abe6525a124a75a984f75c7582371d165035af2df8"
+    }
+  }
+]

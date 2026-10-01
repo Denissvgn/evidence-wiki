@@ -29,6 +29,14 @@ on:
       - tools/*qualif*.py
       - tools/*journey*.py
       - tools/*test*groups*.py
+      - tools/check_ci_compatibility.py
+      - tools/_suite_plugin.py
+      - workspace-template/scripts/normalize_sources.py
+      - tests/test_html_usability*.py
+      - tests/test_strict_evidence.py
+      - tests/_publication_fixture.py
+      - tests/test_test_groups.py
+      - tests/test_ci_compatibility.py
       - tools/verify_test_shards.py
       - tools/scale_benchmark.py
       - tests/test_release*.py
@@ -46,6 +54,9 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
+  compatibility:
+    uses: ./.github/workflows/check-compatibility.yml
+
   release-identity:
     name: Verify release identity and source quality
     runs-on: ubuntu-latest
@@ -62,7 +73,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.14"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -139,7 +150,9 @@ jobs:
 
   release-tests:
     name: Release tests / shard ${{ matrix.shard }}
-    needs: release-identity
+    needs: [release-identity, compatibility]
+    env:
+      EVIDENCE_WIKI_EXPECTED_PYTHON: "3.12.14"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -157,7 +170,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.14"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -167,6 +180,19 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Check pinned compatibility
+        shell: bash
+        run: .venv/bin/python tools/check_ci_compatibility.py
+
+      - name: Retain pinned compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-compatibility-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-cell-${{ matrix.shard }}
+          path: compatibility-evidence/
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Run the complete collection's assigned groups
         shell: bash
@@ -205,7 +231,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.14"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -252,7 +278,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.14"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -323,7 +349,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.14"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -361,7 +387,7 @@ jobs:
   release-gate:
     name: Verify complete release evidence and promote distributions
     timeout-minutes: 15
-    needs: [release-identity, release-tests, release-build, release-artifacts, release-scale]
+    needs: [compatibility, release-identity, release-tests, release-build, release-artifacts, release-scale]
     runs-on: ubuntu-latest
     steps:
       - name: Check out the release commit
@@ -373,7 +399,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.14"
 
       - name: Create the verification environment
         shell: bash
@@ -395,7 +421,7 @@ jobs:
         run: |
           .venv/bin/python -m tools.verify_test_shards --evidence suite-shards \
             --commit "$SUITE_COMMIT" --run-id "$SUITE_RUN_ID" --shard-count 3 --group-size 48 \
-            --platform Linux/X64/3.12 > suite-verification.json
+            --platform Linux/X64/3.12 --python-patch Linux/X64/3.12=3.12.14 > suite-verification.json
 
       - name: Download the validated candidate distributions
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0

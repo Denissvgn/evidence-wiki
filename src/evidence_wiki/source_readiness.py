@@ -1,4 +1,9 @@
-"""Source-scoped ingestion observations with canonical record and lexical checks."""
+"""Source-scoped ingestion observations with canonical record and lexical checks.
+
+Native HTML classification currency qualifies readiness without reclassifying
+originals or changing historical usability claims. Partial extraction may retain
+OCR/rendering qualifications, but cannot bypass currency or original-byte blockers.
+"""
 
 from __future__ import annotations
 
@@ -93,6 +98,11 @@ def _source(view, record, records):
     if error or metadata is None:
         row.update(extraction="invalid", reasons=[*row["reasons"], "normalized_record_invalid"])
         return row
+    profile = owner("_html_usability_profile").evaluate_html_usability(
+        metadata, source_kind=record.get("kind") if isinstance(record.get("kind"), str) else "",
+        effective_method=method or "unsupported")
+    if profile.reason:
+        row["reasons"].append(profile.reason)
     structured = metadata.get("structured_view")
     if isinstance(structured, dict) and isinstance(structured.get("path"), str):
         relative = structured["path"]
@@ -152,7 +162,9 @@ def _source(view, record, records):
         row["reasons"].append("source_content_not_extracted")
     if not row["reasons"] and row["retrieval"] == "lexically_indexable":
         row["usability"] = "usable" if row["complete"] else "partial"
-    elif row["extraction"] == "partial" and row["evidence_usable"] and not unavailable:
+    elif (row["extraction"] == "partial" and row["evidence_usable"] and not unavailable
+          and row["retrieval"] == "lexically_indexable"
+          and set(row["reasons"]) <= {"ocr_required", "partial_rendered_table_or_values"}):
         row["usability"] = "partial"
     row["reasons"] = sorted(set(row["reasons"]))
     row["normalized_sha256"] = hashlib.sha256(raw).hexdigest()

@@ -3279,6 +3279,8 @@ class OrchestrationControllerTests(unittest.TestCase):
         }
         manifest_record = {
             "id": source_id,
+            "kind": "html",
+            "raw_paths": ["raw/web/existing.html"],
             "provenance": {"request_id": request_id, "candidate_id": candidate_id},
         }
         fetched_candidate = {
@@ -3301,6 +3303,8 @@ class OrchestrationControllerTests(unittest.TestCase):
         issued_request = {**fulfilled_request, "status": "open", "source_id": None}
         source_requests.load_requests.return_value = [issued_request]
         normalize_sources = mock.Mock()
+        normalize_sources.normalization_config = NORMALIZE.normalization_config
+        normalize_sources.normalization_method = NORMALIZE.normalization_method
         normalize_sources.source_paths.return_value = (
             "sources/manifest.jsonl",
             "sources/normalized",
@@ -3340,28 +3344,16 @@ class OrchestrationControllerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            normalized_path = Path(tmpdir) / "sources" / "normalized" / "existing.md"
+            raw_path = Path(tmpdir) / manifest_record["raw_paths"][0]
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text("<h1>Measurements</h1><p>The sample conductivity was 0.74.</p>", encoding="utf-8")
+            normalized_path = Path(tmpdir) / "sources/normalized/html--existing-evidence.md"
             normalized_path.parent.mkdir(parents=True)
-            normalized_path.write_text(
-                "---\n"
-                "type: normalized_source\n"
-                f"source_id: {source_id}\n"
-                "source_kind: html\n"
-                "status: content_extracted\n"
-                "evidence_usable: true\n"
-                "---\n\n"
-                "# Existing evidence\n\n"
-                "Normalized evidence.\n",
-                encoding="utf-8",
-            )
+            source = NORMALIZE.normalize_html_record(Path(tmpdir), manifest_record)
+            metadata = NORMALIZE.frontmatter_for(source, "sources/manifest.jsonl", normalized_path, "2026-09-30")
+            normalized_path.write_text(NORMALIZE.render_markdown(source, metadata), encoding="utf-8")
             normalize_sources.normalized_output_path_for_record.return_value = normalized_path
-            raw_baseline = {
-                "algorithm": "sha256-content-v1",
-                "file_count": 0,
-                "total_bytes": 0,
-                "fingerprint": "sha256:" + hashlib.sha256(b"").hexdigest(),
-                "entries": {},
-            }
+            raw_baseline = CONTROLLER.raw_tree_snapshot(Path(tmpdir), {}, include_entries=True)
             selected_candidate = {
                 **fetched_candidate,
                 "lifecycle_state": "selected",
@@ -3398,7 +3390,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                         label="test requests",
                     ),
                     "normalized_file_fingerprints_before": {
-                        "sources/normalized/existing.md": normalized_fingerprint,
+                        "sources/normalized/html--existing-evidence.md": normalized_fingerprint,
                     },
                     "question_file_fingerprints_before": {
                         "test-question.md": page_fingerprint,
@@ -3411,7 +3403,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                 # a workspace with no ledger is exactly the empty-claims case it handles.
                 if stem == "_order_claims":
                     return load_script_module("reconciliation_order_claims", SCRIPTS / "_order_claims.py")
-                if stem in {"question_resolve", "question_status"}:
+                if stem in {"question_resolve", "question_status", "_html_usability_profile"}:
                     return load_script_module(f"reconciliation_{stem}", SCRIPTS / f"{stem}.py")
                 return {
                     "run_controller": run_controller,
@@ -3429,7 +3421,7 @@ class OrchestrationControllerTests(unittest.TestCase):
                     mock.patch.object(
                         CONTROLLER,
                         "normalized_file_fingerprint_snapshot",
-                        return_value={"sources/normalized/existing.md": normalized_fingerprint},
+                        return_value={"sources/normalized/html--existing-evidence.md": normalized_fingerprint},
                     ),
                     mock.patch.object(
                         CONTROLLER,
@@ -5341,7 +5333,9 @@ class OrchestrationControllerTests(unittest.TestCase):
         # A record declaring no input paths cannot be refused for naming an unpinned one,
         # which keeps this fixture about the one clause it exists to isolate.
         normalize_sources.raw_paths.return_value = []
-        with mock.patch.object(CONTROLLER, "load_sibling_module", return_value=normalize_sources):
+        real_loader = CONTROLLER.load_sibling_module
+        with mock.patch.object(CONTROLLER, "load_sibling_module",
+                side_effect=lambda stem: normalize_sources if stem == "normalize_sources" else real_loader(stem)):
             matching, reusable, _ = CONTROLLER.acquisition_reuse_baselines(
                 root, {}, ["req-scoped"], None
             )

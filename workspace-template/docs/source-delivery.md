@@ -182,9 +182,12 @@ convention `coverage_manifest.py` tooling uses to link a request to the facet
 it unblocks, not a schema this package knows; a pack or host may use any keys
 that make sense for its own pairing. `evidence_usability_override`
 must be a mapping with `usable: true`, non-empty `reviewed_by`, non-empty
-`reviewed_at`, and non-empty `reason`. It is an audited escape hatch for
-deterministic source-usability false positives after reviewer inspection; it
-cannot override delivery failures such as HTTP errors, missing files, checksum
+`reviewed_at`, and non-empty `reason`. Its native HTML scope is limited to a
+reviewed `html_javascript_shell` false positive. It cannot clear
+`html_authentication_shell`, gateway/error-page reasons, or an explicit refusal.
+Clearing a JavaScript reason leaves independent blockers active; an old
+`evidence_usability_override_applied` flag grants no clearance, and native HTML
+normalization recomputes it. It cannot override delivery failures such as HTTP errors, missing files, checksum
 mismatches, TLS failures, `source_status: unavailable`, or any
 `delivery_failure_code`. `retrieved_at` must
 be ISO 8601; `checksum` and `sha256` must match `sha256:<64 lowercase hex chars>`
@@ -429,6 +432,16 @@ Failure-aware inventory and normalization are active for this vocabulary.
 Inventory keeps failed captures auditable in `sources/manifest.jsonl`, but marks
 them with `evidence_usable: false` and `unusable_evidence_reasons` so required
 coverage facets cannot pass until the source is redelivered or replaced.
+
+Native HTML classification adds its own content reasons after delivery. A thin
+gateway response uses `html_error_page:official_error_page`; an authentication
+gate uses `html_authentication_shell`. These are normalized evidence reasons,
+separate from the closed delivery-failure vocabulary above. Successful local
+delivery, `source_status: available`, a matching checksum, or complete text
+extraction does not make such a capture usable evidence. Retain the original
+bytes and obtain an authorized usable capture or another suitable source.
+See [HTML classification](normalized-source-format.md#html-shell-classification)
+and [source readiness](source-usability.md) for currentness and admission.
 
 Behavior in `source_inventory.py`:
 

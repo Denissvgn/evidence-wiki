@@ -54,6 +54,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from evidence_wiki import resources  # noqa: E402 - the checkout's manifest names what the archives must carry.
 from tools._qualification_process import CommandRunner, interruptible, positive_seconds  # noqa: E402
+from tools.probe_html_usability import CASE_NAMES as HTML_CASE_NAMES  # noqa: E402
 from tools.probe_installed_cli import checked_outcomes  # noqa: E402
 
 _RUNNER = CommandRunner()
@@ -153,6 +154,10 @@ REQUIRED_SDIST_MEMBERS = (
     "tools/sync_agent_resources.py",
     "tools/probe_installed_extensions.py",
     "tools/probe_installed_cli.py",
+    "tools/probe_html_usability.py",
+    "tests/fixtures/html-usability/pages.json",
+    "tests/fixtures/html-usability/legacy-records.json",
+    "tests/fixtures/html-usability/prior-classification-records.json",
     "tests/_docx_fixture.py",
     "tests/_publication_fixture.py",
     "tests/fixtures/fake_codex_cli.py",
@@ -301,6 +306,9 @@ def create_venv_with_wheel(root: Path, wheel: Path) -> Path:
 
 def fixture_members():
     members = ["tools/smoke_installed_orchestration.py", "tools/qualify_journeys.py",
+               "tools/probe_html_usability.py", "tests/fixtures/html-usability/pages.json",
+               "tests/fixtures/html-usability/legacy-records.json",
+    "tests/fixtures/html-usability/prior-classification-records.json",
                "workspace-template/workspace-system.yml",
                "tools/probe_installed_extensions.py", "tools/probe_installed_cli.py", "tests/_docx_fixture.py",
                "tools/_journey_cases.py", "tools/_journey_driver.py", "tools/_journey_authoring.py", "tools/_qualification_process.py",
@@ -1733,6 +1741,46 @@ def validate_action_probe(python, cli, *, kind, root, outside, fixture_root, out
     return result
 
 
+def checked_html_outcomes(observations):
+    """Require all complete HTML journeys before accepting installed qualification."""
+    expected = {"fresh": set(HTML_CASE_NAMES), "upgrade": {"gateway-body", "signin-body", "numeric-data"},
+                "revision": {"incomplete-gateway", "incomplete-authentication", "useful-control", "gateway-control"}}
+    if not isinstance(observations, dict) or set(observations) != set(expected):
+        raise ValueError("Incomplete installed HTML outcomes")
+    for mode, names in expected.items():
+        report = observations[mode]
+        key = {"fresh": "html_cli_journeys", "upgrade": "html_upgrade", "revision": "html_revision_upgrade"}[mode]
+        if not isinstance(report, dict) or report.get(key) != "passed":
+            raise ValueError("Incomplete installed HTML outcomes: " + mode)
+        rows = report.get("cases")
+        if (not isinstance(rows, list) or len(rows) != len(names) or any(not isinstance(row, dict) for row in rows)
+                or {row.get("case") for row in rows} != names
+                or any(row.get("evidence_accepted") is not False or row.get("semantic_adequacy") != "not_evaluated" for row in rows)):
+            raise ValueError("Incomplete installed HTML cases: " + mode)
+        if mode == "fresh" and (report.get("cached_refresh") != "passed" or report.get("selected_replay") != "passed"):
+            raise ValueError("Incomplete installed HTML refresh/replay")
+        if mode == "upgrade" and (report.get("future_profile_refusal") != "passed" or report.get("originals_preserved") is not True):
+            raise ValueError("Incomplete installed HTML upgrade/refusal")
+        if mode == "revision" and (any(report.get(key) != "passed" for key in
+                ("duplicate_coverage", "incomplete_eof", "acquisition_currentness")) or report.get("originals_preserved") is not True):
+            raise ValueError("Incomplete installed HTML revision qualification")
+    return observations
+
+
+def validate_html_installation(python, cli, *, scratch, outside, fixture_root):
+    """Reuse the public subprocess journeys inside each isolated installation."""
+    observations = {}
+    for mode in ("fresh", "upgrade", "revision"):
+        argv = [str(python), "-I", str(fixture_root / "tools/probe_html_usability.py"), "--cli", str(cli),
+                "--root", str(scratch / ("html-" + mode)), "--corpus", str(fixture_root / "tests/fixtures/html-usability/pages.json")]
+        if mode == "upgrade":
+            argv += ["--legacy-fixture", str(fixture_root / "tests/fixtures/html-usability/legacy-records.json")]
+        if mode == "revision":
+            argv += ["--prior-classification-fixture", str(fixture_root / "tests/fixtures/html-usability/prior-classification-records.json")]
+        observations[mode] = json.loads(run(argv, cwd=outside, label="html-" + mode))
+    return checked_html_outcomes(observations)
+
+
 def validate_installed(venv: Path, scratch: Path, expected_version: str | None, label: str) -> dict[str, object]:
     if scratch.resolve().is_relative_to(REPO_ROOT.resolve()) or venv.resolve().is_relative_to(REPO_ROOT.resolve()):
         raise ValidationError("installed execution must use an unrelated directory outside the checkout")
@@ -1751,6 +1799,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
                          else scratch / "cli-entrypoint-commands")
     entrypoints = validate_cli_entrypoints(python, cli, outside=outside, fixture_root=fixture_root,
         output=entrypoint_output, expected_version=expected_version)
+    html = validate_html_installation(python, cli, scratch=scratch, outside=outside, fixture_root=fixture_root)
     agent_probe = run([str(python), "-c", AGENT_PROBE, str(cli)], cwd=outside)
     pack_probe = run([str(python), "-c", PACK_PROBE, str(cli), str(scratch / "pack-discovery")], cwd=outside)
     native_initialization = run([str(python), "-B", "-c", NATIVE_INITIALIZATION_PROBE, str(cli),
@@ -1876,7 +1925,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
             **json.loads(planning), **json.loads(authoring), **setup, **research, **json.loads(revisions),
             **json.loads(extensions), **json.loads(native_initialization), **entrypoints,
-            "journeys": journeys}
+            "html_usability": html, "journeys": journeys}
 
 
 def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:

@@ -20,6 +20,51 @@ Statuses distinguish missing inventory, unperformed extraction, stale originals,
 invalid records, OCR needs, partial renderings and lexically indexable content.
 Semantic adequacy and evidence acceptance remain separate.
 
+Native HTML readiness also checks the recorded classification revision. An older
+or absent revision reports `html_usability_recheck_required`; an inconsistent
+native claim reports `html_usability_profile_invalid`; a newer revision reports
+`html_usability_profile_unsupported`. Missing classification metadata does not
+establish that the content is a shell. A format-valid record may retain its
+historical `evidence_usable: true` while current `usability` is `not_ready`.
+Completeness and lexical indexing do not clear this blocker, including for
+partial extractions. Inspection and route planning remain read-only: explicitly
+normalize the selected legacy record to recheck it, or use a compatible producer
+for a future revision. Foreign producers and other native methods retain their
+own contracts.
+
+For native HTML, `html_error_page:official_error_page`,
+`html_authentication_shell` and `html_javascript_shell` describe deterministic
+content refusals. Multiple reasons can remain active. Short technical definitions,
+password-policy guidance and independent measurements remain distinct from a
+thin gate; the static classifier's [scope and bounds](normalized-source-format.md#html-shell-classification)
+do not establish semantic correctness or working authentication.
+
+Both local routing and direct required-coverage evaluation enforce classification
+currentness. A caller cannot avoid the check by skipping `source-status`, and an
+unrelated refused source does not block a separately selected healthy source.
+Read-only question exports re-evaluate coverage against retained inputs;
+`coverage_manifest.py evaluate` explicitly writes the resulting coverage verdict.
+Neither operation invents acceptance or a new review receipt. Use the
+[supported tooling upgrade and selected refresh](upgrade-adoption.md#refresh-native-html-classifications)
+for legacy records.
+
+## Resolve normalized-record identity conflicts
+
+Required coverage binds each selected source ID to its canonical normalized path.
+Multiple records claiming that ID fail with `normalized_record_ambiguous`, including
+identical or nested copies. Off-path claims fail with `normalized_record_noncanonical`;
+a missing, malformed or mismatched canonical identity reports
+`normalized_record_identity_invalid`. Remediation lists sorted relative paths.
+These checks run before source, freshness or identity policies can pass. Conflicts
+for unrelated, unselected IDs do not block an otherwise valid selection.
+
+Inspect the named records and preserve any needed originals or historical captures
+outside the normalized-record directory. Explicitly remove duplicate claims or
+restore the correct canonical record through the normalization owner, then
+re-evaluate coverage. The evaluator never chooses a filename-order winner,
+rewrites metadata or deletes records. A correctly located shell still fails its
+ordinary usability checks after the identity conflict is resolved.
+
 ## Declare host tools
 
 Retrieve `evidence-host-tools/v1` with

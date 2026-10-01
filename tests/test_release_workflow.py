@@ -66,17 +66,18 @@ def test_publish_job_is_downstream_of_the_release_gate() -> None:
 def test_release_checks_fan_out_from_identity_and_all_gate_promotion() -> None:
     jobs = load_workflow(QUALIFICATION_PATH)["jobs"]
     producers = {"release-tests", "release-build", "release-scale"}
-    for producer in producers:
+    for producer in producers - {"release-tests"}:
         assert jobs[producer]["needs"] == "release-identity"
+    assert set(jobs["release-tests"]["needs"]) == {"release-identity", "compatibility"}
     assert set(jobs["release-artifacts"]["needs"]) == {"release-identity", "release-build"}
-    assert set(jobs["release-gate"]["needs"]) == producers | {"release-identity", "release-artifacts"}
+    assert set(jobs["release-gate"]["needs"]) == producers | {"compatibility", "release-identity", "release-artifacts"}
     publication = load_workflow()["jobs"]
     assert publication["publish-to-pypi"]["needs"] == "release-gate"
     for job in jobs.values():
         assert "if" not in job and not job.get("continue-on-error", False)
         assert job.get("permissions", {}).get("id-token") is None
         assert "environment" not in job
-        for step in job["steps"]:
+        for step in job.get("steps", []):
             assert not step.get("continue-on-error", False)
             if "actions/checkout@" in step.get("uses", ""):
                 assert step["with"]["ref"] == "${{ github.sha }}"
@@ -278,17 +279,19 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     matrix = test["strategy"]["matrix"]
     assert set(matrix) == {"platform", "shard"}
     assert matrix["shard"] == [1, 2, 3]
-    expected = {("ubuntu-latest", "3.10"), ("ubuntu-latest", "3.14"),
-                ("macos-latest", "3.12"), ("windows-latest", "3.12")}
+    expected = {("ubuntu-latest", "3.10.21"), ("ubuntu-latest", "3.14.7"),
+                ("macos-latest", "3.12.10"), ("windows-latest", "3.12.10")}
     assert {(cell["os"], cell["python-version"]) for cell in matrix["platform"]} == expected
     assert len(list(itertools.product(matrix["platform"], matrix["shard"]))) == 12
     assert test["strategy"]["fail-fast"] is False
-    assert set(package["needs"]) == {"test", "build", "installed"}
+    assert test["needs"] == "compatibility"
+    assert set(package["needs"]) == {"compatibility", "test", "build", "installed"}
     assert package["if"] == "${{ !cancelled() }}"
     assert "needs" not in build and installed["needs"] == "build"
     assert installed["strategy"] == {"fail-fast": False, "max-parallel": 2, "matrix": {"artifact": ["wheel", "sdist"]}}
     require = package["steps"][0]["run"]
-    assert all("test '${{ needs." + name + ".result }}' = success" in require for name in ("test", "build", "installed"))
+    assert all("test '${{ needs." + name + ".result }}' = success" in require
+               for name in ("compatibility", "test", "build", "installed"))
     commands = [step["run"] for step in test["steps"] if "tools/run_test_groups.py" in step.get("run", "")]
     assert len(commands) == 2
     assert all("--shard-count 3 --shard-index ${{ matrix.shard }}" in command for command in commands)
@@ -297,7 +300,7 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     posix = next(command for command in commands if ".venv/bin/python" in command)
     assert "--timeout 3600" in windows and "--timeout" not in posix
     assert all("-m ruff check ." in command and "sync_vendored_scripts.py --check" in command for command in commands)
-    upload = next(step for step in test["steps"] if "actions/upload-artifact@" in step.get("uses", ""))
+    upload = next(step for step in test["steps"] if step.get("with", {}).get("path") == "suite-evidence/")
     assert upload["if"] == "always()"
     assert upload["with"]["name"].endswith("-shard-${{ matrix.shard }}")
     assert upload["with"]["retention-days"] == 90
@@ -407,6 +410,44 @@ def test_every_workflow_uses_pinned_node24_checkout_and_python_actions():
     assert found == set(supported)
 
 
+def test_latest_compatibility_is_shared_blocking_and_retains_separate_evidence():
+    workflow = load_workflow(CI_WORKFLOW_PATH.with_name("check-compatibility.yml"))
+    assert set(workflow["on"]) == {"workflow_call"}
+    assert workflow["permissions"] == {"contents": "read"}
+    job = workflow["jobs"]["check"]
+    assert job["timeout-minutes"] == 15 and job["strategy"]["fail-fast"] is False
+    assert {(cell["os"], cell["python"]) for cell in job["strategy"]["matrix"]["include"]} == {
+        ("ubuntu-latest", "3.10"), ("ubuntu-latest", "3.12"), ("ubuntu-latest", "3.14"),
+        ("macos-latest", "3.14"), ("windows-latest", "3.14")}
+    setup = next(step for step in job["steps"] if "actions/setup-python@" in step.get("uses", ""))
+    assert setup["with"]["check-latest"] is True and setup["with"]["allow-prereleases"] is False
+    assert not job.get("continue-on-error", False)
+    assert all(not step.get("continue-on-error", False) for step in job["steps"])
+    for caller in (CI_WORKFLOW_PATH, QUALIFICATION_PATH):
+        jobs = load_workflow(caller)["jobs"]
+        assert jobs["compatibility"] == {"uses": "./.github/workflows/check-compatibility.yml"}
+        test = jobs["test" if caller == CI_WORKFLOW_PATH else "release-tests"]
+        checks = [step for step in test["steps"] if "tools/check_ci_compatibility.py" in step.get("run", "")]
+        full = next(step for step in test["steps"] if "tools/run_test_groups.py" in step.get("run", ""))
+        assert checks and all(test["steps"].index(check) < test["steps"].index(full) for check in checks)
+        assert "EVIDENCE_WIKI_EXPECTED_PYTHON" in test["env"]
+        upload = next(step for step in test["steps"] if step.get("with", {}).get("path") == "compatibility-evidence/")
+        assert upload["if"] == "always()" and not upload["with"]["name"].startswith(("suite-", "release-suite-"))
+        assert "-shard-" not in upload["with"]["name"]
+        for name, other in jobs.items():
+            if name == "test" or "uses" in other:
+                continue
+            setups = [step for step in other["steps"] if "actions/setup-python@" in step.get("uses", "")]
+            assert all(step["with"]["python-version"] == "3.12.14" for step in setups)
+    gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["package"]
+    verification = next(step["run"] for step in gate["steps"] if "tools.verify_test_shards" in step.get("run", ""))
+    assert all(f"--python-patch {platform}={version}" in verification for platform, version in (
+        ("Linux/X64/3.10", "3.10.21"), ("Linux/X64/3.14", "3.14.7"),
+        ("macOS/ARM64/3.12", "3.12.10"), ("Windows/X64/3.12", "3.12.10")))
+    triggers = load_workflow(QUALIFICATION_PATH)["on"]["pull_request"]["paths"]
+    assert "tools/check_ci_compatibility.py" in triggers and "tests/test_html_usability*.py" in triggers
+
+
 @pytest.mark.parametrize(
     "leak",
     [
@@ -474,9 +515,21 @@ def test_find_artifacts_refuses_an_ambiguous_dist_directory(tmp_path: Path) -> N
 
     with pytest.raises(SystemExit) as refusal:
         VALIDATOR.find_artifacts(tmp_path)
-
     assert "exactly one wheel and one sdist" in str(refusal.value)
 
+
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+@pytest.mark.parametrize("relative", ["scripts/_html_usability_profile.py", "scripts/_normalized_contract.py",
+    "scripts/_evidence_policies.py", "scripts/_script_errors.py", "scripts/normalize_sources.py",
+    "docs/normalized-source-format.md", "docs/source-usability.md", "docs/source-delivery.md", "docs/upgrade-adoption.md"])
+def test_html_runtime_and_contract_assets_are_required_in_both_archives(tmp_path, artifact, relative):
+    missing = ("evidence_wiki/assets/" if artifact == "wheel" else "") + "workspace-template/" + relative
+    wheel = make_wheel(tmp_path / "evidence_wiki-9.9.9-py3-none-any.whl",
+                       sorted(set(VALIDATOR.REQUIRED_WHEEL_MEMBERS) - {missing}))
+    sdist = make_sdist(tmp_path / "evidence_wiki-9.9.9.tar.gz", sorted(set(VALIDATOR.REQUIRED_SDIST_MEMBERS) - {missing}))
+    with pytest.raises(SystemExit, match="missing required members") as refusal:
+        VALIDATOR.check_archive_membership(wheel, sdist)
+    assert missing in str(refusal.value)
 
 def test_round_trip_yaml_runtime_dependency_is_pinned_and_noticed() -> None:
     pyproject = PYPROJECT_PATH.read_text(encoding="utf-8")

@@ -253,7 +253,7 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
 
         for runner in ("ubuntu-latest", "macos-latest", "windows-latest"):
             self.assertIn(f"os: {runner}", workflow)
-        self.assertIn('python-version: "3.10"', workflow)
+        self.assertIn('python-version: "3.10.21"', workflow)
         self.assertIn("Install and verify optional Poppler compatibility backend", workflow)
         self.assertIn("sudo apt-get install --yes --no-install-recommends poppler-utils", workflow)
         self.assertIn("pdftotext -v", workflow)

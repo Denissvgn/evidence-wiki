@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests._html_fixture import normalize_html_manifest
 from tests._script_loader import load_module as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,7 @@ class StandardsRegistryWorkflowTests(unittest.TestCase):
     def copy_fixture(self, root: Path) -> Path:
         target = root / "standards-registry-workspace"
         shutil.copytree(FIXTURE, target)
+        normalize_html_manifest(target)
         return target
 
     def test_offline_fixture_exports_standards_and_blocks_withdrawn_standard(self):

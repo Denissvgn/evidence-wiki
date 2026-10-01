@@ -360,6 +360,10 @@ _REMEDIATIONS = {
     "EVIDENCE_ASSESSMENT_REFUSED": (
         "Check the bounded request, current source revisions, assessment authority and host checkpoint."
     ),
+    "NORMALIZATION_PROFILE_UNSUPPORTED": (
+        "Use a producer that supports the retained HTML classification revision; preserve the existing record "
+        "and originals. Force cannot downgrade an unsupported revision."
+    ),
     "SOURCE_NOT_NORMALIZABLE": (
         "The manifest holds this source but no extractor in this package handles it. Check its kind and "
         "raw_paths with scripts/source_inventory.py --report, or write the record by hand to the contract "

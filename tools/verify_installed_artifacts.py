@@ -12,6 +12,7 @@ from tools.probe_installed_cli import OUTCOME_CASES, checked_outcomes
 from tools.validate_installed_artifacts import (
     REPO_ROOT,
     check_archive_membership,
+    checked_html_outcomes,
     find_artifacts,
     sha256_of,
     validation_identity,
@@ -52,6 +53,7 @@ def verify(dist_dir, evidence, *, commit, run_id, expected_version=None):
             raise ValueError("installed package identity differs")
         for group in OUTCOME_CASES:
             checked_outcomes(group, installed.get(group))
+        checked_html_outcomes(installed.get("html_usability"))
         if installed.get("native_initialization") != {
             "direct_profile": "passed", "nested_profile": "passed",
             "no_write_refusals": "passed", "controller_submission": "passed",

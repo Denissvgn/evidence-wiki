@@ -1,0 +1,207 @@
+{
+  "kind": "synthetic_reader_inputs",
+  "cases": [
+    {
+      "name": "legacy",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        }
+      },
+      "current_revision": 1,
+      "expected_state": "recheck_required"
+    },
+    {
+      "name": "current",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": 1
+      },
+      "current_revision": 1,
+      "expected_state": "current"
+    },
+    {
+      "name": "future",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": 2
+      },
+      "current_revision": 1,
+      "expected_state": "unsupported"
+    },
+    {
+      "name": "boolean",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": true
+      },
+      "current_revision": 1,
+      "expected_state": "invalid"
+    },
+    {
+      "name": "string",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": "1"
+      },
+      "current_revision": 1,
+      "expected_state": "invalid"
+    },
+    {
+      "name": "null",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": null
+      },
+      "current_revision": 1,
+      "expected_state": "invalid"
+    },
+    {
+      "name": "zero",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": 0
+      },
+      "current_revision": 1,
+      "expected_state": "invalid"
+    },
+    {
+      "name": "negative",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": -1
+      },
+      "current_revision": 1,
+      "expected_state": "invalid"
+    },
+    {
+      "name": "mapping",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": {}
+      },
+      "current_revision": 1,
+      "expected_state": "invalid"
+    },
+    {
+      "name": "list",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": []
+      },
+      "current_revision": 1,
+      "expected_state": "invalid"
+    },
+    {
+      "name": "older-positive",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        },
+        "html_usability_version": 1
+      },
+      "current_revision": 2,
+      "expected_state": "recheck_required"
+    },
+    {
+      "name": "foreign",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "html-adapter",
+          "version": "1"
+        }
+      },
+      "current_revision": 1,
+      "expected_state": "not_applicable"
+    },
+    {
+      "name": "native-pdf",
+      "frontmatter": {
+        "source_kind": "pdf",
+        "extraction_method": "pdf_text",
+        "normalizer": {
+          "name": "normalize_sources.py",
+          "version": 3
+        }
+      },
+      "current_revision": 1,
+      "expected_state": "not_applicable"
+    },
+    {
+      "name": "manual",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text",
+        "normalizer": {
+          "name": "manual",
+          "version": 1
+        },
+        "html_usability_version": 1
+      },
+      "current_revision": 1,
+      "expected_state": "recheck_required"
+    },
+    {
+      "name": "missing-producer",
+      "frontmatter": {
+        "source_kind": "html",
+        "extraction_method": "html_text"
+      },
+      "current_revision": 1,
+      "expected_state": "invalid"
+    }
+  ]
+}

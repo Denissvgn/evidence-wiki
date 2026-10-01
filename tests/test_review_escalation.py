@@ -120,7 +120,7 @@ class ReviewEscalationAcceptanceTests(unittest.TestCase):
         normalized = target / "sources" / "normalized" / "raw--supplier-quote-2026.md"
         normalized.parent.mkdir(parents=True, exist_ok=True)
         normalized.write_text(
-            "---\ntype: source\n"
+            "---\ntype: normalized_source\n"
             f"source_id: {SOURCE_ID}\n"
             "title: Supplier quote 2026\n---\n\n"
             "# Supplier quote 2026\n\nQuoted unit price is 12.40 EUR.\n",

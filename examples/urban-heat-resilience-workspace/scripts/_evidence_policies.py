@@ -30,6 +30,7 @@ from _workspace_module_loader import load_workspace_module
 
 _source_failure_taxonomy = load_workspace_module(_SCRIPT_DIR, "source_failure_taxonomy")
 delivery_unusable_evidence_reasons = _source_failure_taxonomy.unusable_evidence_reasons
+_html_usability_profile = load_workspace_module(_SCRIPT_DIR, "_html_usability_profile")
 
 # Neither module imports this one, so both bind at import time. `_policy_primitives`
 # decides a domain pack's declarative policy rules and performs no filesystem I/O of its
@@ -180,6 +181,7 @@ class PolicyInputs:
     policy_rules: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     structured_view_loads: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     question_frontmatters: dict[str, dict[str, Any] | None] = field(default_factory=dict, repr=False, compare=False)
+    normalized_record_issues: dict[str, list[dict[str, Any]]] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # Parsed once here rather than per policy, and eagerly rather than lazily: a
@@ -262,7 +264,8 @@ def load_policy_inputs(project_root: Path | str, config: dict[str, Any] | None =
     root = Path(project_root).expanduser().resolve()
     loaded_config = config if isinstance(config, dict) else load_config(root)
     manifest_records = load_manifest_records(root / manifest_path_text(loaded_config))
-    normalized_records = load_normalized_records(root / normalized_dir_text(loaded_config))
+    normalized_records, normalized_record_issues = load_normalized_records(
+        root / normalized_dir_text(loaded_config), manifest_records)
     provenance = load_provenance_by_source_id(root, manifest_records, normalized_records)
     candidates = load_jsonl_mapping_records(root / DEFAULT_CANDIDATES_PATH, optional=True)
     jurisdiction_profiles = load_jurisdiction_profiles(root / jurisdictions_path_text(loaded_config))
@@ -277,6 +280,7 @@ def load_policy_inputs(project_root: Path | str, config: dict[str, Any] | None =
         candidates_by_request_id=index_candidates_by_request_id(candidates),
         jurisdiction_profiles=jurisdiction_profiles,
         coverage_manifests=coverage_manifests,
+        normalized_record_issues=normalized_record_issues,
     )
 
 
@@ -383,10 +387,10 @@ def load_manifest_records(path: Path) -> dict[str, dict[str, Any]]:
     return records
 
 
-def read_frontmatter(path: Path) -> dict[str, Any]:
+def read_frontmatter(path: Path, *, strict_encoding: bool = False) -> dict[str, Any]:
     try:
-        text = path.read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
-    except OSError:
+        text = path.read_text(encoding="utf-8", errors="strict" if strict_encoding else "ignore").replace("\r\n", "\n").replace("\r", "\n")
+    except (OSError, UnicodeError):
         return {}
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
@@ -401,16 +405,54 @@ def read_frontmatter(path: Path) -> dict[str, Any]:
     return frontmatter if isinstance(frontmatter, dict) else {}
 
 
-def load_normalized_records(normalized_root: Path) -> dict[str, dict[str, Any]]:
+def load_normalized_records(
+    normalized_root: Path, manifest_records: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """Bind metadata to canonical paths and retain identity failures per source.
+
+    A copied record never replaces the canonical observation. Ambiguity is an
+    admission failure for that source, not an exception aborting unrelated policy
+    evaluations. Invalid canonical metadata remains diagnostic data, never an
+    invented usability claim. Symlinks are not normalized-record observations.
+    """
     records: dict[str, dict[str, Any]] = {}
+    issues: dict[str, list[dict[str, Any]]] = {}
     if not normalized_root.is_dir():
-        return records
+        return records, issues
+    contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract")
+    documents: dict[Path, dict[str, Any]] = {}
+    claims: dict[str, list[Path]] = {}
     for path in sorted(normalized_root.rglob("*.md")):
-        frontmatter = read_frontmatter(path)
+        relative = path.relative_to(normalized_root)
+        frontmatter = read_frontmatter(path, strict_encoding=True) if path.is_file() and not path.is_symlink() else {}
+        documents[relative] = frontmatter
         source_id = frontmatter.get("source_id")
-        if isinstance(source_id, str) and source_id:
-            records[source_id] = frontmatter
-    return records
+        if isinstance(source_id, str) and source_id.strip():
+            claims.setdefault(source_id, []).append(relative)
+    source_ids = sorted(set(manifest_records or {}) | set(claims))
+    expected = {source_id: contract.expected_record_path(normalized_root, source_id).relative_to(normalized_root)
+                for source_id in source_ids}
+    owners: dict[Path, list[str]] = {}
+    for source_id, path in expected.items():
+        owners.setdefault(path, []).append(source_id)
+    for source_id in source_ids:
+        canonical = expected[source_id]
+        candidates = claims.get(source_id, [])
+        failures: list[dict[str, Any]] = []
+        if len(candidates) > 1 or (canonical in documents and len(owners[canonical]) > 1):
+            paths = set(candidates) | ({canonical} if canonical in documents else set())
+            failures.append({"reason": "normalized_record_ambiguous", "paths": sorted(p.as_posix() for p in paths)})
+        noncanonical = sorted(p.as_posix() for p in candidates if p != canonical)
+        if noncanonical:
+            failures.append({"reason": "normalized_record_noncanonical", "paths": noncanonical})
+        if canonical in documents:
+            metadata = documents[canonical]
+            records[source_id] = metadata
+            if metadata.get("source_id") != source_id or metadata.get("type") != "normalized_source":
+                failures.append({"reason": "normalized_record_identity_invalid", "paths": [canonical.as_posix()]})
+        if failures:
+            issues[source_id] = failures
+    return records, issues
 
 
 def load_yaml_mapping(path: Path) -> dict[str, Any]:
@@ -548,7 +590,8 @@ def unique_strings(values: list[str]) -> list[str]:
 
 
 def source_exists(inputs: PolicyInputs, source_id: str) -> bool:
-    return source_id in inputs.manifest_records or source_id in inputs.normalized_records
+    return (source_id in inputs.manifest_records or source_id in inputs.normalized_records
+            or source_id in inputs.normalized_record_issues)
 
 
 def present_and_missing(source_ids: list[str], inputs: PolicyInputs) -> tuple[list[str], list[str]]:
@@ -615,11 +658,19 @@ def explicit_unusable_reasons(document: dict[str, Any]) -> list[str]:
 
 
 def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> list[str]:
+    """Aggregate selected-source refusals, including native classification currency."""
     record = inputs.manifest_records.get(source_id, {})
     normalized = inputs.normalized_records.get(source_id, {})
     metadata = source_metadata(inputs, source_id)
     provenance = inputs.provenance_by_source_id.get(source_id, {})
     reasons: list[str] = []
+    for issue in inputs.normalized_record_issues.get(source_id, []):
+        paths = ", ".join((Path(normalized_dir_text(inputs.config)) / path).as_posix() for path in issue["paths"])
+        reasons.append(f"{issue['reason']}: {paths}")
+    profile = _html_usability_profile.evaluate_html_usability(
+        normalized, source_kind=record.get("kind") if isinstance(record.get("kind"), str) else "")
+    if profile.reason:
+        reasons.append(profile.reason)
     usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate")
     reasons.extend(usage.normalized_issues(inputs.project_root, inputs.config, record, normalized))
     packet = load_workspace_module(_SCRIPT_DIR, "_qualified_packet")
@@ -635,17 +686,37 @@ def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> li
 
 def unusable_evidence_result(policy: str, ids: list[str], present: list[str], inputs: PolicyInputs) -> PolicyResult | None:
     reasons: list[str] = []
+    recheck = False
+    identity = False
+    unusable = False
     for source_id in present:
         for reason in source_unusable_evidence_reasons(inputs, source_id):
-            reasons.append(f"{source_id} is marked unusable evidence ({reason}).")
+            if reason.startswith("normalized_record_"):
+                identity = True
+                reasons.append(f"{source_id} has invalid normalized-record identity ({reason}).")
+            elif reason.startswith("html_usability_"):
+                recheck = True
+                reasons.append(f"{source_id} lacks a current native HTML classification ({reason}).")
+            else:
+                unusable = True
+                reasons.append(f"{source_id} is marked unusable evidence ({reason}).")
     if not reasons:
         return None
+    remediation: list[str] = []
+    if identity:
+        remediation.append("Retain one correctly identified record at the canonical normalized path; move retained copies "
+                           "outside the normalized directory through their owner. Preserve original evidence.")
+    if recheck:
+        remediation.append("Recheck selected HTML through native normalization from retained originals; use a compatible producer for future revisions. "
+                           "Preserve records and originals, and resolve any independent unusable-evidence reasons before required coverage.")
+    elif unusable:
+        remediation.append("Redeliver or replace unusable source captures before accepting them for required coverage facets.")
     return result(
         policy,
         VERDICT_FAIL,
         ids,
         reasons,
-        "Redeliver or replace unusable source captures before accepting them for required coverage facets.",
+        " ".join(remediation),
     )
 
 

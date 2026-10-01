@@ -33,6 +33,7 @@ from typing import Any
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _html_usability_profile import HTML_USABILITY_FIELD, evaluate_html_usability, valid_html_usability_version
 from _workspace_module_loader import load_workspace_module
 
 try:
@@ -355,6 +356,14 @@ def check_frontmatter(frontmatter: dict[str, Any]) -> list[Violation]:
             )
 
     violations.extend(_check_normalizer(frontmatter))
+    profile = evaluate_html_usability(frontmatter)
+    if profile.applicable and HTML_USABILITY_FIELD in frontmatter:
+        value = frontmatter[HTML_USABILITY_FIELD]
+        if not valid_html_usability_version(value):
+            violations.append(_invalid(
+                "Native HTML classification revisions must be positive integers.",
+                field=HTML_USABILITY_FIELD, expected="positive integer", actual=value,
+            ))
     return violations
 
 

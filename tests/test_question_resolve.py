@@ -237,7 +237,7 @@ class QuestionResolveTests(unittest.TestCase):
         record = normalized_dir / f"{NORMALIZE.safe_source_id(source_id)}.md"
         record.write_text(
             "---\n"
-            "type: source\n"
+            "type: normalized_source\n"
             f"source_id: {source_id}\n"
             "title: Benchmark Survey 2026\n"
             "---\n\n"

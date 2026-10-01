@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from tools.run_test_groups import COMBINED_MODULES, groups, source_identity
@@ -21,22 +22,34 @@ def check_run(row: dict, label: str, expected: list[str], *, collect: bool = Fal
 
 
 def verify(root: Path, evidence: Path, *, commit: str, run_id: str, platforms: list[str],
-           shard_count: int, group_size: int = 160) -> dict:
+           shard_count: int, group_size: int = 160, python_patches: dict[str, str] | None = None) -> dict:
     """Compare each platform's full collection with every expected shard and order."""
     if not commit or not run_id or not platforms or len(set(platforms)) != len(platforms):
         raise ValueError("commit, run ID and unique expected platforms are required")
     if shard_count < 1 or group_size < 1:
         raise ValueError("shard count and group size must be positive")
+    if python_patches is not None:
+        if set(python_patches) != set(platforms):
+            raise ValueError("Python patch expectations must cover exactly the required platforms")
+        for platform, patch in python_patches.items():
+            if not re.fullmatch(r"\d+\.\d+\.\d+", patch) or not patch.startswith(platform.rsplit("/", 1)[-1] + "."):
+                raise ValueError(f"{platform}: invalid Python patch expectation")
     identity = source_identity(root)
     reports: dict[str, dict[int, dict]] = {platform: {} for platform in platforms}
     for path in sorted(evidence.rglob("manifest.json")):
         report = json.loads(path.read_text(encoding="utf-8"))
         runner, shard = report["runner"], report["shard"]
         python = ".".join(report["python"].split()[0].split(".")[:2])
+        expected_python = report.get("expected_python")
+        if expected_python is not None and report["python"].split()[0] != expected_python:
+            raise ValueError(f"{path}: resolved Python patch differs from the qualification runtime")
         platform = f"{runner['RUNNER_OS']}/{runner['RUNNER_ARCH']}/{python}"
         index = shard["index"]
         if platform not in reports or type(index) is not int or not 1 <= index <= shard_count:
             raise ValueError(f"{path}: unexpected platform or shard")
+        if python_patches is not None and (report["python"].split()[0] != python_patches[platform]
+                                           or expected_python != python_patches[platform]):
+            raise ValueError(f"{platform}: Python patch does not match the required baseline")
         if index in reports[platform]:
             raise ValueError(f"{platform}: duplicate shard {index}")
         if (report["commit"] != commit or runner["GITHUB_RUN_ID"] != run_id
@@ -88,10 +101,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--platform", action="append", required=True, dest="platforms", metavar="OS/ARCH/PYTHON")
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--group-size", type=int, default=160)
+    parser.add_argument("--python-patch", action="append", metavar="OS/ARCH/PYTHON=PATCH")
     args = parser.parse_args(argv)
     try:
+        patches = None
+        if args.python_patch is not None:
+            patches = {}
+            for value in args.python_patch:
+                platform, patch = value.split("=", 1)
+                if platform in patches:
+                    raise ValueError(f"Duplicate Python patch expectation: {platform}")
+                patches[platform] = patch
         summary = verify(args.root.resolve(), args.evidence.resolve(), commit=args.commit, run_id=args.run_id,
-                         platforms=args.platforms, shard_count=args.shard_count, group_size=args.group_size)
+                         platforms=args.platforms, shard_count=args.shard_count, group_size=args.group_size,
+                         python_patches=patches)
     except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
         print(f"Suite shard verification failed: {error}")
         return 1
