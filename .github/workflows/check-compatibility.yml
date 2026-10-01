@@ -1,0 +1,79 @@
+name: Latest Python compatibility
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  check:
+    name: ${{ matrix.os }} / latest Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: macos-latest
+            python: "3.14"
+          - os: windows-latest
+            python: "3.14"
+    steps:
+      - name: Check out the event commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve latest stable Python patch
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          check-latest: true
+          allow-prereleases: false
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install and check compatibility (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          EVIDENCE_WIKI_EXPECTED_PYTHON: ${{ steps.python.outputs.python-version }}
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --editable ".[dev]"
+          .venv/bin/python tools/check_ci_compatibility.py
+
+      - name: Install and check compatibility (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          EVIDENCE_WIKI_EXPECTED_PYTHON: ${{ steps.python.outputs.python-version }}
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe -m pip install --editable ".[dev]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe tools/check_ci_compatibility.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retain latest compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: latest-compatibility-${{ github.workflow }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.python }}
+          path: compatibility-evidence/
+          if-no-files-found: warn
+          retention-days: 90

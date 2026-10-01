@@ -22,7 +22,7 @@ source = normalize_sources.normalize_html_record(root, record)
 output = root / "sources/normalized" / (normalize_sources.safe_source_id(record["id"]) + ".md")
 output.parent.mkdir(parents=True, exist_ok=True)
 metadata = normalize_sources.frontmatter_for(source, "sources/manifest.jsonl", output, "2026-07-02")
-output.write_text(normalize_sources.render_markdown(source, metadata), encoding="utf-8")
+output.write_text(normalize_sources.render_markdown(source, metadata), encoding="utf-8", newline="\\n")
 """
 
 

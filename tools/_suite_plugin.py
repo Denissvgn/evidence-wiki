@@ -5,6 +5,10 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
+MAX_NODE_ID_UNITS = 1024
+
 _collected = []
 _executed = []
 
@@ -17,8 +21,21 @@ def progress(event):
             stream.write(json.dumps(event) + "\n")
 
 
-def pytest_collection_finish(session):
-    _collected[:] = [item.nodeid for item in session.items]
+def pytest_collection_modifyitems(items):
+    """Reject oversized IDs before reporting or executing payload-derived cases."""
+    _collected[:] = [item.nodeid for item in items]
+    oversized = [(node, len(node.encode("utf-16-le", errors="surrogatepass")) // 2)
+                 for node in _collected]
+    oversized = [(node, units) for node, units in oversized if units > MAX_NODE_ID_UNITS]
+    if oversized:
+        examples = "\n".join(f"  {node[:120]!r}: {units} UTF-16 units" for node, units in oversized[:5])
+        # Preserve exact IDs in the record, but abort before terminal collection
+        # reporting can print the entire rejected payload. No case can execute.
+        items.clear()
+        raise pytest.UsageError(
+            f"{len(oversized)} test IDs exceed {MAX_NODE_ID_UNITS} UTF-16 units. "
+            f"Use short explicit parameter IDs; test payloads must stay in parameters.\n{examples}"
+        )
 
 
 def pytest_runtest_logstart(nodeid, location):

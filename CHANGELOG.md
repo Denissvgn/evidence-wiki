@@ -11,7 +11,8 @@
 - Introduce native HTML classification revision 2. Unfinished markup at EOF
   makes gateway/authentication rules abstain without changing retained text,
   titles, links or outlines. Normalized-format and global-normalizer versions
-  remain unchanged.
+  remain unchanged. Finalization handles deferred parser input consistently
+  across supported Python versions.
 - Require current native HTML classifications for source inspection, local
   routing, required coverage and acquisition reuse. Explicitly refresh absent
   or revision-1 classifications from retained originals; future revisions refuse

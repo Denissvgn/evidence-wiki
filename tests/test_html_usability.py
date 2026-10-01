@@ -286,6 +286,81 @@ def test_snapshot_before_parser_close_is_not_a_complete_observation():
     assert not extractor.classification_context().degraded
 
 
+@pytest.fixture(params=[False, True], ids=["immediate", "buffered"])
+def parser_buffering(request, monkeypatch):
+    """Exercise eager and deferred base parsing without depending on a runtime patch."""
+    def feed(parser, data):
+        if not request.param:
+            parser.rawdata += data
+            parser.goahead(False)
+            return
+        if not hasattr(parser, "_queued_input"):
+            parser._queued_input, parser._queued_size, parser._queue_threshold = [], 0, 1
+        parser._queued_input.append(data)
+        parser._queued_size += len(data)
+        if parser._queued_size < parser._queue_threshold:
+            return
+        parser.rawdata += "".join(parser._queued_input)
+        parser._queued_input.clear()
+        parser._queued_size = 0
+        size = len(parser.rawdata)
+        parser.goahead(False)
+        parser._queue_threshold = 1 if len(parser.rawdata) < size else size
+
+    def close(parser):
+        parser.rawdata += "".join(getattr(parser, "_queued_input", []))
+        if hasattr(parser, "_queued_input"):
+            parser._queued_input.clear()
+            parser._queued_size = 0
+        parser.goahead(True)
+
+    monkeypatch.setattr(NORMALIZE.HTMLParser, "feed", feed)
+    monkeypatch.setattr(NORMALIZE.HTMLParser, "close", close)
+
+
+@pytest.mark.parametrize("prefix,suffix", [
+    ('<!-- completed comment', '-->'), ('<br title="', 'x">'), ('<script>hidden</scr', 'ipt>'),
+], ids=["comment", "tag", "skipped-content"])
+def test_deferred_completed_markup_does_not_degrade_classification(parser_buffering, prefix, suffix):
+    parser = NORMALIZE.HTMLContentExtractor()
+    parser.feed('<p>Measured value: 42.</p>')
+    parser.feed(prefix)
+    parser.feed(suffix)
+    assert parser.classification_context().degraded
+    parser.close()
+    assert not parser.classification_context().degraded
+    assert not parser.unbalanced_skip_tags
+    assert NORMALIZE.normalize_html_body_text(parser.text_chunks) == 'Measured value: 42.'
+    complete = parser.classification_context()
+    parser.close()
+    assert parser.classification_context() == complete
+
+
+@pytest.mark.parametrize("tail", ['<!-- unfinished', '<!doctype', '<?unfinished', '<unfinished attr="', '</unfinished'])
+@pytest.mark.parametrize("chunk_size", [1, 7, None])
+def test_deferred_unfinished_markup_stays_degraded(parser_buffering, tail, chunk_size):
+    html = '<p>Bad Gateway.</p>' + tail
+    parser = NORMALIZE.HTMLContentExtractor()
+    size = chunk_size or len(html)
+    for offset in range(0, len(html), size):
+        parser.feed(html[offset:offset + size])
+    parser.close()
+    assert parser.classification_context().degraded
+    assert not NORMALIZE.html_gateway_shell(parser.classification_context())
+    parser.close()
+    assert parser.classification_context().degraded
+
+
+def test_heading_flush_follows_deferred_eof_data(parser_buffering):
+    parser = NORMALIZE.HTMLContentExtractor()
+    parser.feed('<h1>')
+    parser.feed('Measured &am')
+    parser.feed('p;')
+    parser.close()
+    assert parser.outline == [(2, 'Measured &')]
+    assert NORMALIZE.normalize_html_body_text(parser.text_chunks) == 'Measured &'
+
+
 def test_long_retained_evidence_continues_after_context_limit():
     text = 'a' * (NORMALIZE.HTML_CONTEXT_MAX_CHARS + 500)
     extractor = NORMALIZE.HTMLContentExtractor()
@@ -878,7 +953,7 @@ def test_invalid_utf8_is_retained_as_replacement_text_and_not_invented_as_a_mess
     '<p>502 Bad Gateway.</p>' * 5000,
     '<p>Please sign in to continue.</p>' + '<p>Useful explanation.</p>' * 1000,
     '<p>Useful observation.</p>' * 1000 + '<script></script>' * 100,
-])
+], ids=["repeated-gateway", "signin-with-content", "content-with-scripts"])
 def test_large_inputs_keep_new_matching_bounded_and_qualified(html):
     context = parse_context(html)
     assert context.truncated

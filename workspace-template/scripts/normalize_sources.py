@@ -3032,20 +3032,25 @@ class HTMLContentExtractor(HTMLParser):
         self._heading_level = None
         self._heading_parts = []
 
+    def goahead(self, end: bool) -> None:
+        """Qualify residual markup after base closure assembles deferred input."""
+        if end:
+            # Drain complete tokens before EOF can discard unfinished markup.
+            # Base close owns input buffering; feed need not have parsed it yet.
+            super().goahead(False)
+            pending = self.rawdata
+            self._classification.degraded |= (
+                re.match(r"<[A-Za-z]", pending) is not None
+                or pending.startswith(("<!", "<?"))
+                or (pending.startswith("</") and len(pending) > 2)
+            )
+        super().goahead(end)
+
     def close(self) -> None:  # noqa: D102 - inherited behavior plus heading flush
-        # The tokenizer can discard unfinished markup at EOF without a callback.
-        # Character references and literal '<' / '</' are still ordinary text.
-        pending = self.rawdata
-        unfinished_markup = (
-            re.match(r"<[A-Za-z]", pending) is not None
-            or pending.startswith(("<!", "<?"))
-            or (pending.startswith("</") and len(pending) > 2)
-        )
-        self._classification.degraded |= unfinished_markup
+        super().close()
         self._flush_heading()
         if self._skip_depth:
             self.unbalanced_skip_tags = True
-        super().close()
         self._classification.finish()
 
     def classification_context(self, *, degraded: bool = False) -> HTMLClassificationContext:

@@ -162,6 +162,35 @@ def test_invalid_shard_arguments_do_not_start_collection(tmp_path, count, index)
     assert refusal.value.code == 2 and not output.exists()
 
 
+@pytest.mark.parametrize("damage", [None, "runtime", "declared", "missing", "wrong-minor", "partial-map"])
+def test_verifier_binds_resolved_patch_to_required_baseline(completed_shards, tmp_path, damage):
+    root, _, options, originals = completed_shards
+    reports = json.loads(json.dumps(originals))
+    patch = reports[0]["python"].split()[0]
+    for report in reports:
+        report["expected_python"] = patch
+    patches = {options["platforms"][0]: patch}
+    if damage == "runtime":
+        reports[0]["python"] = "0.0.0 changed"
+    elif damage == "declared":
+        reports[0]["expected_python"] = "0.0.0"
+    elif damage == "missing":
+        del reports[0]["expected_python"]
+    elif damage == "wrong-minor":
+        patches[options["platforms"][0]] = "0.0.0"
+    elif damage == "partial-map":
+        patches = {}
+    for i, report in enumerate(reports):
+        path = tmp_path / str(i)
+        path.mkdir()
+        (path / "manifest.json").write_text(json.dumps(report))
+    if damage is None:
+        assert verify(root, tmp_path, **options, python_patches=patches)
+    else:
+        with pytest.raises(ValueError):
+            verify(root, tmp_path, **options, python_patches=patches)
+
+
 def test_too_many_shards_fails_instead_of_claiming_an_empty_pass(completed_shards, tmp_path):
     root, _, _, _ = completed_shards
     output = tmp_path / "evidence"

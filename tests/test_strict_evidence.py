@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import io
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,8 +33,13 @@ def host(tmp_path, monkeypatch, request):
         with contextlib.redirect_stdout(io.StringIO()):
             assert main(["init", "--profile", str(profile)]) == 0
     fixture = AssessmentFixture(tmp_path, monkeypatch, initialize)
+    newline = getattr(request, "param", {}).get("record_newline")
+    if newline is not None:
+        record = fixture.normalized_path.read_bytes().replace(b"\r\n", b"\n")
+        fixture.normalized_path.write_bytes(record.replace(b"\n", newline))
     fixture.transact(USAGE, "initialize")
-    fixture.body, fixture.files = fixture.temporal_source(**getattr(request, "param", {}))
+    source_options = {key: value for key, value in getattr(request, "param", {}).items() if key != "record_newline"}
+    fixture.body, fixture.files = fixture.temporal_source(**source_options)
     fixture.transact(USAGE, "deposit", fixture.body, fixture.files)
     fixture.strict_policy = {
         "schema_version": CONTRACT.POLICY_SCHEMA, "policy_id": "reference-research", "revision": "1",
@@ -147,7 +153,9 @@ def test_changed_basis_or_failed_evidence_never_reuses_approval(host, mutation):
     assert result["questions"][0]["claims"] == []
 
 
-@pytest.mark.parametrize("marker", [b"", b"html_usability_version: 3\n"])
+@pytest.mark.parametrize("host", [{"record_newline": b"\n"}, {"record_newline": b"\r\n"}],
+                         ids=["lf", "crlf"], indirect=True)
+@pytest.mark.parametrize("marker", [b"", b"html_usability_version: 3"], ids=["missing", "future"])
 def test_html_qualification_only_change_cannot_reuse_a_review_receipt(host, marker):
     review(host)
     assert CORE.publication(host.root)["verdict"] == "ship"
@@ -156,7 +164,9 @@ def test_html_qualification_only_change_cannot_reuse_a_review_receipt(host, mark
     metadata, body, error = contract.split_record(original.decode())
     assert error is None and metadata["html_usability_version"] == 2
     state = (host.host / "evidence-state.json").read_bytes()
-    updated = original.replace(b"html_usability_version: 2\n", marker, 1)
+    updated, count = re.subn(rb"(?m)^html_usability_version: 2(\r?\n)",
+                            lambda match: marker + match[1] if marker else b"", original, count=1)
+    assert count == 1
     assert updated != original
     host.normalized_path.write_bytes(updated)
     changed, changed_body, error = contract.split_record(updated.decode())
