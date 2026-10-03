@@ -410,7 +410,7 @@ class ResearchSession:
         if self.execution is not None:
             from . import execution_session
             records = execution_session.retained(self)
-            value = execution_session._pending(records)
+            value = execution_session.pending(self, records)
             if value is not None:
                 value = {"schema_version": "research-execution-pending/v1", **value,
                     "attempt": execution_session._attempt_rows(records)[value["attempt_id"]]["attempt"]}

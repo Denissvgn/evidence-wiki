@@ -30,6 +30,7 @@ from typing import Any, Protocol
 from .workflow_contracts import JOB, JOB_V2, MAX_BYTES, document_sha256, validate_document, validate_job
 
 PROFILE = "research-execution-profile/v1"
+PROFILE_V2 = "research-execution-profile/v2"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -144,6 +145,83 @@ class ExecutionRole:
 
 
 @dataclass(frozen=True)
+class ExecutionRoleLimit:
+    """Aggregate ceilings for one semantic role and controller across configs."""
+
+    role: str
+    controller_ref: str
+    model_calls: int
+    tool_calls: int
+    tokens: int
+    cost_limit: str
+    seconds: int
+
+    def __post_init__(self) -> None:
+        if type(self.role) is not str or self.role not in {"host_worker", "evaluator"}:
+            raise ExecutionError("execution_role_invalid")
+        _ref(self.controller_ref)
+        for name in ("model_calls", "tool_calls", "tokens"):
+            _integer(getattr(self, name), 100000000)
+        _integer(self.seconds, 86400)
+        _decimal(self.cost_limit)
+
+    def document(self) -> dict[str, Any]:
+        return {"role": self.role, "controller_ref": self.controller_ref,
+                "budgets": {"model_calls": self.model_calls, "tool_calls": self.tool_calls,
+                            "tokens": self.tokens, "cost": self.cost_limit, "seconds": self.seconds}}
+
+
+@dataclass(frozen=True)
+class ExecutionSchedule:
+    """Explicit continuation policy; the canonical run owner controls dispatch."""
+
+    role_limits: tuple[ExecutionRoleLimit, ...]
+    retry_reasons: tuple[str, ...] = ("executor_unavailable",)
+    backoff_seconds: int = 0
+    failover: tuple[tuple[str, ...], ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.role_limits) not in (list, tuple):
+            raise ExecutionError("execution_role_limits_invalid")
+        limits = tuple(self.role_limits)
+        if not 1 <= len(limits) <= 32 or any(type(item) is not ExecutionRoleLimit for item in limits):
+            raise ExecutionError("execution_role_limits_invalid")
+        if len({(item.role, item.controller_ref) for item in limits}) != len(limits):
+            raise ExecutionError("execution_role_limits_duplicate")
+        if type(self.retry_reasons) not in (list, tuple) or len(self.retry_reasons) > 16:
+            raise ExecutionError("execution_retry_reasons_invalid")
+        reasons = tuple(_ref(item) for item in self.retry_reasons)
+        if len(set(reasons)) != len(reasons):
+            raise ExecutionError("execution_retry_reasons_invalid")
+        _integer(self.backoff_seconds, 3600)
+        if type(self.failover) not in (list, tuple) or len(self.failover) > 16:
+            raise ExecutionError("execution_failover_invalid")
+        chains, configs = [], set()
+        for supplied in self.failover:
+            if type(supplied) not in (list, tuple) or not 2 <= len(supplied) <= 32:
+                raise ExecutionError("execution_failover_invalid")
+            chain = tuple(_ref(item) for item in supplied)
+            if len(set(chain)) != len(chain) or configs.intersection(chain):
+                raise ExecutionError("execution_failover_overlap")
+            configs.update(chain)
+            chains.append(chain)
+        object.__setattr__(self, "role_limits", limits)
+        object.__setattr__(self, "retry_reasons", reasons)
+        object.__setattr__(self, "failover", tuple(chains))
+
+    def limit(self, role: str, controller_ref: str) -> ExecutionRoleLimit:
+        for item in self.role_limits:
+            if (item.role, item.controller_ref) == (role, controller_ref):
+                return item
+        raise ExecutionError("execution_role_limit_unavailable")
+
+    def document(self) -> dict[str, Any]:
+        return {"role_limits": [item.document() for item in self.role_limits],
+                "retry_reasons": list(self.retry_reasons), "backoff_seconds": self.backoff_seconds,
+                "failover": [list(chain) for chain in self.failover]}
+
+
+@dataclass(frozen=True)
 class ExecutionProfile:
     """Immutable host selection with finite steps and per-job ceilings.
 
@@ -161,6 +239,7 @@ class ExecutionProfile:
     tokens: int
     cost_limit: str
     cleanup_timeout_seconds: float = 2.0
+    schedule: ExecutionSchedule | None = None
 
     def __post_init__(self) -> None:
         _ref(self.profile_ref)
@@ -182,9 +261,20 @@ class ExecutionProfile:
         if len({role.config_ref for role in roles}) != len(roles):
             raise ExecutionError("execution_roles_duplicate")
         object.__setattr__(self, "roles", roles)
+        if self.schedule is not None:
+            if type(self.schedule) is not ExecutionSchedule:
+                raise ExecutionError("execution_schedule_invalid")
+            if ({(role.role, role.controller_ref) for role in roles}
+                    != {(item.role, item.controller_ref) for item in self.schedule.role_limits}):
+                raise ExecutionError("execution_role_limits_incomplete")
+            for chain in self.schedule.failover:
+                selected = [self.role(config) for config in chain]
+                if (any(role.role != "host_worker" for role in selected)
+                        or len({role.controller_ref for role in selected}) != 1):
+                    raise ExecutionError("execution_failover_identity_invalid")
 
     def document(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": PROFILE, "profile_ref": self.profile_ref, "total_steps": self.total_steps,
             "currency": self.currency, "pricing_ref": self.pricing_ref,
             "roles": [role.document() for role in self.roles],
@@ -192,6 +282,9 @@ class ExecutionProfile:
                             "tokens": self.tokens, "cost": self.cost_limit},
             "cleanup_timeout_seconds": self.cleanup_timeout_seconds,
         }
+        if self.schedule is not None:
+            result.update(schema_version=PROFILE_V2, scheduling=self.schedule.document())
+        return result
 
     @property
     def sha256(self) -> str:
@@ -673,6 +766,98 @@ class BoundedSubprocessExecutor:
             raise ExecutionError("execution_correlation_refused")
         value["authentication"] = signature
         return value
+
+
+class DeterministicOfflineExecutor:
+    """Explicit inert fixtures for mechanics, with observed local usage only.
+
+    Output selection performs no model, tool, network or subprocess invocation.
+    Historical receipts authenticate fixture observations, never live judgments.
+    The canonical run owner retains reservations and owns restart recovery.
+    """
+
+    def __init__(self, profile: ExecutionProfile, *, outputs: dict[str, dict[str, Any]],
+                 receipt_key: bytes) -> None:
+        if type(profile) is not ExecutionProfile:
+            raise ExecutionError("execution_profile_invalid")
+        if any(not role.model_ref.startswith("offline/") for role in profile.roles):
+            raise ExecutionError("execution_offline_model_required")
+        if type(receipt_key) is not bytes or not 32 <= len(receipt_key) <= 128:
+            raise ExecutionError("execution_receipt_key_invalid")
+        if type(outputs) is not dict or len(outputs) > 32:
+            raise ExecutionError("execution_offline_outputs_invalid")
+        _json(outputs)
+        selected = {}
+        for config_ref, output in outputs.items():
+            profile.role(config_ref)
+            if type(output) is not dict:
+                raise ExecutionError("execution_offline_output_invalid")
+            encoded = _json(output)
+            if len(encoded) > MAX_BYTES // 2:
+                raise ExecutionError("execution_output_limit_invalid")
+            selected[config_ref] = json.loads(encoded)
+        self.profile = profile
+        self._key = receipt_key
+        self._outputs = selected
+        self._attempts: dict[str, tuple[ExecutionAttempt, dict[str, Any]]] = {}
+        self._lock = threading.RLock()
+
+    # Reuse the reference host's pure correlation and closed receipt contract.
+    _check = BoundedSubprocessExecutor._check
+    _envelope = BoundedSubprocessExecutor._envelope
+    authenticate = BoundedSubprocessExecutor.authenticate
+
+    def _stored(self, attempt: ExecutionAttempt) -> dict[str, Any] | None:
+        self._check(attempt)
+        stored = self._attempts.get(attempt.attempt_id)
+        if stored is not None and stored[0].document() != attempt.document():
+            raise ExecutionError("execution_attempt_conflict")
+        return None if stored is None else stored[1]
+
+    def invoke(self, attempt: ExecutionAttempt) -> dict[str, Any]:
+        with self._lock:
+            stored = self._stored(attempt)
+            if stored is not None:
+                return copy.deepcopy(stored)
+            if len(self._attempts) >= self.profile.total_steps:
+                raise ExecutionError("execution_step_limit")
+            started = _now()
+            job = validate_job(attempt.job, now_utc=started)
+            if job["operation"] in {"poll", "cancel"}:
+                raise ExecutionError("execution_control_job_unsupported")
+            before = time.monotonic()
+            output = copy.deepcopy(self._outputs.get(attempt.config_ref))
+            elapsed = time.monotonic() - before
+            completed = _now()
+            unavailable = output is None
+            expired = not unavailable and (_utc(completed) >= _utc(job["deadline_utc"])
+                                          or elapsed >= job["timeout_seconds"])
+            value = self._envelope(attempt, sequence=1, started_utc=None if unavailable else started, details={
+                "state": "unavailable" if unavailable else "expired" if expired else "succeeded",
+                "reason": "executor_unavailable" if unavailable else "deadline_expired" if expired else "offline_fixture",
+                "completed_utc": None if unavailable else completed,
+                "output": None if expired else output,
+                "observed_usage": {"seconds": 0 if unavailable else elapsed, "model_calls": 0,
+                                   "tool_calls": 0, "tokens": 0, "cost": "0"},
+                "final_accounting": True, "cancellation_confirmed": False,
+            })
+            self._attempts[attempt.attempt_id] = (attempt, value)
+            return copy.deepcopy(value)
+
+    def poll(self, attempt: ExecutionAttempt) -> dict[str, Any]:
+        with self._lock:
+            stored = self._stored(attempt)
+            if stored is not None:
+                return copy.deepcopy(stored)
+            return self._envelope(attempt, sequence=0, started_utc=None, details={
+                "state": "unavailable", "reason": "dispatch_not_observed", "completed_utc": None,
+                "output": None, "observed_usage": {"seconds": None, "model_calls": None,
+                    "tool_calls": None, "tokens": None, "cost": None},
+                "final_accounting": False, "cancellation_confirmed": False,
+            })
+
+    def cancel(self, attempt: ExecutionAttempt) -> dict[str, Any]:
+        return self.poll(attempt)
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

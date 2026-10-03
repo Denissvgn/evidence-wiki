@@ -155,6 +155,8 @@ class QualificationAuthority:
         if type(profile) is not ExecutionProfile or executor.profile.sha256 != profile.sha256:
             _fail("qualification_execution_profile_invalid")
         selected = profile.role(config_ref)
+        if selected.model_ref.startswith("offline/"):
+            _fail("qualification_offline_fixture_unsupported")
         required = [row for row in frozen["required_evaluators"] if row["profile_ref"] == config_ref
                     and row["controller_ref"] == selected.controller_ref]
         if selected.role != "evaluator" or len(required) != 1 or required[0]["human_required"]:
@@ -185,6 +187,8 @@ class QualificationAuthority:
                 _fail("qualification_attempt_mismatch")
             attempts.add(attempt.attempt_id)
             observed = validate_observation(executor.authenticate(supplied, attempt))
+            if observed["reason"] == "offline_fixture":
+                _fail("qualification_offline_fixture_unsupported")
             if any(observed[key] != value for key, value in {
                     "profile_sha256": profile.sha256, "attempt_id": attempt.attempt_id, "nonce": attempt.nonce,
                     "job_sha256": attempt.job_sha256, "input_sha256": attempt.input_sha256,

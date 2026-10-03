@@ -93,6 +93,20 @@ def rows(calibrated, *, record=None, policy=None, profile=None, rubric=None, now
         rubric_sha256=digest(rubric or suite["rubric"]))
 
 
+def test_offline_lookup_profile_cannot_supply_semantic_qualification():
+    from types import SimpleNamespace
+
+    original = policy_document()
+    policy = RunPolicy(original)
+    profile = ExecutionProfile("offline-host", 100, "EUR", "no-provider/v1", (
+        ExecutionRole("profile-a", "evaluator", "controller-a", "offline/reference", "prompt/v1"),),
+        0, 1, 0, "0", 0.1)
+    authority = QualificationAuthority("issuer", b"a" * 32, "generator")
+    with pytest.raises(QualificationError, match="offline_fixture_unsupported"):
+        authority.issue(policy, profile, "profile-a", {}, [], [], SimpleNamespace(profile=profile),
+            expires_utc=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())
+
+
 def test_actual_reference_execution_computes_qualified_metrics(calibrated):
     policy, _, cases, _, observations, _, _, record = calibrated
     assert len(observations) == len(cases) == 100

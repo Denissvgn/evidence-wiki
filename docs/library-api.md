@@ -52,6 +52,12 @@ Execution-aware v2 envelopes preserve the legacy refusal profile. The host
 supplies executor, qualification and observation services; current canonical
 owners continue to control evidence admission and release.
 
+Version `22` adds optional execution-profile scheduling and a deterministic
+offline host. Existing profiles keep their v1 identities when scheduling is
+absent. Scheduling pins aggregate limits for each role/controller across its
+configured worker backends. Authenticated final accounting and frozen policy
+permission are required before retry; unknown dispatch remains reserved.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -483,6 +489,19 @@ with host_context.activate(), Workspace.open(workspace_path) as workspace:
 ```
 
 All services and permissions in this example come from trusted host provisioning.
+
+`ExecutionRoleLimit` and `ExecutionSchedule` optionally freeze aggregate role
+limits, allowed failure reasons, a finite backoff and explicit worker fallback
+chains. The role budget spans every configured backend. Actual model/prompt
+identity is retained for the selected backend. Evaluator fallback requires a
+qualified identity mapping and is currently refused by this scheduling profile.
+Backoff and predecessor identity remain in the canonical run history; restarting
+cannot reset consumption or refresh the original run deadline.
+
+`DeterministicOfflineExecutor` consumes explicit host fixture outputs under
+reserved `offline/` model identities. It measures actual local elapsed work and
+reports zero provider calls, tokens and charge. Lost work remains unknown.
+Offline fixtures cannot establish semantic evaluator qualification.
 An execution profile pins role/controller, model and prompt identities, pricing,
 finite total steps and per-job ceilings. Consumed steps and reservations survive
 restart. A bounded call can yield a nonterminal result; the host can drive the

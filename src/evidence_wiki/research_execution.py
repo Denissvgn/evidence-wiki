@@ -196,6 +196,8 @@ class ResearchExecution:
         state = {"succeeded": "completed", "expired": "failed", "unavailable": "unknown", "running": "started"}.get(
             observation["state"], observation["state"])
         complete = observation["final_accounting"]
+        if state == "unknown" and observation["state"] == "unavailable" and complete:
+            state = "failed"
         slots = ["dispatch", "result", "usage"] if complete else ["dispatch"]
         return self.sign({"schema_version": accounting.OBSERVATION,
             "observation_id": attempt.attempt_id + "." + str(observation["sequence"]),

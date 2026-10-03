@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Add frozen role execution limits, authenticated bounded retries and configured
+  worker fallback without resetting run allowance; provide a deterministic
+  offline host with explicit fixture provenance.
+
 - Add explicit host-driven research sessions over canonical evidence owners,
   with bounded generation, draft admission, independent review and current release.
 - Add authenticated execution accounting and redacted decision reports with

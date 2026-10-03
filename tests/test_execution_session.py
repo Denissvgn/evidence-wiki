@@ -20,6 +20,8 @@ from evidence_wiki import (
     ExecutionAttempt,
     ExecutionProfile,
     ExecutionRole,
+    ExecutionRoleLimit,
+    ExecutionSchedule,
     HostReviewSigner,
     QualificationAuthority,
     QualifiedEvaluators,
@@ -155,9 +157,18 @@ def fixture(tmp_path, monkeypatch, request=None):
         policy["source_rules"]["allow_partial"] = True
     policy["budgets"].update(seconds=1800, model_calls=100, tokens=1000000, cost_limit="0")
     policy = RunPolicy(policy)
-    profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1", (
+    roles = (
         ExecutionRole("researcher", "host_worker", "runner", "controlled-reference-process", "generate/v1"),
-        ExecutionRole("profile-a", "evaluator", "evaluator", "controlled-reference-process", "review/v1")), 1, 1, 1000, "0", 1)
+        ExecutionRole("profile-a", "evaluator", "evaluator", "controlled-reference-process", "review/v1"))
+    schedule = None
+    if options.get("worker_failover"):
+        roles += (ExecutionRole("backup-researcher", "host_worker", "runner", "controlled-backup-process", "generate/v1"),)
+        schedule = ExecutionSchedule((
+            ExecutionRoleLimit("host_worker", "runner", 20, 20, 20000, "0", 1800),
+            ExecutionRoleLimit("evaluator", "evaluator", 20, 20, 20000, "0", 1800)),
+            ("worker_failed",), 1, (("researcher", "backup-researcher"),))
+    profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
+        roles, 1, 1, 1000, "0", 1, schedule)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
     generator = "import json,sys; json.load(sys.stdin); print(" + repr(json.dumps(generated)) + ")"
     evaluator = (
@@ -181,8 +192,12 @@ def fixture(tmp_path, monkeypatch, request=None):
         )
     worker = tmp_path / "workers"
     worker.mkdir()
-    executor = BoundedSubprocessExecutor(profile, commands={"researcher": (sys.executable, "-c", generator),
-        "profile-a": (sys.executable, "-c", evaluator)}, cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
+    commands = {"researcher": (sys.executable, "-c", generator), "profile-a": (sys.executable, "-c", evaluator)}
+    if options.get("worker_failover"):
+        commands["backup-researcher"] = (sys.executable, "-c", generator)
+        commands["researcher"] = (sys.executable, "-c", "raise SystemExit(1)")
+    executor = BoundedSubprocessExecutor(profile, commands=commands,
+        cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
     calibration_executor = BoundedSubprocessExecutor(profile, commands={"researcher": (sys.executable, "-c", generator),
         "profile-a": (sys.executable, "-c", evaluator)}, cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
     cases = [{"case_id": f"case-{index}", "family_id": f"family-{index // 10}",
@@ -356,7 +371,7 @@ def test_public_late_authenticated_completion_does_not_reopen_terminal_run(fixtu
             session.host_job(request_id="external", operation="generate", payload={"question": original})
             row = next(row for row in execution.records(session) if row["kind"] == "execution_attempt")
             attempt = execution.attempt(row["data"]["attempt"])
-            execution.executor.invoke(attempt)
+            initial = execution.executor.invoke(attempt)
             cancelled = session.cancel_pending(request_id="cancel")
             assert cancelled["cancellation_requested"] and not cancelled["cancellation_confirmed"]
             before = session.current()
@@ -369,7 +384,14 @@ def test_public_late_authenticated_completion_does_not_reopen_terminal_run(fixtu
             after = session.current()
             assert after["run"]["state"] == terminal["canonical_run_state"]
             assert after["accounting"]["accepted_count"] == 0
-            assert not after["execution"]["pending"]["reservation_occupied"]
+            assert after["execution"]["pending"]["reservation_occupied"]
+            assert session.pending()["reservation_occupied"]
+            assert session.intake_observation(initial, request_id="late-initial") == initial
+            settled = session.current()
+            assert not settled["execution"]["pending"]["reservation_occupied"]
+            assert not session.pending()["reservation_occupied"]
+            assert settled["run"]["state"] == terminal["canonical_run_state"]
+            assert settled["accounting"]["accepted_count"] == 0
             assert not any(row["kind"] == "execution_application" for row in execution.records(session))
 
 

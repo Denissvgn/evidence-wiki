@@ -152,7 +152,7 @@ def test_proposed_inventory_claim_extent_is_checked_before_application_or_mutati
         ExecutionRole("researcher", "host_worker", "registered-controller", "controlled-model", "prompt/v1"),), 0, 5, 0, "0")
     attempt = ExecutionAttempt.create(attempt_id="draft", nonce="nonce", run_id=isolated.session.run_id,
                                       binding_id=DIGEST, profile=profile, config_ref="researcher", job=job, input_document={})
-    observation = {"state": "succeeded", "final_accounting": True, "output": {"proposal": proposal}}
+    observation = {"state": "succeeded", "sequence": 1, "final_accounting": True, "output": {"proposal": proposal}}
     isolated.append(isolated.session, "execution_attempt", "draft-intent", {
         "attempt": attempt.document(), "original_id": original["original_id"], "purpose": "generate"})
     isolated.append(isolated.session, "execution_observation", "draft-result", {"attempt_id": "draft", "observation": observation})
@@ -210,7 +210,7 @@ def test_failed_cancellation_authentication_cannot_prevent_terminal_persistence(
         "deadline_utc": (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()}}
     isolated.append(isolated.session, "execution_attempt", "pending-intent", {"attempt": attempt})
     isolated.append(isolated.session, "execution_observation", "pending-start", {"attempt_id": "pending",
-        "observation": {"state": "running", "final_accounting": False, "cancellation_confirmed": False}})
+        "observation": {"state": "running", "sequence": 1, "final_accounting": False, "cancellation_confirmed": False}})
     monkeypatch.setattr(execution_session, "_action", lambda session, view, _records, **_kwargs:
                         execution_session._terminal_action(session, view, "stop_budget", "usage_unknown"))
     monkeypatch.setattr(execution_session, "_external", lambda *_args, **_kwargs: ({"forged": True}, None))

@@ -57,7 +57,7 @@ def test_interrupted_native_intent_reaches_canonical_reconciliation(monkeypatch,
 
 def test_retained_application_revalidates_before_native_effect(monkeypatch):
     records = [{"kind": "execution_attempt", "data": {"attempt": {"attempt_id": "job"}}},
-        {"kind": "execution_observation", "data": {"attempt_id": "job", "observation": {"state": "succeeded"}}},
+        {"kind": "execution_observation", "data": {"attempt_id": "job", "observation": {"state": "succeeded", "sequence": 1}}},
         {"kind": "execution_application", "data": {"attempt_id": "job", "operation": "generate",
             "original_id": "original", "proposal": {}, "coverage_links": []}}]
     attempt = SimpleNamespace(job={"basis_id": "old", "deadline_utc":
