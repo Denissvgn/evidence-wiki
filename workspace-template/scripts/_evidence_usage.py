@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import base64
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -24,7 +23,8 @@ from _evidence_authority import (
     verify_attestation,
 )
 from _evidence_revision import canonical_bytes, content_id
-from _host_evidence_store import STATE_ENV, locked_state, read_state, write_state
+from _host_context import selection_identity, state_path
+from _host_evidence_store import locked_state, read_state, write_state
 from _publication_context import captured_view
 from _record_artifacts import artifact_path, closure_identity, json_document, validate_file_bounds
 from _strict_contract import artifact_id as strict_artifact_id
@@ -49,7 +49,7 @@ def workspace_binding(root: Path) -> str:
 
 
 def configured(config: dict[str, Any]) -> bool:
-    return "evidence_usage" in config or bool(os.environ.get(STATE_ENV))
+    return "evidence_usage" in config or bool(state_path())
 
 
 def selection(config: dict[str, Any]) -> str:
@@ -457,11 +457,32 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
 
 class UsageView:
     def __init__(self, state: UsageState, trust: dict[str, Any], now: datetime) -> None:
-        self.state, self.trust, self.now = state, trust, now
-        self.checked: dict[tuple[str, tuple[str, ...], str, str], dict[str, Any]] = {}
+        self._state, self._trust, self.now = state, trust, now
+        self._host_selection = selection_identity()
+        self._checked: dict[tuple[str, tuple[str, ...], str, str], dict[str, Any]] = {}
+
+    def require_selection(self) -> None:
+        if self._host_selection != selection_identity():
+            raise EvidenceInvalid("host_view_selection_changed")
+
+    @property
+    def state(self) -> UsageState:
+        self.require_selection()
+        return self._state
+
+    @property
+    def trust(self) -> dict[str, Any]:
+        self.require_selection()
+        return self._trust
+
+    @property
+    def checked(self) -> dict[tuple[str, tuple[str, ...], str, str], dict[str, Any]]:
+        self.require_selection()
+        return self._checked
 
     def revalidate(self, root: Path, config: dict[str, Any]) -> None:
         """Refresh successful decisions at the read or publication boundary."""
+        self.require_selection()
         now = datetime.now(timezone.utc)
         if now < self.now:
             raise EvidenceInvalid("host_state_clock_regressed")
@@ -475,6 +496,7 @@ class UsageView:
             previous.update(result)
 
     def check(self, revision: str, *, uses: list[str], purpose: str, consumer: str) -> dict[str, Any]:
+        self.require_selection()
         digest(revision)
         name(purpose)
         name(consumer)
@@ -515,6 +537,7 @@ class UsageView:
         return result
 
     def lineage(self, identifier: str, *, limit: int = MAX_NODES) -> dict[str, Any]:
+        self.require_selection()
         digest(identifier)
         if type(limit) is not int or not 1 <= limit <= MAX_NODES:
             raise EvidenceInvalid("invalid_lineage_bound")
@@ -543,6 +566,7 @@ def current_view(root: Path, config: dict[str, Any], *, exclusive: bool = False)
     """Hold one revocation generation through the caller's complete read operation."""
     borrowed = captured_view(root, config)
     if borrowed is not None:
+        borrowed.require_selection()
         if exclusive:
             raise EvidenceInvalid("assessment_capture_is_read_only")
         yield borrowed

@@ -116,7 +116,6 @@ CASES_PACKAGE = "tests.seam_cases"
 
 NOT_A_SEAM = {
     "_script_errors.py": "Shared error helper, with no command or operation of its own.",
-    "normalize_sources.py": "run_normalization is a printing command engine returning an exit code; run_* extractor helpers are not library seams.",
     "fetch_sources.py": "run_provider_command is the provider dispatch engine with argparse inputs and its own FetchSourcesError contract; ScriptRefusal is passed through by main for the host intake guard.",
 }
 

@@ -16,6 +16,27 @@ Old requests remain accepted; old installations reject the new decision field.
 Plans bind installed code and resources, so restart hosts and recompile after
 an upgrade rather than editing a saved identity or adopting a partial target.
 
+Version `15` adds public strict review, source inventory, native normalization,
+source requests and inline coverage authoring. The operation matrix is version
+`3`. New source operations have finite traversal and input limits; supported
+paths use pinned original bytes. Unsupported nested or external extraction
+returns a typed refusal. Source intake and normalized usability remain separate
+from authenticated claim acceptance.
+
+Version `16` adds serialized mutation requests and historical receipts through
+`ws.mutations`; the operation matrix is version `4`. The trusted host selects
+a private control directory outside the workspace. Clients writing the same
+workspace must share that selection to use the same serialization gate.
+
+Version `17` adds controlled draft admission. The operation matrix is version
+`5`. Admission writes an unaccepted claim inventory through the serialized
+canonical owner; review and current release remain separate operations.
+
+Version `18` adds explicit journal telemetry and host-selected delivery. The
+operation matrix is version `6`. Measurements, declared subtotals and delivery
+receipts confer no research approval; complete whole-execution coverage remains
+unavailable in this profile.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -46,6 +67,86 @@ it refuses with is an [`EvidenceWikiError`](#errors) carrying the same stable
 `error_code` the CLI writes into its stderr envelope.
 
 ## Opening A Workspace
+
+### Explicit host selections
+
+An embedding host can select per-call scope and authority without changing the
+process environment:
+
+```python
+from evidence_wiki.host_context import HostContext
+
+context = HostContext(
+    allowed_roots=[workspace_path],
+    writable_roots=[workspace_path],
+    grants=["coverage_manifest.run_evaluate"],
+    actor_ref="configured-worker",
+    authority_file=external_authority_path,
+    state_directory=external_state_path,
+)
+with context.activate():
+    report = ws.coverage.evaluate("benchmarks")
+```
+
+The application supplies this context from trusted configuration. Root and
+operation declarations in model output are insufficient. Grants name canonical
+`owner.seam` operations; onboarding grants use `onboarding.operation` and
+intersect the handle's existing grants. Calls check their actual arguments and
+effects. A context without a writable root cannot authorize a mutation.
+Direct handle reads require `workspace.open` and `workspace.versions` grants.
+Unknown operations and the deployed orchestration subprocess refuse under an
+active context. With no active context, existing environment-based authority
+and state selection remain compatible. Explicit absent selections suppress
+those environment values.
+Credential inspection under an explicit context reports the selected opaque
+reference separately, with availability unknown until the host observes it.
+It does not inspect another host's ambient credential presence. With no context,
+the legacy presence check remains available. Defensive secret redaction still
+scans ambient values to prevent accidental disclosure.
+
+Selections are immutable and isolated across asynchronous tasks and threads
+that activate their own context. A retained evidence view cannot move to a
+different selection. Controller and credential references select configured
+host capabilities; they do not authenticate a principal. Canonical signature,
+role, controller-separation and revocation checks still apply. Signing keys
+belong to the host, outside agent requests and results. `HostContext` is an
+in-process boundary for trusted application code; execute untrusted workers
+in a separately isolated host.
+The host must prevent concurrent replacement of workspace paths during an
+invoked legacy owner. The guard pins directory identities and rechecks them
+after loading and execution; it is not an atomic filesystem transaction or a
+substitute for operating-system isolation.
+
+### Inert workflow contracts and policy decisions
+
+`evidence_wiki.workflow_contracts` provides bounded, closed JSON schemas and
+validation for agent jobs, results and decision envelopes. Result validation
+binds a response to the original job identity and qualifications. Unknown
+versions, fields, duplicate JSON keys and nonfinite measurements refuse.
+Unavailable observed usage remains `null`.
+
+`evidence_wiki.run_policy.RunPolicy` freezes a versioned policy under a
+canonical content identity. Its `decide(observation)` method derives a
+deterministic terminal outcome or bounded continuation from authenticated
+canonical-owner observations supplied by the host. Exact question accounting,
+current evidence, explicit selected claim references, qualified review and
+resource limits are checked separately. Human-required policies return
+`policy_incompatible`.
+
+These modules neither dispatch work nor grant access, sign receipts or accept
+evidence. Their `authorized` and `evidence_accepted` fields remain false even
+when the policy outcome is `accepted`. Hosts must authenticate observations
+and use the existing canonical acceptance owners.
+
+`evidence_wiki.request_compiler.compile_request` accepts an ordinary UTF-8
+objective, trusted host scope, a frozen `RunPolicy`, optional visible defaults
+and an optional inert planning proposal. It returns the existing setup request
+shape for `Onboarding.plan`, retaining exact original bytes and question anchors.
+Missing mandatory context returns terminal `insufficient_context`. Every
+authority action is intersected with its representable policy effect and
+configured capability reference; source locations come only from host
+declarations. Proposal confidence and semantic adequacy remain unverified.
+Compilation performs no acquisition, model execution or workspace setup.
 
 `Workspace.open(path)` validates and never creates:
 
@@ -114,6 +215,228 @@ CLI flag of the same name one for one, plus `no_cache` and `run_id`.
 `coverage.evaluate` is not a read: the recomputed facet verdicts, coverage
 verdict and `updated_at` are written back to `sources/coverage/<slug>.yml`,
 exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
+
+**Local source intake and coverage authoring:**
+
+| Operation | Signature |
+| --- | --- |
+| `sources.inventory` | `ws.sources.inventory(*, dry_run=False, append_log=False, require_checksum=False, reject_mismatch=False, max_records=1000, max_entries=10000, max_input_bytes=16777216)` |
+| `normalize.sources` | `ws.normalize.sources(source_ids=None, *, all_sources=False, dry_run=False, force=False, append_log=False, pdf_extractor=None, max_sources=128, allow_external=False, max_manifest_bytes=1048576, max_manifest_records=1000, max_entries=10000, max_input_bytes=16777216)` |
+| `source_requests.add` | `ws.source_requests.add(*, kind, query_or_identifier, rationale, priority="medium", question_slugs=None, scope=None)` |
+| `source_requests.list` | `ws.source_requests.list(*, statuses=None, kinds=None, scope=None)` |
+| `source_requests.fulfill` | `ws.source_requests.fulfill(*, request_id, source_id, match_scope=None, require_scope=False)` |
+| `coverage.init` | `ws.coverage.init(slug, *, template=None, coverage_profile=None, force=False)` |
+| `coverage.link` | `ws.coverage.link(slug, facet_id, *, accepted_source_ids=None, blocking_request_ids=None, clear_accepted_source_ids=False, clear_blocking_request_ids=False)` |
+| `coverage.revision` | `ws.coverage.revision(request)` |
+
+`source_ids=None` selects pending normalization; `all_sources=True` selects all
+eligible records. A supplied ID list must be nonempty and excludes the all
+selector. Failed native extraction remains report content. Fatal selection,
+scope or resource-limit failures raise typed errors. Bounded normalization
+currently refuses configured external extractors and execution/market closures;
+qualified packet extraction also requires a supported snapshot bridge. Explicit
+opt-in does not make those paths enforceable. Their legacy CLI routes remain
+available under their existing contracts.
+
+New source and authoring seams qualify actual configuration, store, question,
+output and lock paths before effects. A linked workspace folder cannot redirect
+an operation outside its owning workspace. The host still owns concurrent
+filesystem coordination and outer operation timeouts.
+
+Some refusals follow durable effects: checksum filtering can replace the admitted
+manifest before refusal; coverage backfill can fail after the facet write; a log
+failure can follow a request mutation. Inspect canonical state before retrying.
+`COVERAGE_WRITE_UNCERTAIN` and `REQUEST_MUTATION_UNCERTAIN` retain an unknown
+commit outcome instead of implying rollback.
+
+**`ws.strict`** delegates authenticated review to the canonical strict owner:
+
+| Operation | Signature |
+| --- | --- |
+| `strict.check` | `ws.strict.check()` |
+| `strict.admit` | `ws.strict.admit(proposal, *, request_id, expected_revision)` |
+| `strict.prepare_review` | `ws.strict.prepare_review(claim_id)` |
+| `strict.register_review` | `ws.strict.register_review(envelope)` |
+| `strict.export` | `ws.strict.export()` |
+
+Preparation supplies the bound review inputs; the external host signs the
+envelope. Controller strings and model verdicts cannot authenticate it. Current
+policy, role, controller separation, source basis and revocation still determine
+acceptance. These methods consume existing canonical claim inventories; a new
+claim proposal is not admitted by registering its review. An explicit context
+uses separate `strict_evidence.run_operation.check`, `.prepare-review`, `.review`
+and `.export` grants; registration additionally requires writable scope.
+
+Draft admission requires an explicit selected mutation control directory,
+`strict_evidence.run_admit_document` and coordinator grants. Supply the revision
+from `ws.mutations.revision()` as a precondition. The closed draft proposal
+contains the complete strict claim inventory and its exact original-question
+mapping. Source references bind actual current normalized bytes and retained
+capture timestamps; quotes and anchors are mechanically checked. The target is
+the configured strict claims path, with no caller-selected destination.
+The workspace must match the frozen request target and writable roots. Selected
+originals and companions must stay within that request's declared native
+absolute file/directory extents inside the workspace. URI, relative and external
+source extents currently refuse; broader active host grants cannot expand the
+original request scope.
+
+Admission stages exact candidate bytes before publishing that one inventory.
+It creates no review, answer status or approval. Unknown, stale, oversized,
+cyclic or unrepresentable original/source mappings refuse; partial publication
+retains an explicit recoverable desired-state distinction. The public
+`evidence_wiki.draft_contracts` codec exposes the proposal schema and detached
+validation, encoding and decoding functions.
+
+New publication rechecks current source age and usage permission immediately
+before replacement, even when hashes and authority checkpoints are unchanged.
+The report's `admitted_at` is the retained plan validation clock; it does not
+reconstruct actual completion time. Historical receipts and proof of matching
+inventory bytes cannot establish current eligibility.
+
+`contract()["draft_admission"]` describes the offered admission profile. Its
+codec recognizes strict inventory schemas, but configured computation,
+calculation-bearing claims and questions derived from several originals are
+currently unsupported and refuse before publication. Schema decoding alone
+does not imply admission capability for those cases.
+
+**`ws.mutations`** freezes and submits supported canonical owner operations:
+
+| Operation | Signature |
+| --- | --- |
+| `mutations.revision` | `ws.mutations.revision()` |
+| `mutations.prepare` | `ws.mutations.prepare(*, request_id, operation, arguments)` |
+| `mutations.submit` | `ws.mutations.submit(request)` |
+| `mutations.inspect` | `ws.mutations.inspect(request_id)` |
+| `mutations.reconcile` | `ws.mutations.reconcile(request_id)` |
+
+Activate a `HostContext` with `mutation_control_directory` pointing to an
+existing private directory outside workspace, authority and evidence state
+storage. Grants use `mutation_operations.revision`, `.prepare_request`,
+`.submit`, `.inspect` and `.reconcile`; dispatch also checks the canonical
+owner's grant and writable workspace scope. Requests cannot select storage or
+supply credentials. Prepare binds workspace bytes, captured input files,
+installed owners and trusted host selections. Reusing an ID with different
+inputs returns a conflict.
+
+The workspace gate precedes the request gate and existing canonical owner
+locks. Selecting mutation control custody requires coverage and question-intake
+writes to run through the coordinator's held native workspace gate. Direct
+writes outside that gate refuse before effects. Contexts without that selection
+retain the declared legacy host-serialization contract. Other underlying facades
+retain their operation-specific locking contracts. A durable execution checkpoint precedes owner effects;
+pending work is inspected before retry. Exact replay returns the retained
+historical outcome before checking live revision preconditions. Receipts are
+inert: they do not confer current permission, accepted evidence or export
+eligibility. Interrupted multi-artifact writes can retain an explicit unknown
+outcome; reconciliation preserves those artifacts and never blindly dispatches
+them again.
+
+The older compound `Onboarding.research(..., "ingest", ...)` route refuses when
+mutation control custody is selected. Submit its supported normalization,
+request-fulfillment and coverage primitives through the coordinator instead.
+
+Reconciliation records are separate from the original receipt. Exact replay
+continues to return that original outcome even after later inspection resolves
+uncertainty. A retained owner report proves that it returned; its partial or
+failed outcome still applies. Exact current postconditions can prove the desired
+state without reconstructing the original execution time. Read those distinctions
+from the reconciliation record before advancing a workflow.
+
+Inventory, normalization, coverage evaluation and coverage revision retain their
+canonical output plans before effects. Reconciliation compares complete output,
+deletion, activity and dependency obligations against those retained bytes. A
+completed interrupted write can prove the desired state without invoking its
+owner again. Missing or conflicting obligations remain explicit partial or
+unknown outcomes. The API provides no global rollback or blind retry.
+
+The staged native profile requires separate generated source output paths and
+workspace-relative coverage configuration. Outputs cannot replace raw originals,
+questions, configuration or executable files. Unsupported overlapping input/output
+trees and plans outside the declared bounds refuse before effects.
+
+`contract()["serialized_mutations"]` exposes supported operation names and the
+closed schema documents for host negotiation.
+
+**`ws.research`** provides current accounting and explicit bounded sessions:
+
+| Operation | Signature |
+| --- | --- |
+| `research.current` | `ws.research.current(policy, *, run_id=None)` |
+| `research.next` | `ws.research.next(policy, *, run_id=None)` |
+| `research.session` | `ws.research.session(policy, *, run_id)` |
+| session observation | `session.current()` and `session.next()` |
+| session advance | `session.advance(*, request_id, expected_basis_id)` |
+| bounded terminal route | `session.run_until_terminal(*, request_id, expected_basis_id, max_steps=1)` |
+| inert host job | `session.host_job(*, request_id, operation, payload, original_text=None)` |
+| session lifetime | `session.close()` or a context manager |
+
+These operations require an active `HostContext` with selected mutation control
+storage and explicit `research_session` grants. A session binds the selected
+workspace identity, actor, host context, original questions and immutable
+`RunPolicy`. Closing its parent workspace invalidates the session. Advice
+remains inert; it reports the required canonical lifecycle grants before an
+explicit step can create a run. Decisions and jobs use the existing run event
+journal, with immutable request replay.
+
+The available advancement profile records a finite terminal decision when
+execution usage or evaluator qualification is unavailable. It does not execute
+acquisition, draft admission, review or model calls. Current canonical release
+acceptance is reported separately; it cannot supply missing evaluator
+qualification. Generation and evaluation jobs retain finite original leases
+and one pending reservation. Generation currently requires one original and the
+closed payload `{"question": <exact original text>}`. Evaluation uses
+`{"claim_id": <claim>, "packet_id": <snapshot digest>}`; the digest is
+`sha256:` followed by the SHA-256 of the public strict review snapshot encoded
+as UTF-8 JSON with sorted keys, no ASCII escaping and compact separators.
+Evaluation binds its claim and complete source closure to the frozen scope.
+A URI prefix cannot stand in for a concrete source
+identity, so acquisition jobs currently refuse. Inspect
+`contract()["research_sessions"]` before selecting this profile.
+
+**`ws.research.telemetry`** retains bounded measurement declarations and exposes
+their provenance:
+
+| Operation | Signature |
+| --- | --- |
+| record | `record(event, *, run_id, agent_id)` |
+| report | `report(*, run_id, verifier=None)` |
+| projection | `project(report)` |
+| delivery | `deliver(projection, *, run_id, delivery_id, sink, max_attempts=3)` |
+| delivery status | `inspect(delivery_id)` |
+| known-failure retry | `retry(delivery_id, *, sink)` |
+
+Recording uses the selected private mutation workspace gate and canonical run
+lock. The explicit coordinator also accepts `telemetry.record` with the same
+`run_id`, `agent_id` and event data. The event's actor must match the active
+context. Report reads use a bounded anchored journal snapshot; limits apply
+before parsing. Exact logical IDs count once, and conflicting reuse refuses.
+
+Optional `MeasurementVerifier` objects come from trusted host code. A verifier
+must authenticate exact event, workspace, controller, actor, metric and expiry
+bindings. Declared measured/imported labels and reference strings cannot do
+that. Reports separate exact subtotals by provenance, currency and pricing
+identity. Unobserved totals stay unknown. UTC intervals and clock references
+alone do not establish monotonic execution time. Whole-run cost and human
+intervention totals require a complete authenticated coverage owner; this
+profile currently provides none.
+
+Projections are redacted declarations whose measurements are not reverified.
+They retain inert flags. Delivery requires an explicit `DeadlineSink` supplied
+by the host and a finite host-enforced deadline contract. The core checks late
+results and uncertain acknowledgements, and cannot interrupt arbitrary Python
+callbacks. Private intent and sending checkpoints precede the callback; their
+gates are released while it runs. Sending stays pending until its deadline;
+expired or uncertain delivery cannot be retried blindly. Only a known failed
+attempt can use the finite retry allowance. Sink success creates no approval,
+permission or qualification. Inspect `contract()["telemetry"]` before selecting
+these capabilities.
+
+The coordinated output profile retains complete owner plans in private custody
+before effects. Its limits are 4,096 immutable artifact slots, 16 MiB per final
+artifact and 256 MiB in aggregate per request, with separate 1 MiB checkpoint
+and transport limits and at most 3,000 source effects per plan. Plans that exceed these bounds refuse before workspace
+writes. Native APIs retain their declared extraction limits; a large rendered
+output may fit that native profile while exceeding the coordinated profile.
 
 **`ws.usage`** — host-authorized source revisions:
 
@@ -318,9 +641,9 @@ Hosts should check the declared surface at startup and retain an outer timeout.
 Orchestration still launches one version-matched controller process per call;
 `doctor` may probe external tools with individual timeouts.
 
-Workspace upgrade, full normalization, source inventory and general request
-mutation, coverage editing, lint, and workspace-wide publication bundles remain
-CLI-only. Scoped onboarding covers explicit setup and pack lifecycle operations. The
+Standalone lint, workspace-wide publication bundles, delegated fetch planning
+and legacy external normalization remain CLI-only. Scoped onboarding covers
+explicit setup, upgrade and pack lifecycle operations. The
 matrix names their supported entry points. Package API use alone does not
 establish that an operation has no subprocesses or writes.
 
@@ -447,6 +770,9 @@ refusal nor a `SystemExit` propagates unchanged — a `TypeError` from a bad
 argument is a bug in the calling code, not a workspace condition, and dressing it
 as an `EvidenceWikiError` would hide it. `SystemExit` is always translated,
 because a library that let one escape would terminate an ASGI worker.
+An unclassified process-control exit without a result raises
+`LIBRARY_PROCESS_EXIT` with exit code 2. Its bounded scalar status is retained
+in `details.owner_exit_status`; arbitrary exit payloads are not exposed.
 
 ### The CLI And The API Cannot Disagree
 

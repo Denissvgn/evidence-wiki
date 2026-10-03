@@ -21,7 +21,7 @@ import threading
 from pathlib import Path
 from types import ModuleType
 
-from . import resources
+from . import host_context, resources
 
 _SCRIPT_MODULE_CACHE: dict[str, ModuleType] = {}
 _LOADER_MODULE_CACHE: dict[str, ModuleType] = {}
@@ -146,6 +146,7 @@ def _share_load_lock(module: ModuleType) -> ModuleType:
 
     def load_workspace_module(*args: object, **kwargs: object) -> ModuleType:
         with _LOAD_LOCK:
+            kwargs["host_context_bridge"] = host_context
             return _share_load_lock(original(*args, **kwargs))
 
     load_workspace_module.__doc__ = getattr(original, "__doc__", None)
@@ -160,8 +161,16 @@ def _load_script(script_path: Path, module_name: str) -> ModuleType:
     del module_name  # retained for the stable internal call signature
     with _LOAD_LOCK:
         loader = _load_workspace_loader(script_path.parent)
-        module = loader.load_workspace_module(script_path.parent, script_path.stem, cache=_SCRIPT_MODULE_CACHE)
+        module = loader.load_workspace_module(script_path.parent, script_path.stem, cache=_SCRIPT_MODULE_CACHE,
+                                            host_context_bridge=host_context)
         return _share_load_lock(module)
+
+
+def owner_generation() -> tuple[Path, str]:
+    """Select the exact owner tree used by packaged in-process calls."""
+    root = shared_assets_root() / resources.STARTER_DIR / "scripts"
+    with _LOAD_LOCK:
+        return root.resolve(), _load_workspace_loader(root)._tree_hash(root.resolve())
 
 
 def load_packaged_script(assets_root: Path, stem: str) -> ModuleType:

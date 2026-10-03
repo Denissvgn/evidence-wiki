@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import os
-
 from ._pack_io import canonical
-from .host_capabilities import read_tools, scope_allows
+from .host_capabilities import credential_observation, read_tools, scope_allows
 from .pack_discovery import owner
 from .planning_contracts import blocker, owned_call, refuse
 from .planning_inputs import local_input
@@ -120,7 +118,7 @@ def source_plan(request, config, blockers):
             blockers.append(blocker("question_sources_unspecified", questions=[question["id"]], stage="research", field="/request/payload/sources"))
     references = [value.removeprefix("env:") for value in payload["authority"]["credential_references"]]
     return {"routes": routes, "local_inputs": inputs, "providers": views, "provider_inventory": inventory, "normalization": normalizers,
-        "credentials": [{"reference": "env:" + name, "present": bool(os.environ.get(name)), "access_verified": False} for name in references],
+        "credentials": [{"reference": "env:" + name, **credential_observation(name), "access_verified": False} for name in references],
         "budgets": {"requested": payload["budgets"], "host_tokens": decisions["host_token_limit"],
             "library_controls": {"questions": "run.max_questions_per_run", "source_requests": "run.max_source_requests_per_run",
                 "academic_requests": "run.max_academic_provider_requests_per_run", "downloads": "integrations.acquisition.max_downloads_per_run"},

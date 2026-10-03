@@ -828,12 +828,15 @@ class SystemExitContainmentTests(unittest.TestCase):
                 self.assertEqual(message, caught.exception.message)
                 self.assertNotIsInstance(caught.exception, SystemExit)
 
-    def test_a_non_string_system_exit_is_process_control_and_is_left_alone(self):
+    def test_process_control_without_a_result_is_contained(self):
         for code in (0, 3, None):
             with self.subTest(code=code):
-                with self.assertRaises(SystemExit) as caught:
+                with self.assertRaises(errors.EvidenceWikiError) as caught:
                     _base.call_seam(self.loader_raising(SystemExit(code)), "any", "run_any")
-                self.assertEqual(code, caught.exception.code)
+                self.assertEqual("LIBRARY_PROCESS_EXIT", caught.exception.error_code)
+                self.assertEqual(0 if code is None else code, caught.exception.details["owner_exit_status"])
+                self.assertEqual(2, caught.exception.exit_code)
+                self.assertNotIsInstance(caught.exception, SystemExit)
 
     def test_a_refusal_that_is_also_a_system_exit_does_not_escape_as_one(self):
         """``IntakeValidationError(ScriptRefusal, SystemExit)`` is the real dual-inherited case.

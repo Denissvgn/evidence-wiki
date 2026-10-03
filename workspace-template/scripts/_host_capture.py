@@ -117,24 +117,30 @@ def validate(value):
     return copy.deepcopy(value)
 
 
-def read(root: Path, relative: str, maximum=MAX_BYTES):
+def read(root: Path, relative: str, maximum=MAX_BYTES, *, read_input=None):
     require(isinstance(relative, str) and not Path(relative).is_absolute() and "\\" not in relative
             and all(part not in {"", ".", ".."} for part in relative.split("/")), "capture_path_invalid")
     path = root / relative
     try:
         info = path.lstat()
         require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= maximum, "capture_file_unsafe_or_large")
-        revision = load_workspace_module(_SCRIPT_DIR, "_evidence_revision")
-        if os.name == "nt":
-            reader = load_workspace_module(_SCRIPT_DIR, "_windows_files")
-            raw = reader.read_legacy_file(root, relative, revision.observation(info), maximum)
+        if read_input is not None:
+            raw = read_input(root, relative, maximum)
         else:
-            raw = revision.read_observed_file(root, relative, revision.observation(info))
+            revision = load_workspace_module(_SCRIPT_DIR, "_evidence_revision")
+            if os.name == "nt":
+                reader = load_workspace_module(_SCRIPT_DIR, "_windows_files")
+                raw = reader.read_legacy_file(root, relative, revision.observation(info), maximum)
+            else:
+                raw = revision.read_observed_file(root, relative, revision.observation(info))
+        require(isinstance(raw, bytes), "capture_bytes_required")
         require(len(raw) <= maximum, "capture_bytes_bound")
         return raw
     except CaptureInvalid:
         raise
-    except Exception:
+    except Exception as error:
+        if read_input is not None and callable(getattr(error, "to_envelope", None)):
+            raise
         raise CaptureInvalid("capture_file_unavailable_or_changed") from None
 
 
@@ -166,7 +172,12 @@ def sidecar(raw):
         raise CaptureInvalid("capture_sidecar_invalid") from None
 
 
-def inspect_record(root: Path, record):
+def inspect_record(root: Path, record, *, read_input=None):
+    """Inspect unchanged capture semantics using an optional caller-pinned reader.
+
+    The private reader must return exact bytes and enforce its own cumulative
+    capture budget. Default callers retain the legacy anchored read path.
+    """
     provenance = record.get("provenance")
     require(isinstance(provenance, dict) and "host_capture" in provenance, "capture_metadata_missing")
     profile = validate(provenance["host_capture"])
@@ -175,10 +186,10 @@ def inspect_record(root: Path, record):
     relative = paths[0]
     require(relative.startswith("raw/") and Path(relative).suffix.lower() in SUFFIXES, "capture_raw_path_invalid")
     require((profile["content_format"] == "plain_text") == (Path(relative).suffix.lower() == ".txt"), "capture_format_mismatch")
-    raw = read(root, relative)
+    raw = read(root, relative, read_input=read_input)
     require(profile["content_bytes"] == len(raw) and profile["content_sha256"] == "sha256:" + hashlib.sha256(raw).hexdigest(),
             "capture_original_bytes_changed")
-    declared = sidecar(read(root, relative + ".provenance.yml"))
+    declared = sidecar(read(root, relative + ".provenance.yml", read_input=read_input))
     require(declared.get("host_capture") == profile, "capture_metadata_changed")
     for key, expected in (("checksum", profile["content_sha256"]), ("origin_url", profile["origin_url"]),
                           ("retrieved_at", profile["retrieved_at"]), ("license", profile["rights"]["license"]),

@@ -195,6 +195,11 @@ def acquire(target, *, agent_id, run_id, request_id, url):
 
 
 def ingest(target, *, agent_id, run_id, request_id, source_id=None, source_path=None, needs_complete=True):
+    from .host_context import current_context, reject_unsupported
+
+    context = current_context()
+    if context is not None and context.mutation_control_directory is not None:
+        reject_unsupported("caller_ingest_requires_serialized_owners")
     _no_secret_values(
         {
             "agent_id": agent_id,

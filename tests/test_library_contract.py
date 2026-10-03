@@ -129,6 +129,15 @@ class ContractParityTests(unittest.TestCase):
         self.assertTrue(rebuilt["library_api"]["surface"])
         self.assertTrue(rebuilt["artifact_schema_documents"]["orchestration_session"]["required"])
 
+    def test_research_profile_does_not_claim_an_executor_or_qualification(self):
+        profile = evidence_wiki.contract()["research_sessions"]
+        self.assertEqual("unavailable", profile["model_executor"])
+        self.assertIn("unknown", profile["qualification"])
+        self.assertIn("unsupported", profile["acquisition"])
+        self.assertIn("terminal", profile["advance_profile"])
+        profile["schemas"].clear()
+        self.assertEqual(4, len(evidence_wiki.contract()["research_sessions"]["schemas"]))
+
 
 class LibraryApiNegotiationBlockTests(unittest.TestCase):
     @classmethod
@@ -137,7 +146,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
 
     def test_the_block_is_version_gated_rather_than_introspected(self):
         self.assertEqual({"version", "surface", "matrix_version", "operations", "cli_only", "timeout_policy"}, set(self.block))
-        self.assertEqual("14", self.block["version"])
+        self.assertEqual("18", self.block["version"])
         self.assertEqual(contract_module.LIBRARY_API_VERSION, self.block["version"])
         # A JSON payload cannot carry the declaration tuple, so the surface has to
         # arrive as a list on both sides of the CLI boundary.
@@ -162,12 +171,45 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "workspace.publish_selected",
             "workspace.doctor",
             "coverage.evaluate",
+            "coverage.init",
+            "coverage.link",
+            "coverage.revision",
             "grounding.verify",
             "normalize.verify",
+            "normalize.sources",
             "normalize.profiles",
             "normalize.validate_packet",
             "normalize.validate_execution",
             "normalize.validate_market",
+            "sources.inventory",
+            "source_requests.add",
+            "source_requests.list",
+            "source_requests.fulfill",
+            "strict.check",
+            "strict.admit",
+            "strict.prepare_review",
+            "strict.register_review",
+            "strict.export",
+            "mutations.revision",
+            "mutations.prepare",
+            "mutations.submit",
+            "mutations.inspect",
+            "mutations.reconcile",
+            "research.current",
+            "research.next",
+            "research.session",
+            "research.session.current",
+            "research.session.next",
+            "research.session.advance",
+            "research.session.run_until_terminal",
+            "research.session.host_job",
+            "research.session.close",
+            "research.telemetry.record",
+            "research.telemetry.report",
+            "research.telemetry.project",
+            "research.telemetry.deliver",
+            "research.telemetry.inspect",
+            "research.telemetry.retry",
             "usage.status",
             "usage.transact",
             "usage.check",
@@ -222,6 +264,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
 
     def test_every_declared_operation_resolves_and_has_one_boundary(self):
         from evidence_wiki import Onboarding, Workspace, _facades
+        from evidence_wiki.research_session import ResearchSession
 
         owners = {
             "workspace": Workspace, "coverage": _facades.CoverageNamespace,
@@ -232,6 +275,13 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "snapshots": _facades.SnapshotsNamespace,
             "temporal": _facades.TemporalNamespace,
             "assessments": _facades.AssessmentsNamespace,
+            "sources": _facades.SourcesNamespace,
+            "source_requests": _facades.SourceRequestsNamespace,
+            "strict": _facades.StrictNamespace,
+            "mutations": _facades.MutationsNamespace,
+            "research": _facades.ResearchNamespace,
+            "research.session": ResearchSession,
+            "research.telemetry": _facades.TelemetryNamespace,
             "onboarding": Onboarding,
         }
         boundaries = self.block["operations"]

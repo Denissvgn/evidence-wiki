@@ -53,7 +53,7 @@ def refusal_envelope(exc: BaseException) -> dict[str, Any] | None:
         return None
     try:
         envelope = to_envelope()
-    except Exception:  # noqa: BLE001 - a refusal whose rendering fails is still a refusal
+    except (Exception, SystemExit):  # noqa: BLE001 - a refusal whose rendering fails is still a refusal
         envelope = None
     if isinstance(envelope, dict):
         return envelope
@@ -103,14 +103,25 @@ def _translated(exc: BaseException) -> EvidenceWikiError | None:
     if envelope is not None:
         return error_from_envelope(envelope)
     if isinstance(exc, SystemExit):
-        # A library must never let SystemExit reach its caller: inside an ASGI
-        # worker it terminates the process. A string code is a refusal funnel and
-        # is typed above. A non-string code -- ``sys.exit(0)``, ``sys.exit(3)``,
-        # ``sys.exit()`` -- is process control rather than a refusal about the
-        # workspace, and is re-raised untouched. That is the same split
-        # ``ScriptRefusal.from_system_exit`` makes, kept identical on purpose.
-        return _classified_exit(exc.code) if isinstance(exc.code, str) else None
+        code = SystemExit.code.__get__(exc, SystemExit)
+        if type(code) is str:
+            return _classified_exit(code)
+        return _process_exit(exc)
     return None
+
+
+def _process_exit(exc: SystemExit) -> EvidenceWikiError:
+    """Contain process control without invoking payload conversions or rendering."""
+    code = SystemExit.code.__get__(exc, SystemExit)
+    status = code if type(code) is int and code.bit_length() <= 32 else int(code) if type(code) is bool else 0 if code is None else None
+    return EvidenceWikiError(
+        "LIBRARY_PROCESS_EXIT",
+        "The workspace operation exited without returning a result.",
+        recoverable=False,
+        remediation="Inspect the owning operation before retrying; no result was returned.",
+        details={"owner_exit_status": status},
+        exit_code=2,
+    )
 
 
 def call_seam(
@@ -134,11 +145,21 @@ def call_seam(
     hide it.
     """
     try:
-        return getattr(load_script(stem), seam)(*args, **kwargs)
+        from ..host_context import checked_operation
+
+        with checked_operation(stem, seam, args, kwargs) as revalidate:
+            operation = getattr(load_script(stem), seam)
+            revalidate()
+            return operation(*args, **kwargs)
     except (Exception, SystemExit) as exc:
-        translated = _translated(exc)
+        try:
+            translated = _translated(exc)
+        except SystemExit as renderer_exit:
+            translated = _process_exit(renderer_exit)
         if translated is None:
             raise
+        if translated.error_code == "LIBRARY_PROCESS_EXIT":
+            raise translated from None
         raise translated from exc
 
 

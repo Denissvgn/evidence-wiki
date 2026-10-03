@@ -19,10 +19,16 @@ from .assessments import AssessmentsNamespace
 from .coverage import CoverageNamespace
 from .diagnostics import DiagnosticsNamespace
 from .grounding import GroundingNamespace
+from .mutations import MutationsNamespace
 from .normalize import NormalizeNamespace
 from .orchestrate import OrchestrateNamespace, OrchestrationSession
 from .questions import QuestionsNamespace
+from .research import ResearchNamespace
 from .snapshots import SnapshotsNamespace
+from .source_requests import SourceRequestsNamespace
+from .sources import SourcesNamespace
+from .strict import StrictNamespace
+from .telemetry import TelemetryNamespace
 from .temporal import TemporalNamespace
 from .usage import UsageNamespace
 
@@ -32,11 +38,17 @@ __all__ = [
     "DiagnosticsNamespace",
     "GroundingNamespace",
     "Namespace",
+    "MutationsNamespace",
     "NormalizeNamespace",
     "OrchestrateNamespace",
     "OrchestrationSession",
     "QuestionsNamespace",
+    "ResearchNamespace",
+    "TelemetryNamespace",
     "SnapshotsNamespace",
+    "SourceRequestsNamespace",
+    "SourcesNamespace",
+    "StrictNamespace",
     "TemporalNamespace",
     "UsageNamespace",
 ]

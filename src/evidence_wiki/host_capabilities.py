@@ -7,8 +7,10 @@ import re
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 
+from ._pack_io import bounded, canonical
+from .onboarding_contract import _matches
 from .pack_discovery import owner
-from .source_contracts import HOST_TOOLS, decode, refuse, reject_execution_and_secrets
+from .source_contracts import HOST_TOOLS, decode, refuse, reject_execution_and_secrets, schema_document
 
 
 def known_credentials(names=()):
@@ -17,9 +19,30 @@ def known_credentials(names=()):
     return tuple(os.environ.get(name, "") for name in selected)
 
 
+def credential_observation(name):
+    """Separate a selected opaque capability from observed credential presence."""
+    from .host_context import current_context
+
+    context = current_context()
+    if context is None:
+        return {"present": bool(os.environ.get(name))}
+    references = dict(context.credential_refs)
+    return {"present": None, "selected_reference": references.get(name, references.get("env:" + name)),
+            "availability": "not_observed", "basis": "explicit_host_selection"}
+
+
 def read_tools(raw=None):
     if raw is None:
         return []
+    if type(raw) is dict:
+        # The fixed schema bounds every branch before serialization. The same
+        # decoder then owns byte limits, detachment and validation for both doors.
+        _matches(raw, schema_document(HOST_TOOLS))
+        bounded(raw)
+        try:
+            raw = canonical(raw)
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            refuse("source_document_invalid")
     value = decode(HOST_TOOLS, raw)
     tools = value["tools"]
     refs = [name for tool in tools for name in tool["credential_refs"]]
@@ -77,7 +100,7 @@ def describe(tool, demonstrations=()):
     observed = [item for item in demonstrations if item["tool_id"] == tool["id"] and item["tool_version"] == tool["version"]
                 and scope_allows(tool, item["origin_url"]) and item["content_format"] in tool["formats"]
                 and {"capture", "export"}.intersection(tool["operations"]) and item["content_bytes"] <= tool["limits"]["max_bytes"]]
-    return {**tool, "credential_presence": [{"reference": name, "present": bool(os.environ.get(name))} for name in tool["credential_refs"]],
+    return {**tool, "credential_presence": [{"reference": name, **credential_observation(name)} for name in tool["credential_refs"]],
         "demonstration": {"state": "capture_artifact_checked" if observed else "not_demonstrated",
                           "capture_ids": [item["capture_id"] for item in observed],
                           "captures": [{key: item[key] for key in ("capture_id", "origin_url", "content_format", "content_kind", "completeness", "content_bytes")} for item in observed],

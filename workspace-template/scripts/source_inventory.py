@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
+import os
 import re
 import stat
 import sys
 import uuid
+from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -234,11 +239,12 @@ ACQUISITION_LOCK_RELATIVE = ("raw", ".locks", "acquisition.lock")
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _evidence_revision import observation, read_observed_file
 from _host_capture import CaptureInvalid
 from _host_capture import inspect_record as inspect_host_capture
 from _host_capture import validate as validate_host_capture
 from _request_scope import normalize_scope
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _script_errors import ScriptRefusal, emit_error, handle_system_exit, json_mode_requested
 from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import (
@@ -248,6 +254,192 @@ from source_failure_taxonomy import (
 from source_failure_taxonomy import (
     unusable_evidence_reasons as delivery_unusable_evidence_reasons,
 )
+
+_INPUT_LIMITS: ContextVar[dict[str, Any] | None] = ContextVar("source_input_limits", default=None)
+
+
+def _bounded_context_active() -> bool:
+    """Keep a bound helper usable after an isolated loader restores imports."""
+    return _INPUT_LIMITS.get() is not None
+
+
+@contextmanager
+def _bounded_inputs(root: Path, *, max_entries: int, max_input_bytes: int):
+    """Call-local input limits; no environment or process-global mutation."""
+    state = {"root": root.resolve(), "max_entries": max_entries, "max_bytes": max_input_bytes,
+             "entries": {}, "trees": {}, "roots": {}, "bytes_read": 0, "file_bytes": 0, "payloads": {}, "absent": set()}
+    token = _INPUT_LIMITS.set(state)
+    try:
+        yield state
+    finally:
+        _INPUT_LIMITS.reset(token)
+
+
+def _input_refusal(field: str) -> None:
+    raise ScriptRefusal("SOURCE_INPUT_LIMIT", "Source input exceeds its bounded local work scope.",
+                        exit_code=2, recoverable=False, details={"field": field})
+
+
+def _captured_input_bytes(path: Path) -> bytes:
+    state = _INPUT_LIMITS.get()
+    if state is None:
+        _input_refusal("bounded_context_missing")
+    try:
+        relative = path.relative_to(state["root"]).as_posix()
+        if any(part in {".", ".."} for part in PurePosixPath(relative).parts):
+            _input_refusal("input_path")
+        expected = observation(path.lstat())
+        if not stat.S_ISREG(expected[2]) or path.is_symlink():
+            _input_refusal("input_type")
+        cached = state["payloads"].get(relative)
+        if cached is not None:
+            if cached[0] != expected:
+                _input_refusal("input_changed")
+            return cached[1]
+        if expected[4] > min(16 * 1024 * 1024, state["max_bytes"] - state["bytes_read"]):
+            _input_refusal("input_bytes")
+        raw = read_observed_file(state["root"], relative, expected)
+        state["bytes_read"] += len(raw)
+        state["payloads"][relative] = (expected, raw)
+        return raw
+    except (OSError, ValueError):
+        _input_refusal("input_path")
+
+
+def _bounded_text(path: Path, *, encoding: str = "utf-8", errors: str = "strict") -> str:
+    if _INPUT_LIMITS.get() is None:
+        return path.read_text(encoding=encoding, errors=errors)
+    # TextIO's default newline=None normalizes both CRLF and bare CR. Preserve
+    # that text behavior while the shared captured byte value remains exact.
+    return _captured_input_bytes(path).decode(encoding, errors=errors).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _bounded_bytes(path: Path) -> bytes | None:
+    if _INPUT_LIMITS.get() is None:
+        return None
+    return _captured_input_bytes(path)
+
+
+def _capture_input_reader(root: Path, relative: str, maximum: int) -> bytes:
+    data = _captured_input_bytes(root / relative)
+    if len(data) > maximum:
+        _input_refusal("capture_bytes")
+    return data
+
+
+def _inspect_capture(root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    if _INPUT_LIMITS.get() is None:
+        return inspect_host_capture(root, record)
+    return inspect_host_capture(root, record, read_input=_capture_input_reader)
+
+
+def _release_owned_output(path: Path) -> None:
+    state = _INPUT_LIMITS.get()
+    if state is not None:
+        state["payloads"].pop(path.relative_to(state["root"]).as_posix(), None)
+        state["entries"].pop(path, None)
+        state["absent"].discard(path)
+
+
+def _capture_tree(root: Path) -> None:
+    state = _INPUT_LIMITS.get()
+    if state is None or root in state["trees"]:
+        return
+    workspace = state["root"]
+    if not root.exists():
+        state["trees"][root] = []
+        state["absent"].add(root)
+        return
+    if root.is_symlink() or not root.resolve().is_relative_to(workspace):
+        _input_refusal("input_root")
+    if not root.is_dir():
+        _input_refusal("input_directory")
+    if os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd or not hasattr(os, "O_NOFOLLOW"):
+        _input_refusal("bounded_traversal_unsupported")
+    entries = []
+
+    def walk(path: Path, descriptor: int, depth: int) -> None:
+        if depth > 32:
+            _input_refusal("input_depth")
+        with os.scandir(descriptor) as iterator:
+            for entry in iterator:
+                child = path / entry.name
+                if len(state["entries"]) >= state["max_entries"] and child not in state["entries"]:
+                    _input_refusal("input_entries")
+                metadata = entry.stat(follow_symlinks=False)
+                info = observation(metadata)
+                fresh = child not in state["entries"]
+                state["entries"][child] = info
+                entries.append(child)
+                if stat.S_ISREG(metadata.st_mode):
+                    if fresh:
+                        state["file_bytes"] += metadata.st_size
+                    if state["file_bytes"] > state["max_bytes"]:
+                        _input_refusal("input_bytes")
+                elif stat.S_ISDIR(metadata.st_mode):
+                    child_fd = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                    try:
+                        if observation(os.fstat(child_fd)) != info:
+                            _input_refusal("input_changed")
+                        walk(child, child_fd, depth + 1)
+                    finally:
+                        os.close(child_fd)
+
+    descriptors = []
+    try:
+        current = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(current)
+        for part in root.relative_to(workspace).parts:
+            current = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            descriptors.append(current)
+        state["roots"][root] = observation(os.fstat(current))
+        walk(root, current, 0)
+    except OSError:
+        _input_refusal("input_changed")
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    state["trees"][root] = entries
+
+
+def _walk_paths(root: Path, pattern: str = "*"):
+    state = _INPUT_LIMITS.get()
+    if state is None:
+        yield from root.rglob(pattern)
+        return
+    _capture_tree(root)
+    for path in state["trees"][root]:
+        if fnmatch.fnmatchcase(path.name, pattern):
+            yield path
+
+
+def _recheck_inputs() -> None:
+    state = _INPUT_LIMITS.get()
+    if state is None:
+        return
+    for path in state["absent"]:
+        if path.exists() or path.is_symlink():
+            _input_refusal("input_changed")
+    for root, expected in state["roots"].items():
+        try:
+            if observation(root.lstat()) != expected:
+                _input_refusal("input_changed")
+        except OSError:
+            _input_refusal("input_changed")
+    for path, expected in state["entries"].items():
+        if path == acquisition_workspace_lock_path(state["root"]) or path == state["root"] / "raw" / ".locks":
+            continue
+        try:
+            if observation(path.lstat()) != expected:
+                _input_refusal("input_changed")
+        except OSError:
+            _input_refusal("input_changed")
+    for relative, (expected, _data) in state["payloads"].items():
+        try:
+            if observation((state["root"] / relative).lstat()) != expected:
+                _input_refusal("input_changed")
+        except OSError:
+            _input_refusal("input_changed")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -311,7 +503,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    config = yaml.safe_load(_bounded_text(config_path)) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -346,7 +538,7 @@ def existing_detected_at(manifest_path: Path) -> dict[str, str]:
     detected: dict[str, str] = {}
     if not manifest_path.exists():
         return detected
-    for line_number, line in enumerate(manifest_path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(_bounded_text(manifest_path).splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -377,8 +569,11 @@ def looks_like_link_file(path: Path, raw_root: Path) -> bool:
     if path.suffix.lower() != ".txt":
         return False
     try:
-        with path.open(encoding="utf-8", errors="ignore") as handle:
-            sample = handle.read(8192).splitlines()
+        if _INPUT_LIMITS.get() is not None:
+            sample = _bounded_text(path, errors="ignore")[:8192].splitlines()
+        else:
+            with path.open(encoding="utf-8", errors="ignore") as handle:
+                sample = handle.read(8192).splitlines()
     except OSError:
         return False
     non_empty = [line.strip() for line in sample if line.strip()]
@@ -515,7 +710,7 @@ def read_bundle_readme(project_root: Path, bundle_dir: Path) -> tuple[dict[str, 
         return None, []
     readme_rel = readme_path.relative_to(project_root).as_posix()
     try:
-        readme = json.loads(readme_path.read_text(encoding="utf-8"))
+        readme = json.loads(_bounded_text(readme_path))
     except json.JSONDecodeError as exc:
         return None, [f"{readme_rel}: invalid JSON: {exc}"]
     except OSError as exc:
@@ -549,10 +744,14 @@ def fallback_entrypoint(bundle_dir: Path) -> tuple[str | None, str | None]:
             return filename, "fallback_name"
 
     documentclass_candidates: list[str] = []
-    for path in sorted(bundle_dir.glob("*.tex"), key=lambda value: value.name):
+    candidates = (path for path in _walk_paths(bundle_dir, "*.tex") if path.parent == bundle_dir) if _INPUT_LIMITS.get() is not None else bundle_dir.glob("*.tex")
+    for path in sorted(candidates, key=lambda value: value.name):
         try:
-            with path.open(encoding="utf-8", errors="ignore") as handle:
-                sample = handle.read(20000)
+            if _INPUT_LIMITS.get() is not None:
+                sample = _bounded_text(path, errors="ignore")[:20000]
+            else:
+                with path.open(encoding="utf-8", errors="ignore") as handle:
+                    sample = handle.read(20000)
         except OSError:
             continue
         if DOCUMENTCLASS_RE.search(sample):
@@ -625,7 +824,7 @@ def bundle_file_count(bundle_dir: Path) -> int:
     closing either needs an inventory-level member list, not a different predicate here.
     """
     count = 0
-    for path in bundle_dir.rglob("*"):
+    for path in _walk_paths(bundle_dir):
         try:
             metadata = path.lstat()
         except OSError:
@@ -726,7 +925,7 @@ def iter_bundle_candidates(
         raw_root = project_root / raw_root_text
         if not raw_root.is_dir():
             continue
-        for path in (raw_root, *raw_root.rglob("*")):
+        for path in (raw_root, *_walk_paths(raw_root)):
             if path.is_dir() and not is_contained_nonsymlink(path, project_root_resolved):
                 if warnings is not None:
                     relative = path.relative_to(project_root).as_posix()
@@ -759,7 +958,7 @@ def incomplete_acquisition_targets(project_root: Path, source_roots: list[str]) 
         raw_root = project_root / raw_root_text
         if not raw_root.is_dir():
             continue
-        for marker in sorted(raw_root.rglob(f".*{ACQUISITION_INCOMPLETE_SUFFIX}")):
+        for marker in sorted(_walk_paths(raw_root, f".*{ACQUISITION_INCOMPLETE_SUFFIX}")):
             if not is_contained_nonsymlink(marker, project_root_resolved) or not marker.is_file():
                 continue
             target_name = marker.name[1 : -len(ACQUISITION_INCOMPLETE_SUFFIX)]
@@ -890,7 +1089,7 @@ def parse_webloc_file(text: str) -> list[dict[str, Any]]:
 
 def parse_link_file(path: Path, relative_path: str) -> tuple[list[dict[str, Any]], list[str]]:
     try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        text = _bounded_text(path, errors="ignore")
     except OSError as exc:
         return [], [f"{relative_path}: cannot read link file: {exc}"]
 
@@ -1107,7 +1306,7 @@ def iter_local_code_repos(
                 f"refusing codebase source root that resolves outside workspace: {root_relative.as_posix()}"
             )
             continue
-        for path in (raw_root, *raw_root.rglob("*")):
+        for path in (raw_root, *_walk_paths(raw_root)):
             relative = path.relative_to(project_root)
             # Mirror iter_raw_files via the shared containment guard: refuse any
             # symlinked entry and any entry whose real path escapes the workspace.
@@ -1169,7 +1368,7 @@ def local_repo_file_count(repo_dir: Path, *, limit: int | None = None) -> int:
     predicate here.
     """
     count = 0
-    for path in repo_dir.rglob("*"):
+    for path in _walk_paths(repo_dir):
         try:
             metadata = path.lstat()
         except OSError:
@@ -1496,6 +1695,8 @@ def apply_pdf_pairing(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any
 
 
 def hash_file_contents(path: Path) -> str | None:
+    if _INPUT_LIMITS.get() is not None:
+        return hashlib.sha256(_captured_input_bytes(path)).hexdigest()
     try:
         digest = hashlib.sha256()
         with path.open("rb") as handle:
@@ -1601,7 +1802,7 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
     """Parse one provenance sidecar; malformed content degrades to warnings, never failure."""
     warnings: list[str] = []
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document = yaml.safe_load(_bounded_text(path))
     except (OSError, yaml.YAMLError) as exc:
         return {}, [f"{relative_path}: malformed provenance sidecar: {exc}"]
     if not isinstance(document, dict):
@@ -2219,7 +2420,7 @@ def raw_fingerprint_paths(project_root: Path, record: dict[str, Any]) -> list[Pa
             if base.is_dir():
                 paths.extend(
                     path
-                    for path in base.rglob("*")
+                    for path in _walk_paths(base)
                     if path.is_file() and not should_skip(path.relative_to(project_root))
                 )
             sidecar = project_root / f"{latex_root}{PROVENANCE_SIDECAR_SUFFIX}"
@@ -2293,7 +2494,7 @@ def iter_raw_files(project_root: Path, source_roots: list[str]) -> tuple[list[Pa
         if not raw_root.is_dir():
             warnings.append(f"raw root is not a directory: {raw_root_text}")
             continue
-        for path in raw_root.rglob("*"):
+        for path in _walk_paths(raw_root):
             relative = path.relative_to(project_root)
             # raw/ is the untrusted-input boundary and is declared immutable, so an
             # entry that is a symlink (pointing anywhere, inside or outside the
@@ -2346,7 +2547,7 @@ def apply_host_captures(project_root: Path, records: list[dict[str, Any]]) -> No
         record["kind"] = "host_capture"
         metadata = ensure_metadata(record)
         try:
-            inspected = inspect_host_capture(project_root, record)
+            inspected = _inspect_capture(project_root, record)
             metadata["host_capture_complete"] = inspected["complete"]
             reasons = inspected["unusable_reasons"]
         except (CaptureInvalid, ValueError, TypeError, KeyError):
@@ -2364,6 +2565,8 @@ def _build_records_unlocked(
     project_root: Path,
     config: dict[str, Any],
     previous_detected_at: dict[str, str],
+    *,
+    observed_utc: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]:
     raw_config = config.get("raw") or {}
     sources_config = config.get("sources") or {}
@@ -2376,7 +2579,7 @@ def _build_records_unlocked(
     ]
 
     default_status = sources_config.get("default_status", "discovered")
-    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    now = observed_utc or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     incomplete_targets, incomplete_warnings = incomplete_acquisition_targets(project_root, source_roots)
     raw_files, warnings = iter_raw_files(project_root, source_roots)
@@ -2514,13 +2717,18 @@ def build_records(
         return _build_records_unlocked(project_root, config, previous_detected_at)
 
 
+def render_manifest_bytes(records: list[dict[str, Any]]) -> bytes:
+    """Render the same canonical JSONL bytes used by the manifest publisher."""
+    content = "".join(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n" for record in records)
+    return content.encode("utf-8")
+
+
 def write_manifest(manifest_path: Path, records: list[dict[str, Any]]) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    content = "".join(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n" for record in records)
     # Unique temp name so concurrent runs cannot steal each other's temp file;
     # the final rename stays atomic on POSIX (same filesystem).
     tmp_path = manifest_path.with_name(f"{manifest_path.name}.{uuid.uuid4().hex}.tmp")
-    tmp_path.write_text(content, encoding="utf-8", newline="\n")
+    tmp_path.write_bytes(render_manifest_bytes(records))
     tmp_path.replace(manifest_path)
 
 
@@ -2920,11 +3128,68 @@ def append_log(project_root: Path, data: dict[str, Any]) -> None:
     append_log_entry(project_root / "log.md", render_log_entry(data))
 
 
-def run_inventory(args: argparse.Namespace) -> int:
-    if args.append_log and not args.report:
-        raise SystemExit("--append-log requires --report")
+def plan_file_effect(root: Path, path: Path, data: bytes | None) -> dict[str, Any]:
+    """Retain an exact before/after obligation without changing the workspace."""
+    if not path.resolve().is_relative_to(root):
+        _input_refusal("effect_scope")
+    before = _bounded_bytes(path) if path.exists() or path.is_symlink() else None
+    if before is None and path.exists():
+        _input_refusal("bounded_context_missing")
+    return {"path": path.relative_to(root).as_posix(), "mode": "delete" if data is None else "write", "before_sha256":
+        "sha256:" + hashlib.sha256(before).hexdigest() if before is not None else None,
+        "before_bytes": len(before) if before is not None else None, "data": data,
+        "after_sha256": "sha256:" + hashlib.sha256(data).hexdigest() if data is not None else None}
 
-    project_root = Path(args.project_root).resolve()
+
+def plan_preserved_effect(root: Path, path: Path) -> dict[str, Any]:
+    value = plan_file_effect(root, path, None)
+    value.update(mode="preserve", after_sha256=value["before_sha256"])
+    return value
+
+
+def plan_activity_effect(root: Path, entry: str) -> dict[str, Any]:
+    path = root / "log.md"
+    raw = _bounded_bytes(path) if path.exists() or path.is_symlink() else None
+    before = raw or b""
+    text = before.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    prefix = LOG_HEADER if not text else "" if text.endswith("\n\n") else "\n" if text.endswith("\n") else "\n\n"
+    return plan_file_effect(root, path, before + (prefix + entry + "\n").encode("utf-8"))
+
+
+def plan_input_state() -> dict[str, Any]:
+    """Export only bounded observations, not live handles or original payloads."""
+    state = _INPUT_LIMITS.get()
+    if state is None:
+        _input_refusal("bounded_context_missing")
+    ignored = {acquisition_workspace_lock_path(state["root"]), state["root"] / "raw" / ".locks"}
+    return {"absent": [path.relative_to(state["root"]).as_posix() for path in sorted(state["absent"])],
+        "files": [{"path": path, "sha256": "sha256:" + hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+                      for path, (_observed, data) in sorted(state["payloads"].items())],
+        "entries": [{"path": path.relative_to(state["root"]).as_posix(), "observation": list(observed)}
+                    for path, observed in sorted(state["entries"].items()) if path not in ignored],
+        "roots": [{"path": path.relative_to(state["root"]).as_posix(), "observation": list(observed)}
+                  for path, observed in sorted(state["roots"].items()) if path not in ignored]}
+
+
+def plan_absent_input(path: Path) -> None:
+    state = _INPUT_LIMITS.get()
+    if state is not None and not path.exists() and not path.is_symlink():
+        state["absent"].add(path)
+
+
+def _inventory_operation(
+    project_root: str | Path,
+    *,
+    dry_run: bool,
+    append_activity: bool,
+    require_checksum: bool,
+    reject_mismatch: bool,
+    max_records: int | None = None,
+    render: Callable[[str, dict[str, Any]], None] | None = None,
+    plan_only: bool = False,
+    observed_utc: str | None = None,
+) -> dict[str, Any]:
+    project_root = Path(project_root).resolve()
     config = load_config(project_root)
     require_host_intake(config)
     sources_config = config.get("sources") or {}
@@ -2935,17 +3200,48 @@ def run_inventory(args: argparse.Namespace) -> int:
         "sources.manifest_path",
     )
     manifest_path = project_root / manifest_path_text
+    if max_records is not None:
+        for path in (manifest_path, acquisition_workspace_lock_path(project_root)):
+            if not path.resolve().is_relative_to(project_root):
+                raise ScriptRefusal("INVENTORY_SCOPE_INVALID", "Inventory paths leave the selected workspace.",
+                                    exit_code=2, recoverable=False, details={"field": "workspace_paths"})
+        if append_activity and any(not path.resolve().is_relative_to(project_root) for path in (
+            project_root / "log.md", project_root / ".locks" / "log.lock",
+        )):
+            raise ScriptRefusal("INVENTORY_SCOPE_INVALID", "Inventory paths leave the selected workspace.",
+                                exit_code=2, recoverable=False, details={"field": "activity_log"})
     previous = existing_detected_at(manifest_path)
-    records, warnings, summary = build_records(project_root, config, previous)
+    if _INPUT_LIMITS.get() is not None:
+        raw = config.get("raw") or {}
+        roots = raw.get("source_roots") or []
+        if not isinstance(roots, list) or len(roots) > 16:
+            _input_refusal("input_roots")
+        # The barrier is created/acquired before directory observations, so its
+        # own lock resources do not resemble an unobserved raw-tree insertion.
+        with workspace_lock(acquisition_workspace_lock_path(project_root), purpose="source inventory acquisition barrier"):
+            for relative in roots:
+                _capture_tree(project_root / validate_workspace_relative_path(relative, "raw.source_roots"))
+            if codebase_analysis_enabled(config):
+                for root in configured_codebase_source_roots(project_root, roots, config):
+                    _capture_tree(root)
+            records, warnings, summary = _build_records_unlocked(project_root, config, previous, observed_utc=observed_utc)
+    else:
+        records, warnings, summary = build_records(project_root, config, previous)
+    # This is an emitted-record cap before manifest replacement, not a bound on
+    # the configured raw-tree scan or its acquisition-barrier lock resources.
+    if max_records is not None and len(records) > max_records:
+        raise ScriptRefusal("INVENTORY_LIMIT", "Inventory exceeds the selected record cap.",
+                            exit_code=2, recoverable=False, details={"limit": max_records},
+                            remediation="Select a smaller configured raw scope or explicitly increase the finite record cap.")
     records, strict_warnings, strict_refusals = strict_checksum_refusals(
         records,
-        require_checksum=args.require_checksum,
-        reject_mismatch=args.reject_mismatch,
+        require_checksum=require_checksum,
+        reject_mismatch=reject_mismatch,
     )
     if strict_warnings:
         warnings.extend(strict_warnings)
         summary = recompute_pairing_summary(records)
-    report_timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    report_timestamp = observed_utc or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     report_data = build_report_data(
         records,
         warnings,
@@ -2953,24 +3249,129 @@ def run_inventory(args: argparse.Namespace) -> int:
         manifest_path,
         project_root,
         report_timestamp,
-        dry_run=args.dry_run,
+        dry_run=dry_run,
     )
+    receipt = {"report": report_data, "records": records, "summary": summary,
+               "warnings": warnings, "strict_refusals": strict_refusals,
+               "manifest": manifest_path_text, "dry_run": dry_run}
+    if plan_only:
+        effects = [] if dry_run else [plan_file_effect(project_root, manifest_path, render_manifest_bytes(records))]
+        if append_activity and not dry_run:
+            effects.append(plan_activity_effect(project_root, render_log_entry(report_data)))
+        _recheck_inputs()
+        return {"report": report_data, "effects": effects, "inputs": plan_input_state(), "selected_records": records,
+                "strict_refusals": strict_refusals, "clock_utc": report_timestamp}
+    _recheck_inputs()
+    if render is not None:
+        render("report", receipt)
+    if not dry_run:
+        _recheck_inputs()
+        write_manifest(manifest_path, records)
+        if append_activity:
+            append_log(project_root, report_data)
+    elif append_activity and render is not None:
+        render("dry_run_log", receipt)
+    return receipt
 
-    if args.report:
+
+def run_inventory_report(
+    project_root: str | Path,
+    *,
+    dry_run: bool = False,
+    append_log: bool = False,
+    require_checksum: bool = False,
+    reject_mismatch: bool = False,
+    max_records: int = 1000,
+    max_entries: int = 10_000,
+    max_input_bytes: int = 16_777_216,
+) -> dict[str, Any]:
+    """Return the canonical report without printing or invoking CLI parsing.
+
+    Traversal caps entries/depth through no-follow directory descriptors; config,
+    manifest and source reads use pinned bounded bytes. max_records separately
+    limits emitted records before manifest/log writes. Acquisition-barrier lock
+    resources remain explicit. Dry runs do not replace the manifest or append
+    activity. Strict checksum refusal follows admitted writes, as in the CLI.
+    """
+    if (any(type(value) is not bool for value in (dry_run, append_log, require_checksum, reject_mismatch))
+            or type(max_records) is not int or not 1 <= max_records <= 10_000
+            or type(max_entries) is not int or not 1 <= max_entries <= 100_000
+            or type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 67_108_864
+            or not isinstance(project_root, (str, Path))):
+        raise ScriptRefusal("INVENTORY_REQUEST_INVALID", "Inventory arguments are invalid or unbounded.",
+                            exit_code=2, recoverable=False)
+    try:
+        with _bounded_inputs(Path(project_root), max_entries=max_entries, max_input_bytes=max_input_bytes):
+            receipt = _inventory_operation(project_root, dry_run=dry_run, append_activity=append_log,
+                require_checksum=require_checksum, reject_mismatch=reject_mismatch, max_records=max_records)
+    except LockUnavailableError as exc:
+        raise ScriptRefusal(exc.error_code, str(exc), exit_code=2, details=exc.details) from exc
+    except SystemExit as exc:
+        if callable(getattr(exc, "to_envelope", None)):
+            raise
+        raise ScriptRefusal.from_system_exit(exc, exit_code=2) from exc
+    refusals = receipt["strict_refusals"]
+    if refusals:
+        raise ScriptRefusal(strict_refusal_error_code(refusals), strict_refusal_message(refusals),
+                            exit_code=EXIT_STRICT_REFUSAL, details=strict_refusal_details(refusals))
+    return receipt["report"]
+
+
+def prepare_inventory_effects(project_root: str | Path, arguments: dict[str, Any], *, observed_utc: str) -> dict[str, Any]:
+    """Prepare the canonical native inventory once, with no data publication."""
+    fields = {"dry_run", "append_log", "require_checksum", "reject_mismatch", "max_records", "max_entries", "max_input_bytes"}
+    if (type(arguments) is not dict or set(arguments) != fields
+            or any(type(arguments[key]) is not bool for key in ("dry_run", "append_log", "require_checksum", "reject_mismatch"))
+            or any(type(arguments[key]) is not int or not 1 <= arguments[key] <= limit for key, limit in (
+                ("max_records", 10_000), ("max_entries", 100_000), ("max_input_bytes", 67_108_864)))):
+        raise ScriptRefusal("INVENTORY_REQUEST_INVALID", "Inventory arguments are invalid or unbounded.", exit_code=2, recoverable=False)
+    root = Path(project_root).resolve()
+    validate_plan_clock(observed_utc)
+    with _bounded_inputs(root, max_entries=arguments["max_entries"], max_input_bytes=arguments["max_input_bytes"]):
+        try:
+            return _inventory_operation(root, dry_run=arguments["dry_run"], append_activity=arguments["append_log"],
+                require_checksum=arguments["require_checksum"], reject_mismatch=arguments["reject_mismatch"],
+                max_records=arguments["max_records"], plan_only=True, observed_utc=observed_utc)
+        except LockUnavailableError as error:
+            raise ScriptRefusal(error.error_code, str(error), exit_code=2, details=error.details) from error
+        except SystemExit as error:
+            if callable(getattr(error, "to_envelope", None)):
+                raise
+            raise ScriptRefusal.from_system_exit(error, exit_code=2) from error
+
+
+def validate_plan_clock(value: str) -> None:
+    try:
+        if type(value) is not str or not value.endswith("Z"):
+            _input_refusal("plan_clock")
+        clock = datetime.fromisoformat(value[:-1] + "+00:00")
+        if clock.utcoffset().total_seconds() != 0:
+            _input_refusal("plan_clock")
+    except (ValueError, TypeError):
+        _input_refusal("plan_clock")
+
+
+def _render_inventory(event: str, receipt: dict[str, Any], args: argparse.Namespace) -> None:
+    if event == "dry_run_log":
+        print("warning: --append-log skipped during --dry-run", file=sys.stderr)
+    elif args.report:
         if args.format == "json":
-            print(json.dumps(report_data, indent=2, sort_keys=False))
+            print(json.dumps(receipt["report"], indent=2, sort_keys=False))
         else:
-            print(render_inventory_report(report_data), end="")
+            print(render_inventory_report(receipt["report"]), end="")
     elif args.dry_run:
-        for record in records:
+        for record in receipt["records"]:
             print(json.dumps(record, sort_keys=True, separators=(",", ":")))
 
-    if not args.dry_run:
-        write_manifest(manifest_path, records)
-        if args.append_log:
-            append_log(project_root, report_data)
-    elif args.append_log:
-        print("warning: --append-log skipped during --dry-run", file=sys.stderr)
+
+def run_inventory(args: argparse.Namespace) -> int:
+    """Compatibility command adapter, retaining report-before-write ordering."""
+    if args.append_log and not args.report:
+        raise SystemExit("--append-log requires --report")
+    receipt = _inventory_operation(args.project_root, dry_run=args.dry_run, append_activity=args.append_log,
+        require_checksum=args.require_checksum, reject_mismatch=args.reject_mismatch,
+        render=lambda event, result: _render_inventory(event, result, args))
+    strict_refusals = receipt["strict_refusals"]
 
     if strict_refusals and args.format == "json":
         emit_error(
@@ -2981,9 +3382,10 @@ def run_inventory(args: argparse.Namespace) -> int:
         )
         return EXIT_STRICT_REFUSAL
 
-    for warning in warnings:
+    for warning in receipt["warnings"]:
         print(f"warning: {warning}", file=sys.stderr)
     action = "would write" if args.dry_run else "wrote"
+    summary = receipt["summary"]
     print(
         "summary "
         f"paired={summary['paired']} "
@@ -2992,7 +3394,7 @@ def run_inventory(args: argparse.Namespace) -> int:
         f"ambiguous={summary['ambiguous']}",
         file=sys.stderr,
     )
-    print(f"{action} {len(records)} records to {manifest_path.relative_to(project_root)}", file=sys.stderr)
+    print(f"{action} {len(receipt['records'])} records to {receipt['manifest']}", file=sys.stderr)
     return EXIT_STRICT_REFUSAL if strict_refusals else 0
 
 

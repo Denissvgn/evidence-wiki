@@ -9,6 +9,7 @@ normalization, or answer work itself.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -16,9 +17,10 @@ import re
 import stat
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 SCHEMA_VERSION = "1.0"
@@ -78,11 +80,19 @@ ACADEMIC_PROVIDER_ACCOUNTING_FIELD = "academic_provider_request_accounting"
 ACADEMIC_PROVIDER_ACCOUNTING_SCHEMA_VERSION = "1.0"
 PENDING_EVENT_FIELD = "_pending_event"
 MUTATION_RECOVERY_DIR = ".recovery"
+JOURNAL_MAX_BYTES = 16 * 1024 * 1024
+JOURNAL_MAX_EVENT_BYTES = 1024 * 1024
+JOURNAL_MAX_EVENTS = 4096
+JOURNAL_MAX_LINES = 8192
+JOURNAL_MAX_DEPTH = 32
+JOURNAL_MAX_TOKENS = 262144
+TELEMETRY_EVENT_TYPE = "custom.research.telemetry"
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _native_fs import os as _native_os
 from _script_errors import emit_error, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
@@ -107,6 +117,11 @@ class RunControllerError(Exception):
         self.recoverable = recoverable
         self.remediation = remediation
         self.details = details
+
+    def to_envelope(self) -> dict[str, Any]:
+        return {"schema_version": "1.0", "error_code": self.error_code, "message": str(self),
+                "exit_code": self.exit_code, "recoverable": self.recoverable,
+                "remediation": self.remediation, "details": self.details}
 
 
 def parse_non_negative_int(value: str) -> int:
@@ -444,32 +459,161 @@ def mutation_write_error(path: Path, boundary: str, error: OSError) -> RunContro
 
 
 def write_json(path: Path, document: dict[str, Any]) -> None:
-    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    _durable_run_bytes(path, (json.dumps(document, indent=2, sort_keys=False) + "\n").encode("utf-8"), "json")
+
+
+def _run_file_identity(info) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _run_fsync(descriptor: int, boundary: str) -> None:
+    """A real native flush checkpoint; failures are never treated as success."""
+    _native_os.fsync(descriptor)
+
+
+def _replace_run_file(directory: int, temporary: str, name: str) -> None:
+    _native_os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+
+
+@contextmanager
+def _anchored_run_parent(path: Path, *, create: bool = False):
+    """Hold all parent components through the native no-follow selector."""
+    path = Path(path).expanduser().absolute()
+    if sys.platform == "darwin":
+        for prefix in (Path("/var"), Path("/tmp")):  # noqa: S108 - qualify fixed system aliases; never create a temporary here
+            if path.is_relative_to(prefix):
+                selected = prefix.resolve(strict=True)
+                if selected != Path("/private") / prefix.name:
+                    raise RunControllerError("RUN_JOURNAL_UNSAFE", "System journal path alias changed.", recoverable=False)
+                path = selected / path.relative_to(prefix)
+                break
+    if ".." in path.parts or len(path.parts) > 64:
+        raise RunControllerError("RUN_JOURNAL_UNSAFE", "Run journal path cannot be used.", recoverable=False)
+    if (not hasattr(_native_os, "O_NOFOLLOW") or _native_os.open not in _native_os.supports_dir_fd
+            or _native_os.rename not in _native_os.supports_dir_fd):
+        raise RunControllerError("RUN_JOURNAL_UNSUPPORTED", "Native run journal custody is unavailable.", recoverable=False)
+    descriptors, bindings = [], []
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
-        tmp_path.replace(path)
+        flags = _native_os.O_RDONLY | _native_os.O_DIRECTORY | _native_os.O_NOFOLLOW
+        current = _native_os.open(path.anchor, flags)
+        descriptors.append(current)
+        for part in path.parts[1:-1]:
+            if create:
+                try:
+                    _native_os.mkdir(part, 0o700, dir_fd=current)
+                    _run_fsync(current, "ancestor.directory")
+                except FileExistsError:
+                    pass
+            child = _native_os.open(part, flags, dir_fd=current)
+            info = _native_os.fstat(child)
+            bindings.append((current, part, info.st_dev, info.st_ino))
+            descriptors.append(child)
+            current = child
+        if create and "runs" in path.parts[:-1]:
+            run_index = max(index for index, part in enumerate(path.parts[:-1]) if part == "runs")
+            for descriptor in descriptors[max(0, run_index - 1):]:
+                _run_fsync(descriptor, "custody.directory")
+        def revalidate():
+            for parent, part, device, inode in bindings:
+                actual = _native_os.stat(part, dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISDIR(actual.st_mode) or (actual.st_dev, actual.st_ino) != (device, inode):
+                    raise RunControllerError("RUN_JOURNAL_CHANGED", "Run journal custody changed.", recoverable=True)
+        revalidate()
+        yield current, revalidate
+        revalidate()
+    finally:
+        for descriptor in reversed(descriptors):
+            _native_os.close(descriptor)
+
+
+def _run_entry(directory: int, name: str):
+    try:
+        info = _native_os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise RunControllerError("RUN_JOURNAL_UNSAFE", "Run journal requires an ordinary unaliased file.", recoverable=False)
+    return info
+
+
+def _durable_run_bytes(path: Path, raw: bytes, boundary: str) -> None:
+    temporary = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with _anchored_run_parent(path, create=True) as (directory, revalidate):
+            before = _run_entry(directory, path.name)
+            descriptor = _native_os.open(temporary, _native_os.O_WRONLY | _native_os.O_CREAT | _native_os.O_EXCL
+                                         | _native_os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            try:
+                offset = 0
+                while offset < len(raw):
+                    written = _native_os.write(descriptor, raw[offset:offset + 65536])
+                    if written <= 0:
+                        raise OSError("Incomplete run journal write")
+                    offset += written
+                _run_fsync(descriptor, boundary + ".file")
+                published = _run_file_identity(_native_os.fstat(descriptor))
+            finally:
+                _native_os.close(descriptor)
+            revalidate()
+            current = _run_entry(directory, path.name)
+            if (None if current is None else _run_file_identity(current)) != (None if before is None else _run_file_identity(before)):
+                raise RunControllerError("RUN_JOURNAL_CHANGED", "Run journal destination changed.", recoverable=True)
+            _replace_run_file(directory, temporary, path.name)
+            _run_fsync(directory, boundary + ".directory")
+            current = _run_entry(directory, path.name)
+            if current is None or _run_file_identity(current)[:6] != published[:6]:
+                raise RunControllerError("RUN_JOURNAL_CHANGED", "Published run journal changed.", recoverable=True)
+            revalidate()
     except OSError as exc:
-        raise mutation_write_error(path, "json_atomic_replace", exc) from exc
+        raise mutation_write_error(path, boundary, exc) from exc
+
+
+def _flush_run_file(path: Path) -> None:
+    try:
+        with _anchored_run_parent(path) as (directory, revalidate):
+            before = _run_entry(directory, path.name)
+            if before is None:
+                raise RunControllerError("RUN_JOURNAL_CHANGED", "Retained run journal is missing.", recoverable=True)
+            descriptor = _native_os.open(path.name, _native_os.O_RDONLY | _native_os.O_NOFOLLOW
+                                         | _native_os.O_NONBLOCK, dir_fd=directory)
+            try:
+                if _run_file_identity(_native_os.fstat(descriptor)) != _run_file_identity(before):
+                    raise RunControllerError("RUN_JOURNAL_CHANGED", "Retained run journal changed.", recoverable=True)
+                _run_fsync(descriptor, "replay.file")
+            finally:
+                _native_os.close(descriptor)
+            _run_fsync(directory, "replay.directory")
+            current = _run_entry(directory, path.name)
+            if current is None or _run_file_identity(current) != _run_file_identity(before):
+                raise RunControllerError("RUN_JOURNAL_CHANGED", "Retained run journal changed.", recoverable=True)
+            revalidate()
+    except OSError as exc:
+        raise mutation_write_error(path, "replay", exc) from exc
 
 
 def write_run_state_atomic(path: Path, document: dict[str, Any]) -> None:
-    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
-        tmp_path.replace(path)
-    except OSError as exc:
-        raise mutation_write_error(path, "run_state_atomic_replace", exc) from exc
+    phase = "run_state_pending" if PENDING_EVENT_FIELD in document else "run_state_committed"
+    _durable_run_bytes(path, _run_state_bytes(document), phase)
 
 
-def append_event(path: Path, event: dict[str, Any]) -> bool:
-    existing = load_events(path)
+def _run_state_bytes(document: dict[str, Any]) -> bytes:
+    return (json.dumps(document, indent=2, sort_keys=False) + "\n").encode("utf-8")
+
+
+def append_event(path: Path, event: dict[str, Any], *, _journal: dict[str, Any] | None = None) -> bool:
+    if _journal is not None:
+        current = _bounded_journal(path)
+        if current != _journal:
+            raise RunControllerError("RUN_JOURNAL_CHANGED", "Run journal changed before publication.", recoverable=True)
+        existing = current["events"]
+    else:
+        existing = load_events(path)
     event_id = event.get("event_id")
     for item in existing:
         if item.get("event_id") != event_id:
             continue
         if item == event:
+            _flush_run_file(path)
             return False
         raise RunControllerError(
             "RUN_EVENT_ID_CONFLICT",
@@ -479,13 +623,7 @@ def append_event(path: Path, event: dict[str, Any]) -> bool:
             details={"artifact": path.as_posix(), "event_id": event_id},
         )
     content = "".join(compact_json(item) + "\n" for item in [*existing, event])
-    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(content, encoding="utf-8", newline="\n")
-        tmp_path.replace(path)
-    except OSError as exc:
-        raise mutation_write_error(path, "event_log_atomic_replace", exc) from exc
+    _durable_run_bytes(path, content.encode("utf-8"), "event_log")
     return True
 
 
@@ -528,6 +666,150 @@ def load_events(path: Path) -> list[dict[str, Any]]:
             details={"artifact": path.as_posix()},
         )
     return events
+
+
+def _read_run_bytes(path: Path, *, maximum: int, optional: bool = False) -> bytes:
+    try:
+        with _anchored_run_parent(path) as (directory, revalidate):
+            before = _run_entry(directory, path.name)
+            if before is None and optional:
+                return b""
+            if before is None:
+                raise RunControllerError("RUN_UNKNOWN", "Run journal is missing.", recoverable=False)
+            if before.st_size > maximum:
+                raise RunControllerError("RUN_JOURNAL_LIMIT", "Run journal exceeds the supported byte bound.", recoverable=False)
+            descriptor = _native_os.open(path.name, _native_os.O_RDONLY | _native_os.O_NOFOLLOW
+                                         | _native_os.O_NONBLOCK, dir_fd=directory)
+            try:
+                if _run_file_identity(_native_os.fstat(descriptor)) != _run_file_identity(before):
+                    raise RunControllerError("RUN_JOURNAL_CHANGED", "Run journal changed before capture.", recoverable=True)
+                chunks, size = [], 0
+                while chunk := _native_os.read(descriptor, min(65536, maximum - size + 1)):
+                    size += len(chunk)
+                    if size > maximum:
+                        raise RunControllerError("RUN_JOURNAL_LIMIT", "Run journal exceeds the supported byte bound.", recoverable=False)
+                    chunks.append(chunk)
+                if _run_file_identity(_native_os.fstat(descriptor)) != _run_file_identity(before):
+                    raise RunControllerError("RUN_JOURNAL_CHANGED", "Run journal changed during capture.", recoverable=True)
+            finally:
+                _native_os.close(descriptor)
+            current = _run_entry(directory, path.name)
+            if current is None or _run_file_identity(current) != _run_file_identity(before):
+                raise RunControllerError("RUN_JOURNAL_CHANGED", "Run journal changed after capture.", recoverable=True)
+            revalidate()
+            return b"".join(chunks)
+    except FileNotFoundError:
+        raise RunControllerError("RUN_UNKNOWN", "Run journal is missing.", recoverable=False) from None
+    except OSError as error:
+        raise RunControllerError("RUN_JOURNAL_UNREADABLE", "Run journal cannot be captured.", recoverable=False) from error
+
+
+def _bounded_journal_json(raw: bytes):
+    """Reject byte, nesting and token work before invoking the JSON decoder."""
+    if len(raw) > JOURNAL_MAX_EVENT_BYTES:
+        raise RunControllerError("RUN_JOURNAL_LIMIT", "Run event exceeds the supported byte bound.", recoverable=False)
+    depth = tokens = 0
+    quoted = escaped = scalar = False
+    for char in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == 92:
+                escaped = True
+            elif char == 34:
+                quoted = False
+            continue
+        if char == 34:
+            tokens += 1
+            quoted = True
+            scalar = False
+        elif char in (123, 91):
+            tokens += 1
+            depth += 1
+            scalar = False
+        elif char in (125, 93):
+            tokens += 1
+            depth -= 1
+            scalar = False
+        elif char in (44, 58):
+            tokens += 1
+            scalar = False
+        elif char in (9, 10, 13, 32):
+            scalar = False
+        elif not scalar:
+            scalar = True
+            tokens += 1
+        if depth > JOURNAL_MAX_DEPTH or tokens > JOURNAL_MAX_TOKENS:
+            raise RunControllerError("RUN_JOURNAL_LIMIT", "Run event exceeds the supported structural bound.", recoverable=False)
+    try:
+        def pairs(values):
+            result = {}
+            for key, value in values:
+                if key in result:
+                    raise ValueError("Duplicate run journal key")
+                result[key] = value
+            return result
+        def invalid_constant(value):
+            raise ValueError("Non-finite run journal number")
+        def finite_float(value):
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError("Non-finite run journal number")
+            return result
+        def bounded_int(value):
+            if len(value.lstrip("-")) > 78:
+                raise ValueError("Oversized run journal integer")
+            result = int(value)
+            if result.bit_length() > 256:
+                raise ValueError("Oversized run journal integer")
+            return result
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=invalid_constant,
+                          parse_float=finite_float, parse_int=bounded_int)
+    except (ValueError, UnicodeError, RecursionError):
+        raise RunControllerError("RUN_EVENTS_INVALID", "Run journal JSON is invalid.", recoverable=False) from None
+
+
+def _bounded_journal(path: Path) -> dict[str, Any]:
+    raw = _read_run_bytes(path, maximum=JOURNAL_MAX_BYTES, optional=True)
+    line_count = raw.count(b"\n") + raw.count(b"\r") - raw.count(b"\r\n")
+    if line_count > JOURNAL_MAX_LINES:
+        raise RunControllerError("RUN_JOURNAL_LIMIT", "Run journal exceeds the supported line bound.", recoverable=False)
+    rows = raw.splitlines()
+    nonblank = [row for row in rows if row.strip()]
+    if len(nonblank) > JOURNAL_MAX_EVENTS or any(len(row) > JOURNAL_MAX_EVENT_BYTES for row in nonblank):
+        raise RunControllerError("RUN_JOURNAL_LIMIT", "Run journal exceeds the supported event bound.", recoverable=False)
+    events = [_bounded_journal_json(row) for row in nonblank]
+    ids = []
+    for event in events:
+        if type(event) is not dict or type(event.get("event_id")) is not str:
+            raise RunControllerError("RUN_EVENTS_INVALID", "Run journal requires closed event identities.", recoverable=False)
+        for field in ("event_type", "run_id", "agent_id"):
+            if field in event and type(event[field]) is not str:
+                raise RunControllerError("RUN_EVENTS_INVALID", "Run journal outer identity is invalid.", recoverable=False)
+        kind = event.get("event_type")
+        if kind in {TELEMETRY_EVENT_TYPE, "custom.research.decision"}:
+            if (event.get("run_id") != path.parent.name or type(event.get("agent_id")) is not str
+                    or type(event.get("data")) is not dict):
+                raise RunControllerError("RUN_EVENTS_INVALID", "Recognized run journal wrapper is invalid.", recoverable=False)
+            data = event["data"]
+            if kind == TELEMETRY_EVENT_TYPE:
+                from evidence_wiki.telemetry_contracts import EVENT, validate_document
+                try:
+                    if set(data) != {"logical_id", "event"}:
+                        raise ValueError("Unsupported telemetry wrapper")
+                    inner = validate_document(EVENT, data["event"])
+                    if (data["logical_id"] != inner["logical_id"] or inner["run_id"] != event["run_id"]
+                            or inner["agent_id"] != event["agent_id"]):
+                        raise ValueError("Telemetry wrapper binding")
+                except (Exception, SystemExit):
+                    raise RunControllerError("RUN_EVENTS_INVALID", "Retained telemetry wrapper is invalid.", recoverable=False) from None
+            elif (set(data) != {"request_id", "record"} or type(data["request_id"]) is not str
+                    or type(data["record"]) is not dict):
+                raise RunControllerError("RUN_EVENTS_INVALID", "Retained decision wrapper is invalid.", recoverable=False)
+        ids.append(event["event_id"])
+    if len(ids) != len(set(ids)):
+        raise RunControllerError("RUN_EVENTS_INVALID", "Run journal contains duplicate event identities.", recoverable=False)
+    return {"events": events, "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "count": len(events)}
 
 
 def latest_event_at(project_root: Path, run_id: str) -> str | None:
@@ -627,10 +909,11 @@ def custom_event(
     event_type: str,
     message: str,
     data: dict[str, Any],
+    _event_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
-        "event_id": next_event_id(events_path(project_root, run_id)),
+        "event_id": next_event_id(events_path(project_root, run_id)) if _event_id is None else _event_id,
         "run_id": run_id,
         "occurred_at": timestamp_utc(),
         "agent_id": agent_id,
@@ -662,6 +945,8 @@ def commit_run_mutation(
     run_id: str,
     document: dict[str, Any],
     event: dict[str, Any],
+    *,
+    _journal: dict[str, Any] | None = None,
 ) -> None:
     """Commit state plus its audit event with a durable recovery marker.
 
@@ -673,7 +958,7 @@ def commit_run_mutation(
     """
     document[PENDING_EVENT_FIELD] = event
     write_run_state_atomic(run_state_path(project_root, run_id), document)
-    append_event(events_path(project_root, run_id), event)
+    append_event(events_path(project_root, run_id), event, _journal=_journal)
     document.pop(PENDING_EVENT_FIELD, None)
     write_run_state_atomic(run_state_path(project_root, run_id), document)
 
@@ -710,7 +995,8 @@ def quarantine_run_temp_files(project_root: Path, run_id: str) -> list[str]:
     return moved
 
 
-def load_run_state(project_root: Path, run_id: str, *, allow_pending: bool = False) -> dict[str, Any]:
+def load_run_state(project_root: Path, run_id: str, *, allow_pending: bool = False,
+                   _captured_raw: bytes | None = None) -> dict[str, Any]:
     path = run_state_path(project_root, run_id)
     if not path.is_file():
         raise RunControllerError(
@@ -719,7 +1005,7 @@ def load_run_state(project_root: Path, run_id: str, *, allow_pending: bool = Fal
             details={"run_id": run_id},
         )
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        document = json.loads(path.read_text(encoding="utf-8")) if _captured_raw is None else _bounded_journal_json(_captured_raw)
     except json.JSONDecodeError as exc:
         raise RunControllerError(
             "RUN_STATE_INVALID",
@@ -1126,6 +1412,8 @@ def start_with_requirements(project_root, args, requirement_basis):
         if caller is not None:
             document["caller_context"] = caller
             require_caller_context(project_root, document, agent_id)
+        if getattr(args, "session_binding", None) is not None:
+            document["research_session"] = json.loads(compact_json(args.session_binding))
         refresh_counts(project_root, document, status)
         event = state_transition_event(
             project_root,
@@ -1138,6 +1426,157 @@ def start_with_requirements(project_root, args, requirement_basis):
         )
         commit_run_mutation(project_root, run_id, document, event)
         return document
+
+
+def run_session_start(project_root: Path, *, run_id: str, agent_id: str, binding: dict[str, Any]) -> dict[str, Any]:
+    """Bind an explicit caller session to this canonical run, with exact replay."""
+    run_id = validate_run_id(run_id)
+    agent_id = require_agent_id(agent_id)
+    binding = json.loads(compact_json(binding))
+    path = run_state_path(project_root, run_id)
+    if path.exists():
+        with workspace_lock(run_lock_path(project_root, run_id), purpose="research session replay"):
+            document = load_run_state(project_root, run_id)
+            require_caller_context(project_root, document, agent_id)
+            if document.get("research_session") != binding or document["agent_id"] != agent_id:
+                raise RunControllerError("RUN_CALLER_CONTEXT_CONFLICT", "Session binding differs from the retained run.", recoverable=False)
+            _flush_run_file(events_path(project_root, run_id))
+            _flush_run_file(run_state_path(project_root, run_id))
+            return document
+    return run_start(project_root, SimpleNamespace(run_id=run_id, agent_id=agent_id, caller=True, session_binding=binding))
+
+
+def run_session_record(project_root: Path, *, run_id: str, agent_id: str, request_id: str,
+                       binding: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    """Retain one inert decision/job/receipt record in the existing run event log."""
+    run_id, agent_id = validate_run_id(run_id), require_agent_id(agent_id)
+    if type(request_id) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", request_id) is None:
+        raise RunControllerError("VALUE_INVALID", "Session request ID is invalid.", recoverable=False)
+    encoded = compact_json(record)
+    if len(encoded.encode()) > 262144 or type(record) is not dict:
+        raise RunControllerError("VALUE_INVALID", "Session record is invalid or too large.", recoverable=False)
+    with workspace_lock(run_lock_path(project_root, run_id), purpose="research decision commit"):
+        document = load_run_state(project_root, run_id)
+        require_caller_context(project_root, document, agent_id)
+        if document.get("research_session") != binding:
+            raise RunControllerError("RUN_CALLER_CONTEXT_CONFLICT", "Session binding differs from the retained run.", recoverable=False)
+        for event in load_events(events_path(project_root, run_id)):
+            data = event.get("data") or {}
+            if event["event_type"] == "custom.research.decision" and data.get("request_id") == request_id:
+                if data.get("record") != record:
+                    raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Session request ID has a different retained record.", recoverable=False)
+                _flush_run_file(events_path(project_root, run_id))
+                _flush_run_file(run_state_path(project_root, run_id))
+                return event
+        event = custom_event(project_root, run_id, agent_id, event_type="custom.research.decision",
+                             message="Inert research decision recorded.", data={"request_id": request_id, "record": record})
+        document["updated_at"] = event["occurred_at"]
+        commit_run_mutation(project_root, run_id, document, event)
+        return event
+
+
+def _telemetry_host(project_root: Path, seam: str, *, agent_id: str | None = None):
+    bridge = sys.modules.get("evidence_wiki.host_context")
+    context = bridge.current_context() if bridge is not None else None
+    root = Path(project_root).expanduser().absolute()
+    if context is not None:
+        context.require_grant("run_controller." + seam)
+        root = context.require_path(root, write=seam == "run_telemetry_record")
+        if agent_id is not None:
+            bridge.require_actor(agent_id)
+        if seam == "run_telemetry_record" and context.mutation_control_directory is not None:
+            bridge._require_mutation_workspace_gate(root)
+    return root
+
+
+def run_telemetry_events(project_root: Path, *, run_id: str) -> dict[str, Any]:
+    """Capture bounded journal bytes; retained rows are editable artifact facts."""
+    root = _telemetry_host(project_root, "run_telemetry_events")
+    run_id = validate_run_id(run_id)
+    state_path = run_state_path(root, run_id)
+    before = _read_run_bytes(state_path, maximum=JOURNAL_MAX_EVENT_BYTES)
+    load_run_state(root, run_id, _captured_raw=before)
+    journal = _bounded_journal(events_path(root, run_id))
+    if _read_run_bytes(state_path, maximum=JOURNAL_MAX_EVENT_BYTES) != before:
+        raise RunControllerError("RUN_JOURNAL_CHANGED", "Run state changed during journal capture.", recoverable=True)
+    return {"schema_version": "research-telemetry-journal/v1", "run_id": run_id, **journal,
+        "limits": {"max_bytes": JOURNAL_MAX_BYTES, "max_event_bytes": JOURNAL_MAX_EVENT_BYTES,
+            "max_events": JOURNAL_MAX_EVENTS, "max_lines": JOURNAL_MAX_LINES, "max_depth": JOURNAL_MAX_DEPTH},
+        "authorized": False, "evidence_accepted": False}
+
+
+def run_telemetry_record(project_root: Path, *, run_id: str, agent_id: str, event: dict[str, Any]) -> dict[str, Any]:
+    """Retain a closed telemetry event with logical replay and native durability."""
+    root = _telemetry_host(project_root, "run_telemetry_record", agent_id=agent_id)
+    run_id, agent_id = validate_run_id(run_id), require_agent_id(agent_id)
+    from evidence_wiki.source_commands import _no_secret_values
+    from evidence_wiki.telemetry_contracts import EVENT, metric_binding, validate_document
+    event = validate_document(EVENT, event)
+    _no_secret_values(event)
+    if event["run_id"] != run_id or event["agent_id"] != agent_id:
+        raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Telemetry event binding differs from the selected run.", recoverable=False)
+    with workspace_lock(run_lock_path(root, run_id), purpose="telemetry event commit"):
+        raw = _read_run_bytes(run_state_path(root, run_id), maximum=JOURNAL_MAX_EVENT_BYTES)
+        document = load_run_state(root, run_id, _captured_raw=raw)
+        journal = _bounded_journal(events_path(root, run_id))
+        metrics = {}
+        for retained in journal["events"]:
+            if retained.get("event_type") != TELEMETRY_EVENT_TYPE:
+                continue
+            data = retained.get("data") or {}
+            if data.get("logical_id") == event["logical_id"]:
+                if data.get("event") != event or retained.get("agent_id") != agent_id:
+                    raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Telemetry logical ID has different retained content.", recoverable=False)
+                _flush_run_file(events_path(root, run_id))
+                _flush_run_file(run_state_path(root, run_id))
+                return retained
+            previous = validate_document(EVENT, data["event"])
+            for metric in previous["metrics"]:
+                binding = metric_binding(previous, metric)
+                if metric["logical_id"] in metrics and metrics[metric["logical_id"]] != binding:
+                    raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Retained metric logical ID has conflicting content.", recoverable=False)
+                metrics[metric["logical_id"]] = binding
+        for metric in event["metrics"]:
+            if metric["logical_id"] in metrics and metrics[metric["logical_id"]] != metric_binding(event, metric):
+                raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Metric logical ID has different retained execution content.", recoverable=False)
+        require_caller_context(root, document, agent_id)
+        retained = custom_event(root, run_id, agent_id, event_type=TELEMETRY_EVENT_TYPE,
+            message="Inert telemetry observation recorded.", data={"logical_id": event["logical_id"], "event": event},
+            _event_id=f"evt-{journal['count'] + 1:04d}")
+        if any(row["event_id"] == retained["event_id"] for row in journal["events"]):
+            raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Run event identity cannot be assigned safely.", recoverable=False)
+        projected = "".join(compact_json(row) + "\n" for row in [*journal["events"], retained]).encode("utf-8")
+        if (journal["count"] >= JOURNAL_MAX_EVENTS or len(projected) > JOURNAL_MAX_BYTES
+                or len(compact_json(retained).encode("utf-8")) > JOURNAL_MAX_EVENT_BYTES):
+            raise RunControllerError("RUN_JOURNAL_LIMIT", "Telemetry append exceeds the supported journal bound.", recoverable=False)
+        document["updated_at"] = retained["occurred_at"]
+        pending_size = len(_run_state_bytes({**document, PENDING_EVENT_FIELD: retained}))
+        if pending_size > JOURNAL_MAX_EVENT_BYTES:
+            raise RunControllerError("RUN_JOURNAL_LIMIT", "Telemetry checkpoint exceeds the supported state bound.", recoverable=False)
+        commit_run_mutation(root, run_id, document, retained, _journal=journal)
+        return retained
+
+
+def run_session_transition(project_root: Path, *, run_id: str, agent_id: str, to_state: str,
+                           reason: str) -> dict[str, Any]:
+    """Use the canonical transition engine without invoking an argument parser."""
+    args = SimpleNamespace(run_id=run_id, agent_id=agent_id, to_state=to_state, reason=reason)
+    for name in ("questions_processed_this_run", "source_requests_opened_this_run", "releases_this_run",
+                 "discovery_results_this_run", "acquisition_downloads_this_run", "github_archive_bytes_this_run",
+                 "academic_provider_requests_this_run", "web_downloads_this_run", "manual_url_deliveries_this_run"):
+        setattr(args, name, None)
+    return run_transition(project_root, args)
+
+
+def run_session_finish(project_root: Path, *, run_id: str, agent_id: str, final_verdict: str,
+                       reason: str) -> dict[str, Any]:
+    """Use current canonical completion/readiness checks for the terminal state."""
+    args = SimpleNamespace(run_id=run_id, agent_id=agent_id, final_verdict=final_verdict, reason=reason)
+    for name in ("questions_processed_this_run", "source_requests_opened_this_run", "releases_this_run",
+                 "discovery_results_this_run", "acquisition_downloads_this_run", "github_archive_bytes_this_run",
+                 "academic_provider_requests_this_run", "web_downloads_this_run", "manual_url_deliveries_this_run"):
+        setattr(args, name, None)
+    return run_finish(project_root, args)
 
 
 def run_transition(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -1309,6 +1748,8 @@ def run_recover(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
         quarantined = quarantine_run_temp_files(project_root, run_id)
         pending = document.get(PENDING_EVENT_FIELD)
         if pending is None and not quarantined:
+            _flush_run_file(run_state_path(project_root, run_id))
+            _flush_run_file(events_path(project_root, run_id))
             return document
         if pending is not None and (
             not isinstance(pending, dict) or not isinstance(pending.get("event_id"), str)

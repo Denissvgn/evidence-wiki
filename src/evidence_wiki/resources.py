@@ -21,6 +21,8 @@ ORCHESTRATOR_DIR = "orchestrator"
 ORCHESTRATOR_SKILL = "research-orchestrate"
 REQUIRED_STARTER_ASSETS = (
     "scripts/_native_fs.py",
+    "scripts/_host_context.py",
+    "scripts/_owner_paths.py",
     "scripts/_windows_fs.py",
     "AGENTS.md",
     "CLAUDE.md",
@@ -32,6 +34,8 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/doctor.py",
     "scripts/_strict_contract.py",
     "scripts/_strict_evidence.py",
+    "scripts/_draft_admission_contract.py",
+    "scripts/_draft_admission.py",
     "scripts/strict_evidence.py",
     "scripts/_computation_contract.py",
     "scripts/_computation_expression.py",

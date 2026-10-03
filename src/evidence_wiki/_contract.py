@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "14"
+LIBRARY_API_VERSION = "18"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -63,12 +63,45 @@ LIBRARY_API_SURFACE = (
     "workspace.publish_selected",
     "workspace.doctor",
     "coverage.evaluate",
+    "coverage.init",
+    "coverage.link",
+    "coverage.revision",
     "grounding.verify",
     "normalize.verify",
+    "normalize.sources",
     "normalize.profiles",
     "normalize.validate_packet",
     "normalize.validate_execution",
     "normalize.validate_market",
+    "sources.inventory",
+    "source_requests.add",
+    "source_requests.list",
+    "source_requests.fulfill",
+    "strict.check",
+    "strict.admit",
+    "strict.prepare_review",
+    "strict.register_review",
+    "strict.export",
+    "mutations.revision",
+    "mutations.prepare",
+    "mutations.submit",
+    "mutations.inspect",
+    "mutations.reconcile",
+    "research.current",
+    "research.next",
+    "research.session",
+    "research.session.current",
+    "research.session.next",
+    "research.session.advance",
+    "research.session.run_until_terminal",
+    "research.session.host_job",
+    "research.session.close",
+    "research.telemetry.record",
+    "research.telemetry.report",
+    "research.telemetry.project",
+    "research.telemetry.deliver",
+    "research.telemetry.inspect",
+    "research.telemetry.retry",
     "usage.status",
     "usage.transact",
     "usage.check",
@@ -275,6 +308,10 @@ def contract() -> dict:
     from . import orchestration
     from .environment import SERVICE_VARIABLES
     from .extension_contracts import index as extension_index
+    from .mutation_contracts import MAX_BYTES as MUTATION_MAX_BYTES
+    from .mutation_contracts import OPERATIONS as MUTATION_OPERATIONS
+    from .mutation_contracts import schemas as mutation_schemas
+    from .mutation_store import MAX_RECORD_BYTES, MAX_STAGE_BLOB_BYTES, MAX_STAGE_BLOBS, MAX_STAGE_BYTES
     from .onboarding_schemas import contract_index
     from .orchestration_schemas import public_orchestration_schema_documents
     from .pack_authoring_contracts import contract_index as pack_authoring_index
@@ -304,6 +341,7 @@ def contract() -> dict:
         workspace_system = {}
     initializer = load_packaged_script(root, "init_research_workspace")
     strict_contract = load_packaged_script(root, "_strict_contract")
+    revision_module = load_packaged_script(root, "_evidence_revision")
     computation_contract = load_packaged_script(root, "_computation_contract")
     status_module = load_packaged_script(root, "workspace_status")
     intake_module = load_packaged_script(root, "intake_questions")
@@ -422,6 +460,59 @@ def contract() -> dict:
         },
         "workspace_application": setup_contract_index(),
         "caller_research": research_contract_index(),
+        "serialized_mutations": {
+            "operations": list(MUTATION_OPERATIONS),
+            "schema_documents": mutation_schemas(),
+            "limits": {
+                "request_bytes": MUTATION_MAX_BYTES,
+                "workspace_files": revision_module.MAX_FILES,
+                "workspace_entries": revision_module.MAX_ENTRIES,
+                "workspace_bytes": revision_module.MAX_BYTES,
+                "workspace_file_bytes": revision_module.MAX_FILE_BYTES,
+                "workspace_depth": revision_module.MAX_DEPTH,
+                "capture_attempts": 1,
+                "checkpoint_bytes": MAX_RECORD_BYTES,
+                "staged_artifact_slots": MAX_STAGE_BLOBS,
+                "staged_artifact_bytes": MAX_STAGE_BLOB_BYTES,
+                "staged_request_bytes": MAX_STAGE_BYTES,
+            },
+            "control_selection": "HostContext.mutation_control_directory",
+            "serialization_scope": "same workspace and same host-selected control directory",
+            "replay": "immutable historical outcome; no current authorization or acceptance",
+            "recovery": "inspect canonical effects; unknown partial effects never blindly redispatch",
+        },
+        "draft_admission": {
+            "proposal_schema": "evidence-draft-proposal/v1",
+            "owner": "configured strict claims inventory",
+            "acceptance": "unaccepted draft; no review or question status effects",
+            "original_source_scope": "frozen native absolute files/directories inside the original workspace; URI, relative and external extents unsupported",
+            "publication_eligibility": "current source age and usage permission rechecked before new publication",
+            "report_clock": "admitted_at is the retained plan validation clock; actual completion timing is not reconstructed",
+            "computation": "unsupported in the initial native admission profile",
+            "multi_origin_question_mapping": "unsupported; explicit refusal",
+        },
+        "research_sessions": {
+            "schemas": ["research-session-current/v1", "research-session-next/v1",
+                        "research-session-binding/v1", "research-session-step/v1"],
+            "schema_accessor": "evidence_wiki.research_session_contracts.schema_document",
+            "state_owner": "canonical run state and event journal",
+            "advice": "inert current accounting and bounded next-work descriptions",
+            "advance_profile": "finite terminal decision when usage or evaluator qualification is unavailable",
+            "host_jobs": "immutable inert generation/evaluation jobs; one pending reservation",
+            "model_executor": "unavailable",
+            "acquisition": "unsupported; locator-to-source identity binding unavailable",
+            "qualification": "unknown; no authenticated evaluator profile owner",
+            "acceptance": "current canonical release is separate from workflow qualification",
+        },
+        "telemetry": {
+            "schema_accessor": "evidence_wiki.telemetry_contracts.schema_document",
+            "state_owner": "canonical run journal; private delivery operation metadata",
+            "measurement_verifier": "optional explicit host callback; producer references do not authenticate",
+            "whole_execution_coverage": "unsupported; total execution/intervention remains unknown",
+            "projection": "redacted declared report; measurement authentication is not reverified",
+            "delivery": "explicit host-selected deadline sink; core cannot interrupt arbitrary Python callback",
+            "replay": "exact logical event identity and immutable attempts; uncertain delivery never blindly retries",
+        },
         "upgrade_compatibility": {
             "workspace_schema_versions": list(initializer.SUPPORTED_WORKSPACE_SCHEMA_VERSIONS),
             "research_yml_contract_versions": list(initializer.SUPPORTED_RESEARCH_YML_CONTRACTS),

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
-import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -14,7 +13,7 @@ import yaml
 from ._script_host import shared_assets_root
 from .agent import capabilities
 from .errors import EvidenceWikiError
-from .host_capabilities import describe, read_tools
+from .host_capabilities import credential_observation, describe, read_tools
 from .pack_discovery import owner
 from .source_contracts import refuse
 from .source_inputs import SourceView
@@ -88,7 +87,7 @@ def provider_views(config, configured, probes=()):
                                (built_in or observation and observation.get("state") == "observed") else "selected_registration_unverified"
                                if valid and selected and settings.get("enabled") is True and not collision else "not_established",
                 "credentials": {"basis": "built_in_optional_references" if built_in else "probed_declaration" if observation else "unknown",
-                    "references": [{"name": name, "present": bool(os.environ.get(name))} for name in refs]},
+                    "references": [{"name": name, **credential_observation(name)} for name in refs]},
                 "connectivity": "not_probed", "capture": "not_demonstrated", "extraction": "source_dependent",
                 "registration": matches[0] if len(matches) == 1 else None, "probe": observation,
                 "request_kind_declarations_grant_routing": False})

@@ -5,13 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 from .._script_host import load_packaged_script, shared_assets_root
-from ._base import Namespace
+from ._base import Namespace, call_seam
 
 
 def verify_snapshot(data: bytes, *, trust_policy_bytes: bytes) -> dict[str, Any]:
     """Verify historical bindings against explicit trust bytes without opening a workspace."""
-    script = load_packaged_script(shared_assets_root(), "evidence_snapshots")
-    return script.run_verify(data=data, trust_policy_bytes=trust_policy_bytes)
+    return call_seam(
+        lambda stem: load_packaged_script(shared_assets_root(), stem),
+        "evidence_snapshots", "run_verify", data=data, trust_policy_bytes=trust_policy_bytes,
+    )
 
 
 class SnapshotsNamespace(Namespace):

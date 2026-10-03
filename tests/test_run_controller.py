@@ -998,17 +998,17 @@ class RunControllerTests(unittest.TestCase):
             raw.write_text("raw evidence must survive\n", encoding="utf-8")
             user.write_text("user edit must survive\n", encoding="utf-8")
             protected = (raw.read_bytes(), user.read_bytes())
-            original_replace = controller.Path.replace
+            original_replace = controller._replace_run_file
             injected = False
 
-            def fail_event_replace(path, destination):
+            def fail_event_replace(directory, temporary, destination):
                 nonlocal injected
-                if not injected and path.name.startswith(".events.jsonl.") and path.name.endswith(".tmp"):
+                if not injected and temporary.startswith(".events.jsonl.") and temporary.endswith(".tmp"):
                     injected = True
                     raise OSError(errno.ENOSPC, "injected quota exhaustion")
-                return original_replace(path, destination)
+                return original_replace(directory, temporary, destination)
 
-            with mock.patch.object(controller.Path, "replace", new=fail_event_replace):
+            with mock.patch.object(controller, "_replace_run_file", new=fail_event_replace):
                 code, stdout, stderr = self.run_module(
                     controller,
                     [

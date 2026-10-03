@@ -8,6 +8,7 @@ from pathlib import Path
 from ._onboarding_scope import Scope, scoped_operation
 from ._pack_io import canonical, json_document
 from .errors import ConfigError
+from .host_context import current_context
 from .pack_discovery import owner
 from .pack_migrations import _call
 from .planning_contracts import refuse
@@ -82,6 +83,9 @@ class Onboarding:
             raise ConfigError("WORKSPACE_UNREADABLE", "Onboarding handle is closed.")
         if operation not in self._allow:
             refuse("onboarding_operation_not_granted", "ONBOARDING_AUTHORITY_REQUIRED")
+        context = current_context()
+        if context is not None:
+            context.require_grant("onboarding." + operation)
         self._scope.verify()
         if generation() != self._generation:
             refuse("onboarding_generation_changed_restart_required", "ONBOARDING_PLAN_STALE")
@@ -111,24 +115,28 @@ class Onboarding:
         result = {"schema_version": version + ".0", "kind": kind, "request_id": request_id, "payload": payload}
         return self._finish(json.loads(encode_document("onboarding/" + kind + "/v" + version, result)))
 
+    @scoped_operation
     def resources(self):
         from .agent_resources import resource_index
 
         self._check("resources")
         return self._finish(resource_index())
 
+    @scoped_operation
     def resource(self, resource_id):
         from .agent_resources import resource_document
 
         self._check("resource")
         return self._finish(resource_document(resource_id))
 
+    @scoped_operation
     def recipes(self):
         from .capability_recipes import recipes
 
         self._check("recipes")
         return self._finish(recipes())
 
+    @scoped_operation
     def contracts(self):
         from .extension_contracts import contract
 
@@ -191,6 +199,7 @@ class Onboarding:
         self._pack_scope(target=base["target"], catalog=base["catalog"], path=base["path"])
         return self._finish(derive(raw, output=output))
 
+    @scoped_operation
     def inspect(self, target, *, source_ids=(), source_paths=(), host_tools=None):
         from .source_inspection import inspect
 
@@ -265,6 +274,7 @@ class Onboarding:
     def migration_apply(self, value):
         return self._revision("migration_apply", value)
 
+    @scoped_operation
     def revision_status(self, target, *, evaluate=False):
         from .pack_revisions import status
 
@@ -272,6 +282,7 @@ class Onboarding:
         self._scope.builtin_workspace(target)
         return self._finish(_call(status, target, evaluate=evaluate))
 
+    @scoped_operation
     def reevaluate(self, target, value):
         from .pack_revision_contracts import REEVALUATION, decode
 
@@ -368,6 +379,7 @@ class Onboarding:
     def transition_apply(self, value):
         return self._transition("transition_apply", value)
 
+    @scoped_operation
     def research_next(self, target, *, agent_id=None, run_id=None):
         from .research_actions import guidance
 
@@ -375,6 +387,7 @@ class Onboarding:
         self._scope.builtin_workspace(target)
         return self._finish(guidance(target, agent_id=agent_id, run_id=run_id))
 
+    @scoped_operation
     def research(self, target, operation, *, agent_id, run_id, request_id=None, source_id=None, source_path=None):
         from .research_operations import ingest, run_operation
 
@@ -390,6 +403,7 @@ class Onboarding:
             refuse("onboarding_research_operation_unknown")
         return self._finish(result)
 
+    @scoped_operation
     def research_export(self, target, *, allow_partial=False, run_id=None):
         from .research_completion import completion
 
@@ -397,6 +411,7 @@ class Onboarding:
         self._scope.builtin_workspace(target)
         return self._finish(completion(target, allow_partial=allow_partial, run_id=run_id))
 
+    @scoped_operation
     def computation(self, target, operation="check", *, as_of=None, expected_result_id=None, request_id=None, cadence_id=None, dry_run=False):
         self._check("computation." + operation)
         root = self._scope.builtin_workspace(target)

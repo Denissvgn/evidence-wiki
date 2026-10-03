@@ -20,10 +20,15 @@ from ._facades.assessments import AssessmentsNamespace
 from ._facades.coverage import CoverageNamespace
 from ._facades.diagnostics import DiagnosticsNamespace
 from ._facades.grounding import GroundingNamespace
+from ._facades.mutations import MutationsNamespace
 from ._facades.normalize import NormalizeNamespace
 from ._facades.orchestrate import OrchestrateNamespace
 from ._facades.questions import QuestionsNamespace
+from ._facades.research import ResearchNamespace
 from ._facades.snapshots import SnapshotsNamespace
+from ._facades.source_requests import SourceRequestsNamespace
+from ._facades.sources import SourcesNamespace
+from ._facades.strict import StrictNamespace
 from ._facades.temporal import TemporalNamespace
 from ._facades.usage import UsageNamespace
 from .errors import ConfigError
@@ -83,6 +88,11 @@ class Workspace:
         "snapshots",
         "temporal",
         "assessments",
+        "sources",
+        "source_requests",
+        "strict",
+        "mutations",
+        "research",
         "orchestrate",
         "diagnostics",
     )
@@ -98,6 +108,11 @@ class Workspace:
         self.snapshots = SnapshotsNamespace(self)
         self.temporal = TemporalNamespace(self)
         self.assessments = AssessmentsNamespace(self)
+        self.sources = SourcesNamespace(self)
+        self.source_requests = SourceRequestsNamespace(self)
+        self.strict = StrictNamespace(self)
+        self.mutations = MutationsNamespace(self)
+        self.research = ResearchNamespace(self)
         self.orchestrate = OrchestrateNamespace(self)
         self.diagnostics = DiagnosticsNamespace(self)
 
@@ -116,6 +131,13 @@ class Workspace:
             ConfigError: ``WORKSPACE_UNREADABLE`` when ``path`` is not a usable
                 directory, ``CONFIG_MISSING`` when it holds no ``research.yml``.
         """
+        from .host_context import current_context
+
+        context = current_context()
+        if context is not None:
+            context.require_grant("workspace.open")
+            selected = context.require_path(Path(path).expanduser().absolute())
+            context.require_path(selected / WORKSPACE_MARKER)
         try:
             root = Path(path).expanduser().resolve()
         except (OSError, RuntimeError, ValueError) as exc:
@@ -183,10 +205,13 @@ class Workspace:
             ConfigError: ``WORKSPACE_UNREADABLE`` if the handle is closed.
         """
         self._check_open()
-        return {
-            "package": _package_version(),
-            "workspace": self._workspace_versions(),
-        }
+        from .host_context import checked_workspace
+
+        with checked_workspace("workspace.versions", self._root, paths=(self._root / WORKSPACE_SYSTEM_FILE,)):
+            return {
+                "package": _package_version(),
+                "workspace": self._workspace_versions(),
+            }
 
     def _workspace_versions(self) -> dict[str, Any]:
         metadata = _read_workspace_system(self._root / WORKSPACE_SYSTEM_FILE)
