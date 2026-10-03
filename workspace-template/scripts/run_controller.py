@@ -787,7 +787,7 @@ def _bounded_journal(path: Path) -> dict[str, Any]:
             if field in event and type(event[field]) is not str:
                 raise RunControllerError("RUN_EVENTS_INVALID", "Run journal outer identity is invalid.", recoverable=False)
         kind = event.get("event_type")
-        if kind in {TELEMETRY_EVENT_TYPE, "custom.research.decision"}:
+        if kind in {TELEMETRY_EVENT_TYPE, "custom.research.decision", "custom.research.pending"}:
             if (event.get("run_id") != path.parent.name or type(event.get("agent_id")) is not str
                     or type(event.get("data")) is not dict):
                 raise RunControllerError("RUN_EVENTS_INVALID", "Recognized run journal wrapper is invalid.", recoverable=False)
@@ -806,6 +806,8 @@ def _bounded_journal(path: Path) -> dict[str, Any]:
             elif (set(data) != {"request_id", "record"} or type(data["request_id"]) is not str
                     or type(data["record"]) is not dict):
                 raise RunControllerError("RUN_EVENTS_INVALID", "Retained decision wrapper is invalid.", recoverable=False)
+            elif ((kind == "custom.research.pending") != (data["record"].get("kind") == "pending_work")):
+                raise RunControllerError("RUN_EVENTS_INVALID", "Retained record has an incompatible request namespace.", recoverable=False)
         ids.append(event["event_id"])
     if len(ids) != len(set(ids)):
         raise RunControllerError("RUN_EVENTS_INVALID", "Run journal contains duplicate event identities.", recoverable=False)
@@ -1430,13 +1432,14 @@ def start_with_requirements(project_root, args, requirement_basis):
 
 def run_session_start(project_root: Path, *, run_id: str, agent_id: str, binding: dict[str, Any]) -> dict[str, Any]:
     """Bind an explicit caller session to this canonical run, with exact replay."""
+    project_root = _session_host(project_root, "run_session_start", agent_id=agent_id)
     run_id = validate_run_id(run_id)
     agent_id = require_agent_id(agent_id)
     binding = json.loads(compact_json(binding))
     path = run_state_path(project_root, run_id)
     if path.exists():
         with workspace_lock(run_lock_path(project_root, run_id), purpose="research session replay"):
-            document = load_run_state(project_root, run_id)
+            document = _session_state(project_root, run_id)
             require_caller_context(project_root, document, agent_id)
             if document.get("research_session") != binding or document["agent_id"] != agent_id:
                 raise RunControllerError("RUN_CALLER_CONTEXT_CONFLICT", "Session binding differs from the retained run.", recoverable=False)
@@ -1449,6 +1452,7 @@ def run_session_start(project_root: Path, *, run_id: str, agent_id: str, binding
 def run_session_record(project_root: Path, *, run_id: str, agent_id: str, request_id: str,
                        binding: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
     """Retain one inert decision/job/receipt record in the existing run event log."""
+    project_root = _session_host(project_root, "run_session_record", agent_id=agent_id)
     run_id, agent_id = validate_run_id(run_id), require_agent_id(agent_id)
     if type(request_id) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", request_id) is None:
         raise RunControllerError("VALUE_INVALID", "Session request ID is invalid.", recoverable=False)
@@ -1456,23 +1460,118 @@ def run_session_record(project_root: Path, *, run_id: str, agent_id: str, reques
     if len(encoded.encode()) > 262144 or type(record) is not dict:
         raise RunControllerError("VALUE_INVALID", "Session record is invalid or too large.", recoverable=False)
     with workspace_lock(run_lock_path(project_root, run_id), purpose="research decision commit"):
-        document = load_run_state(project_root, run_id)
+        document = _session_state(project_root, run_id)
         require_caller_context(project_root, document, agent_id)
         if document.get("research_session") != binding:
             raise RunControllerError("RUN_CALLER_CONTEXT_CONFLICT", "Session binding differs from the retained run.", recoverable=False)
-        for event in load_events(events_path(project_root, run_id)):
+        journal = _bounded_journal(events_path(project_root, run_id))
+        event_type = "custom.research.pending" if record.get("kind") == "pending_work" else "custom.research.decision"
+        for event in journal["events"]:
             data = event.get("data") or {}
-            if event["event_type"] == "custom.research.decision" and data.get("request_id") == request_id:
+            if event["event_type"] == event_type and data.get("request_id") == request_id:
                 if data.get("record") != record:
                     raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Session request ID has a different retained record.", recoverable=False)
                 _flush_run_file(events_path(project_root, run_id))
                 _flush_run_file(run_state_path(project_root, run_id))
                 return event
-        event = custom_event(project_root, run_id, agent_id, event_type="custom.research.decision",
-                             message="Inert research decision recorded.", data={"request_id": request_id, "record": record})
+        if record.get("kind") == "host_job":
+            from datetime import timedelta
+            from decimal import Decimal
+
+            from evidence_wiki.workflow_contracts import JOB, validate_document
+            job = validate_document(JOB, record.get("job"))
+            if (job["id"] != request_id or job["policy_id"] != binding.get("policy_id")
+                    or job["input_id"] != binding.get("request_binding") or not set(job["scope"]) <= set(binding.get("original_ids", []))):
+                raise RunControllerError("RUN_CALLER_CONTEXT_CONFLICT", "Job reservation differs from the retained session.", recoverable=False)
+            if any((row.get("data") or {}).get("record", {}).get("kind") == "host_job"
+                   for row in journal["events"] if row.get("event_type") == "custom.research.decision"):
+                raise RunControllerError("RUN_JOB_RESERVATION_PENDING", "Run budget already has a retained job reservation.", recoverable=False)
+            policy = binding["policy"]
+            started = datetime.fromisoformat(document["started_at"].replace("Z", "+00:00"))
+            updated = datetime.fromisoformat(document["updated_at"].replace("Z", "+00:00"))
+            issued = datetime.fromisoformat(job["issued_utc"].replace("Z", "+00:00"))
+            deadline = datetime.fromisoformat(job["deadline_utc"].replace("Z", "+00:00"))
+            observed = datetime.now(timezone.utc)
+            effect = {"generate": "model", "evaluate": "adjudicate"}.get(job["operation"])
+            bridge = sys.modules.get("evidence_wiki.host_context")
+            context = bridge.current_context() if bridge is not None else None
+            role = "evaluator" if job["operation"] == "evaluate" else "host_worker"
+            if (effect is None or effect not in policy["allowed_effects"]
+                    or job["grant_ref"] != policy["host_capability_refs"].get(effect)
+                    or job["required_capabilities"] != [effect] or job["role"] != role
+                    or job["max_attempts"] != 1 or job["budgets"]["model_calls"] < 1 or job["budgets"]["tokens"] < 1
+                    or context is not None and dict(context.controller_refs).get(role) != job["controller_ref"]
+                    or not max(started, updated) <= issued <= observed < deadline
+                    or deadline > started + timedelta(seconds=policy["budgets"]["seconds"])
+                    or any(job["budgets"][key] > policy["budgets"][key] for key in ("model_calls", "tool_calls", "tokens"))
+                    or Decimal(job["budgets"]["cost"]) > Decimal(policy["budgets"]["cost_limit"])):
+                raise RunControllerError("RUN_JOB_RESERVATION_INVALID", "Job reservation exceeds its frozen run policy or lease.", recoverable=False)
+            if document["state"]["current"] in TERMINAL_STATES:
+                raise RunControllerError("RUN_TERMINAL", "Terminal runs cannot reserve new work.", recoverable=False)
+        elif record.get("kind") == "pending_work":
+            from datetime import timedelta
+
+            from evidence_wiki.mutation_contracts import digest
+            from evidence_wiki.pending_work_contracts import PENDING, create, validate_document, validate_transition
+            receipt = validate_document(PENDING, record.get("receipt"))
+            previous = None
+            for row in journal["events"]:
+                prior = (row.get("data") or {}).get("record", {})
+                if row.get("event_type") not in {"custom.research.decision", "custom.research.pending"}:
+                    continue
+                if prior.get("kind") == "host_job":
+                    job = prior["job"]
+                    try:
+                        deadline = datetime.fromisoformat(document["started_at"].replace("Z", "+00:00")) + timedelta(seconds=binding["policy"]["budgets"]["seconds"])
+                    except OverflowError:
+                        raise RunControllerError("RUN_STATE_INVALID", "Run session deadline is invalid.", recoverable=False) from None
+                    previous = create(job, run_id=run_id, binding_id=digest(binding), request_id=job["id"],
+                        run_deadline_utc=deadline.isoformat(), observed_utc=job["issued_utc"])
+                elif prior.get("kind") == "pending_work":
+                    if previous is None:
+                        raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Pending work has no reservation.", recoverable=False)
+                    previous = validate_transition(previous, prior["receipt"])
+            if previous is None or record.get("operation") not in {"cancel", "reconcile"}:
+                raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Pending work differs from its immutable reservation.", recoverable=False)
+            validate_transition(previous, receipt)
+        event = custom_event(project_root, run_id, agent_id, event_type=event_type,
+                             message="Inert research decision recorded.", data={"request_id": request_id, "record": record},
+                             _event_id=f"evt-{journal['count'] + 1:04d}")
+        if any(row["event_id"] == event["event_id"] for row in journal["events"]):
+            raise RunControllerError("RUN_EVENT_ID_CONFLICT", "Run event identity cannot be assigned safely.", recoverable=False)
+        projected = "".join(compact_json(row) + "\n" for row in [*journal["events"], event]).encode("utf-8")
+        if (journal["count"] >= JOURNAL_MAX_EVENTS or len(projected) > JOURNAL_MAX_BYTES
+                or len(compact_json(event).encode("utf-8")) > JOURNAL_MAX_EVENT_BYTES
+                or len(_run_state_bytes({**document, PENDING_EVENT_FIELD: event})) > JOURNAL_MAX_EVENT_BYTES):
+            raise RunControllerError("RUN_JOURNAL_LIMIT", "Research append exceeds the supported journal bound.", recoverable=False)
         document["updated_at"] = event["occurred_at"]
-        commit_run_mutation(project_root, run_id, document, event)
+        commit_run_mutation(project_root, run_id, document, event, _journal=journal)
         return event
+
+
+def _session_state(project_root: Path, run_id: str):
+    document = load_run_state(project_root, run_id, _captured_raw=_read_run_bytes(
+        run_state_path(project_root, run_id), maximum=JOURNAL_MAX_EVENT_BYTES))
+    from evidence_wiki.workflow_contracts import WorkflowContractError, _utc
+    for field in ("started_at", "updated_at"):
+        try:
+            _utc(document.get(field), "/" + field)
+        except WorkflowContractError:
+            raise RunControllerError("RUN_STATE_INVALID", "Run session clock is invalid.", recoverable=False,
+                                     details={"field": field}) from None
+    return document
+
+
+def _session_host(project_root: Path, seam: str, *, agent_id: str):
+    bridge = sys.modules.get("evidence_wiki.host_context")
+    context = bridge.current_context() if bridge is not None else None
+    root = Path(project_root).expanduser().absolute()
+    if context is not None:
+        context.require_grant("run_controller." + seam)
+        root = context.require_path(root, write=True)
+        bridge.require_actor(agent_id)
+        bridge._require_mutation_workspace_gate(root)
+    return root
 
 
 def _telemetry_host(project_root: Path, seam: str, *, agent_id: str | None = None):
@@ -1560,6 +1659,7 @@ def run_telemetry_record(project_root: Path, *, run_id: str, agent_id: str, even
 def run_session_transition(project_root: Path, *, run_id: str, agent_id: str, to_state: str,
                            reason: str) -> dict[str, Any]:
     """Use the canonical transition engine without invoking an argument parser."""
+    project_root = _session_host(project_root, "run_session_transition", agent_id=agent_id)
     args = SimpleNamespace(run_id=run_id, agent_id=agent_id, to_state=to_state, reason=reason)
     for name in ("questions_processed_this_run", "source_requests_opened_this_run", "releases_this_run",
                  "discovery_results_this_run", "acquisition_downloads_this_run", "github_archive_bytes_this_run",
@@ -1571,6 +1671,7 @@ def run_session_transition(project_root: Path, *, run_id: str, agent_id: str, to
 def run_session_finish(project_root: Path, *, run_id: str, agent_id: str, final_verdict: str,
                        reason: str) -> dict[str, Any]:
     """Use current canonical completion/readiness checks for the terminal state."""
+    project_root = _session_host(project_root, "run_session_finish", agent_id=agent_id)
     args = SimpleNamespace(run_id=run_id, agent_id=agent_id, final_verdict=final_verdict, reason=reason)
     for name in ("questions_processed_this_run", "source_requests_opened_this_run", "releases_this_run",
                  "discovery_results_this_run", "acquisition_downloads_this_run", "github_archive_bytes_this_run",

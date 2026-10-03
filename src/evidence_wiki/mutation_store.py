@@ -274,6 +274,7 @@ class MutationStore:
         if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or os.link not in os.supports_dir_fd:
             _refuse("native_storage_unavailable", "MUTATION_PLATFORM_UNAVAILABLE")
         locks = owner("_workspace_locks")
+        yielded_error = False
         try:
             root = self._open_control_root()
             namespace = self._directory(root, "mutations")
@@ -288,12 +289,20 @@ class MutationStore:
                 with _mutation_workspace_gate(self.workspace_root, self.control_root,
                         workspace_binding=self.workspace_binding, control_identity=self.control_identity,
                         gate_descriptor=gate):
-                    yield self
+                    try:
+                        yield self
+                    except BaseException:
+                        yielded_error = True
+                        raise
                     self._verify()
         except locks.LockUnavailableError as exc:
+            if yielded_error:
+                raise
             _refuse("workspace_or_request_gate_busy" if exc.contended else "native_lock_unavailable",
                     "MUTATION_LOCK_BUSY" if exc.contended else "MUTATION_PLATFORM_UNAVAILABLE")
         except OSError:
+            if yielded_error:
+                raise
             _refuse("control_io_unavailable")
         finally:
             self._active, self._request, self._request_id, self._workspace = False, None, None, None
@@ -310,35 +319,50 @@ class MutationStore:
         identifier = _identifier(identifier)
         locks = owner("_workspace_locks")
         with self.workspace_locked():
-            requests = self._directory(self._workspace, "requests")
-            self._request = self._directory(requests, hashlib.sha256(identifier.encode()).hexdigest())
-            request_lock = self._lock_file(self._request, "request.lock")
-            with locks.descriptor_lock(request_lock, timeout_seconds=0):
-                self._active, self._request_id = True, identifier
-                self._verify()
-                allowed = {"request.lock", "intent.json", "state.json", "receipt.json"}
-                entries = os.listdir(self._request)
-                if len(entries) > 2 * MAX_STAGE_BLOBS + 32 or any(name not in allowed and not _TEMPORARY.fullmatch(name)
-                        and not _STAGED.fullmatch(name) and not _STAGE_METADATA.fullmatch(name) for name in entries):
-                    _refuse("request_directory_contains_unowned_data")
-                if sum(bool(_TEMPORARY.fullmatch(name)) for name in entries) > 32:
-                    _refuse("stage_temporary_bound")
-                for name in entries:
-                    if _STAGED.fullmatch(name) or _STAGE_METADATA.fullmatch(name) or _TEMPORARY.fullmatch(name):
-                        info = os.stat(name, dir_fd=self._request, follow_symlinks=False)
-                        _private(info)
-                        if info.st_size > (MAX_RECORD_BYTES if _STAGE_METADATA.fullmatch(name) else MAX_STAGE_BLOB_BYTES):
-                            _refuse("stage_blob_bound")
-                        if _TEMPORARY.fullmatch(name):
-                            self._stage_temporary_bytes += info.st_size
-                        else:
-                            self._stage_sizes[name] = info.st_size
-                            self._stage_slots.add(name.removesuffix(".json"))
-                if (len(self._stage_slots) > MAX_STAGE_BLOBS
-                        or sum(self._stage_sizes.values()) + self._stage_temporary_bytes > MAX_STAGE_BYTES):
-                    _refuse("stage_aggregate_bound")
-                yield self
-                self._verify()
+            yielded_error = False
+            try:
+                requests = self._directory(self._workspace, "requests")
+                self._request = self._directory(requests, hashlib.sha256(identifier.encode()).hexdigest())
+                request_lock = self._lock_file(self._request, "request.lock")
+                with locks.descriptor_lock(request_lock, timeout_seconds=0):
+                    self._active, self._request_id = True, identifier
+                    self._verify()
+                    allowed = {"request.lock", "intent.json", "state.json", "receipt.json"}
+                    entries = os.listdir(self._request)
+                    if len(entries) > 2 * MAX_STAGE_BLOBS + 32 or any(name not in allowed and not _TEMPORARY.fullmatch(name)
+                            and not _STAGED.fullmatch(name) and not _STAGE_METADATA.fullmatch(name) for name in entries):
+                        _refuse("request_directory_contains_unowned_data")
+                    if sum(bool(_TEMPORARY.fullmatch(name)) for name in entries) > 32:
+                        _refuse("stage_temporary_bound")
+                    for name in entries:
+                        if _STAGED.fullmatch(name) or _STAGE_METADATA.fullmatch(name) or _TEMPORARY.fullmatch(name):
+                            info = os.stat(name, dir_fd=self._request, follow_symlinks=False)
+                            _private(info)
+                            if info.st_size > (MAX_RECORD_BYTES if _STAGE_METADATA.fullmatch(name) else MAX_STAGE_BLOB_BYTES):
+                                _refuse("stage_blob_bound")
+                            if _TEMPORARY.fullmatch(name):
+                                self._stage_temporary_bytes += info.st_size
+                            else:
+                                self._stage_sizes[name] = info.st_size
+                                self._stage_slots.add(name.removesuffix(".json"))
+                    if (len(self._stage_slots) > MAX_STAGE_BLOBS
+                            or sum(self._stage_sizes.values()) + self._stage_temporary_bytes > MAX_STAGE_BYTES):
+                        _refuse("stage_aggregate_bound")
+                    try:
+                        yield self
+                    except BaseException:
+                        yielded_error = True
+                        raise
+                    self._verify()
+            except locks.LockUnavailableError as exc:
+                if yielded_error:
+                    raise
+                _refuse("workspace_or_request_gate_busy" if exc.contended else "native_lock_unavailable",
+                        "MUTATION_LOCK_BUSY" if exc.contended else "MUTATION_PLATFORM_UNAVAILABLE")
+            except OSError:
+                if yielded_error:
+                    raise
+                _refuse("control_io_unavailable")
 
     def _require_locked(self) -> None:
         if not self._active or self._request is None:

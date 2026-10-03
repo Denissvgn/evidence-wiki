@@ -40,6 +40,7 @@ GRANTS = {"workspace.open", "workspace_status.run_status_report", "source_reques
     "research_session.current", "research_session.next_work", "research_session.session",
     "research_session.advance", "research_session.run_until_terminal", "research_session.host_job",
     "research_session.host_job.generate", "research_session.host_job.evaluate", "research_session.host_job.acquire",
+    "research_session.pending", "research_session.reconcile_pending", "research_session.cancel_pending",
     "run_controller.run_session_start", "run_controller.run_session_record", "run_controller.run_session_transition",
     "run_controller.run_session_finish"}
 

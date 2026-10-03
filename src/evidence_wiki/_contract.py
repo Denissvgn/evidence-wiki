@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "18"
+LIBRARY_API_VERSION = "19"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -95,6 +95,9 @@ LIBRARY_API_SURFACE = (
     "research.session.advance",
     "research.session.run_until_terminal",
     "research.session.host_job",
+    "research.session.pending",
+    "research.session.reconcile_pending",
+    "research.session.cancel_pending",
     "research.session.close",
     "research.telemetry.record",
     "research.telemetry.report",
@@ -499,6 +502,11 @@ def contract() -> dict:
             "advice": "inert current accounting and bounded next-work descriptions",
             "advance_profile": "finite terminal decision when usage or evaluator qualification is unavailable",
             "host_jobs": "immutable inert generation/evaluation jobs; one pending reservation",
+            "pending_schema": "research-pending-work/v1",
+            "pending_schema_accessor": "evidence_wiki.pending_work_contracts.schema_document",
+            "pending_profile": "durable expiry or unavailable-executor fallback; cancellation remains unconfirmed",
+            "reservation": "serialized under native workspace and canonical run gates; unknown usage retains the reservation",
+            "deadline": "job lease capped by the original canonical run deadline; calls do not reset the allowance",
             "model_executor": "unavailable",
             "acquisition": "unsupported; locator-to-source identity binding unavailable",
             "qualification": "unknown; no authenticated evaluator profile owner",

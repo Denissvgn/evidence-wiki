@@ -37,6 +37,11 @@ operation matrix is version `6`. Measurements, declared subtotals and delivery
 receipts confer no research approval; complete whole-execution coverage remains
 unavailable in this profile.
 
+Version `19` adds retained pending-work observations and durable reconciliation
+or cancellation fallback. Job reservations use the selected workspace gate and
+canonical run lock; their leases cannot exceed the original run allowance. The
+operation matrix is version `7`.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -368,6 +373,9 @@ closed schema documents for host negotiation.
 | session advance | `session.advance(*, request_id, expected_basis_id)` |
 | bounded terminal route | `session.run_until_terminal(*, request_id, expected_basis_id, max_steps=1)` |
 | inert host job | `session.host_job(*, request_id, operation, payload, original_text=None)` |
+| retained pending work | `session.pending() -> dict \| None` |
+| finite reconciliation | `session.reconcile_pending(*, request_id)` |
+| cancellation request | `session.cancel_pending(*, request_id)` |
 | session lifetime | `session.close()` or a context manager |
 
 These operations require an active `HostContext` with selected mutation control
@@ -392,6 +400,23 @@ Evaluation binds its claim and complete source closure to the frozen scope.
 A URI prefix cannot stand in for a concrete source
 identity, so acquisition jobs currently refuse. Inspect
 `contract()["research_sessions"]` before selecting this profile.
+
+Pending reads return the retained receipt without renewing its lease or writing
+an expiry. Reconciliation records expiry at the fixed deadline, or an
+`executor_unavailable` fallback in the current profile, and finishes the
+canonical run. An advancement step also settles retained work automatically.
+Cancellation records an unconfirmed request and a finite terminal fallback;
+it cannot confirm that external work stopped or that any effects were rolled
+back. Unknown completion and usage retain the full budget reservation.
+Request replay returns historical receipts and does not grant new work.
+Decision/job requests and pending-control requests have separate namespaces in
+the same canonical journal, so caller IDs cannot collide with automatic
+settlement. Pending reads validate immutable run, binding and lease fields;
+edited history cannot supply completion or release a reservation.
+The core performs no scheduling or arbitrary Python preemption. Long-running
+extraction still requires a bounded host worker; this profile has no executor
+intake for authenticated late completion. UTC observations reject regression
+against the last retained observation.
 
 **`ws.research.telemetry`** retains bounded measurement declarations and exposes
 their provenance:

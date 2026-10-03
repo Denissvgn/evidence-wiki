@@ -5,14 +5,14 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
 from ._facades._base import _process_exit, _translated, call_seam
 from ._pack_io import canonical, identity
 from .errors import EvidenceWikiError, UsageError
-from .host_context import current_context
+from .host_context import checked_operation, current_context
 from .mutation_store import MutationStore
 from .pack_discovery import owner
 from .telemetry_contracts import EVENT, JOURNAL, PROJECTION, REPORT, VERIFICATION, metric_binding, validate_document
@@ -227,6 +227,18 @@ def _spans(events, coverage):
     return result
 
 
+def _pending_state(root, run_id):
+    with checked_operation("run_controller", "run_telemetry_events", (root,), {"run_id": run_id}) as revalidate:
+        try:
+            state = owner("run_controller")._session_state(root, run_id)
+        except Exception as error:
+            if getattr(error, "error_code", None) == "RUN_STATE_INVALID":
+                refuse("JOB_CONFLICT")
+            raise
+        revalidate()
+        return state
+
+
 @_contained
 def report(root, *, run_id, verifier=None):
     """Reconstruct decisions and declared measurements from one captured journal."""
@@ -235,6 +247,7 @@ def report(root, *, run_id, verifier=None):
         refuse("VERIFIER_INVALID")
     snapshot = validate_document(JOURNAL, call_seam(owner, "run_controller", "run_telemetry_events", root, run_id=run_id))
     events, trace, decisions, expected, jobs, logical, unknown = [], [], [], set(), {}, {}, 0
+    pending_work = []
     for outer in snapshot["events"]:
         reference = outer["event_id"]
         data = outer.get("data") or {}
@@ -275,9 +288,51 @@ def report(root, *, run_id, verifier=None):
                     jobs[job["id"]] = job
                 decisions.append({"event_ref": reference, "request_id": retained["request_id"], "decision": retained["decision"],
                     "job_id": job["id"] if job is not None else None, "job_operation": job["operation"] if job is not None else None})
+        elif outer["event_type"] == "custom.research.pending":
+            from .pending_work_contracts import PENDING
+            from .pending_work_contracts import validate_document as pending_document
+            record = data.get("record")
+            if (type(record) is not dict or set(record) != {"kind", "operation", "receipt", "authorized", "evidence_accepted"}
+                    or record["kind"] != "pending_work" or record["operation"] not in {"reconcile", "cancel"}
+                    or record["authorized"] is not False or record["evidence_accepted"] is not False):
+                refuse("JOB_CONFLICT")
+            pending_work.append(pending_document(PENDING, record["receipt"]))
         elif outer["event_type"].startswith("custom."):
             unknown += 1
     from .workflow_contracts import JOB, document_sha256
+    pending_state = _pending_state(root, run_id) if pending_work else None
+    if pending_state is not None:
+        from .research_session_contracts import BINDING, checked
+        if (type(pending_state) is not dict or type(pending_state.get("research_session")) is not dict
+                or type(pending_state.get("run_id")) is not str or type(pending_state.get("started_at")) is not str):
+            refuse("JOB_CONFLICT")
+        try:
+            binding = checked(BINDING, pending_state["research_session"])
+            run_deadline = _time(pending_state["started_at"]) + timedelta(seconds=binding["policy"]["budgets"]["seconds"])
+        except (EvidenceWikiError, KeyError, TypeError, ValueError, OverflowError):
+            refuse("JOB_CONFLICT")
+        if pending_state["run_id"] != run_id or binding["run_id"] != run_id:
+            refuse("JOB_CONFLICT")
+        previous_pending = {}
+        from .pending_work_contracts import create, validate_transition
+        for receipt in pending_work:
+            job = jobs.get(receipt["job_id"])
+            if (job is None or receipt["job_sha256"] != _sha(job) or receipt["run_id"] != run_id
+                    or receipt["request_id"] != job["id"] or receipt["state"] not in {"expired", "unknown"}
+                    or receipt["binding_id"] != _sha(binding) or _time(receipt["issued_utc"]) != _time(job["issued_utc"])
+                    or _time(receipt["job_deadline_utc"]) != _time(job["deadline_utc"])
+                    or _time(receipt["run_deadline_utc"]) != run_deadline
+                    or _time(receipt["effective_deadline_utc"]) != min(run_deadline, _time(job["deadline_utc"]))):
+                refuse("JOB_CONFLICT")
+            previous = previous_pending.get(receipt["job_id"])
+            if previous is None:
+                previous = create(job, run_id=run_id, binding_id=_sha(binding), request_id=job["id"],
+                    run_deadline_utc=run_deadline.isoformat(), observed_utc=job["issued_utc"])
+            try:
+                validate_transition(previous, receipt)
+            except EvidenceWikiError:
+                refuse("JOB_CONFLICT")
+            previous_pending[receipt["job_id"]] = receipt
     for _reference, event, _outer in events:
         if event["job_id"] is None:
             continue
@@ -294,12 +349,15 @@ def report(root, *, run_id, verifier=None):
     root = _context.require_path(root)
     now = datetime.now(timezone.utc)
     events = [(reference, event, expires is not None and now < expires) for reference, event, expires in verified]
+    if pending_state is not None and _pending_state(root, run_id) != pending_state:
+        refuse("JOB_CONFLICT")
     coverage = _coverage(events, expected, unknown)
     return validate_document(REPORT, {"schema_version": REPORT, "run_id": run_id, "journal_sha256": snapshot["sha256"],
         "event_count": snapshot["count"], "logical_event_count": len(events), "trace": trace, "decisions": decisions,
         "metrics": _metrics(events, coverage), "spans": _spans(events, coverage), "coverage": coverage,
         "observed_human_interventions": None, "limitations": ["Measurements are declarations unless verified by an explicitly selected host verifier.",
-            "Coverage describes retained journal attempts; complete execution and whole-run human intervention remain unknown."],
+            "Coverage describes retained journal attempts; complete execution and whole-run human intervention remain unknown."]
+            + (["Pending-work receipts record control state; they establish no executed attempt, measured usage or complete coverage."] if pending_work else []),
         "authorized": False, "evidence_accepted": False})
 
 

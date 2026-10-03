@@ -440,6 +440,8 @@ _WRITE_SEAMS = frozenset({
     ("evidence_usage", "run_transact"), ("evidence_usage", "run_materialize"),
 })
 _SERIALIZED_WRITERS = frozenset({
+    ("run_controller", "run_session_start"), ("run_controller", "run_session_record"),
+    ("run_controller", "run_session_transition"), ("run_controller", "run_session_finish"),
     ("run_controller", "run_telemetry_record"),
     ("strict_evidence", "run_admit_document"),
     ("coverage_manifest", "run_init_inline"), ("coverage_manifest", "run_link"),
@@ -499,8 +501,9 @@ def checked_operation(stem: str, seam: str, args: tuple[Any, ...], kwargs: Mappi
         write = effect == "review"
     elif stem == "mutation_operations" and seam in {"revision", "prepare_request", "submit", "inspect", "reconcile"}:
         write = seam in {"submit", "reconcile"}
-    elif stem == "research_session" and seam in {"current", "next_work", "session", "advance", "run_until_terminal", "host_job"}:
-        write = seam in {"advance", "run_until_terminal", "host_job"}
+    elif stem == "research_session" and seam in {"current", "next_work", "session", "advance", "run_until_terminal", "host_job",
+                                               "pending", "reconcile_pending", "cancel_pending"}:
+        write = seam in {"advance", "run_until_terminal", "host_job", "reconcile_pending", "cancel_pending"}
     elif stem == "telemetry" and seam in {"record", "report", "project"}:
         write = seam == "record"
     elif stem == "telemetry_delivery" and seam in {"deliver", "inspect", "retry"}:

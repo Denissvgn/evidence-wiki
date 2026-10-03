@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "6"
+OPERATION_MATRIX_VERSION = "7"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -48,9 +48,12 @@ _ROWS = (
     ("research.session", None, "none; binds immutable policy, scope and original accounting", "canonical run owner on later explicit steps", "none"),
     ("research.session.current", None, "none; verifies session binding and current accounting", "bounded canonical observations", "none"),
     ("research.session.next", None, "none; verifies session binding and returns inert work", "bounded canonical observations", "none"),
-    ("research.session.advance", None, "canonical run state and immutable finite terminal decision event", "canonical run lock and pending-event recovery", "none; no acquisition, claim admission or review executor"),
+    ("research.session.advance", None, "canonical run state, immutable finite decision and pending terminal fallback", "selected native workspace gate then canonical run locks and pending-event recovery", "none; no acquisition, claim admission or review executor"),
     ("research.session.run_until_terminal", None, "bounded explicit terminal decision and accounting", "same owning locks; finite step/budget limits", "none; no acquisition, claim admission or review executor"),
-    ("research.session.host_job", None, "retains an inert leased host job in canonical run events", "canonical run lock and immutable event replay", "none; no default model executor"),
+    ("research.session.host_job", None, "retains an inert leased host job and immutable budget reservation", "selected native workspace gate then canonical run lock and event replay", "none; no default model executor"),
+    ("research.session.pending", None, "none; observes retained lease without renewal", "bounded native run state and journal capture", "none"),
+    ("research.session.reconcile_pending", None, "durable expiry or unavailable-executor fallback and canonical terminal run", "selected native workspace gate then canonical run locks", "none; uncertain external completion remains unknown"),
+    ("research.session.cancel_pending", None, "durable unconfirmed cancellation request and canonical terminal fallback", "selected native workspace gate then canonical run locks", "none; no external stop or rollback inferred"),
     ("research.session.close", None, "none; invalidates session handle", "none", "none"),
     ("research.telemetry.record", None, "canonical telemetry event and run journal checkpoints", "selected native workspace gate then canonical run lock", "none"),
     ("research.telemetry.report", None, "none; captured journal fold and optional explicit measurement verifier", "bounded anchored canonical journal snapshot", "none; optional trusted host callback"),

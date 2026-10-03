@@ -5,13 +5,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from time import perf_counter
 
 from ._facades._base import _process_exit, _translated, call_seam
 from .errors import EvidenceWikiError
 from .host_context import checked_operation, current_context
 from .mutation_contracts import canonical, detached, digest, validate_request_id
 from .mutation_operations import _generation, _host_selection
+from .mutation_store import MutationStore
 from .research_completion import completion
 from .research_observation import ResearchObservation
 from .research_session_contracts import BINDING, CURRENT, NEXT, STEP, checked, refuse
@@ -50,6 +50,17 @@ def _boundary(function):
 
 def _policy(value):
     return value if isinstance(value, RunPolicy) else RunPolicy.from_dict(value)
+
+
+def _serialized(function):
+    """Reserve canonical work under the host's existing workspace gate."""
+    @wraps(function)
+    def guarded(self, *args, **kwargs):
+        self._check(function.__name__, write=True)
+        root, context = _scope(self.root, function.__name__, write=True)
+        with MutationStore(root, context.mutation_control_directory).workspace_locked():
+            return function(self, *args, **kwargs)
+    return guarded
 
 
 def _scope(project_root, operation, *, write=False):
@@ -304,6 +315,99 @@ class ResearchSession:
     def _run(self):
         return _owner(self.root, "run_session_start", run_id=self.run_id, agent_id=self.context.actor_ref, binding=self.binding)
 
+    def _pending(self):
+        """Read retained reservation facts without treating them as authority."""
+        from .pending_work_contracts import create, validate_transition
+        controller = _load(self.root, "run_controller")
+        if not controller.run_state_path(self.root, self.run_id).exists():
+            return None
+        document = controller._session_state(self.root, self.run_id)
+        if document.get("research_session") != self.binding:
+            refuse("BINDING_CHANGED")
+        retained = None
+        for event in controller._bounded_journal(controller.events_path(self.root, self.run_id))["events"]:
+            record = (event.get("data") or {}).get("record", {})
+            if event.get("event_type") not in {"custom.research.decision", "custom.research.pending"}:
+                continue
+            if record.get("kind") == "host_job":
+                job = record["job"]
+                try:
+                    run_deadline = datetime.fromisoformat(document["started_at"].replace("Z", "+00:00")) + timedelta(seconds=self.policy.to_dict()["budgets"]["seconds"])
+                except OverflowError:
+                    refuse("CLOCK_INVALID")
+                retained = create(job, run_id=self.run_id, binding_id=digest(self.binding), request_id=job["id"],
+                    run_deadline_utc=run_deadline.isoformat(), observed_utc=job["issued_utc"])
+            elif record.get("kind") == "pending_work":
+                if retained is None:
+                    refuse("REQUEST_CONFLICT")
+                retained = validate_transition(retained, record["receipt"])
+        return retained
+
+    @_boundary
+    def pending(self):
+        """Return a retained pending-work receipt; reading never refreshes its lease."""
+        self._check("pending")
+        return self._pending()
+
+    def _settle_pending(self, request_id, operation):
+        from .pending_work_contracts import PENDING, fallback, observe, request_cancellation, validate_document
+        receipt = self._pending()
+        if receipt is None:
+            refuse("JOB_UNKNOWN")
+        controller = _load(self.root, "run_controller")
+        for event in controller._bounded_journal(controller.events_path(self.root, self.run_id))["events"]:
+            data = event.get("data") or {}
+            if event.get("event_type") == "custom.research.pending" and data.get("request_id") == request_id:
+                record = data.get("record", {})
+                if record.get("kind") != "pending_work" or record.get("operation") != operation:
+                    refuse("REQUEST_CONFLICT")
+                saved = validate_document(PENDING, record["receipt"])
+                self._finish(controller._session_state(self.root, self.run_id), saved["fallback_reason"] or "pending_work_terminal")
+                return saved
+        now = datetime.now(timezone.utc).isoformat()
+        updated = receipt if receipt["terminal"] else observe(receipt, observed_utc=now)
+        if not updated["terminal"]:
+            if operation == "cancel":
+                updated = request_cancellation(updated, observed_utc=now)
+                reason = "cancellation_unconfirmed"
+            else:
+                reason = "executor_unavailable"
+            updated = fallback(updated, observed_utc=now, reason=reason)
+        _owner(self.root, "run_session_record", run_id=self.run_id, agent_id=self.context.actor_ref,
+            request_id=request_id, binding=self.binding,
+            record={"kind": "pending_work", "operation": operation, "receipt": updated,
+                    "authorized": False, "evidence_accepted": False})
+        self._finish(controller._session_state(self.root, self.run_id), updated["fallback_reason"] or "pending_work_terminal")
+        return updated
+
+    def _settle_for_advance(self, request_id):
+        receipt = self._pending()
+        if receipt is None:
+            return
+        if receipt["terminal"]:
+            controller = _load(self.root, "run_controller")
+            self._finish(controller._session_state(self.root, self.run_id), receipt["fallback_reason"] or "pending_work_terminal")
+        else:
+            self._settle_pending(request_id, "reconcile")
+
+    @_boundary
+    @_serialized
+    def reconcile_pending(self, *, request_id):
+        """Durably expire work or stop on unavailable execution without guessing completion."""
+        self._check("reconcile_pending", write=True)
+        for grant in TERMINAL_GRANTS:
+            self.context.require_grant(grant)
+        return self._settle_pending(validate_request_id(request_id), "reconcile")
+
+    @_boundary
+    @_serialized
+    def cancel_pending(self, *, request_id):
+        """Retain an unconfirmed cancellation request without claiming rollback."""
+        self._check("cancel_pending", write=True)
+        for grant in TERMINAL_GRANTS:
+            self.context.require_grant(grant)
+        return self._settle_pending(validate_request_id(request_id), "cancel")
+
     def _finish(self, document, reason):
         controller = _load(self.root, "run_controller")
         if document["state"]["current"] == "initialized":
@@ -317,6 +421,7 @@ class ResearchSession:
         return document
 
     @_boundary
+    @_serialized
     def advance(self, *, request_id, expected_basis_id):
         self._check("advance", write=True)
         request_id = validate_request_id(request_id)
@@ -325,19 +430,24 @@ class ResearchSession:
         controller = _load(self.root, "run_controller")
         path = controller.run_state_path(self.root, self.run_id)
         if path.exists():
-            document = controller.load_run_state(self.root, self.run_id)
+            document = controller._session_state(self.root, self.run_id)
             if document.get("research_session") != self.binding:
                 refuse("BINDING_CHANGED")
-            for event in controller.load_events(controller.events_path(self.root, self.run_id)):
+            for event in controller._bounded_journal(controller.events_path(self.root, self.run_id))["events"]:
                 data = event.get("data") or {}
                 if event["event_type"] == "custom.research.decision" and data.get("request_id") == request_id:
                     record = data["record"]
                     if record.get("schema_version") != STEP or record["before_basis_id"] != expected_basis_id:
                         refuse("REQUEST_CONFLICT")
+                    if self._pending() is not None:
+                        self._settle_for_advance(request_id)
+                        document = controller._session_state(self.root, self.run_id)
                     document = self._finish(document, record["reason"])
                     result = detached(record)
                     result.update(historical=True, event_ref=event["event_id"], canonical_run_state=document["state"]["current"])
                     return checked(STEP, result)
+            if document["state"]["current"] in controller.TERMINAL_STATES:
+                refuse("RUN_TERMINAL")
         view = current(self.root, self.policy, run_id=self.run_id if path.exists() else None)
         if view["basis_id"] != expected_basis_id:
             refuse("BASIS_CHANGED")
@@ -350,6 +460,9 @@ class ResearchSession:
             "historical": False, "authorized": False, "evidence_accepted": False})
         event = _owner(self.root, "run_session_record", run_id=self.run_id, agent_id=self.context.actor_ref,
             request_id=request_id, binding=self.binding, record=record)
+        if self._pending() is not None:
+            self._settle_for_advance(request_id)
+            document = controller._session_state(self.root, self.run_id)
         document = self._finish(document, decision["reason"])
         record["event_ref"] = event["event_id"]
         record["canonical_run_state"] = document["state"]["current"]
@@ -360,13 +473,11 @@ class ResearchSession:
         self._check("run_until_terminal", write=True)
         if type(max_steps) is not int or not 1 <= max_steps <= 64:
             refuse("LIMIT", "/max_steps")
-        started = perf_counter()
         result = self.advance(request_id=request_id, expected_basis_id=expected_basis_id)
-        if perf_counter() - started > self.policy.to_dict()["budgets"]["seconds"]:
-            refuse("BUDGET_EXHAUSTED")
         return result
 
     @_boundary
+    @_serialized
     def host_job(self, *, request_id, operation, payload, original_text=None):
         """Retain an inert bounded job; execution and authentication stay in the host."""
         self._check("host_job", write=True)
@@ -379,7 +490,7 @@ class ResearchSession:
         if effect is None or effect not in policy["allowed_effects"] or policy["host_capability_refs"][effect] is None:
             refuse("HOST_CAPABILITY_UNAVAILABLE")
         self.context.require_grant("research_session.host_job." + operation)
-        for grant in ("run_controller.run_session_start", "run_controller.run_session_record"):
+        for grant in TERMINAL_GRANTS:
             self.context.require_grant(grant)
         if operation == "acquire":
             refuse("SOURCE_MAPPING_UNSUPPORTED")
@@ -387,11 +498,11 @@ class ResearchSession:
             refuse("BUDGET_EXHAUSTED")
         controller = _load(self.root, "run_controller")
         if controller.run_state_path(self.root, self.run_id).exists():
-            document = controller.load_run_state(self.root, self.run_id)
+            document = controller._session_state(self.root, self.run_id)
             if document.get("research_session") != self.binding:
                 refuse("BINDING_CHANGED")
             jobs = []
-            for event in controller.load_events(controller.events_path(self.root, self.run_id)):
+            for event in controller._bounded_journal(controller.events_path(self.root, self.run_id))["events"]:
                 data = event.get("data") or {}
                 if event["event_type"] == "custom.research.decision" and data.get("record", {}).get("kind") == "host_job":
                     jobs.append(data["record"]["job"])
@@ -412,12 +523,25 @@ class ResearchSession:
         scope, original_text = _job_original(self.root, policy, view, operation, payload, original_text)
         if self.current()["basis_id"] != view["basis_id"]:
             refuse("BASIS_CHANGED")
-        now = datetime.now(timezone.utc)
-        timeout = min(600, policy["budgets"]["seconds"])
         role = "evaluator" if operation == "evaluate" else "host_worker"
         controller_ref = dict(self.context.controller_refs).get(role)
         if controller_ref is None:
             refuse("HOST_CAPABILITY_UNAVAILABLE")
+        document = self._run()
+        now = datetime.now(timezone.utc)
+        started = datetime.fromisoformat(document["started_at"].replace("Z", "+00:00"))
+        last_observed = datetime.fromisoformat(document["updated_at"].replace("Z", "+00:00"))
+        if now < max(started, last_observed):
+            refuse("CLOCK_REGRESSED")
+        try:
+            run_deadline = started + timedelta(seconds=policy["budgets"]["seconds"])
+        except OverflowError:
+            refuse("CLOCK_INVALID")
+        remaining = (run_deadline - now).total_seconds()
+        if remaining < 1:
+            self._finish(document, "run_deadline_expired")
+            refuse("BUDGET_EXHAUSTED")
+        timeout = min(600, int(remaining))
         job = validate_job({"schema_version": JOB, "id": request_id, "operation": operation,
             "role": role,
             "controller_ref": controller_ref, "grant_ref": policy["host_capability_refs"][effect],
@@ -430,7 +554,6 @@ class ResearchSession:
                 "tokens": policy["budgets"]["tokens"], "cost": policy["budgets"]["cost_limit"]},
             "qualifications": {"assurance": policy["assurance"], "status": "unknown", "evaluator_ref": None,
                 "qualification_ref": None, "context_basis": None}}, now_utc=now.isoformat())
-        self._run()
         _owner(self.root, "run_session_record", run_id=self.run_id, agent_id=self.context.actor_ref,
             request_id=request_id, binding=self.binding, record={"kind": "host_job", "job": job, "authorized": False, "evidence_accepted": False})
         return job
