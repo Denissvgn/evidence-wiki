@@ -12,9 +12,8 @@ from .host_context import checked_operation, current_context
 from .mutation_contracts import canonical, detached, digest, validate_request_id
 from .mutation_operations import _generation, _host_selection
 from .mutation_store import MutationStore
-from .research_completion import completion
 from .research_observation import ResearchObservation
-from .research_session_contracts import BINDING, CURRENT, NEXT, STEP, checked, refuse
+from .research_session_contracts import BINDING, BINDING_V2, CURRENT, NEXT, STEP, checked, refuse
 from .run_policy import OBSERVATION, RunPolicy
 from .workflow_contracts import JOB, validate_job
 
@@ -57,6 +56,8 @@ def _serialized(function):
     @wraps(function)
     def guarded(self, *args, **kwargs):
         self._check(function.__name__, write=True)
+        if self.execution is not None:
+            return function(self, *args, **kwargs)
         root, context = _scope(self.root, function.__name__, write=True)
         with MutationStore(root, context.mutation_control_directory).workspace_locked():
             return function(self, *args, **kwargs)
@@ -89,6 +90,38 @@ def _original_binding(view):
     return digest([{"original_id": row["original_id"], "original_text": row["original_text"],
         "question_ids": [question["question_id"] for question in row["questions"]], "missing_question_ids": row["missing_question_ids"]}
         for row in view["accounting"]["original_outcomes"]])
+
+
+def _request_binding(root):
+    """Bind canonical original mappings without computing unrelated publication."""
+    from types import MappingProxyType
+
+    from ._pack_io import yaml_document
+    from .pack_discovery import owner
+
+    revisions = owner("_evidence_revision")
+    before = revisions.capture_workspace(root)
+    config = yaml_document(before.files["research.yml"])
+    questions = owner("question_status").questions_directory(root, config).relative_to(root).as_posix() + "/"
+    selected = lambda name: name in {"research.yml", "docs/research-requirements.json"} or (
+        name.startswith(questions) and name.endswith(".md"))
+    files = {name: raw for name, raw in before.files.items() if selected(name)}
+    directories = {".", questions.rstrip("/")}
+    for name in [*files, *directories]:
+        directories.update(parent.as_posix() for parent in Path(name).parents if parent.as_posix() != ".")
+    captured = revisions.WorkspaceRevision(MappingProxyType(files), tuple(sorted(directories)))
+    with captured.materialize() as snapshot:
+        mapping = owner("_caller_context").original_questions(snapshot, config)
+    if mapping["gaps"]:
+        refuse("ORIGINALS_CHANGED")
+    result = digest([{"original_id": row["id"], "original_text": row["text"],
+        "question_ids": [identifier for identifier in row["question_ids"] if identifier in mapping["expected"]],
+        "missing_question_ids": [identifier for identifier in row["question_ids"] if identifier not in mapping["expected"]]}
+        for row in mapping["originals"]])
+    after = revisions.capture_workspace(root)
+    if {name: raw for name, raw in after.files.items() if selected(name)} != files:
+        refuse("ORIGINALS_CHANGED")
+    return result
 
 
 def _run_summary(document):
@@ -149,9 +182,11 @@ def _job_original(root, policy, view, operation, payload, original_text):
 
 
 @_boundary
-def current(project_root, policy, *, run_id=None):
+def current(project_root, policy, *, run_id=None, execution=None):
     """Return current owner accounting; qualification and missing usage stay unknown."""
     root, context = _scope(project_root, "current")
+    if execution is not None:
+        return ResearchSession(root, policy, run_id=run_id, execution=execution).current()
     frozen = _policy(policy)
     for grant in ("workspace.open", "workspace_status.run_status_report", "source_requests.run_list_requests",
                   "strict_evidence.run_operation.check", "strict_evidence.run_operation.export"):
@@ -159,12 +194,19 @@ def current(project_root, policy, *, run_id=None):
     if run_id is not None:
         validate_request_id(run_id)
     view = ResearchObservation(root, run_id=run_id)
-    release = completion(root, allow_partial=frozen.to_dict()["source_rules"]["allow_partial"], run_id=run_id)
+    return _current_observation(root, context, frozen, run_id, view, close=True)
+
+def _current_observation(root, context, frozen, run_id, view, *, close=False):
+    """Share captured inputs only inside the same live current observation."""
+    from .research_completion import _completion_observation
+
+    release = _completion_observation(view, allow_partial=frozen.to_dict()["source_rules"]["allow_partial"], run_id=run_id)
     mapping = view.mapping.get("result")
     originals = mapping.get("originals", []) if mapping else []
     ids = [row["id"] for row in originals]
     compatible = bool(mapping and not mapping["gaps"] and set(ids) == set(frozen.to_dict()["scope"]["question_ids"]))
-    view.finish()
+    if close:
+        view.finish()
     return checked(CURRENT, {"schema_version": CURRENT, "target": str(root), "run_id": run_id,
         "basis_id": view.basis["workspace_revision"], "policy_id": frozen.policy_id,
         "observed_utc": view.now.isoformat(), "accounting": {
@@ -202,8 +244,10 @@ def _observation(view, policy):
 
 
 @_boundary
-def next_work(project_root, policy, *, run_id=None):
+def next_work(project_root, policy, *, run_id=None, execution=None):
     _scope(project_root, "next_work")
+    if execution is not None:
+        return ResearchSession(project_root, policy, run_id=run_id, execution=execution).next()
     policy = _policy(policy)
     view = current(project_root, policy, run_id=run_id)
     decision = policy.decide(_observation(view, policy))
@@ -217,31 +261,36 @@ def next_work(project_root, policy, *, run_id=None):
 
 
 @_boundary
-def session(project_root, policy, *, run_id):
+def session(project_root, policy, *, run_id, execution=None):
     """Construct the bound session through the guarded public owner seam."""
-    return ResearchSession(project_root, policy, run_id=run_id)
+    return ResearchSession(project_root, policy, run_id=run_id, execution=execution)
 
 
 class ResearchSession:
     """One immutable policy binding on the existing canonical run and event journal."""
 
     @_boundary
-    def __init__(self, project_root, policy, *, run_id):
+    def __init__(self, project_root, policy, *, run_id, execution=None):
         root, context = _scope(project_root, "session")
         self._root, self._policy, self._run_id = root, _policy(policy), validate_request_id(run_id)
         self._context = context
+        from .research_execution import ResearchExecution
+        if execution is not None and type(execution) is not ResearchExecution:
+            refuse("EXECUTION_CONFIG_INVALID")
+        self._execution = execution
         self._closed = False
         self._owner_workspace = None
         view = current(root, self.policy, run_id=None)
         if not view["policy_compatible"]:
             refuse("SCOPE_ACCOUNTING")
         info = root.stat()
-        binding = checked(BINDING, {"schema_version": BINDING, "run_id": self.run_id,
+        version = BINDING_V2 if execution is not None else BINDING
+        binding = checked(version, {"schema_version": version, "run_id": self.run_id,
             "actor_ref": context.actor_ref, "policy": self.policy.to_dict(), "policy_id": self.policy.policy_id,
             "target": str(root), "workspace_binding": {"path": str(root), "device": str(info.st_dev), "inode": str(info.st_ino)},
             "request_binding": _original_binding(view), "host_context_sha256": _host_selection(),
             "owner_generation": _generation(), "original_ids": view["accounting"]["original_ids"],
-            "authorized": False, "evidence_accepted": False})
+            **(execution.identity() if execution is not None else {}), "authorized": False, "evidence_accepted": False})
         self._binding_raw = canonical(binding)
 
     @property
@@ -259,6 +308,10 @@ class ResearchSession:
     @property
     def context(self):
         return self._context
+
+    @property
+    def execution(self):
+        return self._execution
 
     @property
     def closed(self):
@@ -283,8 +336,9 @@ class ResearchSession:
             refuse("BINDING_CHANGED")
         if self.policy.to_dict() != self.binding["policy"] or self.run_id != self.binding["run_id"]:
             refuse("BINDING_CHANGED")
-        view = current(root, self.policy, run_id=None)
-        if _original_binding(view) != self.binding["request_binding"]:
+        if self.execution is not None:
+            self.execution.check(self.binding)
+        if _request_binding(root) != self.binding["request_binding"]:
             refuse("ORIGINALS_CHANGED")
 
     def close(self):
@@ -301,6 +355,9 @@ class ResearchSession:
     @_boundary
     def current(self):
         self._check("current")
+        if self.execution is not None:
+            from . import execution_session
+            return execution_session.current(self)
         controller = _load(self.root, "run_controller")
         selected = self.run_id if controller.run_state_path(self.root, self.run_id).exists() else None
         return current(self.root, self.policy, run_id=selected)
@@ -308,6 +365,9 @@ class ResearchSession:
     @_boundary
     def next(self):
         self._check("next_work")
+        if self.execution is not None:
+            from . import execution_session
+            return execution_session.next_work(self)
         controller = _load(self.root, "run_controller")
         selected = self.run_id if controller.run_state_path(self.root, self.run_id).exists() else None
         return next_work(self.root, self.policy, run_id=selected)
@@ -347,6 +407,14 @@ class ResearchSession:
     def pending(self):
         """Return a retained pending-work receipt; reading never refreshes its lease."""
         self._check("pending")
+        if self.execution is not None:
+            from . import execution_session
+            records = execution_session.retained(self)
+            value = execution_session._pending(records)
+            if value is not None:
+                value = {"schema_version": "research-execution-pending/v1", **value,
+                    "attempt": execution_session._attempt_rows(records)[value["attempt_id"]]["attempt"]}
+            return value
         return self._pending()
 
     def _settle_pending(self, request_id, operation):
@@ -397,6 +465,9 @@ class ResearchSession:
         self._check("reconcile_pending", write=True)
         for grant in TERMINAL_GRANTS:
             self.context.require_grant(grant)
+        if self.execution is not None:
+            from . import execution_session
+            return execution_session.control_pending(self, request_id=request_id)
         return self._settle_pending(validate_request_id(request_id), "reconcile")
 
     @_boundary
@@ -406,6 +477,9 @@ class ResearchSession:
         self._check("cancel_pending", write=True)
         for grant in TERMINAL_GRANTS:
             self.context.require_grant(grant)
+        if self.execution is not None:
+            from . import execution_session
+            return execution_session.control_pending(self, request_id=request_id, cancel=True)
         return self._settle_pending(validate_request_id(request_id), "cancel")
 
     def _finish(self, document, reason):
@@ -427,6 +501,9 @@ class ResearchSession:
         request_id = validate_request_id(request_id)
         for grant in TERMINAL_GRANTS:
             self.context.require_grant(grant)
+        if self.execution is not None:
+            from . import execution_session
+            return execution_session.advance(self, request_id=request_id, expected_basis_id=expected_basis_id)
         controller = _load(self.root, "run_controller")
         path = controller.run_state_path(self.root, self.run_id)
         if path.exists():
@@ -471,6 +548,10 @@ class ResearchSession:
     @_boundary
     def run_until_terminal(self, *, request_id, expected_basis_id, max_steps=1):
         self._check("run_until_terminal", write=True)
+        if self.execution is not None:
+            from . import execution_session
+            return execution_session.run_until_terminal(self, request_id=request_id,
+                expected_basis_id=expected_basis_id, max_steps=max_steps)
         if type(max_steps) is not int or not 1 <= max_steps <= 64:
             refuse("LIMIT", "/max_steps")
         result = self.advance(request_id=request_id, expected_basis_id=expected_basis_id)
@@ -481,6 +562,10 @@ class ResearchSession:
     def host_job(self, *, request_id, operation, payload, original_text=None):
         """Retain an inert bounded job; execution and authentication stay in the host."""
         self._check("host_job", write=True)
+        if self.execution is not None:
+            from . import execution_session
+            return execution_session.host_job(self, request_id=request_id, operation=operation,
+                payload=payload, original_text=original_text)
         request_id = validate_request_id(request_id)
         payload = detached(payload)
         from .source_commands import _no_secret_values
@@ -557,3 +642,21 @@ class ResearchSession:
         _owner(self.root, "run_session_record", run_id=self.run_id, agent_id=self.context.actor_ref,
             request_id=request_id, binding=self.binding, record={"kind": "host_job", "job": job, "authorized": False, "evidence_accepted": False})
         return job
+
+    @_boundary
+    def intake_observation(self, observation, *, request_id):
+        """Retain authenticated execution history without granting current acceptance."""
+        self._check("intake_observation", write=True)
+        if self.execution is None:
+            refuse("HOST_CAPABILITY_UNAVAILABLE")
+        from . import execution_session
+        return execution_session.intake(self, observation, request_id=validate_request_id(request_id))
+
+    @_boundary
+    def report(self, *, after_sequence=0, max_records=64):
+        """Return bounded redacted decision and measurement metadata."""
+        self._check("report")
+        if self.execution is None:
+            refuse("HOST_CAPABILITY_UNAVAILABLE")
+        from . import execution_session
+        return execution_session.report(self, after_sequence=after_sequence, max_records=max_records)

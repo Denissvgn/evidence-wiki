@@ -15,8 +15,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
@@ -254,6 +255,7 @@ from _normalizer_adapter import (
     build_request,
     run_adapter,
 )
+from _operation_control import OperationControl, checkpoint
 from _script_errors import ScriptRefusal, emit_error, emit_refusal, handle_system_exit
 
 # Aliased because this module already has a `content_hash` — that one hashes a record's
@@ -4562,6 +4564,7 @@ def sync_structured_view(
     source_id: str,
     *,
     project_root: Path | None = None,
+    operation_control: OperationControl | None = None,
 ) -> dict[str, str] | None:
     """Put a record's structured-view sidecar into the state ``payload`` describes.
 
@@ -4579,6 +4582,7 @@ def sync_structured_view(
     no structured view. Native tabular emission is the second caller.
     """
     sidecar = expected_structured_path(normalized_root, source_id)
+    checkpoint(operation_control, "before_sidecar_publication")
     if payload is None:
         sidecar.unlink(missing_ok=True)
         return None
@@ -4586,6 +4590,7 @@ def sync_structured_view(
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = sidecar.with_name(f".{sidecar.name}.tmp")
     temporary_path.write_bytes(data)
+    checkpoint(operation_control, "before_sidecar_replace")
     temporary_path.replace(sidecar)
     return {
         "path": declared_structured_path(sidecar, project_root),
@@ -4602,6 +4607,7 @@ def write_normalized_source(
     project_root: Path | None = None,
     force: bool = False,
     normalized_at: str | None = None,
+    operation_control: OperationControl | None = None,
 ) -> tuple[Path, str]:
     output_path = normalized_output_path(source, normalized_root)
     existed = output_path.exists()
@@ -4617,6 +4623,7 @@ def write_normalized_source(
         normalized_root,
         record_id(source.record),
         project_root=project_root,
+        operation_control=operation_control,
     )
     frontmatter = frontmatter_for(
         source,
@@ -4631,6 +4638,7 @@ def write_normalized_source(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(f".{output_path.name}.tmp")
     temporary_path.write_text(render_markdown(source, frontmatter), encoding="utf-8", newline="\n")
+    checkpoint(operation_control, "before_record_replace")
     temporary_path.replace(output_path)
     return output_path, "updated" if existed else "created"
 
@@ -4898,7 +4906,11 @@ def _normalization_operation(
     max_manifest_records: int | None = None,
     plan_only: bool = False,
     observed_utc: str | None = None,
+    operation_control: OperationControl | None = None,
+    max_entries: int = 10_000,
+    max_input_bytes: int = 16_777_216,
 ) -> dict[str, Any]:
+    checkpoint(operation_control, "before_input_capture")
     json_output = args.format == "json"
     project_root = Path(args.project_root).resolve()
     config = load_config(project_root)
@@ -4941,6 +4953,7 @@ def _normalization_operation(
                             remediation="Select fewer source IDs or explicitly increase the finite source cap.")
     if max_sources is not None:
         for item in selected:
+            checkpoint(operation_control, "before_source_capture")
             if item.method in {"execution", "market"}:
                 raise ScriptRefusal("SOURCE_BOUNDED_EXECUTION_UNSUPPORTED", "Nested evidence closure cannot share the caller's snapshot budget.",
                                     exit_code=2, recoverable=False, details={"field": "nested_closure"})
@@ -4968,6 +4981,7 @@ def _normalization_operation(
                 raise ScriptRefusal("SOURCE_SCOPE_INVALID", "A selected source leaves the workspace scope.",
                                     exit_code=2, recoverable=False, details={"field": "selected_source_paths"})
             for path in paths:
+                checkpoint(operation_control, "before_path_capture")
                 resolved = project_root / path
                 if resolved.is_dir():
                     if normalized_root.resolve().is_relative_to(resolved.resolve()):
@@ -5004,6 +5018,7 @@ def _normalization_operation(
 
     actionable: list[tuple[EligibleRecord, Path, bool, bool]] = []
     for item in selected:
+        checkpoint(operation_control, "before_record_selection")
         method_key = method_count_key(item.method)
         summary[method_key] = int(summary.get(method_key, 0)) + 1
         output_path = normalized_output_path_for_record(item.record, normalized_root)
@@ -5083,6 +5098,7 @@ def _normalization_operation(
             summary=summary, warnings=report_warnings, actions=actions)
         if max_sources is not None:
             _recheck_inputs()
+        checkpoint(operation_control, "before_report_return")
         if render is not None:
             render("report", (report, summary))
         return report
@@ -5104,17 +5120,24 @@ def _normalization_operation(
 
     for item, output_path, _existed, stale in actionable:
         try:
-            source = normalize_selected_record(project_root, config, item, resolved_pdf_extractor)
+            checkpoint(operation_control, "before_extraction")
+            source = (normalize_selected_record(project_root, config, item, resolved_pdf_extractor)
+                if operation_control is None else _controlled_normalize_source(
+                    project_root, config, item, resolved_pdf_extractor, operation_control,
+                    max_entries=max_entries, max_input_bytes=max_input_bytes))
+            checkpoint(operation_control, "after_extraction")
             if max_sources is not None:
                 _recheck_inputs()
             # The selection loop already decided to (re)write this record, so force the write.
             if plan_only:
+                checkpoint(operation_control, "before_rendering")
                 artifacts = render_normalized_artifacts(source, normalized_root, manifest_path_text, date_text,
                     normalized_at=normalized_at, manifest_records=records, project_root=project_root)
                 prepared_effects = [plan_file_effect(project_root, path, data) for path, data in artifacts]
                 planned_effects.extend(prepared_effects)
                 write_action = "updated" if _existed else "created"
             else:
+                checkpoint(operation_control, "before_publication")
                 output_path, write_action = write_normalized_source(
                 source,
                 normalized_root,
@@ -5124,6 +5147,7 @@ def _normalization_operation(
                 manifest_records=records,
                 project_root=project_root,
                 force=True,
+                operation_control=operation_control,
             )
             if item.method == ADAPTER_METHOD and not plan_only:
                 verify_adapter_output(project_root, output_path, records, normalized_root, config=config)
@@ -5131,6 +5155,8 @@ def _normalization_operation(
                 _release_owned_output(output_path)
                 _release_owned_output(structured_view_path_for_record(output_path))
         except Exception as exc:
+            if isinstance(exc, ScriptRefusal) and exc.error_code.startswith("OPERATION_"):
+                raise
             if plan_only:
                 planned_effects.extend(plan_preserved_effect(project_root, path) for path in (
                     output_path, structured_view_path_for_record(output_path)))
@@ -5205,6 +5231,7 @@ def _normalization_operation(
                 _normalization_diagnostic(render, f"warning: {warning}")
 
     if args.append_log and not plan_only:
+        checkpoint(operation_control, "before_activity_publication")
         append_normalization_log(
             project_root,
             {
@@ -5222,12 +5249,41 @@ def _normalization_operation(
             planned_effects.append(plan_activity_effect(project_root, render_normalization_log_entry({
                 "timestamp": run_timestamp, "manifest": manifest_path_text, "summary": summary})))
         _recheck_inputs()
+        checkpoint(operation_control, "before_plan_return")
         return {"report": report, "effects": planned_effects, "inputs": plan_input_state(),
                 "selected_records": [item.record for item in selected],
                 "strict_refusals": [], "clock_utc": run_timestamp}
     if render is not None:
         render("report", (report, summary))
+    checkpoint(operation_control, "before_report_return")
     return report
+
+
+def _controlled_normalize_source(project_root, config, item, extractor, control, *, max_entries, max_input_bytes):
+    """Extract in a bounded process with no publication capability in its route."""
+    with tempfile.TemporaryDirectory(prefix="evidence-normalize-") as temporary:
+        request_path = Path(temporary) / "request.json"
+        result_path = Path(temporary) / "result.json"
+        request = {"project_root": str(project_root), "config": config, "item": asdict(item),
+                   "pdf_extractor": asdict(extractor) if extractor is not None else None,
+                   "max_entries": max_entries, "max_input_bytes": max_input_bytes}
+        raw = json.dumps(request, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(raw) > 67_108_864:
+            raise ScriptRefusal("SOURCE_NORMALIZATION_LIMIT", "Extraction request exceeds its byte cap.",
+                                exit_code=2, recoverable=False)
+        request_path.write_bytes(raw)
+        result = control.run([sys.executable, str(_SCRIPT_DIR / "_normalization_worker.py"),
+                              str(request_path), str(result_path)])
+        if result != 0 or not result_path.is_file() or result_path.stat().st_size > 67_108_864:
+            raise ScriptRefusal("SOURCE_EXTRACTION_FAILED", "The bounded native extractor did not produce a valid result.",
+                                exit_code=2, recoverable=False)
+        value = json.loads(result_path.read_text(encoding="utf-8"))
+        item.record.clear()
+        item.record.update(value["record"])
+        value["record"] = item.record
+        value["media"] = [MediaReference(**media) for media in value["media"]]
+        value["outline"] = [tuple(entry) for entry in value["outline"]]
+        return NormalizedSource(**value)
 
 
 def run_normalization_report(
@@ -5245,6 +5301,7 @@ def run_normalization_report(
     max_manifest_records: int = 1000,
     max_entries: int = 10_000,
     max_input_bytes: int = 16_777_216,
+    operation_control: OperationControl | None = None,
 ) -> dict[str, Any]:
     """Return the canonical report, retaining failed-source verdicts as data.
 
@@ -5255,6 +5312,9 @@ def run_normalization_report(
     Config/manifest and selected inputs have finite byte/traversal bounds.
     Configured adapters/Poppler currently refuse bounded API execution even
     with opt-in: timeout and post-capture checks cannot enforce output bounds.
+    An optional host control bounds native extraction in a child process and
+    checks cancellation before publication. Earlier committed artifacts remain
+    observable when a later checkpoint stops the operation.
     """
     invalid = (not isinstance(project_root, (str, Path))
         or any(type(value) is not bool for value in (all_sources, dry_run, force, append_log, allow_external))
@@ -5273,9 +5333,11 @@ def run_normalization_report(
     args = argparse.Namespace(project_root=project_root, source_id=list(source_ids or ()), all=all_sources,
         dry_run=dry_run, force=force, append_log=append_log, pdf_extractor=pdf_extractor, format="json")
     try:
+        checkpoint(operation_control, "before_input_capture")
         with _bounded_inputs(Path(project_root), max_entries=max_entries, max_input_bytes=max_input_bytes):
             return _normalization_operation(args, max_sources=max_sources, allow_external=allow_external,
-                max_manifest_bytes=max_manifest_bytes, max_manifest_records=max_manifest_records)
+                max_manifest_bytes=max_manifest_bytes, max_manifest_records=max_manifest_records,
+                operation_control=operation_control, max_entries=max_entries, max_input_bytes=max_input_bytes)
     except LockUnavailableError as exc:
         raise ScriptRefusal(exc.error_code, str(exc), exit_code=2, details=exc.details) from exc
     except NormalizationConfigError as exc:
@@ -5287,7 +5349,8 @@ def run_normalization_report(
         raise ScriptRefusal.from_system_exit(exc, exit_code=2) from exc
 
 
-def prepare_normalization_effects(project_root: str | Path, arguments: dict[str, Any], *, observed_utc: str) -> dict[str, Any]:
+def prepare_normalization_effects(project_root: str | Path, arguments: dict[str, Any], *, observed_utc: str,
+                                  operation_control: OperationControl | None = None) -> dict[str, Any]:
     """Extract/render the bounded canonical native plan without publication."""
     fields = {"source_ids", "all_sources", "dry_run", "force", "append_log", "pdf_extractor", "max_sources",
               "allow_external", "max_manifest_bytes", "max_manifest_records", "max_entries", "max_input_bytes"}
@@ -5309,11 +5372,13 @@ def prepare_normalization_effects(project_root: str | Path, arguments: dict[str,
     args = argparse.Namespace(project_root=project_root, source_id=identifiers or [], all=arguments["all_sources"],
         dry_run=arguments["dry_run"], force=arguments["force"], append_log=arguments["append_log"],
         pdf_extractor=arguments["pdf_extractor"], format="json")
+    checkpoint(operation_control, "before_input_capture")
     with _bounded_inputs(Path(project_root), max_entries=arguments["max_entries"], max_input_bytes=arguments["max_input_bytes"]):
         try:
             value = _normalization_operation(args, max_sources=arguments["max_sources"], allow_external=False,
                 max_manifest_bytes=arguments["max_manifest_bytes"], max_manifest_records=arguments["max_manifest_records"],
-                plan_only=True, observed_utc=observed_utc)
+                plan_only=True, observed_utc=observed_utc, operation_control=operation_control,
+                max_entries=arguments["max_entries"], max_input_bytes=arguments["max_input_bytes"])
             if arguments["dry_run"]:
                 return {"report": value, "effects": [], "inputs": plan_input_state(), "selected_records": [],
                         "strict_refusals": [], "clock_utc": observed_utc}

@@ -35,7 +35,11 @@ class _SourceLoader(importlib.machinery.SourceFileLoader):
 
     def get_code(self, fullname: str):
         path = self.get_filename(fullname)
-        return self.source_to_code(self.get_data(path), path)
+        source = self.get_data(path)
+        bridge = _HOST_CONTEXT_BRIDGE or sys.modules.get("_host_context")
+        if getattr(bridge, "__name__", None) == "evidence_wiki.host_context":
+            return bridge.compiled_source_code(source, path)
+        return self.source_to_code(source, path)
 
 
 class _SiblingFinder(importlib.abc.MetaPathFinder):

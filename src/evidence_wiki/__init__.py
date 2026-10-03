@@ -40,6 +40,17 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
 _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "Workspace": (".workspace", "Workspace"),
     "Onboarding": (".onboarding", "Onboarding"),
+    "RunPolicy": (".run_policy", "RunPolicy"),
+    "ResearchExecution": (".research_execution", "ResearchExecution"),
+    "OperationControl": (".operation_control", "OperationControl"),
+    "ExecutionProfile": (".agent_execution", "ExecutionProfile"),
+    "ExecutionRole": (".agent_execution", "ExecutionRole"),
+    "ExecutionAttempt": (".agent_execution", "ExecutionAttempt"),
+    "BoundedSubprocessExecutor": (".agent_execution", "BoundedSubprocessExecutor"),
+    "QualificationAuthority": (".agent_qualification", "QualificationAuthority"),
+    "QualifiedEvaluators": (".agent_qualification", "QualifiedEvaluators"),
+    "HostReviewSigner": (".agent_qualification", "HostReviewSigner"),
+    "SigningIdentity": (".agent_qualification", "SigningIdentity"),
     "contract": ("._contract", "contract"),
     "errors": (".errors", None),
     # Module-level rather than a handle method: it aggregates across many

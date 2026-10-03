@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from ..operation_control import OperationControl, native_control
 from ._base import Namespace
 
 
@@ -18,13 +19,19 @@ class NormalizeNamespace(Namespace):
         allow_external: bool = False,
         max_manifest_bytes: int = 1_048_576, max_manifest_records: int = 1000,
         max_entries: int = 10_000, max_input_bytes: int = 16_777_216,
+        operation_control: OperationControl | None = None,
     ) -> dict[str, Any]:
         """Normalize bounded selected inputs, or pending inputs by default.
 
         Failed extraction is returned as report content. External adapters and
         Poppler require an explicit host-selected execution permission; dry runs
         execute no extractor. Fatal input/selection failures raise typed errors.
+        An operation control preserves one deadline across native extraction
+        and cooperative capture/publication checkpoints.
         """
+        control = {} if operation_control is None else {
+            "operation_control": native_control(operation_control, self._script("normalize_sources")),
+        }
         return self._call(
             "normalize_sources", "run_normalization_report", self._root,
             source_ids=source_ids, all_sources=all_sources, dry_run=dry_run,
@@ -32,6 +39,7 @@ class NormalizeNamespace(Namespace):
             max_sources=max_sources, allow_external=allow_external,
             max_manifest_bytes=max_manifest_bytes, max_manifest_records=max_manifest_records,
             max_entries=max_entries, max_input_bytes=max_input_bytes,
+            **control,
         )
 
     def profiles(self) -> dict[str, Any]:

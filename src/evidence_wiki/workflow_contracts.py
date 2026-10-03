@@ -20,6 +20,8 @@ from .errors import UsageError
 from .onboarding_contract import _matches
 
 JOB = "research-host-job/v1"
+JOB_V2 = "research-host-job/v2"
+EXECUTION_OBSERVATION = "research-execution-observation/v1"
 RESULT = "research-host-result/v1"
 DECISION = "research-decision/v1"
 MAX_BYTES = 1_048_576
@@ -253,8 +255,12 @@ def schemas() -> dict[str, dict[str, Any]]:
         )),
         qualifications=qualifications, authorized={"const": False}, evidence_accepted={"const": False},
     )
+    job_v2 = copy.deepcopy(job)
+    for branch in job_v2["anyOf"]:
+        branch["properties"]["schema_version"] = {"const": JOB_V2}
+        branch["properties"]["expected_result_schema"] = {"const": EXECUTION_OBSERVATION}
     return copy.deepcopy({name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape}
-                          for name, shape in ((JOB, job), (RESULT, result), (DECISION, decision))})
+                          for name, shape in ((JOB, job), (JOB_V2, job_v2), (RESULT, result), (DECISION, decision))})
 
 
 def schema_document(name: str) -> dict[str, Any]:
@@ -366,7 +372,7 @@ def _utc(value: str, field: str) -> datetime:
 
 
 def _semantic(name: str, value: dict[str, Any]) -> None:
-    if name == JOB:
+    if name in {JOB, JOB_V2}:
         issued = _utc(value["issued_utc"], "/issued_utc")
         deadline = _utc(value["deadline_utc"], "/deadline_utc")
         lease = (deadline - issued).total_seconds()
@@ -470,7 +476,10 @@ def validate_job(value: Any, *, now_utc: str, parent_job: Any = None) -> dict[st
     by remaining lease time by the executor; this validator cannot authenticate
     the clock, references or the caller's stored parent.
     """
-    job = validate_document(JOB, value)
+    name = value.get("schema_version") if type(value) is dict else JOB
+    if name not in {JOB, JOB_V2}:
+        _refuse("VERSION_UNSUPPORTED", "/schema_version")
+    job = validate_document(name, value)
     now = _utc(now_utc, "/now_utc")
     if now < _utc(job["issued_utc"], "/issued_utc"):
         _refuse("INVALID", "/issued_utc")
@@ -479,7 +488,7 @@ def validate_job(value: Any, *, now_utc: str, parent_job: Any = None) -> dict[st
     if job["operation"] in {"poll", "cancel"}:
         if parent_job is None:
             _refuse("CONTEXT_REQUIRED", "/payload/job_id")
-        parent = validate_document(JOB, parent_job)
+        parent = validate_document(name, parent_job)
         if parent["operation"] in {"poll", "cancel"}:
             _refuse("CORRELATION_MISMATCH", "/payload/job_id")
         if job["payload"]["job_id"] != parent["id"] or job["id"] == parent["id"]:

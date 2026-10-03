@@ -13,6 +13,7 @@ from evidence_wiki.workflow_contracts import (
     DECISION,
     DECISION_OUTCOMES,
     JOB,
+    JOB_V2,
     MAX_BYTES,
     MAX_DEPTH,
     MAX_NODES,
@@ -113,7 +114,7 @@ def test_exact_roundtrip_and_detachment(name, value):
 
 
 def test_schema_catalog_is_detached_and_does_not_grant_authority():
-    assert set(schemas()) == {JOB, RESULT, DECISION}
+    assert set(schemas()) == {JOB, JOB_V2, RESULT, DECISION}
     first = schema_document(RESULT)
     first["properties"]["schema_version"]["const"] = "invented"
     assert schema_document(RESULT)["properties"]["schema_version"]["const"] == RESULT

@@ -100,7 +100,8 @@ def test_roundtrip_detaches_every_supported_document(name):
     assert schema_document(name)["properties"]
 
 
-@pytest.mark.parametrize("name", [None, False, 5, [], {}, "future/v9", "x" * 10000])
+@pytest.mark.parametrize("name", [None, False, 5, [], {}, "future/v9", "x" * 10000],
+                         ids=["null", "bool", "number", "list", "object", "future", "oversized"])
 def test_unknown_schema_names_are_typed_refusals(name):
     with pytest.raises(WorkflowContractError) as error:
         schema_document(name)

@@ -25,8 +25,8 @@ class TelemetryNamespace(Namespace):
     def record(self, event, *, run_id, agent_id):
         return self._invoke("telemetry", "record", run_id=run_id, agent_id=agent_id, event=event)
 
-    def report(self, *, run_id, verifier=None):
-        return self._invoke("telemetry", "report", run_id=run_id, verifier=verifier)
+    def report(self, *, run_id, verifier=None, execution_session=None):
+        return self._invoke("telemetry", "report", run_id=run_id, verifier=verifier, execution_session=execution_session)
 
     def project(self, report):
         self._workspace._check_open()

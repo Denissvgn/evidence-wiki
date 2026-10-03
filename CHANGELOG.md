@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Add explicit host-driven research sessions over canonical evidence owners,
+  with bounded generation, draft admission, independent review and current release.
+- Add authenticated execution accounting and redacted decision reports with
+  predeclared coverage, exact scoped costs and explicit uncertainty.
+- Support shared operation deadlines, bounded cancellation observations and
+  interrupted native normalization recovery without assuming rollback.
+
 ## 1.1.2 - 2026-09-30
 
 - Reject thin native HTML gateway, timeout and authentication shells while

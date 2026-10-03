@@ -37,6 +37,7 @@ from .mutation_contracts import (
 from .mutation_contracts import (
     arguments as checked_arguments,
 )
+from .operation_control import OperationControl, checkpoint
 
 # This registry contains known dictionary-return owners, never user callables,
 # module names, shell commands or model-provided argv.
@@ -428,13 +429,16 @@ def _error(error: BaseException) -> dict[str, Any]:
             "recoverable": False, "remediation": "Inspect canonical durable state before retrying.", "details": {}}
 
 
-def _invoke(root: Path, intent: dict[str, Any], capture: dict[str, Any]) -> dict[str, Any]:
+def _invoke(root: Path, intent: dict[str, Any], capture: dict[str, Any], *,
+            operation_control: OperationControl | None = None) -> dict[str, Any]:
     from ._facades._base import call_seam
     from .workspace import Workspace
 
     operation, value = intent["operation"], intent["arguments"]
+    checkpoint(operation_control, "before_owner_invocation")
     if operation in STAGED_OPERATIONS:
-        return _recovery_module(operation).invoke(root, intent, capture["owner_basis"], capture["mutation_store"])
+        options = {"operation_control": operation_control} if operation in STAGED_SOURCES and operation_control is not None else {}
+        return _recovery_module(operation).invoke(root, intent, capture["owner_basis"], capture["mutation_store"], **options)
     if operation == "sources.capture":
         from .onboarding import Onboarding
         current_context().require_path(root / value["path"], write=True)
@@ -492,7 +496,8 @@ def _recover_owner_return(store, intent, state):
     return _terminal_state(store, intent, state)
 
 
-def submit(project_root: str | Path, request: Any) -> dict[str, Any]:
+def submit(project_root: str | Path, request: Any, *,
+           operation_control: OperationControl | None = None) -> dict[str, Any]:
     """Dispatch once, preserving exact duplicate outcomes before live preconditions.
 
     Owner refusal may follow writes. Such refusals and any missing completion
@@ -519,6 +524,7 @@ def submit(project_root: str | Path, request: Any) -> dict[str, Any]:
             # An executing/prepared checkpoint is inspectable, never re-run.
             if state["status"] in {"prepared", "executing"}:
                 refuse("OUTCOME_UNKNOWN", "/state")
+        checkpoint(operation_control, "before_mutation_capture")
         captured = _capture(root, _input_paths(root, request["operation"], request["arguments"]))
         if captured["revision_id"] != request["expected_revision"]:
             refuse("REVISION_CONFLICT", "/expected_revision")
@@ -529,6 +535,7 @@ def submit(project_root: str | Path, request: Any) -> dict[str, Any]:
         current_context().require_grant(_owner_grant(request["operation"]))
         current_context().require_grant("workspace.open")
         try:
+            checkpoint(operation_control, "before_owner_basis")
             owner_basis = _basis(root, intent, captured)
         except (Exception, SystemExit) as error:
             from ._facades._base import _translated
@@ -542,10 +549,14 @@ def submit(project_root: str | Path, request: Any) -> dict[str, Any]:
         state = {"schema_version": STATE, "request_id": intent["request_id"], "input_sha256": intent["input_sha256"],
                  "status": "prepared", "before_revision": captured["revision_id"], "after_revision": None,
                  "result": None, "error": None, "owner_basis": owner_basis, "reconciliation": None}
+        checkpoint(operation_control, "before_prepared_checkpoint")
         store.write(checked(STATE, state), expected_sha256=None)
         if request["operation"] in STAGED_OPERATIONS:
             try:
-                owner_basis = _recovery_module(request["operation"]).prepare(root, intent, store)
+                checkpoint(operation_control, "before_owner_preparation")
+                options = {"operation_control": operation_control} if request["operation"] in STAGED_SOURCES and operation_control is not None else {}
+                owner_basis = _recovery_module(request["operation"]).prepare(root, intent, store, **options)
+                checkpoint(operation_control, "after_owner_preparation")
             except (Exception, SystemExit) as error:
                 from ._facades._base import _translated
                 if isinstance(error, EvidenceWikiError):
@@ -562,12 +573,14 @@ def submit(project_root: str | Path, request: Any) -> dict[str, Any]:
                     or _generation() != request["owner_generation"]
                     or _host_selection() != request["host_context_sha256"]):
                 refuse("STAGING_INPUTS_CHANGED", "/owner_basis")
+        checkpoint(operation_control, "before_executing_checkpoint")
         state["status"] = "executing"
         store.write(checked(STATE, state), expected_sha256=store.state_sha256())
         # This checkpoint is durable before any owner invocation.
         try:
             captured["mutation_store"] = store
-            result = _invoke(root, intent, captured)
+            options = {} if operation_control is None else {"operation_control": operation_control}
+            result = _invoke(root, intent, captured, **options)
             if type(result) is not dict:
                 refuse("OWNER_RESULT_INVALID", "/result")
             state["result"] = detached(result)
@@ -851,7 +864,8 @@ def _unproved_observation(root, intent, config, revision_id, workspace):
             "reason": "current_manifest_cannot_reconstruct_original_evaluation_or_revision"}
 
 
-def reconcile(project_root: str | Path, request_id: str) -> dict[str, Any]:
+def reconcile(project_root: str | Path, request_id: str, *,
+              operation_control: OperationControl | None = None) -> dict[str, Any]:
     """Inspect owning postconditions while preserving every earlier receipt.
 
     A retained owner return proves historical completion. Exact selected durable
@@ -878,6 +892,7 @@ def reconcile(project_root: str | Path, request_id: str) -> dict[str, Any]:
             return _recover_owner_return(store, intent, state)
         if state["status"] in {"committed", "refused"}:
             return _terminal_state(store, intent, state)
+        checkpoint(operation_control, "before_reconciliation_capture")
         config, revision_id = _configuration(root)
         completion, desired, supported, present, kind = False, False, False, False, "none"
         outcome = "original_unknown"
@@ -906,7 +921,8 @@ def reconcile(project_root: str | Path, request_id: str) -> dict[str, Any]:
                         supported = True
                         kind = ("draft_postconditions" if operation in STAGED_DRAFTS else
                                 "source_postconditions" if operation in STAGED_SOURCES else "coverage_postconditions")
-                        result = _recovery_module(operation).prove(root, intent, basis, store)
+                        options = {"operation_control": operation_control} if operation in STAGED_SOURCES and operation_control is not None else {}
+                        result = _recovery_module(operation).prove(root, intent, basis, store, **options)
                         present, desired, completion = result["present"], result["desired"], result["completion"]
                         owner_observation = result["observation"]
                         outcome = result["operation_outcome"]
@@ -929,6 +945,7 @@ def reconcile(project_root: str | Path, request_id: str) -> dict[str, Any]:
                         owner_observation = _unproved_observation(root, intent, config, revision_id, workspace)
                 except (Exception, SystemExit) as error:
                     owner_observation = {"owner_error": _error(error), "postconditions_proved": False}
+        checkpoint(operation_control, "before_reconciliation_validation")
         if (_capture(root)["revision_id"] != revision_id
                 or _host_selection() != intent["host_context_sha256"]
                 or state["result"] is None and _generation() != intent["owner_generation"]):
@@ -941,6 +958,7 @@ def reconcile(project_root: str | Path, request_id: str) -> dict[str, Any]:
         proof = {"current_revision": revision_id, "owner_observation": owner_observation,
             "completion_proved": completion, "desired_state_proved": desired, "recovery_supported": supported,
             "proof_kind": kind, "operation_outcome": outcome}
+        checkpoint(operation_control, "before_reconciliation_checkpoint")
         state["reconciliation"] = proof
         state["status"] = status
         store.write(checked(STATE, state), expected_sha256=store.state_sha256())

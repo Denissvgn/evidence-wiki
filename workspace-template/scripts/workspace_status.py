@@ -2874,7 +2874,9 @@ def main(argv: list[str] | None = None) -> int:
             manual_url_deliveries_this_run=args.manual_url_deliveries_this_run,
             run_id=args.run_id,
         )
-    except ScriptRefusal as refusal:
+    except (Exception, SystemExit) as refusal:
+        if not is_refusal(refusal):
+            raise
         return emit_refusal(refusal, json_mode=json_mode)
 
     if args.format == "json":

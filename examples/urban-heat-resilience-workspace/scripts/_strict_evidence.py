@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from functools import wraps
@@ -13,6 +12,7 @@ from pathlib import Path
 import yaml
 from _evidence_authority import load_trust, read_host_policy, timestamp, verify_attestation
 from _evidence_revision import capture_workspace, content_id, observation, read_observed_file
+from _host_context import authority_path
 from _publication_context import authorized_capture, strict_host, strict_internal
 from _record_artifacts import json_document
 from _script_errors import ScriptRefusal
@@ -90,7 +90,7 @@ def resolve_policy(root, config):
     require(isinstance(config, dict), "strict_configuration_invalid")
     local = config.get("strict_evidence")
     external = None
-    if os.environ.get("EVIDENCE_WIKI_AUTHORITY_FILE"):
+    if authority_path(root):
         raw = read_host_policy(root)
         document = json_document(raw)
         scopes = document.get("strict_workspaces", {})
@@ -111,7 +111,7 @@ def resolve_policy(root, config):
 def configured(root, config):
     if not isinstance(config, dict):
         return False
-    if config.get("strict_evidence") is None and not os.environ.get("EVIDENCE_WIKI_AUTHORITY_FILE"):
+    if config.get("strict_evidence") is None and not authority_path(root):
         return False
     sibling("_selected_publication").validate_config_paths(config)
     key = (str(Path(root).resolve()), content_id("strict-config", config))

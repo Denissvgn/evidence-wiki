@@ -295,9 +295,10 @@ def test_inventory_sampling_uses_captured_text_and_top_level_worklist(tmp_path, 
     (folder / "nested" / "earlier.tex").write_text("\\documentclass{article}\n")
     with inventory._bounded_inputs(root, max_entries=100, max_input_bytes=10_000):
         inventory._capture_tree(folder)
-        monkeypatch.setattr(Path, "open", lambda *a, **k: pytest.fail("unanchored sampling reopen"))
-        assert inventory.looks_like_link_file(folder / "links.txt", folder)
-        assert inventory.fallback_entrypoint(folder) == ("custom.tex", "fallback_documentclass")
+        with monkeypatch.context() as sampling:
+            sampling.setattr(Path, "open", lambda *a, **k: pytest.fail("unanchored sampling reopen"))
+            assert inventory.looks_like_link_file(folder / "links.txt", folder)
+            assert inventory.fallback_entrypoint(folder) == ("custom.tex", "fallback_documentclass")
 
 
 @pytest.mark.parametrize("dry_run", [False, True])

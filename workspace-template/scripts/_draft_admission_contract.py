@@ -8,7 +8,7 @@ from copy import deepcopy
 
 from _evidence_revision import canonical_bytes
 from _record_artifacts import json_document
-from _script_errors import ScriptRefusal
+from _script_errors import ScriptRefusal, is_refusal
 from _strict_contract import CLAIMS_SCHEMA, CLAIMS_SCHEMA_V2, claims_document, identifier, text, validate_shape
 from _strict_contract import schema_documents as strict_schemas
 
@@ -103,9 +103,9 @@ def validate_document(name, value):
             _require(all(expected[slug] == row["original_id"] for row in value["originals"] for slug in row["question_slugs"]),
                      "original_mapping_changed")
         return value
-    except ScriptRefusal:
-        raise
-    except (ValueError, TypeError, KeyError, AttributeError, RecursionError, UnicodeError):
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError, UnicodeError) as exc:
+        if is_refusal(exc):
+            raise
         raise refusal("document_invalid") from None
 
 
@@ -118,9 +118,9 @@ def decode_document(name, raw):
         raise refusal("document_bound")
     try:
         return validate_document(name, json_document(raw))
-    except ScriptRefusal:
-        raise
-    except (ValueError, TypeError, UnicodeError, RecursionError):
+    except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+        if is_refusal(exc):
+            raise
         raise refusal("document_invalid") from None
 
 

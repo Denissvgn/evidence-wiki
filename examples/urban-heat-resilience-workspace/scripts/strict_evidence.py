@@ -51,6 +51,11 @@ def run_operation(root, operation, *, claim_id=None, envelope=None):
         raise refusal("strict_input_invalid_or_unreadable") from None
 
 
+def run_admit_document(root, proposal, *, _plan=None):
+    """Forward controlled draft publication to its sole canonical owner."""
+    return sibling("_draft_admission").run_admit_document(root, proposal, _plan=_plan)
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message):
         raise refusal("strict_arguments_invalid")

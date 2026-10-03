@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +20,7 @@ from .telemetry import _SECRET, _contained, _sha, _time, project, refuse, valida
 from .telemetry_contracts import ACK, PROJECTION, RECEIPT, validate_document
 
 OUTBOX = "research-telemetry-outbox/v1"
+_CALLBACK_CAPACITY = threading.BoundedSemaphore(16)
 
 
 def current_time():
@@ -26,11 +29,11 @@ def current_time():
 
 @dataclass(frozen=True)
 class DeadlineSink:
-    """A host-selected bounded executor; the core cannot preempt a Python call.
+    """A selected sink with a bounded core wait and explicit external uncertainty.
 
-    The host must implement the finite deadline outside an unbounded synchronous
-    callable before declaring ``host_deadline_enforced``. Reference strings and
-    callbacks do not authenticate measurements or grant delivery authority.
+    The legacy host flag selects the supported profile; the core independently
+    bounds its wait. Timeout cannot prove that a callback or its external effects
+    stopped. Hosts remain responsible for transport deadlines and reconciliation.
     """
 
     sink_ref: str
@@ -171,11 +174,15 @@ def _dispatch(root, control, intent, sending, sink):
         "attempt": sending["attempts"], "deadline_utc": sending["deadline_utc"], "projection": intent["projection"]}
     status, ack_ref, error = "unknown", None, "TELEMETRY_CALLBACK_UNKNOWN"
     try:
-        ack = validate_document(ACK, sink.callback(validate_detached(request)))
-        if ack["delivery_id"] == intent["delivery_id"] and ack["projection_sha256"] == intent["projection_sha256"]:
-            status = ack["status"]
-            ack_ref = _sha({"ack_ref": ack["ack_ref"]}) if ack["ack_ref"] is not None else None
-            error = None if status == "acknowledged" else "TELEMETRY_SINK_FAILED"
+        result, timed_out = _bounded_callback(sink, request, sending["deadline_utc"])
+        if timed_out:
+            status, ack_ref, error = "unknown", None, "TELEMETRY_DEADLINE_UNKNOWN"
+        else:
+            ack = validate_document(ACK, result)
+            if ack["delivery_id"] == intent["delivery_id"] and ack["projection_sha256"] == intent["projection_sha256"]:
+                status = ack["status"]
+                ack_ref = _sha({"ack_ref": ack["ack_ref"]}) if ack["ack_ref"] is not None else None
+                error = None if status == "acknowledged" else "TELEMETRY_SINK_FAILED"
     except (Exception, SystemExit):
         status, ack_ref, error = "unknown", None, "TELEMETRY_CALLBACK_UNKNOWN"
     if current_time() >= _time(sending["deadline_utc"]):
@@ -193,6 +200,35 @@ def _dispatch(root, control, intent, sending, sink):
             refuse("OUTBOX_CONFLICT")
         store.immutable(f"attempt-{sending['attempts']}.json", terminal)
         return store.checkpoint(terminal)
+
+
+def _bounded_callback(sink, request, deadline_utc):
+    """Bound waiting without retrying or asserting cancellation of a late effect."""
+    remaining = min(sink.deadline_seconds, (_time(deadline_utc) - current_time()).total_seconds())
+    capacity = _CALLBACK_CAPACITY
+    if remaining <= 0 or not capacity.acquire(blocking=False):
+        return None, True
+    finished = threading.Event()
+    result = []
+    monotonic_deadline = time.monotonic() + remaining
+
+    def invoke():
+        try:
+            result.append(sink.callback(validate_detached(request)))
+        except BaseException:
+            result.append(None)
+        finally:
+            finished.set()
+            capacity.release()
+
+    try:
+        threading.Thread(target=invoke, daemon=True, name="telemetry-sink-delivery").start()
+    except (Exception, SystemExit):
+        capacity.release()
+        return None, True
+    if not finished.wait(max(0, monotonic_deadline - time.monotonic())):
+        return None, True
+    return result[0], time.monotonic() >= monotonic_deadline
 
 
 @_contained

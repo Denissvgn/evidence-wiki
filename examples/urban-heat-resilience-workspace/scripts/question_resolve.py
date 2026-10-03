@@ -1705,13 +1705,19 @@ def render_revision_page(text: str, revision_id: str) -> str:
          "blocked_reason", "blocking_request_ids", "confidence", "evidence_strength", *GROUNDING_VERIFICATION_STAMPS))
 
 
-def reopen_for_revision(project_root, slug, revision_id, original):
+def reopen_for_revision(project_root, slug, revision_id, original, *, _expected_sha256=None):
     """Coverage migration has archived history; this owner alone resets the question."""
+    import hashlib
+
     claims = load_sibling_module("question_claim")
     path = claims.question_page_path(project_root, slug)
     guard = load_sibling_module("_pack_revision_guard")
     with claims.question_lock(path):
-        current = path.read_bytes().decode("utf-8")
+        current_raw = path.read_bytes()
+        current = current_raw.decode("utf-8")
+        if _expected_sha256 is not None:
+            guard.require("sha256:" + hashlib.sha256(current_raw).hexdigest() == _expected_sha256,
+                          "revision_question_changed")
         rendered = render_revision_page(original, revision_id)
         guard.require(current in {original, rendered}, "revision_question_changed")
         if current != rendered:

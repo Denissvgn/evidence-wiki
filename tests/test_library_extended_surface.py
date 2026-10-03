@@ -407,14 +407,17 @@ class RefusalTranslationTests(unittest.TestCase):
                 self.assertEqual(expected_code, caught.exception.error_code)
                 self.assertEqual(message, str(caught.exception))
 
-    def test_a_system_exit_that_is_process_control_is_re_raised_untouched(self):
-        # A non-string code is ``sys.exit(2)``, not a refusal. Converting it
-        # would swallow a deliberate process-level decision.
+    def test_an_owner_process_exit_is_contained_without_assuming_success(self):
+        # An owning operation returned no result; its exit cannot terminate the
+        # embedding host or supply a successful operation outcome.
         for code in (0, 2, None, 137):
             with self.subTest(code=code):
-                with self.assertRaises(SystemExit) as caught:
+                with self.assertRaises(errors.EvidenceWikiError) as caught:
                     _base.call_seam(seam_raising(SystemExit(code)), "stub", "seam")
-                self.assertEqual(code, caught.exception.code)
+                self.assertEqual("LIBRARY_PROCESS_EXIT", caught.exception.error_code)
+                self.assertEqual(0 if code is None else code, caught.exception.details["owner_exit_status"])
+                self.assertEqual(2, caught.exception.exit_code)
+                self.assertFalse(caught.exception.recoverable)
 
     def test_an_ordinary_bug_propagates_unchanged(self):
         # A KeyError from a script is a defect. Dressing it up as a workspace

@@ -18,7 +18,9 @@ from typing import Any, NoReturn
 from .workflow_contracts import WorkflowContractError
 
 POLICY = "research-run-policy/v1"
+POLICY_V2 = "research-run-policy/v2"
 OBSERVATION = "research-policy-observation/v1"
+OBSERVATION_V2 = "research-policy-observation/v2"
 DECISION = "research-policy-decision/v1"
 MAX_BYTES = 262_144
 MAX_DEPTH = 12
@@ -135,8 +137,20 @@ def schemas() -> dict[str, dict[str, Any]]:
         unresolved_count=_integer(100), selected_outcome_refs=_array(ident, 100),
         authorized={"const": False}, evidence_accepted={"const": False},
     )
+    policy_v2 = json.loads(json.dumps(policy))
+    policy_v2["properties"]["schema_version"] = {"const": POLICY_V2}
+    policy_v2["properties"]["scope"]["properties"]["source_scope_kind"] = {"enum": ["identity", "native_extent"]}
+    policy_v2["properties"]["scope"]["required"].append("source_scope_kind")
+    observation_v2 = json.loads(json.dumps(observation))
+    observation_v2["properties"]["schema_version"] = {"const": OBSERVATION_V2}
+    observation_v2["properties"]["spent"]["properties"]["cost_limit"] = _nullable({"type": "string", "maxLength": 26,
+        "pattern": r"^(?:0|[1-9][0-9]{0,12})(?:\.[0-9]{1,12})?$(?![\s\S])"})
+    observation_v2["properties"]["source_bindings"] = _array(
+        _object(source_id=ident, extent_ref=_string(4096), closure_id=policy_id), 64)
+    observation_v2["required"].append("source_bindings")
     return {name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape}
-            for name, shape in ((POLICY, policy), (OBSERVATION, observation), (DECISION, decision))}
+            for name, shape in ((POLICY, policy), (POLICY_V2, policy_v2), (OBSERVATION, observation),
+                                (OBSERVATION_V2, observation_v2), (DECISION, decision))}
 
 
 def schema_document(name: str) -> dict[str, Any]:
@@ -255,7 +269,7 @@ def validate_document(name: str, value: Any) -> dict[str, Any]:
     if type(value) is dict and value.get("schema_version", name) != name:
         _refuse("VERSION_UNSUPPORTED", "/schema_version")
     _matches(value, shape)
-    if name == POLICY:
+    if name in {POLICY, POLICY_V2}:
         if len(value["scope"]["question_ids"]) > value["budgets"]["questions"]:
             _refuse("INVALID", "/scope/question_ids")
         thresholds = value["thresholds"]
@@ -265,6 +279,11 @@ def validate_document(name: str, value: Any) -> dict[str, Any]:
         keys = [(row["role"], row["profile_ref"]) for row in required]
         if len(keys) != len(set(keys)) or not any(row["role"] == "evaluator" for row in required):
             _refuse("INVALID", "/required_evaluators")
+        if name == POLICY_V2 and value["scope"]["source_scope_kind"] == "native_extent":
+            from pathlib import Path
+
+            if any(not Path(item).is_absolute() or ".." in Path(item).parts for item in value["scope"]["source_scope"]):
+                _refuse("INVALID", "/scope/source_scope")
         expected = _identity(value)
         if value["policy_id"] is not None and value["policy_id"] != expected:
             _refuse("IDENTITY_MISMATCH", "/policy_id")
@@ -336,7 +355,10 @@ class RunPolicy:
     _raw: bytes = field(repr=False)
 
     def __init__(self, document: Any) -> None:
-        object.__setattr__(self, "_raw", encode_document(POLICY, document))
+        version = document.get("schema_version") if type(document) is dict else POLICY
+        if type(version) is not str or version not in {POLICY, POLICY_V2}:
+            _refuse("VERSION_UNSUPPORTED", "/schema_version")
+        object.__setattr__(self, "_raw", encode_document(version, document))
 
     @classmethod
     def from_dict(cls, document: Any) -> RunPolicy:
@@ -344,7 +366,17 @@ class RunPolicy:
 
     @classmethod
     def from_json(cls, raw: bytes) -> RunPolicy:
-        return cls(decode_document(POLICY, raw))
+        if type(raw) is not bytes or not raw:
+            _refuse("INVALID")
+        if len(raw) > MAX_BYTES:
+            _refuse("LIMIT")
+        try:
+            version = json.loads(raw, object_pairs_hook=_unique, parse_constant=_constant).get("schema_version")
+        except (ValueError, UnicodeError, RecursionError, AttributeError):
+            _refuse("INVALID")
+        if type(version) is not str or version not in {POLICY, POLICY_V2}:
+            _refuse("VERSION_UNSUPPORTED", "/schema_version")
+        return cls(decode_document(version, raw))
 
     @property
     def policy_id(self) -> str:
@@ -400,7 +432,8 @@ def decide(policy: RunPolicy, observed: Any) -> dict[str, Any]:
     frozen = policy.to_dict()
     count = len(frozen["scope"]["question_ids"])
     try:
-        owner = validate_document(OBSERVATION, observed)
+        version = OBSERVATION_V2 if frozen["schema_version"] == POLICY_V2 else OBSERVATION
+        owner = validate_document(version, observed)
     except WorkflowContractError:
         owner = None
     evidence = {key: value for key, value in owner.items() if key != "agent_rationale"} if owner else None
@@ -437,10 +470,17 @@ def decide(policy: RunPolicy, observed: Any) -> dict[str, Any]:
     selected = owner["selected_outcomes"]
     ids = [row["question_id"] for row in selected]
     refs = [row["outcome_ref"] for row in selected]
+    authorized_sources = set(frozen["scope"]["source_scope"])
+    if frozen["scope"].get("source_scope_kind") == "native_extent":
+        bindings = owner["source_bindings"]
+        if (len({row["source_id"] for row in bindings}) != len(bindings)
+                or any(row["extent_ref"] not in authorized_sources for row in bindings)):
+            return record("rejected", "scope_accounting")
+        authorized_sources = {row["source_id"] for row in bindings}
     if (owner["original_count"] != count or owner["accepted_count"] + owner["unresolved_count"] != count
             or owner["accepted_count"] != len(selected) or len(ids) != len(set(ids)) or len(refs) != len(set(refs))
             or set(ids) - set(frozen["scope"]["question_ids"])
-            or any(set(row["source_refs"]) - set(frozen["scope"]["source_scope"]) for row in selected)):
+            or any(set(row["source_refs"]) - authorized_sources for row in selected)):
         return record("rejected", "scope_accounting")
     if (frozen["human_review"] or any(row["human_required"] for row in frozen["required_evaluators"])
             or any(row["human_required"] for row in owner["evaluators"]) or owner["policy_compatible"] is not True):

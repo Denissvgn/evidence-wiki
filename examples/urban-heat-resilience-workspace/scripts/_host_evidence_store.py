@@ -16,6 +16,7 @@ from pathlib import Path
 
 from _evidence_authority import EvidenceInvalid
 from _evidence_revision import observation
+from _host_context import state_path
 from _native_fs import os
 
 try:
@@ -39,7 +40,7 @@ def private_entry(info: os.stat_result, *, directory: bool = False) -> None:
 
 @contextmanager
 def host_directory(project_root: Path) -> Iterator[int]:
-    raw = os.environ.get(STATE_ENV)
+    raw = state_path(project_root)
     if not raw:
         raise EvidenceInvalid("host_state_unavailable")
     path = Path(raw)

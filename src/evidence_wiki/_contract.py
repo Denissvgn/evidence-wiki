@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "20"
+LIBRARY_API_VERSION = "21"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -98,6 +98,8 @@ LIBRARY_API_SURFACE = (
     "research.session.pending",
     "research.session.reconcile_pending",
     "research.session.cancel_pending",
+    "research.session.intake_observation",
+    "research.session.report",
     "research.session.close",
     "research.telemetry.record",
     "research.telemetry.report",
@@ -496,20 +498,28 @@ def contract() -> dict:
         },
         "research_sessions": {
             "schemas": ["research-session-current/v1", "research-session-next/v1",
-                        "research-session-binding/v1", "research-session-step/v1"],
+                        "research-session-binding/v1", "research-session-step/v1",
+                        "research-session-current/v2", "research-session-next/v2",
+                        "research-session-binding/v2", "research-session-step/v2"],
             "schema_accessor": "evidence_wiki.research_session_contracts.schema_document",
             "state_owner": "canonical run state and event journal",
             "advice": "inert current accounting and bounded next-work descriptions",
-            "advance_profile": "finite terminal decision when usage or evaluator qualification is unavailable",
-            "host_jobs": "immutable inert generation/evaluation jobs; one pending reservation",
+            "advance_profile": "legacy finite refusal; explicit ResearchExecution enables bounded canonical generation, admission, independent review and release",
+            "host_jobs": "immutable generation/evaluation attempts; one active external reservation; settled attempts permit subsequent work",
             "pending_schema": "research-pending-work/v1",
             "pending_schema_accessor": "evidence_wiki.pending_work_contracts.schema_document",
-            "pending_profile": "durable expiry or unavailable-executor fallback; cancellation remains unconfirmed",
+            "pending_profile": "legacy unknown fallback; explicit host execution distinguishes requested cancellation, authenticated stop and historical completion",
             "reservation": "serialized under native workspace and canonical run gates; unknown usage retains the reservation",
             "deadline": "job lease capped by the original canonical run deadline; calls do not reset the allowance",
-            "model_executor": "unavailable",
-            "acquisition": "unsupported; locator-to-source identity binding unavailable",
-            "qualification": "unknown; no authenticated evaluator profile owner",
+            "model_executor": "host_selected",
+            "execution_profile": "ExecutionProfile and ResearchExecution; no mandatory model SDK",
+            "execution_observation": "research-execution-observation/v1",
+            "execution_report": "research-execution-report/v2",
+            "execution_report_schema_accessor": "evidence_wiki.execution_reporting.schema_document",
+            "acquisition": "approved normalized native evidence; scoped preparation only where canonical owners support the selected host; protected pending capture requires host sanitization; external acquisition unsupported",
+            "source_scope": "v1 exact identities; policy v2 permits frozen native extents with owner-derived complete source bindings",
+            "qualification": "host-authenticated protected references tied to exact policy, model, prompt, controller, rubric, domain and expiry; host must withdraw frozen services when qualification is revoked",
+            "operational_limits": "configured host required; reference subprocess bounds do not establish malicious-worker isolation or general semantic quality",
             "acceptance": "current canonical release is separate from workflow qualification",
         },
         "research_setup": {
@@ -526,7 +536,8 @@ def contract() -> dict:
             "schema_accessor": "evidence_wiki.telemetry_contracts.schema_document",
             "state_owner": "canonical run journal; private delivery operation metadata",
             "measurement_verifier": "optional explicit host callback; producer references do not authenticate",
-            "whole_execution_coverage": "unsupported; total execution/intervention remains unknown",
+            "whole_execution_coverage": "execution-session reports attest predeclared session-work scope; wider host/human coverage remains unknown unless independently observed",
+            "execution_report": "research-execution-report/v2 via report(execution_session=...) or session.report()",
             "projection": "redacted declared report; measurement authentication is not reverified",
             "delivery": "explicit host-selected deadline sink; core cannot interrupt arbitrary Python callback",
             "replay": "exact logical event identity and immutable attempts; uncertain delivery never blindly retries",

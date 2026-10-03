@@ -176,6 +176,7 @@ def schemas() -> dict[str, dict[str, Any]]:
 
 
 def _shape(value: Any, shape: dict[str, Any], field: str = "/") -> None:
+    import math
     import re
 
     if "anyOf" in shape:
@@ -187,8 +188,13 @@ def _shape(value: Any, shape: dict[str, Any], field: str = "/") -> None:
                 continue
         refuse("INVALID", field)
     types = {"object": dict, "array": list, "string": str, "integer": int, "boolean": bool, "null": type(None)}
-    if "type" in shape and type(value) is not types[shape["type"]]:
-        refuse("INVALID", field)
+    if "type" in shape:
+        expected = shape["type"]
+        if expected == "number":
+            if type(value) not in (int, float) or type(value) is float and not math.isfinite(value):
+                refuse("INVALID", field)
+        elif expected not in types or type(value) is not types[expected]:
+            refuse("INVALID", field)
     if "const" in shape and (type(value) is not type(shape["const"]) or value != shape["const"]):
         refuse("INVALID", field)
     if "enum" in shape and value not in shape["enum"]:
@@ -215,7 +221,7 @@ def _shape(value: Any, shape: dict[str, Any], field: str = "/") -> None:
             refuse("LIMIT", field)
         if "pattern" in shape and re.search(shape["pattern"], value) is None:
             refuse("INVALID", field)
-    elif type(value) is int:
+    elif type(value) in (int, float):
         if value < shape.get("minimum", value) or value > shape.get("maximum", value):
             refuse("INVALID", field)
 

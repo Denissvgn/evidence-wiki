@@ -13,6 +13,7 @@ from pathlib import Path
 from ._filesystem import os
 from ._pack_io import read_file, relative_path
 from .mutation_contracts import RECEIPT, STATE, canonical, checked, detached, digest, refuse
+from .operation_control import checkpoint, native_control
 from .pack_discovery import owner
 
 PLAN_VERSION = "research-source-effect-plan/v1"
@@ -151,23 +152,26 @@ def _load(store, basis):
     return value
 
 
-def _dependencies(root, plan, *, after=False):
+def _dependencies(root, plan, *, after=False, operation_control=None):
     effects = {item["path"] for item in plan["effects"]}
     inputs = plan["inputs"]
     if type(inputs) is not dict or set(inputs) != {"files", "entries", "roots", "absent"}:
         refuse("SOURCE_PLAN_INVALID")
     for path in inputs["absent"]:
+        checkpoint(operation_control, "before_absent_dependency")
         if after and path in effects:
             continue
         if (root / relative_path(path)).exists() or (root / path).is_symlink():
             refuse("SOURCE_INPUTS_CHANGED")
     for item in inputs["files"]:
+        checkpoint(operation_control, "before_file_dependency")
         if after and item["path"] in effects:
             continue
         if _current(root, item["path"]) != item["sha256"]:
             refuse("SOURCE_INPUTS_CHANGED")
     revision = owner("_evidence_revision")
     for item in [*inputs["entries"], *inputs["roots"]]:
+        checkpoint(operation_control, "before_path_dependency")
         if after and item["path"] in effects:
             continue
         path = root if item["path"] == "." else root / relative_path(item["path"])
@@ -265,8 +269,9 @@ def _projected_tree(root, effects):
         refuse("SOURCE_OUTPUT_LIMIT")
 
 
-def prepare(root, intent, store):
+def prepare(root, intent, store, *, operation_control=None):
     """Retain clock/identity first, then stage every exact native publication."""
+    checkpoint(operation_control, "before_source_plan_capture")
     state = store.read()
     basis = detached(state["owner_basis"])
     clock = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -278,7 +283,8 @@ def prepare(root, intent, store):
     stem, seam = OPERATIONS[intent["operation"]]
     with Workspace.open(root) as workspace:
         module = workspace._script(stem)
-        prepared = getattr(module, seam)(root, intent["arguments"], observed_utc=clock)
+        options = {"operation_control": native_control(operation_control, module)} if intent["operation"] == "normalize.sources" and operation_control is not None else {}
+        prepared = getattr(module, seam)(root, intent["arguments"], observed_utc=clock, **options)
         config = module.load_config(root)
     _targets(root, intent["operation"], prepared, config)
     _projected_tree(root, prepared["effects"])
@@ -287,6 +293,7 @@ def prepare(root, intent, store):
     report = _quota(intent, basis, prepared["report"])
     total = len(canonical(report))
     for effect in prepared["effects"]:
+        checkpoint(operation_control, "before_source_plan_effect")
         relative_path(effect["path"])
         raw = effect["data"]
         if raw is not None and (type(raw) is not bytes or len(raw) > MAX_ARTIFACT_BYTES):
@@ -296,6 +303,7 @@ def prepare(root, intent, store):
         refuse("SOURCE_PLAN_LIMIT")
     effects, directories = [], set()
     for index, effect in enumerate(prepared["effects"]):
+        checkpoint(operation_control, "before_source_stage_publication")
         item = {key: value for key, value in effect.items() if key != "data"}
         item["stage"] = store.stage_blob(f"source-output-{index:04d}", effect["data"]) if effect["data"] is not None else None
         effects.append(item)
@@ -303,6 +311,7 @@ def prepare(root, intent, store):
         while path != Path(".") and not (root / path).exists():
             directories.add(path.as_posix())
             path = path.parent
+    checkpoint(operation_control, "before_source_report_stage")
     report_stage = store.stage_blob("source-report", canonical(report))
     plan = {"schema_version": PLAN_VERSION, "request_id": intent["request_id"], "input_sha256": intent["input_sha256"],
         "operation": intent["operation"], "clock_utc": clock, "effects": effects,
@@ -312,13 +321,15 @@ def prepare(root, intent, store):
     raw = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(raw) > MAX_ARTIFACT_BYTES:
         refuse("SOURCE_PLAN_LIMIT")
+    checkpoint(operation_control, "before_source_plan_publication")
     descriptor = store.stage_blob("source-plan", raw)
     basis["source_stage"].update(phase="ready", plan=descriptor)
     _projected_quota(intent, basis, report, prepared["strict_refusals"])
+    checkpoint(operation_control, "before_source_plan_return")
     return basis
 
 
-def _delete(root, effect):
+def _delete(root, effect, *, operation_control=None):
     """Use pinned no-follow directory handles for a sidecar deletion."""
     publisher = owner("_usage_materialization")
     parts = Path(relative_path(effect["path"])).parts
@@ -348,6 +359,7 @@ def _delete(root, effect):
         if _hash(read_file(current, parts[-1], MAX_ARTIFACT_BYTES)) != effect["before_sha256"]:
             refuse("SOURCE_OUTPUT_CONFLICT")
         publisher.check_destination(root, descriptors, parts, previous)
+        checkpoint(operation_control, "before_source_delete")
         os.unlink(parts[-1], dir_fd=current)
         os.fsync(current)
         publisher.check_destination(root, descriptors, parts, None)
@@ -363,14 +375,16 @@ def _report(store, plan):
     return detached(json.loads(raw.decode("utf-8")))
 
 
-def invoke(root, intent, basis, store):
+def invoke(root, intent, basis, store, *, operation_control=None):
     """Publish only retained bytes; extraction never repeats after preparation."""
+    checkpoint(operation_control, "before_source_plan_load")
     plan = _load(store, basis)
     if plan["operation"] != intent["operation"]:
         refuse("SOURCE_PLAN_CONFLICT")
-    _dependencies(root, plan)
+    _dependencies(root, plan, operation_control=operation_control)
     allowed = set(plan["allowed_directories"])
     for effect in plan["effects"]:
+        checkpoint(operation_control, "before_source_output_capture")
         for parent in Path(effect["path"]).parents:
             if parent != Path(".") and not (root / parent).exists() and parent.as_posix() not in allowed:
                 refuse("SOURCE_OUTPUT_CONFLICT")
@@ -383,26 +397,34 @@ def invoke(root, intent, basis, store):
         locks = owner("_workspace_locks")
         inventory = owner("source_inventory")
         with locks.workspace_lock(inventory.acquisition_workspace_lock_path(root), purpose="planned native source publication"):
-            _dependencies(root, plan)
+            _dependencies(root, plan, operation_control=operation_control)
             # All current output states are checked before the first publication.
             for effect in plan["effects"]:
+                checkpoint(operation_control, "before_source_output_validation")
                 if _current(root, effect["path"]) != effect["before_sha256"]:
                     refuse("SOURCE_OUTPUT_CONFLICT")
             for effect in plan["effects"]:
-                _dependencies(root, plan, after=True)
+                checkpoint(operation_control, "before_source_effect")
+                _dependencies(root, plan, after=True, operation_control=operation_control)
                 if effect["mode"] == "preserve":
                     continue
                 if effect["mode"] == "delete":
-                    _delete(root, effect)
+                    options = {} if operation_control is None else {"operation_control": operation_control}
+                    _delete(root, effect, **options)
                 else:
                     raw = store.read_stage(effect["stage"])
                     if _hash(raw) != effect["after_sha256"]:
                         refuse("SOURCE_PLAN_CONFLICT")
                     if effect["path"] == "log.md":
                         with locks.workspace_lock(root / ".locks/log.lock", purpose="planned source activity"):
-                            publisher.publish_file(root, effect["path"], raw, effect["before_sha256"])
+                            options = {} if operation_control is None else {
+                                "before_publish": lambda: checkpoint(operation_control, "before_source_replace")}
+                            publisher.publish_file(root, effect["path"], raw, effect["before_sha256"], **options)
                     else:
-                        publisher.publish_file(root, effect["path"], raw, effect["before_sha256"])
+                        options = {} if operation_control is None else {
+                            "before_publish": lambda: checkpoint(operation_control, "before_source_replace")}
+                        publisher.publish_file(root, effect["path"], raw, effect["before_sha256"], **options)
+    checkpoint(operation_control, "before_source_report_return")
     report = _report(store, plan)
     if plan["strict_refusals"]:
         module = owner("source_inventory")
@@ -412,26 +434,32 @@ def invoke(root, intent, basis, store):
     return report
 
 
-def prove(root, intent, basis, store):
+def prove(root, intent, basis, store, *, operation_control=None):
     """Compare every planned publication and dependency without redispatch."""
+    checkpoint(operation_control, "before_source_proof_capture")
     plan = _load(store, basis)
     from .workspace import Workspace
     with Workspace.open(root) as workspace:
         module = workspace._script(OPERATIONS[intent["operation"]][0])
         config = module.load_config(root)
         module.require_host_intake(config, plan["selected_records"]) if intent["operation"] == "normalize.sources" else module.require_host_intake(config)
-    _dependencies(root, plan, after=True)
+    _dependencies(root, plan, after=True, operation_control=operation_control)
     report = _report(store, plan)
     matching, missing = [], []
     for effect in plan["effects"]:
+        checkpoint(operation_control, "before_source_effect_proof")
         current = _current(root, effect["path"])
         (matching if current == effect["after_sha256"] else missing).append(effect["path"])
         if effect["stage"] is not None:
             store.read_stage(effect["stage"])
     partial = bool(plan["strict_refusals"]) or bool(report.get("summary", {}).get("failed") or report.get("summary", {}).get("partial"))
     complete = not missing
-    observed_changes = any(effect["mode"] != "preserve" and _current(root, effect["path"]) != effect["before_sha256"]
-                          for effect in plan["effects"])
+    observed_changes = False
+    for effect in plan["effects"]:
+        checkpoint(operation_control, "before_source_change_proof")
+        if effect["mode"] != "preserve" and _current(root, effect["path"]) != effect["before_sha256"]:
+            observed_changes = True
+    checkpoint(operation_control, "before_source_proof_return")
     return {"present": observed_changes or complete and partial, "desired": complete and not partial, "completion": False,
         "observation": {"effects_complete": complete, "matching_count": len(matching), "missing_count": len(missing),
             "missing_or_changed_outputs": missing[:24], "output_listing_truncated": len(missing) > 24,

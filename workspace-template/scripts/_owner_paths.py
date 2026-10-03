@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Qualify actual workspace paths before scoped owner reads and mutations."""
 
 from __future__ import annotations

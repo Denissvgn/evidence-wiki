@@ -20,7 +20,7 @@ from _evidence_revision import canonical_bytes, capture_workspace, content_id
 from _native_fs import os
 from _owner_paths import checked_path
 from _record_artifacts import artifact_path, json_document
-from _script_errors import ScriptRefusal
+from _script_errors import ScriptRefusal, is_refusal
 from _workspace_module_loader import load_workspace_module
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -50,9 +50,9 @@ def typed(function):
     def call(*args, **kwargs):
         try:
             return function(*args, **kwargs)
-        except ScriptRefusal:
-            raise
-        except (ValueError, OSError, TypeError, KeyError, AttributeError, RecursionError, UnicodeError, yaml.YAMLError):
+        except (ValueError, OSError, TypeError, KeyError, AttributeError, RecursionError, UnicodeError, yaml.YAMLError) as exc:
+            if is_refusal(exc):
+                raise
             refuse("admission_input_invalid_or_unreadable")
     return call
 
@@ -471,7 +471,7 @@ def run_admit_document(root, proposal, *, _plan=None):
     try:
         require(_plan is not None, "serialized_admission_required")
         return commit_admission(root, proposal, _plan)
-    except ScriptRefusal:
-        raise
-    except (ValueError, OSError, TypeError, KeyError, AttributeError, RecursionError, UnicodeError, yaml.YAMLError):
+    except (ValueError, OSError, TypeError, KeyError, AttributeError, RecursionError, UnicodeError, yaml.YAMLError) as exc:
+        if is_refusal(exc):
+            raise
         refuse("admission_input_or_publication_uncertain")

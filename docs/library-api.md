@@ -46,6 +46,12 @@ Version `20` adds concise setup preparation and read-only recovery inspection
 through `Onboarding`. The operation matrix is version `8`. Setup readiness,
 frozen research scope compatibility and accepted evidence remain separate.
 
+Version `21` adds explicit host-driven research execution, authenticated scoped
+accounting and redacted execution reports, plus shared operation deadlines.
+Execution-aware v2 envelopes preserve the legacy refusal profile. The host
+supplies executor, qualification and observation services; current canonical
+owners continue to control evidence admission and release.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -269,7 +275,7 @@ exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
 | Operation | Signature |
 | --- | --- |
 | `sources.inventory` | `ws.sources.inventory(*, dry_run=False, append_log=False, require_checksum=False, reject_mismatch=False, max_records=1000, max_entries=10000, max_input_bytes=16777216)` |
-| `normalize.sources` | `ws.normalize.sources(source_ids=None, *, all_sources=False, dry_run=False, force=False, append_log=False, pdf_extractor=None, max_sources=128, allow_external=False, max_manifest_bytes=1048576, max_manifest_records=1000, max_entries=10000, max_input_bytes=16777216)` |
+| `normalize.sources` | `ws.normalize.sources(source_ids=None, *, all_sources=False, dry_run=False, force=False, append_log=False, pdf_extractor=None, max_sources=128, allow_external=False, max_manifest_bytes=1048576, max_manifest_records=1000, max_entries=10000, max_input_bytes=16777216, operation_control=None)` |
 | `source_requests.add` | `ws.source_requests.add(*, kind, query_or_identifier, rationale, priority="medium", question_slugs=None, scope=None)` |
 | `source_requests.list` | `ws.source_requests.list(*, statuses=None, kinds=None, scope=None)` |
 | `source_requests.fulfill` | `ws.source_requests.fulfill(*, request_id, source_id, match_scope=None, require_scope=False)` |
@@ -353,9 +359,9 @@ does not imply admission capability for those cases.
 | --- | --- |
 | `mutations.revision` | `ws.mutations.revision()` |
 | `mutations.prepare` | `ws.mutations.prepare(*, request_id, operation, arguments)` |
-| `mutations.submit` | `ws.mutations.submit(request)` |
+| `mutations.submit` | `ws.mutations.submit(request, *, operation_control=None)` |
 | `mutations.inspect` | `ws.mutations.inspect(request_id)` |
-| `mutations.reconcile` | `ws.mutations.reconcile(request_id)` |
+| `mutations.reconcile` | `ws.mutations.reconcile(request_id, *, operation_control=None)` |
 
 Activate a `HostContext` with `mutation_control_directory` pointing to an
 existing private directory outside workspace, authority and evidence state
@@ -409,9 +415,9 @@ closed schema documents for host negotiation.
 
 | Operation | Signature |
 | --- | --- |
-| `research.current` | `ws.research.current(policy, *, run_id=None)` |
-| `research.next` | `ws.research.next(policy, *, run_id=None)` |
-| `research.session` | `ws.research.session(policy, *, run_id)` |
+| `research.current` | `ws.research.current(policy, *, run_id=None, execution=None)` |
+| `research.next` | `ws.research.next(policy, *, run_id=None, execution=None)` |
+| `research.session` | `ws.research.session(policy, *, run_id, execution=None)` |
 | session observation | `session.current()` and `session.next()` |
 | session advance | `session.advance(*, request_id, expected_basis_id)` |
 | bounded terminal route | `session.run_until_terminal(*, request_id, expected_basis_id, max_steps=1)` |
@@ -419,6 +425,8 @@ closed schema documents for host negotiation.
 | retained pending work | `session.pending() -> dict \| None` |
 | finite reconciliation | `session.reconcile_pending(*, request_id)` |
 | cancellation request | `session.cancel_pending(*, request_id)` |
+| authenticated history intake | `session.intake_observation(observation, *, request_id)` |
+| execution metadata | `session.report(*, after_sequence=0, max_records=64)` |
 | session lifetime | `session.close()` or a context manager |
 
 These operations require an active `HostContext` with selected mutation control
@@ -429,37 +437,113 @@ remains inert; it reports the required canonical lifecycle grants before an
 explicit step can create a run. Decisions and jobs use the existing run event
 journal, with immutable request replay.
 
-The available advancement profile records a finite terminal decision when
-execution usage or evaluator qualification is unavailable. It does not execute
-acquisition, draft admission, review or model calls. Current canonical release
-acceptance is reported separately; it cannot supply missing evaluator
-qualification. Generation and evaluation jobs retain finite original leases
-and one pending reservation. Generation currently requires one original and the
+Calls without `execution` preserve the finite refusal profile: unavailable
+usage or qualification cannot become accepted research. Supplying an explicit
+`ResearchExecution` selects a host-driven route through the same canonical run,
+source, admission, review and publication owners. It performs bounded generation,
+independent evaluation, permitted repair and current release without interactive
+approval. Missing capabilities or evidence produce explicit finite outcomes.
+Current canonical release cannot supply missing evaluator qualification.
+
+The integrating host supplies an immutable `ExecutionProfile`, an executor,
+`QualifiedEvaluators`, `HostReviewSigner` and a stable protected observer key.
+The library has no mandatory model SDK and discovers no credentials or provider.
+`BoundedSubprocessExecutor` provides finite invocation, polling, process-group
+cancellation, output limits and host-authenticated receipts. A host usage meter
+must observe model calls, tokens and incremental charges independently of worker
+output; unavailable measurements remain unknown. These execution bounds do not
+establish malicious-worker OS isolation.
+
+The accepted source profile starts with host-provided, approved normalized
+evidence and its complete raw/provenance closure. Native local inventory and
+normalization remain owning operations. Protected pending captures require the
+host's established sanitization/materialization route; the driver retains the
+precise owner refusal and terminates when that capability is unavailable. It
+never creates a usage grant or treats a normalization retry as permission.
+
+```python
+from evidence_wiki import ResearchExecution, Workspace
+
+execution = ResearchExecution(
+    executor,
+    qualifications=qualified_evaluators,
+    review_signer=protected_review_signer,
+    observer_key=protected_observer_key,
+)
+with host_context.activate(), Workspace.open(workspace_path) as workspace:
+    with workspace.research.session(
+        frozen_policy, run_id="research-run", execution=execution
+    ) as session:
+        result = session.run_until_terminal(
+            request_id="research-drive",
+            expected_basis_id=session.current()["basis_id"],
+            max_steps=64,
+        )
+        metadata = session.report()
+```
+
+All services and permissions in this example come from trusted host provisioning.
+An execution profile pins role/controller, model and prompt identities, pricing,
+finite total steps and per-job ceilings. Consumed steps and reservations survive
+restart. A bounded call can yield a nonterminal result; the host can drive the
+next slice under the original run deadline and remaining allowance. A yield is
+not completed research. Reusing an exact request inspects retained work rather
+than dispatching a second model call.
+
+`QualificationAuthority` derives scoped evaluator metrics from protected reference
+cases and authenticated execution observations. Qualification binds the exact
+policy, model/settings, prompt, controller, scope, rubric, domain and expiry.
+Missing or insufficient reference coverage stays unknown. The protected signer
+supplies the existing strict attestation format; canonical owners still check
+controller independence, current evidence and release eligibility. Qualification
+for one domain does not establish general semantic correctness.
+
+Qualification records are immutable scoped snapshots. The host must withdraw or
+invalidate the bound execution services when it revokes a qualification. Close
+every affected retained session, or invalidate the effective executor/profile
+seen by its binding checks before further use; changing a separate registry does
+not update existing handles. Service identity changes refuse further use. This
+profile does not query an online qualification revocation registry. Canonical
+strict owners independently check current principal, signing-key and policy
+authority before release.
+
+Generation and evaluation retain finite original leases and one active external
+reservation. The legacy generation route requires one original and the
 closed payload `{"question": <exact original text>}`. Evaluation uses
 `{"claim_id": <claim>, "packet_id": <snapshot digest>}`; the digest is
 `sha256:` followed by the SHA-256 of the public strict review snapshot encoded
 as UTF-8 JSON with sorted keys, no ASCII escaping and compact separators.
 Evaluation binds its claim and complete source closure to the frozen scope.
-A URI prefix cannot stand in for a concrete source
-identity, so acquisition jobs currently refuse. Inspect
+Policy v1 names exact source identities. Policy v2 can name native absolute
+extents inside the original workspace; current owning capture and normalization
+records bind those extents to actual source IDs and complete provenance. Source
+IDs are not predicted or added to an active policy. Unsupported external/URI and
+multi-origin mappings refuse explicitly. Inspect
 `contract()["research_sessions"]` before selecting this profile.
 
-Pending reads return the retained receipt without renewing its lease or writing
-an expiry. Reconciliation records expiry at the fixed deadline, or an
-`executor_unavailable` fallback in the current profile, and finishes the
-canonical run. An advancement step also settles retained work automatically.
-Cancellation records an unconfirmed request and a finite terminal fallback;
-it cannot confirm that external work stopped or that any effects were rolled
-back. Unknown completion and usage retain the full budget reservation.
+Pending reads never renew a lease. Under explicit execution, reconciliation and
+cancellation use bounded host operations outside canonical locks. A requested
+cancellation, confirmed stop, racing completion and unknown external effect have
+distinct observations. Stopping never implies rollback. Unknown completion or
+usage keeps the reservation occupied. Authenticated late intake records history
+and actual charges without reopening a terminal run or accepting stale results.
 Request replay returns historical receipts and does not grant new work.
 Decision/job requests and pending-control requests have separate namespaces in
 the same canonical journal, so caller IDs cannot collide with automatic
 settlement. Pending reads validate immutable run, binding and lease fields;
 edited history cannot supply completion or release a reservation.
-The core performs no scheduling or arbitrary Python preemption. Long-running
-extraction still requires a bounded host worker; this profile has no executor
-intake for authenticated late completion. UTC observations reject regression
-against the last retained observation.
+The core installs no background scheduler. A live integrating host drives the
+bounded loop; after a host disconnect, the next host invocation observes the
+retained deadline and reconciles existing effects. UTC observations reject
+regression. `OperationControl(deadline_utc=..., timeout_seconds=...,
+cancel_requested=...)` supplies one fixed allowance to `normalize.sources`,
+`mutations.submit` and `mutations.reconcile`. Native extraction has an enforceable
+worker boundary; surrounding canonical phases check the same deadline before
+publication. A stalled cancellation observer stops work with explicit uncertainty.
+The reference subprocess and controlled extraction worker require POSIX process
+groups. Unsupported hosts refuse before worker dispatch; hosts can supply their
+own qualified executor boundary. Calls without explicit operation control retain
+their existing platform behavior.
 
 **`ws.research.telemetry`** retains bounded measurement declarations and exposes
 their provenance:
@@ -467,7 +551,7 @@ their provenance:
 | Operation | Signature |
 | --- | --- |
 | record | `record(event, *, run_id, agent_id)` |
-| report | `report(*, run_id, verifier=None)` |
+| report | `report(*, run_id, verifier=None, execution_session=None)` |
 | projection | `project(report)` |
 | delivery | `deliver(projection, *, run_id, delivery_id, sink, max_attempts=3)` |
 | delivery status | `inspect(delivery_id)` |
@@ -484,9 +568,26 @@ must authenticate exact event, workspace, controller, actor, metric and expiry
 bindings. Declared measured/imported labels and reference strings cannot do
 that. Reports separate exact subtotals by provenance, currency and pricing
 identity. Unobserved totals stay unknown. UTC intervals and clock references
-alone do not establish monotonic execution time. Whole-run cost and human
-intervention totals require a complete authenticated coverage owner; this
-profile currently provides none.
+alone do not establish monotonic execution time. An explicit execution-session
+report reconstructs decisions from authenticated retained inputs and exposes
+exact totals only for its complete declared scope. Attempts and measurement slots
+are declared before work; missing observations or sequence gaps remain unknown.
+Duplicate receipts count once, and authenticated late costs remain visible.
+Its redacted metadata omits private inputs, model outputs and signing material.
+Use paging cursors when the declared trace exceeds one report page.
+
+Native trace timing identifies an observed owner call, a recovered receipt or a
+desired-state proof. Recovery lifetime stays separate from active execution;
+unobserved active and waiting time remain unknown. `activity_summary` counts
+concrete retained step, repair, retry, cancellation, recovery, review-conflict
+and budget-stop records across the entire snapshot, including rows outside the
+displayed page. Its completeness flags describe the declared scope. Those
+counts do not certify repaired defects, caller autonomy or human zero.
+
+Whole-host human intervention is unknown without a separately observed complete
+boundary. Closed stdin, an empty intervention list or successful agent execution
+does not prove a global zero. Setup, calibration and excluded host activity must
+retain their own measurement scope.
 
 Projections are redacted declarations whose measurements are not reverified.
 They retain inert flags. Delivery requires an explicit `DeadlineSink` supplied
@@ -688,6 +789,11 @@ Version `"12"` adds `orchestrate.session.retire` and
 claim ledgers. See the [retention contract](../workspace-template/docs/orchestration.md#claim-retirement-and-cleanup)
 before applying either operation. Archives and tombstones remain permanent;
 payload erasure is unsupported and explicitly refused.
+Version `"21"` adds explicit execution-session observation intake and redacted
+reports, shared native operation controls, and host-driven advancement through
+canonical research owners. Session v2 and host-job v2 are explicit selections;
+legacy session and host-result codecs retain their original meanings. Hosts
+must provision execution, qualification and observation custody before use.
 `contract()["intake_profiles"]` advertises the supported native schemas,
 validator pin, bounds, and reconciliation limits. Validation returns a report
 with separate delivery, native consistency, and host reconciliation results;

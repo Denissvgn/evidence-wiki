@@ -115,6 +115,7 @@ CASES_DIR = Path(__file__).resolve().parent / "seam_cases"
 CASES_PACKAGE = "tests.seam_cases"
 
 NOT_A_SEAM = {
+    "_draft_admission.py": "Private serialized strict-admission owner requires a canonical plan; no standalone CLI; exercised through strict and mutation APIs.",
     "_script_errors.py": "Shared error helper, with no command or operation of its own.",
     "fetch_sources.py": "run_provider_command is the provider dispatch engine with argparse inputs and its own FetchSourcesError contract; ScriptRefusal is passed through by main for the host intake guard.",
 }

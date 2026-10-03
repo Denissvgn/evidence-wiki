@@ -93,7 +93,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _native_fs import os as _native_os
-from _script_errors import emit_error, handle_system_exit, json_mode_requested
+from _script_errors import emit_error, error_envelope, handle_system_exit, json_mode_requested
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
 
@@ -112,16 +112,17 @@ class RunControllerError(Exception):
         details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
+        envelope = error_envelope(error_code, message, recoverable=recoverable,
+                                  remediation=remediation, details=details)
         self.error_code = error_code
         self.exit_code = exit_code
-        self.recoverable = recoverable
-        self.remediation = remediation
+        self.recoverable = envelope["recoverable"]
+        self.remediation = envelope["remediation"]
         self.details = details
 
     def to_envelope(self) -> dict[str, Any]:
-        return {"schema_version": "1.0", "error_code": self.error_code, "message": str(self),
-                "exit_code": self.exit_code, "recoverable": self.recoverable,
-                "remediation": self.remediation, "details": self.details}
+        return {**error_envelope(self.error_code, str(self), recoverable=self.recoverable,
+                                remediation=self.remediation, details=self.details), "exit_code": self.exit_code}
 
 
 def parse_non_negative_int(value: str) -> int:
@@ -675,7 +676,7 @@ def _read_run_bytes(path: Path, *, maximum: int, optional: bool = False) -> byte
             if before is None and optional:
                 return b""
             if before is None:
-                raise RunControllerError("RUN_UNKNOWN", "Run journal is missing.", recoverable=False)
+                raise RunControllerError("RUN_JOURNAL_UNREADABLE", "Run journal is missing.", recoverable=False)
             if before.st_size > maximum:
                 raise RunControllerError("RUN_JOURNAL_LIMIT", "Run journal exceeds the supported byte bound.", recoverable=False)
             descriptor = _native_os.open(path.name, _native_os.O_RDONLY | _native_os.O_NOFOLLOW
@@ -699,7 +700,7 @@ def _read_run_bytes(path: Path, *, maximum: int, optional: bool = False) -> byte
             revalidate()
             return b"".join(chunks)
     except FileNotFoundError:
-        raise RunControllerError("RUN_UNKNOWN", "Run journal is missing.", recoverable=False) from None
+        raise RunControllerError("RUN_JOURNAL_UNREADABLE", "Run journal is missing.", recoverable=False) from None
     except OSError as error:
         raise RunControllerError("RUN_JOURNAL_UNREADABLE", "Run journal cannot be captured.", recoverable=False) from error
 
@@ -1455,10 +1456,10 @@ def run_session_record(project_root: Path, *, run_id: str, agent_id: str, reques
     project_root = _session_host(project_root, "run_session_record", agent_id=agent_id)
     run_id, agent_id = validate_run_id(run_id), require_agent_id(agent_id)
     if type(request_id) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", request_id) is None:
-        raise RunControllerError("VALUE_INVALID", "Session request ID is invalid.", recoverable=False)
+        raise RunControllerError("VALUE_INVALID", "Session request ID is invalid.", recoverable=True)
     encoded = compact_json(record)
     if len(encoded.encode()) > 262144 or type(record) is not dict:
-        raise RunControllerError("VALUE_INVALID", "Session record is invalid or too large.", recoverable=False)
+        raise RunControllerError("VALUE_INVALID", "Session record is invalid or too large.", recoverable=True)
     with workspace_lock(run_lock_path(project_root, run_id), purpose="research decision commit"):
         document = _session_state(project_root, run_id)
         require_caller_context(project_root, document, agent_id)

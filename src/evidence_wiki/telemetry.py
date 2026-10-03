@@ -240,9 +240,17 @@ def _pending_state(root, run_id):
 
 
 @_contained
-def report(root, *, run_id, verifier=None):
+def report(root, *, run_id, verifier=None, execution_session=None):
     """Reconstruct decisions and declared measurements from one captured journal."""
     root, _context = _scope(root, "report")
+    if execution_session is not None:
+        from .research_session import ResearchSession
+        if (type(execution_session) is not ResearchSession or execution_session.root != root
+                or execution_session.run_id != run_id or execution_session.execution is None):
+            refuse("EXECUTION_SESSION_CONFLICT")
+        if verifier is not None:
+            refuse("VERIFIER_INVALID")
+        return execution_session.report()
     if verifier is not None and type(verifier) is not MeasurementVerifier:
         refuse("VERIFIER_INVALID")
     snapshot = validate_document(JOURNAL, call_seam(owner, "run_controller", "run_telemetry_events", root, run_id=run_id))

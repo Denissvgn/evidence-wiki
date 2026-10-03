@@ -36,6 +36,7 @@ class _DoorBinding(NamedTuple):
     accepted: frozenset[str]
     supplied_keywords: frozenset[str]
     forwarded: frozenset[str]
+    operation: str | None = None
 
 
 def _literal_str(node: ast.expr, consts: dict[str, str]) -> str | None:
@@ -50,6 +51,36 @@ def _literal_str(node: ast.expr, consts: dict[str, str]) -> str | None:
     if isinstance(node, ast.Name):
         return consts.get(node.id)
     return None
+
+
+def _expanded_items(node: ast.expr, assignments: dict[str, ast.expr], seen: frozenset[str] = frozenset()):
+    """Resolve concrete mapping values that flow into a seam's keyword expansion."""
+    if isinstance(node, ast.Name) and node.id in assignments and node.id not in seen:
+        return _expanded_items(assignments[node.id], assignments, seen | {node.id})
+    if isinstance(node, ast.IfExp):
+        return _expanded_items(node.body, assignments, seen) + _expanded_items(node.orelse, assignments, seen)
+    if isinstance(node, ast.Dict):
+        result = {}
+        for key, value in zip(node.keys, node.values, strict=True):
+            if key is None:
+                result.update(_expanded_items(value, assignments, seen))
+            elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+                result[key.value] = value
+        return list(result.items())
+    return []
+
+
+def _public_seam_keywords(binding: _DoorBinding) -> set[str]:
+    seam = getattr(binding.seam_module, binding.seam_name)
+    keywords = {name for name, parameter in inspect.signature(seam).parameters.items()
+                if parameter.kind is inspect.Parameter.KEYWORD_ONLY and not name.startswith("_")}
+    # The dispatcher exposes distinct inputs for its selected action. Dynamic
+    # selectors remain conservative; new keywords are not silently exempted.
+    if (Path(binding.seam_module.__file__).stem == "strict_evidence"
+            and binding.seam_name == "run_operation" and binding.operation is not None):
+        conditional = {"claim_id": {"prepare-review"}, "envelope": {"review"}}
+        keywords -= {name for name, operations in conditional.items() if binding.operation not in operations}
+    return keywords
 
 
 def _door_seam_bindings() -> list[_DoorBinding]:
@@ -120,12 +151,30 @@ def _door_seam_bindings() -> list[_DoorBinding]:
             # A facade may bind an operation name or rename an envelope parameter.
             # Track destinations separately from caller values: `request=command`
             # supplies `request` and forwards `command`; `request={}` drops it.
+            assignments = {}
+            for statement in method.body:
+                if statement.lineno >= seam_call.lineno:
+                    break
+                if isinstance(statement, ast.Assign):
+                    for target in statement.targets:
+                        if isinstance(target, ast.Name):
+                            assignments[target.id] = statement.value
+                elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name) and statement.value is not None:
+                    assignments[statement.target.id] = statement.value
             supplied_keywords = {kw.arg for kw in seam_call.keywords if kw.arg}
             forwarded = {
                 kw.value.id for kw in seam_call.keywords if isinstance(kw.value, ast.Name)
             } | {
                 arg.id for arg in seam_call.args if isinstance(arg, ast.Name)
             }
+            for keyword in seam_call.keywords:
+                if keyword.arg is not None:
+                    continue
+                for name, value in _expanded_items(keyword.value, assignments):
+                    supplied_keywords.add(name)
+                    forwarded.update(node.id for node in ast.walk(value) if isinstance(node, ast.Name))
+            operation = next((_literal_str(keyword.value, consts) for keyword in seam_call.keywords
+                              if keyword.arg == "operation"), None)
             bindings.append(
                 _DoorBinding(
                     label=f"{path.stem}.{method.name}",
@@ -134,6 +183,7 @@ def _door_seam_bindings() -> list[_DoorBinding]:
                     accepted=frozenset(accepted),
                     supplied_keywords=frozenset(supplied_keywords),
                     forwarded=frozenset(forwarded),
+                    operation=operation,
                 )
             )
     return bindings
@@ -1814,11 +1864,7 @@ class QuestionResolveTests(unittest.TestCase):
             seam = getattr(b.seam_module, b.seam_name, None)
             if seam is None:
                 continue
-            seam_kwargs = {
-                name
-                for name, parameter in inspect.signature(seam).parameters.items()
-                if parameter.kind is inspect.Parameter.KEYWORD_ONLY
-            }
+            seam_kwargs = _public_seam_keywords(b)
             missing = sorted(
                 name for name in seam_kwargs - b.supplied_keywords if (b.label, name) not in deliberate
             )
@@ -1857,6 +1903,63 @@ class QuestionResolveTests(unittest.TestCase):
                         binding, = _door_seam_bindings()
                     self.assertEqual(missing, {"operation", "request"} - binding.supplied_keywords)
                     self.assertEqual(lost, binding.accepted - binding.forwarded)
+
+    def test_facade_guard_follows_only_mapping_values_expanded_into_the_seam(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            facades = root / "src" / "evidence_wiki" / "_facades"
+            facades.mkdir(parents=True)
+            (facades.parent / "workspace.py").write_text("", encoding="utf-8")
+            for assignment, expansion, supplied, forwarded in (
+                ('control = {"operation_control": native_control(operation_control)}', "control", True, True),
+                ('control = {} if operation_control is None else {"operation_control": native_control(operation_control)}', "control", True, True),
+                ('control = {} if operation_control is None else {}', "control", False, False),
+                ('control = {"operation_control": None}', "control", True, False),
+                ('control = {"operation_control": operation_control, "operation_control": None}', "control", True, False),
+                ('control = {**{"operation_control": operation_control}, "operation_control": None}', "control", True, False),
+                ('native_control(operation_control)\n        control = {}', "control", False, False),
+                ('control = {"operation_control": native_control(operation_control)}\n        ignored = {}', "ignored", False, False),
+                ('control = {"operation_control": operation_control}\n        control = {}', "control", False, False),
+            ):
+                with self.subTest(assignment=assignment):
+                    (facades / "probe.py").write_text(
+                        "class Probe:\n    def sources(self, *, operation_control=None):\n"
+                        f"        {assignment}\n"
+                        '        return self._call("normalize_sources", "run_normalization_report", '
+                        f"self._root, **{expansion})\n", encoding="utf-8")
+                    with mock.patch(f"{__name__}.REPO_ROOT", root):
+                        binding, = _door_seam_bindings()
+                    self.assertEqual(supplied, "operation_control" in binding.supplied_keywords)
+                    self.assertEqual(forwarded, "operation_control" in binding.forwarded)
+
+    def test_facade_guard_keeps_private_plans_out_of_public_action_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            facades = root / "src" / "evidence_wiki" / "_facades"
+            facades.mkdir(parents=True)
+            (facades.parent / "workspace.py").write_text("", encoding="utf-8")
+            for selector, required in (("check", set()), ("export", set()),
+                                       ("prepare-review", {"claim_id"}), ("review", {"envelope"})):
+                (facades / "probe.py").write_text(
+                    "class Probe:\n    def dispatch(self):\n"
+                    '        return self._call("strict_evidence", "run_operation", '
+                    f"self._root, operation={selector!r})\n", encoding="utf-8")
+                with mock.patch(f"{__name__}.REPO_ROOT", root):
+                    binding, = _door_seam_bindings()
+                self.assertEqual(required, _public_seam_keywords(binding))
+                self.assertEqual(required, _public_seam_keywords(binding) - binding.supplied_keywords)
+            (facades / "probe.py").write_text(
+                "class Probe:\n    def dispatch(self, operation):\n"
+                '        return self._call("strict_evidence", "run_operation", self._root, operation=operation)\n', encoding="utf-8")
+            with mock.patch(f"{__name__}.REPO_ROOT", root):
+                binding, = _door_seam_bindings()
+            self.assertEqual({"claim_id", "envelope"}, _public_seam_keywords(binding))
+            (facades / "probe.py").write_text(
+                "class Probe:\n    def evaluate(self, slug):\n"
+                '        return self._call("coverage_manifest", "run_evaluate_checked", self._root, slug=slug)\n', encoding="utf-8")
+            with mock.patch(f"{__name__}.REPO_ROOT", root):
+                binding, = _door_seam_bindings()
+            self.assertEqual({"slug"}, _public_seam_keywords(binding))
 
     def test_require_decisive_scope_refuses_an_undecided_pairing(self):
         """The opt-in gate: a pairing scope did not make is refused, not reported."""

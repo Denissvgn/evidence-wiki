@@ -129,14 +129,14 @@ class ContractParityTests(unittest.TestCase):
         self.assertTrue(rebuilt["library_api"]["surface"])
         self.assertTrue(rebuilt["artifact_schema_documents"]["orchestration_session"]["required"])
 
-    def test_research_profile_does_not_claim_an_executor_or_qualification(self):
+    def test_research_profile_declares_explicit_host_execution_and_scoped_qualification(self):
         profile = evidence_wiki.contract()["research_sessions"]
-        self.assertEqual("unavailable", profile["model_executor"])
-        self.assertIn("unknown", profile["qualification"])
+        self.assertEqual("host_selected", profile["model_executor"])
+        self.assertIn("host-authenticated", profile["qualification"])
         self.assertIn("unsupported", profile["acquisition"])
-        self.assertIn("terminal", profile["advance_profile"])
+        self.assertIn("explicit ResearchExecution", profile["advance_profile"])
         profile["schemas"].clear()
-        self.assertEqual(4, len(evidence_wiki.contract()["research_sessions"]["schemas"]))
+        self.assertEqual(8, len(evidence_wiki.contract()["research_sessions"]["schemas"]))
 
 
 class LibraryApiNegotiationBlockTests(unittest.TestCase):
@@ -146,7 +146,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
 
     def test_the_block_is_version_gated_rather_than_introspected(self):
         self.assertEqual({"version", "surface", "matrix_version", "operations", "cli_only", "timeout_policy"}, set(self.block))
-        self.assertEqual("20", self.block["version"])
+        self.assertEqual("21", self.block["version"])
         self.assertEqual(contract_module.LIBRARY_API_VERSION, self.block["version"])
         # A JSON payload cannot carry the declaration tuple, so the surface has to
         # arrive as a list on both sides of the CLI boundary.
@@ -206,6 +206,8 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "research.session.pending",
             "research.session.reconcile_pending",
             "research.session.cancel_pending",
+            "research.session.intake_observation",
+            "research.session.report",
             "research.session.close",
             "research.telemetry.record",
             "research.telemetry.report",

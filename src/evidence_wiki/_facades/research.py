@@ -21,13 +21,13 @@ class ResearchNamespace(Namespace):
             return research_session
         return call_seam(load, "research_session", seam, self._root, *args, **kwargs)
 
-    def current(self, policy, *, run_id=None):
-        return self._invoke("current", policy, run_id=run_id)
+    def current(self, policy, *, run_id=None, execution=None):
+        return self._invoke("current", policy, run_id=run_id, execution=execution)
 
-    def next(self, policy, *, run_id=None):
-        return self._invoke("next_work", policy, run_id=run_id)
+    def next(self, policy, *, run_id=None, execution=None):
+        return self._invoke("next_work", policy, run_id=run_id, execution=execution)
 
-    def session(self, policy, *, run_id):
-        session = self._invoke("session", policy, run_id=run_id)
+    def session(self, policy, *, run_id, execution=None):
+        session = self._invoke("session", policy, run_id=run_id, execution=execution)
         session._owner_workspace = self._workspace
         return session

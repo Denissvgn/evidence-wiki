@@ -18,8 +18,9 @@ import hashlib
 import importlib.util
 import sys
 import threading
+from collections import OrderedDict
 from pathlib import Path
-from types import ModuleType
+from types import CodeType, ModuleType
 
 from . import host_context, resources
 
@@ -58,6 +59,37 @@ _LOADER_HASH_MEMO: dict[Path, tuple[tuple[int, int, int, int], str]] = {}
 # sibling caches make a warm operation take no loads at all, so concurrent
 # operations stay concurrent.
 _LOAD_LOCK = threading.RLock()
+_COMPILED_SOURCE_LOCK = threading.RLock()
+_COMPILED_SOURCE: OrderedDict[tuple[str, bytes, str | None, int], tuple[CodeType, int]] = OrderedDict()
+_COMPILED_SOURCE_BYTES = 0
+_COMPILED_SOURCE_MAX_ENTRIES = 512
+_COMPILED_SOURCE_MAX_BYTES = 32 * 1024 * 1024
+
+
+def compiled_source_code(source: bytes, filename: str) -> CodeType:
+    """Reuse compilation only for exact source bytes, filename and interpreter flags.
+
+    The loader still reads and validates source and executes a fresh module.
+    No module globals, context, evidence, permissions or eligibility are cached.
+    """
+    global _COMPILED_SOURCE_BYTES
+    if type(source) is not bytes or type(filename) is not str:
+        raise TypeError("Source compilation requires bytes and a filename")
+    key = (filename, hashlib.sha256(source).digest(), sys.implementation.cache_tag, sys.flags.optimize)
+    with _COMPILED_SOURCE_LOCK:
+        found = _COMPILED_SOURCE.get(key)
+        if found is not None:
+            _COMPILED_SOURCE.move_to_end(key)
+            return found[0]
+        code = compile(source, filename, "exec", dont_inherit=True, optimize=sys.flags.optimize)
+        if len(source) <= _COMPILED_SOURCE_MAX_BYTES:
+            _COMPILED_SOURCE[key] = (code, len(source))
+            _COMPILED_SOURCE_BYTES += len(source)
+            while (len(_COMPILED_SOURCE) > _COMPILED_SOURCE_MAX_ENTRIES
+                    or _COMPILED_SOURCE_BYTES > _COMPILED_SOURCE_MAX_BYTES):
+                _discarded, (_, size) = _COMPILED_SOURCE.popitem(last=False)
+                _COMPILED_SOURCE_BYTES -= size
+        return code
 
 #: Marks a ``load_workspace_module`` binding this module has already wrapped.
 _SHARED_LOCK_MARKER = "_evidence_wiki_shared_load_lock"
@@ -109,7 +141,7 @@ def _load_workspace_loader(script_dir: Path) -> ModuleType:
     try:
         # Timestamp-based pyc validation is weaker than this loader's content
         # identity. Compile the actual loader bytes even when an old pyc exists.
-        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # noqa: S102 -- trusted packaged code
+        exec(compiled_source_code(path.read_bytes(), str(path)), module.__dict__)  # noqa: S102 -- trusted packaged code
     finally:
         sys.modules.pop(module_name, None)
     for old_key in list(_LOADER_MODULE_CACHE):

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from _evidence_revision import canonical_bytes, content_id, observation
+from _host_context import authority_path, controller_allowed
 from _native_fs import os
 from _qualified_packet import strict_json
 from _workspace_module_loader import load_workspace_module
@@ -92,7 +93,7 @@ def bounded_list(value: Any, *, maximum: int = 256, minimum: int = 0) -> list[An
 
 def read_host_policy(project_root: Path) -> bytes:
     """Read one no-follow, private, bounded external trust-file generation."""
-    raw = os.environ.get(TRUST_ENV)
+    raw = authority_path(project_root)
     if not raw:
         raise EvidenceInvalid("host_trust_unavailable")
     path = Path(raw)
@@ -244,6 +245,8 @@ def verify_attestation(
         expected = hmac.new(bytes.fromhex(settings["keys"][auth["key_id"]]), message, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(signature, expected):
             raise EvidenceInvalid("authentication_signature_mismatch")
+        if not controller_allowed(role, settings["controller"]):
+            raise EvidenceInvalid("authentication_controller_not_selected")
         result.update(authenticated=True, reason="authenticated_host_receipt", principal=auth["principal"],
                       controller=settings["controller"], role=role, issued_at=auth["issued_at"], expires_at=auth["expires_at"],
                       authority=authority_basis(trust))

@@ -9,6 +9,11 @@ from .research_observation import ResearchObservation, optional
 
 def completion(target, *, allow_partial=False, run_id=None):
     view = ResearchObservation(target, run_id=run_id)
+    return _completion_observation(view, allow_partial=allow_partial, run_id=run_id, close=True)
+
+
+def _completion_observation(view, *, allow_partial=False, run_id=None, close=False):
+    """Derive release from one per-call capture; the owning caller closes it."""
     mapping = view.mapping.get("result")
     gaps = [] if mapping else ["original_question_accounting_unavailable"]
     if mapping:
@@ -84,7 +89,8 @@ def completion(target, *, allow_partial=False, run_id=None):
     if not view.policy and publication:
         gaps.append("legacy_structural_release_has_no_strict_confirmation")
         complete = False
-    view.finish()
+    if close:
+        view.finish()
     return checked(
         {
             "schema_version": COMPLETION,

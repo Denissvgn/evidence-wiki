@@ -383,6 +383,13 @@ def loading_lock():
     return _LOAD_LOCK
 
 
+def compiled_source_code(source: bytes, filename: str):
+    """Share exact-byte compilation while every loader preserves module isolation."""
+    from ._script_host import compiled_source_code as compile_source
+
+    return compile_source(source, filename)
+
+
 @contextmanager
 def call_binding() -> Iterator[None]:
     """Pin one installed owner generation across a complete operation."""
@@ -502,8 +509,8 @@ def checked_operation(stem: str, seam: str, args: tuple[Any, ...], kwargs: Mappi
     elif stem == "mutation_operations" and seam in {"revision", "prepare_request", "submit", "inspect", "reconcile"}:
         write = seam in {"submit", "reconcile"}
     elif stem == "research_session" and seam in {"current", "next_work", "session", "advance", "run_until_terminal", "host_job",
-                                               "pending", "reconcile_pending", "cancel_pending"}:
-        write = seam in {"advance", "run_until_terminal", "host_job", "reconcile_pending", "cancel_pending"}
+                                               "pending", "reconcile_pending", "cancel_pending", "intake_observation", "report"}:
+        write = seam in {"advance", "run_until_terminal", "host_job", "reconcile_pending", "cancel_pending", "intake_observation"}
     elif stem == "telemetry" and seam in {"record", "report", "project"}:
         write = seam == "record"
     elif stem == "telemetry_delivery" and seam in {"deliver", "inspect", "retry"}:

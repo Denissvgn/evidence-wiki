@@ -447,7 +447,8 @@ def test_session_envelopes_refuse_hostile_changes(root, tmp_path, kind):
     assert schema_document(CURRENT)["properties"]
 
 
-@pytest.mark.parametrize("name", [None, False, 3, [], {}, "future/v9", "x" * 1000])
+@pytest.mark.parametrize("name", [None, False, 3, [], {}, "future/v9", "x" * 1000],
+                         ids=["null", "bool", "number", "list", "object", "future", "oversized"])
 def test_session_schema_lookup_refuses_unknown_types_and_versions(name):
     with pytest.raises(WorkflowContractError) as error:
         schema_document(name)
