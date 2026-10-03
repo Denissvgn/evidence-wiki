@@ -1,6 +1,7 @@
 """Static public method and effect declarations for scoped lifecycle handles."""
 
 METHODS = ("open", "close", "bootstrap", "resources", "resource", "recipes", "contracts", "inspect", "plan", "check_plan", "apply",
+    "prepare", "setup_status",
     "pack_list", "pack_show", "pack_decide", "pack_scaffold", "pack_derive", "capture", "revision_plan", "revision_apply",
     "revision_status", "migration_plan", "migration_apply", "reevaluate", "composition_plan", "composition_apply", "fleet_plan",
     "fleet_apply", "transition_plan", "transition_apply", "instructions_plan", "instructions_apply", "instructions_remove",
@@ -8,6 +9,7 @@ METHODS = ("open", "close", "bootstrap", "resources", "resource", "recipes", "co
 
 _WRITES = {"apply", "pack_scaffold", "pack_derive", "capture", "revision_apply", "migration_apply", "reevaluate", "composition_apply", "fleet_apply", "transition_apply", "instructions_apply", "instructions_remove", "research", "computation"}
 _SHELL = {"open": None, "close": None, "bootstrap": "agent summary / agent", "resources": "agent resources",
+    "prepare": None, "setup_status": None,
     "resource": "agent resource", "recipes": "agent recipes", "contracts": "agent extensions", "inspect": "agent inspect",
     "plan": "agent plan", "check_plan": "agent plan-check", "apply": "agent apply", "capture": "agent capture",
     "pack_list": "pack list", "pack_show": "pack show", "pack_decide": "pack decide", "pack_scaffold": "pack scaffold", "pack_derive": "pack derive",

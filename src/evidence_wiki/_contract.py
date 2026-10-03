@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "19"
+LIBRARY_API_VERSION = "20"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -511,6 +511,16 @@ def contract() -> dict:
             "acquisition": "unsupported; locator-to-source identity binding unavailable",
             "qualification": "unknown; no authenticated evaluator profile owner",
             "acceptance": "current canonical release is separate from workflow qualification",
+        },
+        "research_setup": {
+            "entry": "Onboarding.prepare, check_plan, apply, setup_status",
+            "schemas": ["research-setup-preparation/v1", "research-setup-status/v1"],
+            "schema_accessor": "evidence_wiki.setup_contracts.schema_document",
+            "recovery": "exact stored plan/request/ownership; checks rerun through apply",
+            "status": "read-only existing journal and current artifact capture; archived readiness is not a current check",
+            "worker": "fixed bounded installed owners; selected contexts exclude ambient authority/state/provider credentials",
+            "protected_worker": "unsupported; selected protected state/authority/control or trust configuration refuses before effects",
+            "acceptance": "setup ready, native research scope compatibility and accepted evidence remain separate",
         },
         "telemetry": {
             "schema_accessor": "evidence_wiki.telemetry_contracts.schema_document",

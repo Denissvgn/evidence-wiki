@@ -123,7 +123,13 @@ def check_plan(raw):
     try:
         current = compile_plan(canonical(saved["request"]))
     except (Exception, SystemExit):
-        refuse("saved_plan_preconditions_unavailable", "ONBOARDING_PLAN_STALE")
+        from .setup_application import status_plan
+
+        status = status_plan(raw)
+        if not status["ownership_valid"] or status["transaction_id"] is None:
+            refuse("saved_plan_preconditions_unavailable", "ONBOARDING_PLAN_STALE")
+        return {"schema_version": "evidence-setup-plan-check/v1", "plan_id": saved["plan_id"], "status": "current",
+                "setup_ready": saved["setup_ready"], "research_ready": False, "authority_verified": False, "actions_executed": False}
     if current["plan_id"] != saved["plan_id"]:
         refuse("saved_plan_preconditions_changed", "ONBOARDING_PLAN_STALE")
     return {"schema_version": "evidence-setup-plan-check/v1", "plan_id": saved["plan_id"], "status": "current",

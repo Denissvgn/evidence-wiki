@@ -26,6 +26,10 @@ def scoped_operation(function):
                 return function(self, *args, **kwargs)
         except OSError:
             refuse("onboarding_local_environment_unavailable", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
+        except SystemExit as error:
+            from ._facades._base import _process_exit
+
+            raise _process_exit(error) from None
         finally:
             ACTIVE_SCOPE.reset(token)
     return scoped
@@ -96,7 +100,7 @@ class Scope:
             _outside_assets(resolved, additional_roots=(Path(__file__).parent,))
         return resolved
 
-    def setup(self, value):
+    def setup(self, value, *, write=True):
         from .planning_contracts import PLAN, REQUEST, decode
 
         raw = value
@@ -109,8 +113,8 @@ class Scope:
         payload = request["request"]["payload"]
         selected = payload["target"]
         # Setup writes its coordination state under the selected writable root too.
-        self.path(selected["writable_root"], write=True)
-        self.path(Path(selected["writable_root"]) / selected["relative_path"], write=True)
+        self.path(selected["writable_root"], write=write)
+        self.path(Path(selected["writable_root"]) / selected["relative_path"], write=write)
         for scope in payload["authority"]["source_scope"]:
             if not scope.startswith(("https://", "http://")):
                 self.path(scope, installation=True)

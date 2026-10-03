@@ -38,8 +38,10 @@ def specifications():
         source_paths=array(text, 200), host_tools=opaque), {"source_ids", "source_paths", "host_tools"}))
     for name in ("plan", "check_plan", "apply", "revision_plan", "revision_apply", "migration_plan", "migration_apply",
                  "composition_plan", "fleet_plan", "fleet_apply", "transition_plan", "transition_apply",
-                 "instructions_plan", "instructions_apply", "instructions_remove"):
+                 "instructions_plan", "instructions_apply", "instructions_remove", "setup_status"):
         add(name, name, obj(value=opaque))
+    add("prepare", "prepare", optional(obj(objective=string(16384), host_scope=opaque, policy=opaque,
+        defaults=opaque, proposal=opaque, request_id=string(128)), {"host_scope", "policy", "defaults", "proposal", "request_id"}))
     add("composition_apply", "composition_apply", obj(value=opaque, output=text))
     add("capture", "capture", obj(target=text, value=opaque, path=text))
     add("revision_status", "revision_status", optional(obj(target=text, evaluate=boolean), {"evaluate"}))

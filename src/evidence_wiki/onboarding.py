@@ -15,6 +15,7 @@ from .planning_contracts import refuse
 from .runtime_identity import generation
 
 READ = frozenset({"bootstrap", "resources", "resource", "recipes", "inspect", "plan", "check_plan",
+    "prepare", "setup_status",
     "revision_plan", "revision_status", "migration_plan", "composition_plan", "fleet_plan", "transition_plan",
     "research_next", "research_export", "computation.check", "computation.aggregate", "computation.evaluate",
     "computation.verify", "computation.schedule", "instructions_plan", "contracts", "pack_list", "pack_show", "pack_decide"})
@@ -67,7 +68,7 @@ class Onboarding:
         return cls(allowed_roots, allow)
 
     def __enter__(self):
-        self._check("bootstrap")
+        self._check_lifetime()
         return self
 
     def __exit__(self, *args):
@@ -78,17 +79,20 @@ class Onboarding:
             self._scope.close()
             self.closed = True
 
-    def _check(self, operation):
+    def _check_lifetime(self):
         if self.closed:
             raise ConfigError("WORKSPACE_UNREADABLE", "Onboarding handle is closed.")
+        self._scope.verify()
+        if generation() != self._generation:
+            refuse("onboarding_generation_changed_restart_required", "ONBOARDING_PLAN_STALE")
+
+    def _check(self, operation):
+        self._check_lifetime()
         if operation not in self._allow:
             refuse("onboarding_operation_not_granted", "ONBOARDING_AUTHORITY_REQUIRED")
         context = current_context()
         if context is not None:
             context.require_grant("onboarding." + operation)
-        self._scope.verify()
-        if generation() != self._generation:
-            refuse("onboarding_generation_changed_restart_required", "ONBOARDING_PLAN_STALE")
 
     def _finish(self, value):
         self._scope.verify()
@@ -208,6 +212,44 @@ class Onboarding:
         return self._finish(inspect(target=str(root), source_ids=list(source_ids), source_paths=list(source_paths), host_tools=host_tools))
 
     @scoped_operation
+    def prepare(self, objective, *, host_scope=None, policy=None, defaults=None, proposal=None, request_id="research-request"):
+        """Compile a concise objective and its explicit host selections without effects."""
+        from .planning import compile_plan
+        from .request_compiler import compile_request
+        from .run_policy import RunPolicy
+        from .setup_application import research_compatibility
+        from .setup_contracts import PREPARATION, checked
+
+        self._check("prepare")
+        if type(policy) is dict:
+            policy = RunPolicy.from_dict(policy)
+        compiled = compile_request(objective, host_scope=host_scope, policy=policy, defaults=defaults,
+                                   proposal=proposal, request_id=request_id)
+        plan = None
+        if compiled["status"] == "compiled":
+            raw, _ = document(compiled["request"])
+            self._scope.setup(raw, write=False)
+            plan = compile_plan(raw)
+        ready = plan is not None and plan["setup_ready"]
+        result = {"schema_version": PREPARATION, "status": "prepared" if ready else "insufficient_context" if plan is None else "blocked",
+            "compilation": compiled, "plan": plan, "plan_ready": ready, "setup_ready": False,
+            "research_complete": False, "claims_verified": False, "authority_verified": False,
+            "actions_executed": False, "terminal": True,
+            "research_compatibility": research_compatibility(plan) if plan is not None else None,
+            "next_action": "check_and_apply" if ready else "stop_context" if plan is None else "stop_blocked"}
+        return self._finish(checked(result, PREPARATION))
+
+    @scoped_operation
+    def setup_status(self, value):
+        """Inspect exact setup ownership and recovery without writing or running checks."""
+        from .setup_application import status_plan
+
+        self._check("setup_status")
+        raw, _ = document(value)
+        self._scope.setup(raw, write=False)
+        return self._finish(status_plan(raw))
+
+    @scoped_operation
     def plan(self, value):
         from .planning import compile_plan
 
@@ -222,7 +264,7 @@ class Onboarding:
 
         self._check("check_plan")
         raw, _ = document(value)
-        self._scope.setup(raw)
+        self._scope.setup(raw, write=False)
         return self._finish(check_plan(raw))
 
     @scoped_operation

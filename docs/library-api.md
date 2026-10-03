@@ -42,6 +42,10 @@ or cancellation fallback. Job reservations use the selected workspace gate and
 canonical run lock; their leases cannot exceed the original run allowance. The
 operation matrix is version `7`.
 
+Version `20` adds concise setup preparation and read-only recovery inspection
+through `Onboarding`. The operation matrix is version `8`. Setup readiness,
+frozen research scope compatibility and accepted evidence remain separate.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -152,6 +156,45 @@ authority action is intersected with its representable policy effect and
 configured capability reference; source locations come only from host
 declarations. Proposal confidence and semantic adequacy remain unverified.
 Compilation performs no acquisition, model execution or workspace setup.
+
+The scoped lifecycle handle composes compilation with the existing setup owner:
+
+```python
+from evidence_wiki import Onboarding
+
+with Onboarding.open(allowed_roots=[setup_root], allow=["apply"]) as host:
+    prepared = host.prepare(objective, host_scope=host_selections, policy=run_policy)
+    if prepared["plan_ready"]:
+        plan = prepared["plan"]
+        host.check_plan(plan)
+        applied = host.apply(plan)
+        recovery = host.setup_status(plan)
+```
+
+Missing mandatory context is a terminal preparation outcome. An agent can use
+the closed plan directly; no YAML editing or shell command is required.
+`setup_status` inspects existing private coordination state and current owned
+artifacts without creating directories, executing checks or renewing authority.
+Its `recorded_setup_ready` is an archived local declaration; `setup_ready` stays
+unknown until `apply` repeats the owning checks. Owned plans can be checked after
+application. Changed controls, installation or unexplained workspace effects
+return stale/conflict outcomes and preserve user bytes.
+
+Preparation and status need their own `onboarding.prepare` and
+`onboarding.setup_status` grants under an active `HostContext`. They require
+read scope; application also needs `onboarding.apply`, the handle's apply grant
+and writable scope. Entering the handle adds no hidden bootstrap permission.
+New operations also have closed tools in the scoped onboarding MCP adapter.
+
+Explicit local setup excludes ambient authority, state and provider credentials
+from its fixed child workers while preserving the parent environment. Selected
+protected state, authority, mutation control or a merged trust configuration
+requires a separate worker bridge and refuses before journal/workspace effects
+in this profile. The no-context legacy selection boundary remains compatible.
+Fixed bounded tool-version probes and filesystem coordination do not establish
+worker isolation. Research compatibility reports native admission scope gaps
+separately: external/URI source extents, computation and multi-origin mappings
+cannot be made acceptable by a successful setup.
 
 `Workspace.open(path)` validates and never creates:
 
