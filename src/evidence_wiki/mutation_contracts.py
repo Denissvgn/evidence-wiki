@@ -28,6 +28,8 @@ OPERATIONS = (
     "telemetry.record",
     "requirements.revise",
     "sources.capture_revision",
+    "source_requests.link_current", "source_requests.fulfill_current",
+    "questions.block_current", "questions.reopen_current",
 )
 
 
@@ -77,6 +79,11 @@ def argument_schemas() -> dict[str, dict[str, Any]]:
         "source_requests.add": _obj(kind=_text(128), query_or_identifier=_content(), rationale=_content(),
             priority={"enum": ["high", "medium", "low"]}, question_slugs=selectors, scope=_null(scope)),
         "source_requests.fulfill": _obj(request_id=_text(128), source_id=_text(512), match_scope=_null(scope), require_scope=boolean),
+        "source_requests.link_current": _obj(request_id=_text(128), question_slugs=_array(_text(128), 128), scope=_null(scope)),
+        "source_requests.fulfill_current": _obj(request_id=_text(128), source_id=_text(512), match_scope=_null(scope),
+            require_scope={"const": True}, needs_complete=boolean),
+        "questions.block_current": _obj(slug=_text(128), blocking_request_ids=_array(_text(128), 128), reason=_content()),
+        "questions.reopen_current": _obj(slug=_text(128), needs_complete=boolean),
         "sources.inventory": _obj(dry_run=boolean, append_log=boolean, require_checksum=boolean, reject_mismatch=boolean,
             max_records=integer(10_000), max_entries=integer(100_000), max_input_bytes=integer(67_108_864)),
         "sources.capture": _obj(path=_text(512), delivery=opaque),
@@ -102,6 +109,9 @@ def arguments(operation: str, value: Any) -> dict[str, Any]:
         "questions.add_batch": {"dry_run": False},
         "source_requests.add": {"priority": "medium", "question_slugs": None, "scope": None},
         "source_requests.fulfill": {"match_scope": None, "require_scope": False},
+        "source_requests.link_current": {"scope": None},
+        "source_requests.fulfill_current": {"match_scope": None, "require_scope": True, "needs_complete": True},
+        "questions.block_current": {}, "questions.reopen_current": {"needs_complete": True},
         "sources.inventory": {"dry_run": False, "append_log": False, "require_checksum": False,
             "reject_mismatch": False, "max_records": 1000, "max_entries": 10_000, "max_input_bytes": 16_777_216},
         "sources.capture": {}, "sources.capture_revision": {},

@@ -121,7 +121,8 @@ def _source(view, record, records):
             fingerprint = owner("source_inventory").compute_raw_fingerprint(root, record)
             if fingerprint != record["raw_fingerprint"]:
                 row["reasons"].append("raw_revision_changed_since_inventory")
-        validation_root = view.root if qualified else root
+        protected = owner("_evidence_usage").configured(view.config)
+        validation_root = view.root if qualified or protected else root
         violations = contract.validate_document(validation_root / normalized_relative, metadata, body, manifest_by_id=records,
             normalized_root=validation_root / normalized_root, project_root=validation_root, config=view.config)
         if qualified:

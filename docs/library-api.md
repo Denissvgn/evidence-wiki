@@ -108,6 +108,11 @@ Capture metadata and exact bytes establish a retained revision, while inventory,
 extraction, current rights, request fulfillment and semantic acceptance remain
 separate outcomes. Existing v1 text delivery retains its contract.
 
+Version `28` adds current request observations, compatible-scope links and
+checked fulfillment/block/reopen mutations. Operation matrix `11` distinguishes
+historical bookkeeping from current original, normalized, scope and permission
+checks. Existing request APIs retain their legacy behavior.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -340,6 +345,11 @@ exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
 | `source_requests.add` | `ws.source_requests.add(*, kind, query_or_identifier, rationale, priority="medium", question_slugs=None, scope=None)` |
 | `source_requests.list` | `ws.source_requests.list(*, statuses=None, kinds=None, scope=None)` |
 | `source_requests.fulfill` | `ws.source_requests.fulfill(*, request_id, source_id, match_scope=None, require_scope=False)` |
+| `source_requests.current` | `ws.source_requests.current(*, request_ids=(), question_slugs=(), max_records=200)` |
+| `source_requests.link_current` | `ws.source_requests.link_current(request)` |
+| `source_requests.fulfill_current` | `ws.source_requests.fulfill_current(request)` |
+| `questions.block_current` | `ws.questions.block_current(request)` |
+| `questions.reopen_current` | `ws.questions.reopen_current(request)` |
 | `coverage.init` | `ws.coverage.init(slug, *, template=None, coverage_profile=None, force=False)` |
 | `coverage.link` | `ws.coverage.link(slug, facet_id, *, accepted_source_ids=None, blocking_request_ids=None, clear_accepted_source_ids=False, clear_blocking_request_ids=False)` |
 | `coverage.revision` | `ws.coverage.revision(request)` |
@@ -401,6 +411,61 @@ directories and the empty coordination file may be retained even when a new
 capture cannot complete. Known conflicting or orphan pairs refuse before
 creating that coordination state. Named directory/lock identity is rechecked
 throughout pair publication and desired-state reconciliation.
+
+Current request observations require an active `HostContext`, selected private
+mutation custody and `request_lifecycle_operations.current`. They bind original
+and derived question metadata to the effective frozen requirements. Inline
+criteria and their declared scope remain unchanged. Missing or unsupported
+requirements produce a typed refusal; unknown sources and unprocessed records
+remain gaps. Requests keep their native `open`/`fulfilled` statuses while
+`current_ready` separately checks current originals, normalized records, scope,
+complete context and current usage. Permission compatibility for ordinary
+legacy evidence is labeled separately from authenticated native usage revisions.
+Neither route supplies semantic approval.
+
+Prepare checked mutations through `ws.mutations.prepare` and retain the exact
+request for replay:
+
+```python
+request = ws.mutations.prepare(
+    request_id="fulfill-1", operation="source_requests.fulfill_current",
+    arguments={"request_id": evidence_request_id, "source_id": source_id},
+)
+receipt = ws.source_requests.fulfill_current(request)
+current = ws.source_requests.current(request_ids=[evidence_request_id])
+```
+
+The four operation argument shapes are:
+
+- `source_requests.link_current`: `request_id`, `question_slugs`, `scope=None`.
+- `source_requests.fulfill_current`: `request_id`, `source_id`,
+  `match_scope=None`, `require_scope=True`, `needs_complete=True`.
+- `questions.block_current`: `slug`, `blocking_request_ids`, `reason`.
+- `questions.reopen_current`: `slug`, `needs_complete=True`.
+
+Each requires its exact `request_lifecycle_operations.<operation>` grant, the
+existing mutation prepare/submit grants, and the canonical inner seam grant.
+Linking uses `source_requests.run_link_request`; ordinary fulfillment uses
+`source_requests.run_fulfill_request`; protected fulfillment uses
+`source_requests.run_fulfill_current_request`. Question transitions use their
+existing `question_resolve.run_block`/`run_reopen` grants and the selected actor.
+Blocking enforces the native question claim; it cannot select another actor or
+silently use an unclaimed question.
+
+Linking preserves exact declared scope and native managed-order freezes.
+Fulfillment refuses missing, partial, unusable, stale, denied or out-of-scope
+sources. `require_scope=False` is invalid; `needs_complete=False` cannot weaken
+frozen requirements in this profile. Reopening checks every page and coverage
+blocker, including missing or foreign request references. Native prewrite checks
+repeat current source and scope checks while canonical request/question locks
+are held. Protected use holds the native usage view through bookkeeping and
+revalidates trust and expiry immediately before writing.
+
+Completed replay retains the original historical receipt even after deletion or
+revocation. Always request a new current view before treating evidence as ready.
+An interrupted owner result remains partial or unknown under the mutation
+contract; absence of a receipt does not prove non-execution. Current readiness
+and transport completion never imply accepted claim support or release.
 
 New source and authoring seams qualify actual configuration, store, question,
 output and lock paths before effects. A linked workspace folder cannot redirect

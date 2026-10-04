@@ -1635,6 +1635,8 @@ def transition_resolution(
             remove_fields,
             quoted_fields={"updated", "human_review_requested_at"},
         )
+        if getattr(args, "_before_write", None) is not None:
+            args._before_write()
         question_claim.write_page_atomic(page_path, updated)
         result: dict[str, Any] = {
             "applied": True,
@@ -1893,6 +1895,8 @@ def transition_reopen(
             if source_id not in merged:
                 merged.append(source_id)
         now = question_claim.timestamp_utc()
+        if getattr(args, "_before_write", None) is not None:
+            args._before_write()
         if contingent is not None:
             # Merged with whatever this action already claimed for the question, not
             # written over it. The page is frozen, so a second reopen recomputes `merged`
@@ -2519,6 +2523,7 @@ def run_block(
     blocked_reason: str,
     request_id: list[str] | None = None,
     allow_unclaimed: bool = False,
+    _before_write=None,
 ) -> dict[str, Any]:
     """Resolve a question as blocked on missing evidence."""
     return _run_command(
@@ -2530,6 +2535,7 @@ def run_block(
             allow_unclaimed=allow_unclaimed,
             blocked_reason=blocked_reason,
             request_id=request_id,
+            _before_write=_before_write,
         ),
     )
 
@@ -2584,6 +2590,7 @@ def run_reopen(
     source_id: list[str],
     request_id: list[str] | None = None,
     require_decisive_scope: bool = False,
+    _before_write=None,
 ) -> dict[str, Any]:
     """Move a blocked question back to open once its evidence is delivered and normalized.
 
@@ -2601,6 +2608,7 @@ def run_reopen(
             source_id=source_id,
             request_id=request_id,
             require_decisive_scope=require_decisive_scope,
+            _before_write=_before_write,
         ),
     )
 

@@ -453,6 +453,7 @@ def call_binding() -> Iterator[None]:
 # Only known seam effects may run under an explicit context. The canonical
 # owners still validate their arguments and authenticate evidence independently.
 _READ_SEAMS = frozenset({
+    ("request_lifecycle_operations", "current"),
     ("requirements_operations", "current"), ("requirements_operations", "prepare_revision"),
     ("run_controller", "run_telemetry_events"),
     ("export_answers", "run_export"),
@@ -466,6 +467,8 @@ _READ_SEAMS = frozenset({
     ("source_requests", "run_list_requests"),
 })
 _WRITE_SEAMS = frozenset({
+    ("request_lifecycle_operations", "link_current"), ("request_lifecycle_operations", "fulfill_current"),
+    ("request_lifecycle_operations", "block_current"), ("request_lifecycle_operations", "reopen_current"),
     ("mutation_capture_recovery", "resume"),
     ("requirements_operations", "revise"),
     ("run_controller", "run_telemetry_record"),
@@ -478,6 +481,8 @@ _WRITE_SEAMS = frozenset({
     ("coverage_manifest", "run_init_inline"), ("coverage_manifest", "run_link"),
     ("coverage_manifest", "run_revision"),
     ("source_requests", "run_add_request"), ("source_requests", "run_fulfill_request"),
+    ("source_requests", "run_link_request"),
+    ("source_requests", "run_fulfill_current_request"),
     ("question_claim", "run_claim"), ("question_claim", "run_release"),
     ("question_resolve", "run_answer"), ("question_resolve", "run_block"),
     ("question_resolve", "run_defer"), ("question_resolve", "run_reject"),
@@ -485,6 +490,8 @@ _WRITE_SEAMS = frozenset({
     ("evidence_usage", "run_transact"), ("evidence_usage", "run_materialize"),
 })
 _SERIALIZED_WRITERS = frozenset({
+    ("request_lifecycle_operations", "link_current"), ("request_lifecycle_operations", "fulfill_current"),
+    ("request_lifecycle_operations", "block_current"), ("request_lifecycle_operations", "reopen_current"),
     ("run_controller", "run_session_start"), ("run_controller", "run_session_record"),
     ("run_controller", "run_session_transition"), ("run_controller", "run_session_finish"),
     ("run_controller", "run_telemetry_record"),

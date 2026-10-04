@@ -48,6 +48,24 @@ class QuestionsNamespace(Namespace):
         ConfigError: the workspace cannot be read, or the handle is closed.
     """
 
+    def block_current(self, request):
+        """Submit a frozen missing-evidence transition through native question custody."""
+        self._workspace._check_open()
+        from ..mutation_contracts import REQUEST, checked, refuse
+        request = checked(REQUEST, request)
+        if request["operation"] != "questions.block_current":
+            refuse("OPERATION_UNSUPPORTED", "/operation")
+        return self._workspace.mutations.submit(request)
+
+    def reopen_current(self, request):
+        """Reopen only after all current page and coverage blockers are checked."""
+        self._workspace._check_open()
+        from ..mutation_contracts import REQUEST, checked, refuse
+        request = checked(REQUEST, request)
+        if request["operation"] != "questions.reopen_current":
+            refuse("OPERATION_UNSUPPORTED", "/operation")
+        return self._workspace.mutations.submit(request)
+
     # -- claim lifecycle ------------------------------------------------
 
     def claim(

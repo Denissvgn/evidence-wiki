@@ -4,11 +4,38 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._base import Namespace
+from ._base import Namespace, call_seam
 
 
 class SourceRequestsNamespace(Namespace):
     """A request records an evidence gap; creating one acquires no source."""
+
+    def current(self, *, request_ids=(), question_slugs=(), max_records=200):
+        """Keep recorded fulfillment separate from current evidence readiness."""
+        self._workspace._check_open()
+        def load(_stem):
+            from .. import request_lifecycle_operations
+            return request_lifecycle_operations
+        return call_seam(load, "request_lifecycle_operations", "current", self._root,
+            request_ids=request_ids, question_slugs=question_slugs, max_records=max_records)
+
+    def link_current(self, request):
+        """Submit a frozen compatible-scope request link through its native owner."""
+        self._workspace._check_open()
+        from ..mutation_contracts import REQUEST, checked, refuse
+        request = checked(REQUEST, request)
+        if request["operation"] != "source_requests.link_current":
+            refuse("OPERATION_UNSUPPORTED", "/operation")
+        return self._workspace.mutations.submit(request)
+
+    def fulfill_current(self, request):
+        """Submit current source checks before native historical fulfillment."""
+        self._workspace._check_open()
+        from ..mutation_contracts import REQUEST, checked, refuse
+        request = checked(REQUEST, request)
+        if request["operation"] != "source_requests.fulfill_current":
+            refuse("OPERATION_UNSUPPORTED", "/operation")
+        return self._workspace.mutations.submit(request)
 
     def add(self, *, kind: str, query_or_identifier: str, rationale: str,
             priority: str = "medium", question_slugs: list[str] | None = None,

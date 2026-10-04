@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Expose current evidence-request readiness, compatible request links and checked
+  fulfillment/block/reopen operations over canonical native records and permissions.
+
 - Retain bounded text, structured and PDF host captures as immutable original
   revisions, with approved-path reads and explicit recovery of interrupted
   original/provenance publication.

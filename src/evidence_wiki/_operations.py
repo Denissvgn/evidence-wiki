@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "10"
+OPERATION_MATRIX_VERSION = "11"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -38,6 +38,11 @@ _ROWS = (
     ("source_requests.add", "scripts/source_requests.py add", "source request and activity log; log failure may follow durable mutation", "canonical request store lock and separate activity log lock", "none"),
     ("source_requests.list", "scripts/source_requests.py list", "none", "canonical request reader", "none"),
     ("source_requests.fulfill", "scripts/source_requests.py fulfill", "request state and activity log, or contingent delegated claim", "canonical request/claim locks and separate activity log lock", "none"),
+    ("source_requests.current", None, "none; recorded fulfillment and current source readiness remain separate", "bounded native request/question/source reads and current permission checks", "none"),
+    ("source_requests.link_current", None, "canonical request links and activity log; no scope expansion or evidence approval", "selected mutation workspace/request custody and native request lock", "none"),
+    ("source_requests.fulfill_current", None, "native request bookkeeping only after current evidence and scope checks", "selected mutation workspace/request custody, current source/usage revalidation and canonical request locks", "none"),
+    ("questions.block_current", None, "canonical question blocker references and activity log", "selected mutation workspace/request custody and native question/request locks", "none"),
+    ("questions.reopen_current", None, "canonical question reopening only after all current blockers are qualified", "selected mutation workspace/request custody and native question/request/source checks", "none"),
     ("strict.check", "evidence-wiki strict check", "none in live workspace", "current private host view and bounded private capture", "none"),
     ("strict.admit", None, "configured unaccepted claim inventory and private immutable plan/receipt; no approval or question status", "native mutation workspace/request gates followed by canonical claims gate and prior-byte checks", "none"),
     ("strict.prepare_review", "evidence-wiki strict prepare-review", "none in live workspace", "current private host view and exact review basis", "none"),

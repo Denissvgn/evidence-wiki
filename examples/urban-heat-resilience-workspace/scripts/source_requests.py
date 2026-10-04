@@ -144,7 +144,8 @@ from _delegation_gate import (
     live_pending_orders,
     require_sanctioned_mutation,
 )
-from _normalized_contract import STRUCTURED_VIEW_SUFFIX, safe_source_id
+from _evidence_usage import current_view
+from _normalized_contract import STRUCTURED_VIEW_SUFFIX, safe_source_id, split_record
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
 from _order_claims import (
     OrderClaimError,
@@ -165,7 +166,7 @@ from _request_scope import (
     scope_match,
 )
 from _script_errors import ScriptRefusal, emit_error, handle_system_exit, json_mode_requested, remediation_for
-from _usage_gate import require_host_intake
+from _usage_gate import normalized_relative, read_workspace_file, require_host_intake, source_decision
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import ATTEMPT_FAILURE_CODES, is_attempt_failure_code
 
@@ -2085,10 +2086,14 @@ def check_fulfill_scope(
             )
 
 
-def run_fulfill(args: argparse.Namespace, *, _config: dict[str, Any] | None = None) -> dict[str, Any]:
+def run_fulfill(args: argparse.Namespace, *, _config: dict[str, Any] | None = None,
+                _current_use=None) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
     config = load_config(project_root) if _config is None else _config
-    require_host_intake(config)
+    if _current_use is None:
+        require_host_intake(config)
+    else:
+        _current_use()
     path = requests_path(project_root, config)
 
     request_id = args.request_id.strip()
@@ -2166,6 +2171,11 @@ def run_fulfill(args: argparse.Namespace, *, _config: dict[str, Any] | None = No
             asserted_scope,
             require_scope=bool(getattr(args, "require_scope", False)),
         )
+
+        if getattr(args, "_before_write", None) is not None:
+            args._before_write()
+        if _current_use is not None:
+            _current_use()
 
         now = timestamp_utc()
         if contingent is not None:
@@ -2617,8 +2627,80 @@ def run_list_requests(project_root: str | Path, *, statuses: list[str] | None = 
 
 
 @_public_seam(write=True)
+def run_link_request(project_root: str | Path, *, request_id: str, question_slugs: list[str],
+                     scope: dict[str, str] | None = None, _before_write=None) -> dict[str, Any]:
+    """Link an existing open request with exactly unchanged declared scope."""
+    arguments = _public_arguments(project_root,
+        request_id=_argument_text(request_id, "request_id", 128),
+        question_slugs=_argument_list(question_slugs, "question_slugs", maximum=128),
+        scope=_argument_scope(scope, "scope"))
+    root, config = _checked_request_config(project_root, question_slugs=question_slugs)
+    path = requests_path(root, config)
+    slugs = validate_question_slugs(root, config, question_slugs)
+    if not slugs:
+        _argument_invalid("question_slugs")
+    declared = parse_scope_pairs(arguments.scope)
+    with workspace_lock(source_requests_lock_path(path), purpose="source request mutation"):
+        records = load_requests(path)
+        target = next((row for row in records if row.get("request_id") == request_id), None)
+        if target is None or target.get("status") != "open":
+            raise SystemExit("Request linking requires an existing open request.")
+        if normalize_scope(target.get("scope")) != declared:
+            raise SystemExit("Request link scope must equal the retained declared scope.")
+        require_in_order_request_mutation(root, config, request_id)
+        missing = [slug for slug in slugs if slug not in (target.get("question_slugs") or [])]
+        if missing and live_pending_orders(root):
+            raise SystemExit("Existing request links are frozen by an active managed session.")
+        if _before_write is not None:
+            _before_write()
+        if not missing:
+            return {"schema_version": SCHEMA_VERSION, "action": "link", "updated": False,
+                "request": target, "requests_path": relative_label(root, path)}
+        now = timestamp_utc()
+        target["question_slugs"] = list(dict.fromkeys([*(target.get("question_slugs") or []), *missing]))
+        target["updated_at"] = now
+        _write_requests_unlocked(path, records)
+    append_log_entry(root / "log.md", f"## [{now.split('T', 1)[0]}] source-request | Linked source request\n\n"
+        f"- Request: `{request_id}`\n- Questions: {', '.join(missing)}.\n")
+    return {"schema_version": SCHEMA_VERSION, "action": "link", "updated": True,
+        "request": target, "requests_path": relative_label(root, path)}
+
+
+@_public_seam(write=True)
+def run_fulfill_current_request(project_root: str | Path, *, request_id: str, source_id: str,
+                                match_scope: dict[str, str] | None = None, _before_write=None) -> dict[str, Any]:
+    """Own authenticated current-use bookkeeping through the complete native commit."""
+    arguments = _public_arguments(project_root,
+        request_id=_argument_text(request_id, "request_id", 128),
+        source_id=_argument_text(source_id, "source_id", 512),
+        match_scope=_argument_scope(match_scope, "match_scope"), require_scope=True)
+    root, config = _checked_request_config(project_root, source_ids=[source_id])
+    arguments.project_root, arguments._before_write = str(root), _before_write
+    normalized_path = normalized_relative(config, source_id)
+    original = read_workspace_file(root, normalized_path)
+    metadata, _body, error = split_record(original.decode("utf-8"))
+    if error or metadata is None:
+        raise SystemExit("Current fulfillment requires a valid normalized record.")
+    manifest = next((row for row in iter_manifest_records(root, config) if row.get("id") == source_id), None)
+    if manifest is None:
+        raise SystemExit("Current fulfillment requires a manifest source.")
+    with current_view(root, config) as view:
+        def require_current():
+            view.revalidate(root, config)
+            if read_workspace_file(root, normalized_path) != original:
+                raise SystemExit("Current fulfillment source changed before bookkeeping.")
+            decision = source_decision(root, config, source_id, [manifest, metadata], view=view,
+                normalized=original, uses=["retrieval"], purpose="research")
+            if decision.get("eligible") is not True or decision.get("complete") is not True:
+                raise SystemExit("Current fulfillment source permission is unavailable.")
+        require_current()
+        return run_fulfill(arguments, _config=config, _current_use=require_current)
+
+
+@_public_seam(write=True)
 def run_fulfill_request(project_root: str | Path, *, request_id: str, source_id: str,
-                        match_scope: dict[str, str] | None = None, require_scope: bool = False) -> dict[str, Any]:
+                        match_scope: dict[str, str] | None = None, require_scope: bool = False,
+                        _before_write=None) -> dict[str, Any]:
     """Preserve canonical scope checks, locking and delegated contingent claims."""
     if type(require_scope) is not bool:
         _argument_invalid("require_scope")
@@ -2627,6 +2709,7 @@ def run_fulfill_request(project_root: str | Path, *, request_id: str, source_id:
         match_scope=_argument_scope(match_scope, "match_scope"), require_scope=require_scope)
     root, config = _checked_request_config(project_root, source_ids=[arguments.source_id.strip()])
     arguments.project_root = str(root)
+    arguments._before_write = _before_write
     return run_fulfill(arguments, _config=config)
 
 

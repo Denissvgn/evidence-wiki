@@ -49,6 +49,10 @@ OWNER_OPERATIONS = {
     "questions.add_batch": ("intake_questions", "run_intake_document"),
     "source_requests.add": ("source_requests", "run_add_request"),
     "source_requests.fulfill": ("source_requests", "run_fulfill_request"),
+    "source_requests.link_current": ("request_lifecycle_operations", "link_current"),
+    "source_requests.fulfill_current": ("request_lifecycle_operations", "fulfill_current"),
+    "questions.block_current": ("request_lifecycle_operations", "block_current"),
+    "questions.reopen_current": ("request_lifecycle_operations", "reopen_current"),
     "sources.inventory": ("source_inventory", "run_inventory_report"),
     "sources.capture": ("source_delivery", "deliver"),
     "sources.capture_revision": ("source_capture_operations", "deliver"),
@@ -464,6 +468,11 @@ def _invoke(root: Path, intent: dict[str, Any], capture: dict[str, Any], *,
         finally:
             onboarding.close()
     stem, seam = OWNER_OPERATIONS[operation]
+    if stem == "request_lifecycle_operations":
+        def load(_stem):
+            from . import request_lifecycle_operations
+            return request_lifecycle_operations
+        return call_seam(load, stem, seam, root, **value)
     with Workspace.open(root) as workspace:
         if operation == "questions.add_batch":
             module = workspace._script(stem)
