@@ -382,7 +382,7 @@ def test_published_schema_discovery_and_closed_older_decisions(tmp_path, capsys)
     exported = json.loads(capsys.readouterr().out)
     assert exported == schema_document(REQUEST)
     discovered = contract()
-    assert discovered["library_api"]["version"] == discovered["onboarding_extensions"]["python_api_version"] == "25"
+    assert discovered["library_api"]["version"] == discovered["onboarding_extensions"]["python_api_version"] == "26"
     assert discovered["research_planning"]["orchestration_selection"]["schema"] == exported["properties"]["decisions"]["properties"]["orchestration"]
     previous = copy.deepcopy(exported)
     del previous["properties"]["decisions"]["properties"]["orchestration"]
@@ -413,7 +413,7 @@ def test_installed_example_cli_sdk_and_mcp_share_plan_apply_and_replay(tmp_path,
     assert cli.main(["agent", "plan-check", "--from-file", str(saved)]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "current"
     with Onboarding.open(allowed_roots=[tmp_path], allow=["apply"]) as host:
-        assert host.bootstrap()["payload"]["installation"]["library_api_version"] == "25"
+        assert host.bootstrap()["payload"]["installation"]["library_api_version"] == "26"
         plan = host.plan(value)
         assert plan == expected and host.check_plan(plan)["status"] == "current"
         server = OnboardingMcpServer(allowed_roots=[tmp_path], allow=["apply"])

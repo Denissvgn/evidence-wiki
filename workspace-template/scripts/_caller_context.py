@@ -12,7 +12,6 @@ from pathlib import Path
 
 import yaml
 from _evidence_revision import capture_workspace, content_id
-from _record_artifacts import json_document
 from _workspace_module_loader import load_workspace_module
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -53,7 +52,7 @@ def capture(root):
     if not isinstance(config, dict) or not builtin_integrations(config):
         raise ValueError("caller_provider_requires_explicit_qualification")
     if "docs/research-requirements.json" in revision.files:
-        document = json_document(revision.files["docs/research-requirements.json"])
+        document = sibling("_requirements_bridge").effective(root, revision.files["docs/research-requirements.json"])
         if (
             document.get("schema_version") != "evidence-research-requirements/v1"
             or document.get("request", {}).get("schema_version") not in {"1.0", "2.0"}
@@ -75,7 +74,7 @@ def capture(root):
     if policy:
         selected.update(policy["instructions"])
         for path, expected in policy["instructions"].items():
-            if path not in revision.files or "sha256:" + hashlib.sha256(revision.files[path]).hexdigest() != expected:
+            if path not in revision.files or not sibling("_requirements_bridge").instruction_matches(root, path, revision.files[path], expected):
                 raise ValueError("caller_instruction_changed")
     expected_scripts = {"scripts/" + path.name for path in SCRIPT_DIR.glob("*.py")}
     actual_scripts = {path for path in revision.files if path.startswith("scripts/")}
@@ -151,7 +150,7 @@ def original_questions(root, config):
     raw = path.read_bytes()
     if len(raw) > 1_048_576:
         raise ValueError("caller_requirements_bound")
-    requirements = json_document(raw)
+    requirements = sibling("_requirements_bridge").effective(root, raw)
     if (
         requirements.get("schema_version") != "evidence-research-requirements/v1"
         or requirements.get("request", {}).get("schema_version") not in {"1.0", "2.0"}

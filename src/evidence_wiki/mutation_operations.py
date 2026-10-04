@@ -55,15 +55,20 @@ OWNER_OPERATIONS = {
     "strict.admit": ("strict_evidence", "run_admit_document"),
     "telemetry.record": ("run_controller", "run_telemetry_record"),
     "normalize.sources": ("normalize_sources", "run_normalization_report"),
+    "requirements.revise": ("requirements_operations", "revise"),
 }
 CONTROL_EXCLUSIONS = (".locks", "raw/.locks")
 STAGED_SOURCES = frozenset({"sources.inventory", "normalize.sources"})
 STAGED_COVERAGE = frozenset({"coverage.revision", "coverage.evaluate"})
 STAGED_DRAFTS = frozenset({"strict.admit"})
-STAGED_OPERATIONS = STAGED_SOURCES | STAGED_COVERAGE | STAGED_DRAFTS
+STAGED_REQUIREMENTS = frozenset({"requirements.revise"})
+STAGED_OPERATIONS = STAGED_SOURCES | STAGED_COVERAGE | STAGED_DRAFTS | STAGED_REQUIREMENTS
 
 
 def _recovery_module(operation):
+    if operation in STAGED_REQUIREMENTS:
+        from . import mutation_requirements_recovery
+        return mutation_requirements_recovery
     if operation in STAGED_DRAFTS:
         from . import mutation_draft_recovery
         return mutation_draft_recovery
@@ -283,6 +288,8 @@ def _basis(root, intent, captured):
     from .workspace import Workspace
 
     operation, value = intent["operation"], intent["arguments"]
+    if operation == "requirements.revise":
+        current_context().require_grant("requirements.envelope." + digest(value["envelope"])[7:])
     config, revision_id = _configuration(root, revision_id=captured["revision_id"])
     basis = {"kind": operation, "configuration_sha256": digest(config)}
     with Workspace.open(root) as workspace:
@@ -922,7 +929,8 @@ def reconcile(project_root: str | Path, request_id: str, *,
                 try:
                     if operation in STAGED_OPERATIONS:
                         supported = True
-                        kind = ("draft_postconditions" if operation in STAGED_DRAFTS else
+                        kind = ("requirements_postconditions" if operation in STAGED_REQUIREMENTS else
+                                "draft_postconditions" if operation in STAGED_DRAFTS else
                                 "source_postconditions" if operation in STAGED_SOURCES else "coverage_postconditions")
                         options = {"operation_control": operation_control} if operation in STAGED_SOURCES and operation_control is not None else {}
                         result = _recovery_module(operation).prove(root, intent, basis, store, **options)

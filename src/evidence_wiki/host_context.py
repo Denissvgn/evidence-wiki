@@ -318,6 +318,15 @@ def _require_mutation_workspace_gate(root: Path) -> None:
         _refuse("host_mutation_workspace_gate_changed")
 
 
+def _require_borrowed_mutation_workspace_gate(root: Path, control: Path) -> None:
+    """Verify read-only custody borrowed from the exact current execution."""
+    context = current_context()
+    if (context is None or context.mutation_control_directory is None
+            or context.mutation_control_directory.resolve(strict=True) != control):
+        _refuse("host_mutation_workspace_gate_required")
+    _require_mutation_workspace_gate(root)
+
+
 def require_actor(value: Any) -> None:
     context = current_context()
     if context is not None and value is not None and value != context.actor_ref:
@@ -440,6 +449,7 @@ def call_binding() -> Iterator[None]:
 # Only known seam effects may run under an explicit context. The canonical
 # owners still validate their arguments and authenticate evidence independently.
 _READ_SEAMS = frozenset({
+    ("requirements_operations", "current"), ("requirements_operations", "prepare_revision"),
     ("run_controller", "run_telemetry_events"),
     ("export_answers", "run_export"),
     ("publication_readiness", "run_selected_publication"), ("workspace_status", "run_status_report"),
@@ -452,6 +462,7 @@ _READ_SEAMS = frozenset({
     ("source_requests", "run_list_requests"),
 })
 _WRITE_SEAMS = frozenset({
+    ("requirements_operations", "revise"),
     ("run_controller", "run_telemetry_record"),
     ("run_controller", "run_session_start"), ("run_controller", "run_session_record"),
     ("run_controller", "run_session_transition"), ("run_controller", "run_session_finish"),

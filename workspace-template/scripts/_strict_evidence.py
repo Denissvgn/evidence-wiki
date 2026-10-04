@@ -149,7 +149,7 @@ def selection_inputs(root, config, policy, *, view=None, computation=None):
     if config.get("computation") is not None and computation is None:
         computation = sibling("_computation_service").required(root, config, view=view)
     for relative, expected in policy["instructions"].items():
-        require(relative in capture.files and "sha256:" + hashlib.sha256(capture.files[relative]).hexdigest() == expected,
+        require(relative in capture.files and sibling("_requirements_bridge").instruction_matches(root, relative, capture.files[relative], expected),
                 "strict_instructions_changed")
     # Bind all retained bytes except lifecycle-only ledgers and question pages.
     # The renderer uses reviewed question text, not editable prose from those pages.

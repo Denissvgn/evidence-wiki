@@ -44,7 +44,11 @@ def setup_observation(root, files):
     if raw is None:
         return {"state": "not_recorded", "trust": "local_unauthenticated"}
     try:
-        target = json_document(raw)["request"]["payload"]["target"]
+        document = json_document(raw)
+        if document.get("schema_version") == "evidence-research-requirements/v2":
+            from .requirements_operations import read_effective
+            document = read_effective(root, raw=raw)
+        target = document["request"]["payload"]["target"]
         writable = Path(target["writable_root"]).resolve()
         if writable / target["relative_path"] != root:
             raise ValueError("setup_target_mismatch")
@@ -133,6 +137,9 @@ class ResearchObservation:
             if "docs/research-requirements.json" in self.capture.files
             else None
         )
+        if (self.requirements or {}).get("schema_version") == "evidence-research-requirements/v2":
+            from .requirements_operations import read_effective
+            self.requirements = read_effective(self.root, raw=self.capture.files["docs/research-requirements.json"])
         choice = (self.requirements or {}).get("decisions", {}).get("framework")
         self.framework = {"selection": choice, "runtime_access": "not_probed", "transport_success_is_acceptance": False}
         if choice:

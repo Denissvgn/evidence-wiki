@@ -24,6 +24,7 @@ from .normalize import NormalizeNamespace
 from .orchestrate import OrchestrateNamespace, OrchestrationSession
 from .questions import QuestionsNamespace
 from .research import ResearchNamespace
+from .requirements import RequirementsNamespace
 from .snapshots import SnapshotsNamespace
 from .source_requests import SourceRequestsNamespace
 from .sources import SourcesNamespace
@@ -44,6 +45,7 @@ __all__ = [
     "OrchestrationSession",
     "QuestionsNamespace",
     "ResearchNamespace",
+    "RequirementsNamespace",
     "TelemetryNamespace",
     "SnapshotsNamespace",
     "SourceRequestsNamespace",

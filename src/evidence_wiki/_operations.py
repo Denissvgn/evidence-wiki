@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "8"
+OPERATION_MATRIX_VERSION = "9"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -44,6 +44,9 @@ _ROWS = (
     ("mutations.inspect", None, "private control gates only; reads retained request metadata", "workspace gate then request gate", "none"),
     ("mutations.reconcile", None, "retained reconciliation metadata; canonical partial effects preserved", "workspace gate then request gate; no automatic effect replay", "none"),
     ("research.current", None, "none; current canonical accounting and qualification unknowns", "bounded canonical observations and closing revision checks", "none"),
+    ("research.requirements.current", None, "none; original obligations, constraints and current dispositions", "current native capture and protected owner receipt verification", "none"),
+    ("research.requirements.prepare_revision", None, "private mutation-control gates only; inert exact-scope revision request", "native workspace gate and frozen envelope grant", "none"),
+    ("research.requirements.revise", None, "owned append-only requirements, new question/coverage artifacts and historical mutation receipt; no acceptance", "existing native workspace/request gates, staged prior-byte checks and requirements published last", "none"),
     ("research.next", None, "none; inert typed next work", "bounded canonical observations", "none"),
     ("research.session", None, "none; binds immutable policy, scope and original accounting", "canonical run owner on later explicit steps", "none"),
     ("research.session.current", None, "none; verifies session binding and current accounting", "bounded canonical observations", "none"),

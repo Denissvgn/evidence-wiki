@@ -119,25 +119,32 @@ def status_plan(raw):
     try:
         target_basis(selected, owned_basis=binding)
         result["versions"] = workspace_versions(Path(result["target"]))
-        current = revalidate(plan, owned=True)
+        current = revalidate(plan, owned=True, read_only=True)
         result["research_compatibility"] = research_compatibility(current)
         store = SetupStore(plan)
         with store.inspected():
             if store.transaction is None:
                 if target_basis(selected)[1] != plan["bindings"]["target"]:
                     refuse("setup_target_unowned_or_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
-                revalidate(plan)
+                revalidate(plan, read_only=True)
                 result.update(ownership_valid=True, snapshot_matches=True, setup_ready=False)
             else:
                 checkpoint = store.read("checkpoint.json")
                 checkpoint_valid(checkpoint)
                 result.update(transaction_id=store.transaction_id, checkpoint_state=checkpoint["state"],
                               pending=checkpoint["pending"], completed=checkpoint["completed"])
-                revalidate(plan, owned=True)
+                revalidate(plan, owned=True, read_only=True)
                 captured = snapshot(store.target)
                 if captured != checkpoint["snapshot"]:
                     result["snapshot_matches"] = False
-                    refuse("setup_owned_files_changed_or_interrupted_write", "ONBOARDING_OWNERSHIP_CONFLICT")
+                    from .requirements_operations import setup_changes_owned
+                    try:
+                        revised = setup_changes_owned(store.target, checkpoint["snapshot"], captured)
+                    except (ValueError, EvidenceWikiError, TypeError, KeyError):
+                        revised = False
+                    if (checkpoint["state"] != "complete" or checkpoint["pending"] is not None
+                            or not revised):
+                        refuse("setup_owned_files_changed_or_interrupted_write", "ONBOARDING_OWNERSHIP_CONFLICT")
                 postconditions(store.target, plan, checkpoint["completed"])
                 try:
                     saved = store.read("receipt.json")
@@ -151,7 +158,7 @@ def status_plan(raw):
                 state = checkpoint["state"]
                 result.update(status="interrupted" if checkpoint["pending"] is not None or state == "running" else state,
                               recovery="recheck" if state == "complete" else "resume",
-                              ownership_valid=True, snapshot_matches=True)
+                              ownership_valid=True, snapshot_matches=captured == checkpoint["snapshot"])
                 result["guidance"] = ["recheck_owned_checks"] if state == "complete" else ["apply_same_plan"]
                 if snapshot(store.target) != captured or store.read("checkpoint.json") != checkpoint:
                     refuse("setup_status_changed_during_observation", "ONBOARDING_OWNERSHIP_CONFLICT")
@@ -181,7 +188,7 @@ def status_plan(raw):
     return checked(result, STATUS)
 
 
-def revalidate(plan, *, owned=False):
+def revalidate(plan, *, owned=False, read_only=False):
     if plan_identity(plan) != plan["plan_id"]:
         refuse("saved_plan_identity_changed", "ONBOARDING_PLAN_STALE")
     current = compile_plan(canonical(plan["request"]), _owned_target=plan["bindings"]["target"] if owned else None)
@@ -191,7 +198,8 @@ def revalidate(plan, *, owned=False):
         refuse("setup_decisions_unresolved", "ONBOARDING_CHECK_FAILED")
     if current["strict"]["requested_assurance"] == "host_enforced":
         refuse("protected_setup_provisioner_unavailable", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
-    worker_environment(current)
+    if not read_only:
+        worker_environment(current)
     target, _ = target_basis(current["bindings"]["target"]["target"], owned_basis=current["bindings"]["target"])
     if owner("_strict_evidence").resolve_policy(target, current["initialization"]["effective_config"]) != current["strict"].get("policy"):
         refuse("setup_external_policy_conflict", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
@@ -239,8 +247,17 @@ def postconditions(root, plan, completed):
     if digest(config) != plan["initialization"]["config_sha256"]:
         refuse("setup_configuration_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
     frozen = owner("init_research_workspace").frozen_requirements_bytes(plan["profile"]["workspace_init"])
-    if read_file(root, "docs/research-requirements.json") != frozen:
-        refuse("setup_requirements_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
+    actual = read_file(root, "docs/research-requirements.json")
+    if actual != frozen:
+        from .requirements_operations import verifylineage
+        try:
+            lineage = verifylineage(root, json_document(actual))
+            expected = owner("_evidence_revision").canonical_bytes(lineage["base"])
+            valid = lineage["owner_authentication"] == "protected_mutation_receipts" and expected == frozen
+        except (Exception, SystemExit):
+            valid = False
+        if not valid:
+            refuse("setup_requirements_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
     if "intake" in completed:
         status = owner("question_status")
         directory = status.questions_directory(root, config)

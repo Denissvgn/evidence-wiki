@@ -9,6 +9,12 @@ class ResearchNamespace(Namespace):
     """Canonical lifecycle composition; current advice never grants authority."""
 
     @property
+    def requirements(self):
+        self._workspace._check_open()
+        from .requirements import RequirementsNamespace
+        return RequirementsNamespace(self._workspace)
+
+    @property
     def telemetry(self):
         self._workspace._check_open()
         from .telemetry import TelemetryNamespace

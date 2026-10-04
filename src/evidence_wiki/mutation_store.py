@@ -208,6 +208,7 @@ class MutationStore:
         self._workspace = None
         self._request_id = None
         self._active = False
+        self._historical_readonly = False
         self._stage_sizes = {}
         self._stage_slots = set()
         self._stage_temporary_bytes = 0
@@ -267,10 +268,17 @@ class MutationStore:
         return descriptor
 
     @contextlib.contextmanager
-    def workspace_locked(self) -> Iterator[MutationStore]:
+    def workspace_locked(self, *, borrow: bool = False) -> Iterator[MutationStore]:
         """Hold the workspace gate without creating a fake request identity."""
         if self._workspace is not None:
             _refuse("store_lock_nested")
+        if type(borrow) is not bool:
+            _refuse("historical_read_scope_required")
+        if borrow:
+            from .host_context import _require_borrowed_mutation_workspace_gate
+            if not self._historical_readonly:
+                _refuse("historical_read_scope_required")
+            _require_borrowed_mutation_workspace_gate(self.workspace_root, self.control_root)
         if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or os.link not in os.supports_dir_fd:
             _refuse("native_storage_unavailable", "MUTATION_PLATFORM_UNAVAILABLE")
         locks = owner("_workspace_locks")
@@ -281,20 +289,28 @@ class MutationStore:
             workspaces = self._directory(namespace, "workspaces")
             workspace = self._directory(workspaces, hashlib.sha256(str(self.workspace_root).encode()).hexdigest())
             gate = self._lock_file(workspace, "workspace.lock")
-            with locks.descriptor_lock(gate, timeout_seconds=0):
+            with contextlib.ExitStack() as custody:
+                from .host_context import _mutation_workspace_gate, _require_borrowed_mutation_workspace_gate
+                if borrow:
+                    if not self._historical_readonly:
+                        _refuse("historical_read_scope_required")
+                    _require_borrowed_mutation_workspace_gate(self.workspace_root, self.control_root)
+                else:
+                    custody.enter_context(locks.descriptor_lock(gate, timeout_seconds=0))
                 self._workspace = workspace
                 self._verify()
-                from .host_context import _mutation_workspace_gate
-
-                with _mutation_workspace_gate(self.workspace_root, self.control_root,
+                if not borrow:
+                    custody.enter_context(_mutation_workspace_gate(self.workspace_root, self.control_root,
                         workspace_binding=self.workspace_binding, control_identity=self.control_identity,
-                        gate_descriptor=gate):
-                    try:
-                        yield self
-                    except BaseException:
-                        yielded_error = True
-                        raise
-                    self._verify()
+                        gate_descriptor=gate))
+                try:
+                    yield self
+                except BaseException:
+                    yielded_error = True
+                    raise
+                self._verify()
+                if borrow:
+                    _require_borrowed_mutation_workspace_gate(self.workspace_root, self.control_root)
         except locks.LockUnavailableError as exc:
             if yielded_error:
                 raise
@@ -314,11 +330,11 @@ class MutationStore:
             self._stage_temporary_bytes = 0
 
     @contextlib.contextmanager
-    def locked(self, request_id: str | None = None) -> Iterator[MutationStore]:
+    def locked(self, request_id: str | None = None, *, borrow_workspace: bool = False) -> Iterator[MutationStore]:
         identifier = request_id if request_id is not None else self.intent.get("request_id") if self.intent else None
         identifier = _identifier(identifier)
         locks = owner("_workspace_locks")
-        with self.workspace_locked():
+        with self.workspace_locked(borrow=borrow_workspace):
             yielded_error = False
             try:
                 requests = self._directory(self._workspace, "requests")
@@ -364,6 +380,18 @@ class MutationStore:
                     raise
                 _refuse("control_io_unavailable")
 
+    @contextlib.contextmanager
+    def historical_locked(self, request_id: str, *, borrow_workspace: bool = False) -> Iterator[MutationStore]:
+        """Read protected history without nesting or enlarging the held workspace gate."""
+        if self._active or self._workspace is not None:
+            _refuse("store_lock_nested")
+        self._historical_readonly = True
+        try:
+            with self.locked(request_id, borrow_workspace=borrow_workspace):
+                yield self
+        finally:
+            self._historical_readonly = False
+
     def _require_locked(self) -> None:
         if not self._active or self._request is None:
             _refuse("store_gate_required")
@@ -397,6 +425,8 @@ class MutationStore:
     def _publish(self, name: str, raw: bytes, *, expected: str | None = None, immutable: bool = False,
                  maximum: int = MAX_RECORD_BYTES) -> str:
         self._require_locked()
+        if self._historical_readonly:
+            _refuse("historical_read_only")
         if len(raw) > maximum:
             _refuse("record_bound")
         previous = self._read_raw(name, maximum)
@@ -520,6 +550,8 @@ class MutationStore:
     def stage_blob(self, name: str, raw: bytes) -> dict[str, Any]:
         """Durably retain immutable execution bytes, never authority or evidence state."""
         self._require_locked()
+        if self._historical_readonly:
+            _refuse("historical_read_only")
         if (type(raw) is not bytes or len(raw) > MAX_STAGE_BLOB_BYTES
                 or type(name) is not str or _STAGE_NAME.fullmatch(name) is None):
             _refuse("stage_blob_bound_or_invalid")

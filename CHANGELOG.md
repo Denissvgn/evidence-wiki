@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Expose original research obligations and bounded append-only requirement
+  revisions through native staged transactions and protected historical proof.
+
 - Add bounded per-claim disagreement repair and separately qualified optional
   investigation, preserving retry spend, claim identity and fresh review gates.
 

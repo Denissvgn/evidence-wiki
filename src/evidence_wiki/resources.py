@@ -85,6 +85,7 @@ REQUIRED_STARTER_ASSETS = (
     "docs/workspace-application.md",
     "docs/caller-research.md",
     "scripts/_caller_context.py",
+    "scripts/_requirements_bridge.py",
     "docs/pack-authoring.md",
     "docs/pack-revisions.md",
     "docs/upgrade-adoption.md",

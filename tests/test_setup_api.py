@@ -128,7 +128,9 @@ def test_protected_selection_refuses_before_journal_and_workspace_effect(tmp_pat
         assert error.value.error_code == "ONBOARDING_ENVIRONMENT_INCOMPATIBLE"
         assert error.value.details["field"] == "setup_explicit_protected_worker_bridge_unavailable"
         assert files(tmp_path) == before and not (selected / ".evidence-wiki").exists()
-        assert handle.setup_status(plan)["status"] == "unsupported" and files(tmp_path) == before
+        inspection = handle.setup_status(plan)
+        assert inspection["status"] == "not_applied" and not inspection["actions_executed"]
+        assert files(tmp_path) == before
 
 
 def test_status_preserves_edits_and_recomputed_foreign_binding_refuses(tmp_path, in_process):

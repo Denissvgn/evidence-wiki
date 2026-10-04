@@ -13,6 +13,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
+from types import MappingProxyType
 
 import yaml
 from _draft_admission_contract import MAX_BYTES, RESULT, proposal_document, validate_document
@@ -116,7 +117,7 @@ def target(root, config, policy):
 
 def originals(capture, root, config, policy, proposal):
     require(REQUIREMENTS in capture.files and REQUIREMENTS in policy["instructions"], "original_context_missing")
-    frozen = json_document(capture.files[REQUIREMENTS])
+    frozen = sibling("_requirements_bridge").effective(root, capture.files[REQUIREMENTS])
     require(frozen.get("schema_version") == "evidence-research-requirements/v1", "original_context_invalid")
     request = frozen.get("request")
     require(type(request) is dict and request.get("schema_version") in {"1.0", "2.0"}
@@ -206,6 +207,10 @@ def originals(capture, root, config, policy, proposal):
     actual = {item["original_id"]: {**item, "question_slugs": sorted(item["question_slugs"])} for item in proposal["originals"]}
     require(actual == expected and all(mapping.values()), "original_accounting_changed")
     mapped, captured_inputs = sibling("coverage_manifest").recovery_materialized_inputs(root, config, capture)
+    # The live owner authenticated the revision; the disposable mapping view
+    # carries that effective projection without acquiring clone-local custody.
+    captured_inputs = type(captured_inputs)(MappingProxyType({**captured_inputs.files,
+        REQUIREMENTS: canonical_bytes(frozen)}), captured_inputs.directories)
     with captured_inputs.materialize() as captured:
         accounting = sibling("_caller_context").original_questions(captured, mapped)
         require(accounting["basis"] == "frozen_research_request" and not accounting["gaps"], "original_lineage_changed")
@@ -332,7 +337,7 @@ def prepare_admission(root, proposal, *, observed_at):
             "computation_admission_unsupported", unsupported=True)
     relative = target(root, config, policy)
     for path, expected in policy["instructions"].items():
-        require(path in capture.files and file_hash(capture.files[path]) == expected, "instructions_changed")
+        require(path in capture.files and sibling("_requirements_bridge").instruction_matches(root, path, capture.files[path], expected), "instructions_changed")
     scopes = originals(capture, root, config, policy, proposal)
     count, authority = source_checks(root, config, policy, capture, proposal, observed_at, scopes)
     raw = canonical_bytes(proposal["inventory"])

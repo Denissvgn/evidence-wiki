@@ -26,6 +26,7 @@ OPERATIONS = (
     "strict.register_review",
     "strict.admit",
     "telemetry.record",
+    "requirements.revise",
 )
 
 
@@ -81,6 +82,7 @@ def argument_schemas() -> dict[str, dict[str, Any]]:
         "strict.register_review": _obj(envelope=opaque),
         "strict.admit": _obj(proposal=opaque),
         "telemetry.record": _obj(run_id=_text(96), agent_id=_text(128), event=opaque),
+        "requirements.revise": _obj(proposal=opaque, envelope=opaque),
         "normalize.sources": _obj(source_ids=_null(_array(_text(), 1000)), all_sources=boolean, dry_run=boolean,
             force=boolean, append_log=boolean, pdf_extractor=_null({"enum": ["pypdf", "poppler"]}),
             max_sources=integer(1000), allow_external={"const": False}, max_manifest_bytes=integer(16_777_216),
@@ -104,6 +106,7 @@ def arguments(operation: str, value: Any) -> dict[str, Any]:
         "strict.register_review": {},
         "strict.admit": {},
         "telemetry.record": {},
+        "requirements.revise": {},
         "normalize.sources": {"source_ids": None, "all_sources": False, "dry_run": False, "force": False,
             "append_log": False, "pdf_extractor": None, "max_sources": 128, "allow_external": False,
             "max_manifest_bytes": 1_048_576, "max_manifest_records": 1000,
@@ -151,7 +154,7 @@ def schemas() -> dict[str, dict[str, Any]]:
         operation_outcome={"enum": ["original_unknown", "desired_state_only", "owner_return_success",
             "owner_return_partial", "owner_return_with_inputs_changed", "owner_return_with_transport_uncertainty",
             "authenticated_event"]},
-        proof_kind={"enum": ["none", "owner_return", "capture_pair", "coverage_postconditions", "request_postconditions", "strict_checkpoint", "source_postconditions", "draft_postconditions"]})
+        proof_kind={"enum": ["none", "owner_return", "capture_pair", "coverage_postconditions", "request_postconditions", "strict_checkpoint", "source_postconditions", "draft_postconditions", "requirements_postconditions"]})
     common = dict(request_id=identifier, operation={"enum": list(OPERATIONS)}, arguments=opaque,
                   expected_revision=hashed, input_files=_array(file, 64), owner_generation=generation,
                   host_context_sha256=hashed)

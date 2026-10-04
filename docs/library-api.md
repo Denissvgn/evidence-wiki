@@ -82,6 +82,25 @@ findings and cannot register a review, approve a claim, or override native gates
 Unsupported source acquisition remains an explicit finite abstention until an
 authorized acquisition route is available.
 
+Version `26` adds `ws.research.requirements.current`, `prepare_revision` and
+`revise`. Views retain every original and derived obligation, current native
+dispositions, declared criteria and explicit unknown constraints. Open work is
+reported as blocked/pending, rather than inferred to have abstained.
+Revisions append exact preauthorized question/facet combinations and inherit
+their existing inline criteria. They cannot delete originals or edit success
+criteria, exclusions, dates, stopping rules or source authority.
+The host grants `requirements_operations.revise` and
+`requirements.envelope.<SHA256>` for the immutable envelope selected at startup.
+Preparation returns an existing mutation request; submission retains the
+private staged plan, historical receipt and versioned requirements lineage.
+Interrupted prefixes remain ineligible until exact owned reconciliation.
+Protected instruction hashes continue to bind the original bytes while the
+full revised document changes the current basis and invalidates older sessions.
+Template-only inheritance and runs with unverifiable outstanding execution
+reservations are refused explicitly. Legacy unprotected base documents are
+identified as host declarations. Neither a revision receipt nor its transport
+status approves research evidence.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
