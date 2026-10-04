@@ -305,6 +305,19 @@ def schema_documents():
     publication_v2["properties"]["questions"]["items"]["properties"]["claims"]["items"] = obj(**claim_v2["properties"], verification=obj(observation=observation, review=review))
     documents.update({CLAIMS_SCHEMA_V2: claims_v2, REVIEW_SCHEMA_V2: review_v2, RESULT_SCHEMA_V2: result_v2,
                       "evidence-strict-publication/v2": publication_v2})
+    documents["evidence-machine-review-policy/v1"] = obj(
+        schema_version={"const": "evidence-machine-review-policy/v1"}, compatible=boolean,
+        outcome={"enum": ["policy_incompatible", "machine_compatible"]},
+        reason={"enum": ["human_review_required", "ordinary_evaluator_route", "coverage_contract_unknown"]}, human_review=boolean,
+        questions=array(obj(question_slug=ident, required_review_role={"enum": ["evaluator", "human-review"]},
+                            contract_known=boolean, policy_reasons=array(string(512), 32))), policy_sha256=hashed,
+        authorized={"const": False}, evidence_accepted={"const": False})
+    documents["evidence-strict-review-status/v1"] = obj(
+        schema_version={"const": "evidence-strict-review-status/v1"}, basis_id=hashed,
+        claims=array(obj(claim_id=ident, accepted=boolean, required_review_role={"enum": ["evaluator", "human-review"]},
+                         reasons=reasons, review=review)), selection={"const": "latest_matching_current_basis"},
+        revocation_owner={"const": "current_host_authority_and_source_usage"},
+        authorized={"const": False}, evidence_accepted={"const": False})
     return {key: {"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "urn:" + key.replace("/", ":"),
                   "x-evidence-wiki-limits": {"bytes": MAX_BYTES, "claims": MAX_CLAIMS, "depth": 16, "nodes": 65536},
                   **value} for key, value in documents.items()}

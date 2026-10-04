@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Expose current strict review status, signed supersession and source revocation,
+  with current strict/coverage compatibility checks before new machine work.
+  Human-only or unknown contracts stop without changing policy or evidence.
+
 - Add protected blinded review pages and opt-in complete host delivery with frozen
   packet/input bounds, current source rights, shared context identities and native
   computation, mechanical and counter context. Missing decisive pages block review;

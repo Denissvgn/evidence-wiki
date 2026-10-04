@@ -7,6 +7,7 @@ STRICT_SCHEMAS = tuple(f"evidence-strict-{name}/v{version}" for name, version in
     ("policy", 1), ("claims", 1), ("review", 1), ("result", 1), ("publication", 1), ("action", 1),
     ("claims", 2), ("review", 2), ("result", 2), ("publication", 2),
 ))
+STRICT_SCHEMAS += ("evidence-machine-review-policy/v1", "evidence-strict-review-status/v1")
 COMPUTATION_SCHEMAS = ("evidence-computation-definition/v1", "evidence-computation-result/v1")
 RECOVERY_SCHEMAS = ("research-recovery-status/v1",)
 CALCULATION_SCHEMAS = ("evidence-calculation-proposal/v1", "evidence-calculation-selection/v1", "research-calculation-context/v1")

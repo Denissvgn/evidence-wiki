@@ -86,6 +86,30 @@ class StrictNamespace(Namespace):
         return self._call("strict_evidence", "run_operation", self._root,
                           operation="review", envelope=envelope)
 
+    def review_status(self, claim_id: str | None = None) -> dict[str, Any]:
+        """Return current authenticated selection, including failed or stale reviews."""
+        return self._call("strict_evidence", "run_operation", self._root,
+                          operation="review-status", claim_id=claim_id)
+
+    def machine_compatibility(self) -> dict[str, Any]:
+        """Read current strict and coverage requirements without changing policy."""
+        return self._call("strict_evidence", "run_operation", self._root,
+                          operation="machine-compatibility")
+
+    def supersede_review(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """Register a new signed review; native latest matching selection supersedes prior votes."""
+        return self.register_review(envelope)
+
+    def revoke_source(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """Submit an existing signed source revocation to its canonical usage owner."""
+        self._workspace._check_open()
+        from ..errors import UsageError
+        if (type(envelope) is not dict or type(envelope.get("payload")) is not dict
+                or envelope["payload"].get("action") != "revoke"):
+            raise UsageError("STRICT_EVIDENCE_REFUSED", "Signed source revocation required.",
+                             details={"reason": "strict_source_revocation_command_invalid"})
+        return self._workspace.usage.transact(envelope)
+
     def export(self) -> dict[str, Any]:
         """Return the owner's checked claim release and its unresolved limitations."""
         return self._call("strict_evidence", "run_operation", self._root, operation="export")

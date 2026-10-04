@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "20"
+OPERATION_MATRIX_VERSION = "21"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -56,6 +56,10 @@ _ROWS = (
     ("strict.prepare_packet", None, "none; protected complete blinded page handle", "current native source/diagnostic/rights and closing material checks on every access", "none"),
     ("strict.packet_schemas", None, "none; closed inert packet and delivery contracts", "none", "none"),
     ("strict.register_review", "evidence-wiki strict review", "authenticated review events in private host state", "canonical exclusive host state lock, checkpoint and request identity", "none"),
+    ("strict.review_status", None, "none; current native review selection", "held current authority and bounded closing capture", "none"),
+    ("strict.machine_compatibility", None, "none; current strict and coverage requirements", "bounded immutable capture and closing identity", "none"),
+    ("strict.supersede_review", None, "signed native strict review event; newer matching review selected", "canonical usage transaction and current trust/checkpoint CAS", "none"),
+    ("strict.revoke_source", None, "signed native source/revision revocation", "canonical usage transaction; required revocation role", "none"),
     ("strict.export", "evidence-wiki strict export", "none in live workspace; returns checked release", "current private host view and bounded private capture", "none"),
     ("mutations.revision", None, "private control gates only; observes workspace bytes", "native workspace gate in host-selected private control directory", "none"),
     ("mutations.prepare", None, "private control gates only; freezes request and input identities", "native workspace gate in host-selected private control directory", "none"),

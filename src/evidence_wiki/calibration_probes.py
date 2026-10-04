@@ -62,6 +62,7 @@ def refresh(session, request_id):
     if plan is None:
         return
     with driver.gate(session):
+        driver.require_machine_compatible(session)
         driver._begin(session)
     domain = domain_observation(session)
     now = datetime.now(timezone.utc)

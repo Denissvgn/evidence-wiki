@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "37"
+LIBRARY_API_VERSION = "38"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -102,6 +102,10 @@ LIBRARY_API_SURFACE = (
     "strict.prepare_review",
     "strict.register_review",
     "strict.export",
+    "strict.review_status",
+    "strict.machine_compatibility",
+    "strict.supersede_review",
+    "strict.revoke_source",
     "mutations.revision",
     "mutations.prepare",
     "mutations.submit",
@@ -475,6 +479,11 @@ def contract() -> dict:
             "worker_processes": "single process; spawning and detached children denied",
             "host_backend": {"id": "darwin-sbpl", "availability": "requires successful live probe"},
             "review_authority": "existing external host trust policy and evidence event store; POSIX storage",
+            "review_status": "latest matching current basis; later fail supersedes prior pass",
+            "machine_preflight": "current strict and coverage owner before new machine work; incompatible finite stop",
+            "revocation_routes": {"source_revision": "strict.revoke_source via signed usage transaction",
+                "keys_envelopes": "external host authority policy owner; no SDK policy writer",
+                "supersession": "strict.supersede_review via newer signed current-basis registration"},
             "review_actions": ["register-strict-review", "register-strict-human-review"],
             "unsupported_checks": ["automatic_semantic_truth_verification"],
             "limits": {"artifact_bytes": strict_contract.MAX_BYTES, "claims": strict_contract.MAX_CLAIMS,

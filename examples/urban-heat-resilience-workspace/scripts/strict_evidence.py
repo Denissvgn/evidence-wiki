@@ -14,12 +14,14 @@ from _strict_contract import MAX_BYTES, schema_documents
 from _strict_evidence import (
     configuration,
     evaluate,
+    machine_compatibility,
     prepare_review,
     publication,
     read_json,
     refusal,
     render_markdown,
     resolve_policy,
+    review_status,
     sibling,
 )
 
@@ -31,6 +33,10 @@ def run_operation(root, operation, *, claim_id=None, envelope=None):
         policy = resolve_policy(root, config)
         if policy is None:
             raise refusal("strict_policy_missing")
+        if operation == "machine-compatibility":
+            return machine_compatibility(root)
+        if operation == "review-status":
+            return review_status(root, claim_id=claim_id)
         if operation == "prepare-review":
             return prepare_review(root, claim_id)
         if operation == "review":

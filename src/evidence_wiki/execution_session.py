@@ -149,6 +149,26 @@ def input_basis(observed):
     return owner("_evidence_revision").content_id("research-session-input-basis/v1", files)
 
 
+def machine_compatible(session):
+    """Consult current native policy before new machine work, never rewrite it."""
+    frozen = session.policy.to_dict()
+    if frozen["human_review"] or any(row["human_required"] for row in frozen["required_evaluators"]):
+        return False
+    config = owner("_strict_evidence").configuration(session.root)
+    mapping = owner("_caller_context").original_questions(session.root, config)
+    selected = sorted({mapping["expected"][qid] for row in mapping["originals"]
+        if row["id"] in session.binding["original_ids"] for qid in row["question_ids"]
+        if qid in mapping["expected"]})
+    status = owner("_strict_evidence").machine_compatibility(session.root,
+        question_slugs=selected or None)
+    return status["compatible"] is True
+
+
+def require_machine_compatible(session):
+    if not machine_compatible(session):
+        refuse("POLICY_INCOMPATIBLE", "/policy")
+
+
 def current(session):
     from .research_session import _current_observation
 
@@ -164,6 +184,7 @@ def current(session):
     if observed.config.get("computation") is not None:
         from .calculation_session import project_intent
         project_intent(session, view, observed, records)
+    view["policy_compatible"] = view["policy_compatible"] and machine_compatible(session)
     observed.finish()
     plan = session.execution.ledger(session, records)
     projection = None if plan is None else accounting.projection(plan, limits=_limits(session))
@@ -617,6 +638,7 @@ def _worker_config(session, purpose="generate"):
 
 
 def reserve(session, request_id, action, view):
+    require_machine_compatible(session)
     frozen = session.policy.to_dict()
     if "model" not in frozen["allowed_effects"] or frozen["host_capability_refs"]["model"] is None:
         refuse("HOST_CAPABILITY_UNAVAILABLE")
@@ -1542,6 +1564,9 @@ def advance(session, *, request_id, expected_basis_id):
                 if existing and _document(session)["state"]["current"] in owner("run_controller").TERMINAL_STATES:
                     refuse("RUN_TERMINAL")
         if needs_probe:
+            with gate(session):
+                needs_probe = machine_compatible(session)
+        if needs_probe:
             from .calibration_probes import refresh
             refresh(session, request_id)
     from .review_packet_execution import automatic
@@ -1875,6 +1900,8 @@ def host_job(session, *, request_id, operation, payload, original_text=None):
                 refuse("RUN_TERMINAL")
             if (pending_work := pending(session, existing)) is not None and not pending_work["applied"]:
                 refuse("JOB_RESERVATION_PENDING")
+        with gate(session):
+            require_machine_compatible(session)
         from .calibration_probes import refresh
         refresh(session, request_id)
     with gate(session):
@@ -1892,6 +1919,7 @@ def host_job(session, *, request_id, operation, payload, original_text=None):
             refuse("RUN_TERMINAL")
         if (pending_work := pending(session, records)) is not None and not pending_work["applied"]:
             refuse("JOB_RESERVATION_PENDING")
+        require_machine_compatible(session)
         view = current(session)
         intent = next((row["data"] for row in records if row["kind"] == "execution_advance"
             and row["data"]["advance_id"] == request_id), None)

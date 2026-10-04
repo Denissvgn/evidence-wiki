@@ -754,6 +754,10 @@ commit outcome instead of implying rollback.
 | `strict.prepare_packet` | `ws.strict.prepare_packet(claim_id, *, context_id, task_role="evaluator", source_ids=(), page_chars=4096)` |
 | `strict.packet_schemas` | `ws.strict.packet_schemas()` |
 | `strict.register_review` | `ws.strict.register_review(envelope)` |
+| `strict.review_status` | `ws.strict.review_status(claim_id=None)` |
+| `strict.machine_compatibility` | `ws.strict.machine_compatibility()` |
+| `strict.supersede_review` | `ws.strict.supersede_review(envelope)` |
+| `strict.revoke_source` | `ws.strict.revoke_source(envelope)` |
 | `strict.export` | `ws.strict.export()` |
 
 Preparation supplies the bound review inputs; the external host signs the
@@ -763,6 +767,30 @@ acceptance. These methods consume existing canonical claim inventories; a new
 claim proposal is not admitted by registering its review. An explicit context
 uses separate `strict_evidence.run_operation.check`, `.prepare-review`, `.review`
 and `.export` grants; registration additionally requires writable scope.
+
+`review_status` recomputes current native approval with a held authority view.
+It selects the latest signed review matching the current claim basis; a later
+failed or unknown review supersedes an earlier pass. Changed material, expired
+attestations or current key/envelope revocation invalidate retained approval.
+`supersede_review` registers another complete signed envelope through the same
+owner, rather than deleting or editing history. `revoke_source` accepts only an
+existing signed `revoke` command and delegates to `usage.transact`. Host key and
+envelope revocation remain changes owned by the external authority service;
+these methods do not write its policy. Legacy assessments confer no strict review.
+
+`machine_compatibility` checks the current strict policy and actual coverage
+contracts, including conditional manual outcomes and unlinked human-only rules.
+Known machine rules may permit unfinished evidence; missing or invalid contracts
+remain unknown and stop new machine work. Execution checks compatibility before
+new model reservations, qualification probes and complete packet assembly.
+An incompatible contract produces `policy_incompatible` with retained evidence.
+The host signer never constructs `register-strict-human-review` from model output,
+and the library never rewrites policy to remove a human requirement.
+Use explicit `.review-status` and `.machine-compatibility` read grants under
+`strict_evidence.run_operation`; source revocation requires
+`evidence_usage.run_transact`, writable scope and a currently authorized signed
+revocation principal. Six rubric criteria, exact claim/basis and independently
+controlled current generator/evaluator attestations still decide approval.
 
 Draft admission requires an explicit selected mutation control directory,
 `strict_evidence.run_admit_document` and coordinator grants. Supply the revision

@@ -32,6 +32,8 @@ def assembled(session, *, request_id, claim_id, task_role="evaluator", page_char
                 and row["data"]["error_code"] is None for row in native.retained(session))
             if not completed:
                 refuse("packet_run_terminal")
+        if document["state"]["current"] not in native.owner("run_controller").TERMINAL_STATES:
+            native.require_machine_compatible(session)
         source_ids = [row["source_id"] for row in native.current(session)["execution"]["source_bindings"]]
     seed = hmac.new(session.execution._observer_key, b"review-page-order/v1\0" +
         canonical({"binding": digest(session.binding), "request_id": request_id}), hashlib.sha256).digest()

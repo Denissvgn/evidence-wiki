@@ -424,6 +424,101 @@ def review_snapshot(root, config, policy, view, claim_id, expected_basis):
 
 
 @typed
+def machine_compatibility(root, *, question_slugs=None):
+    """Read current policy and coverage requirements without granting a review."""
+    root = Path(root).resolve()
+    capture = capture_workspace(root)
+    config = yaml.safe_load(capture.files.get("research.yml", b""))
+    require(isinstance(config, dict), "strict_configuration_invalid")
+    sibling("_selected_publication").validate_config_paths(config)
+    policy = resolve_policy(root, config)
+    require(policy is not None, "strict_policy_missing")
+    usage = sibling("_evidence_usage")
+    rows = []
+    with usage.current_view(root, config) if usage.configured(config) else nullcontext(None) as view:
+        with capture.materialize() as captured, (
+            authorized_capture(captured, config, view) if view is not None else nullcontext()
+        ):
+            qstatus = sibling("question_status")
+            coverage = sibling("coverage_manifest")
+            policies = sibling("_evidence_policies")
+            questions = qstatus.collect_questions(qstatus.questions_directory(captured, config))
+            require(len(questions) <= 100, "strict_question_bound")
+            known = {item["slug"] for item in questions}
+            require(question_slugs is None or type(question_slugs) in {list, tuple} and len(question_slugs) <= 100
+                    and all(type(slug) is str for slug in question_slugs)
+                    and len(question_slugs) == len(set(question_slugs)), "strict_question_unknown")
+            selected = known if question_slugs is None else set(question_slugs)
+            require(bool(selected) and selected <= known, "strict_question_unknown")
+            primitives = sibling("_policy_primitives")
+            try:
+                rules = primitives.pack_policy_rules(config)
+                vocabularies = coverage.merged_policy_vocabularies(config)
+                declarations_known = True
+            except (primitives.PolicyRuleError, coverage.CoverageManifestError):
+                rules, vocabularies, declarations_known = {}, {}, False
+            manual = {"source_policy": policies.MANUAL_ONLY_SOURCE_POLICIES,
+                      "freshness_policy": policies.MANUAL_ONLY_FRESHNESS_POLICIES,
+                      "identity_policy": policies.MANUAL_ONLY_IDENTITY_POLICIES}
+            for slug in sorted(selected):
+                summary = coverage.coverage_summary_for_question(captured, config, slug, {"coverage_required": True})
+                human, reasons = sibling("question_resolve").requires_human_review(summary)
+                contract_known = declarations_known and summary.get("coverage_status") not in {"missing", "invalid", "not_required"}
+                for facet in summary.get("coverage_facets", []):
+                    for field, unconditional in manual.items():
+                        name = facet[field]
+                        if name in unconditional or (name in rules and rules[name].manual_review_required) or (name not in coverage.BASE_POLICY_DEFINITIONS[field]
+                                and (name not in rules or rules[name].section != field)):
+                            human = True
+                            reasons.append(name)
+                        contract_known = contract_known and name in vocabularies.get(field, {})
+                rows.append({"question_slug": slug, "required_review_role":
+                    "human-review" if policy["human_review"] or human else "evaluator",
+                    "contract_known": contract_known, "policy_reasons": sorted(set(reasons))})
+        require(configuration(root) == config and resolve_policy(root, config) == policy, "strict_policy_changed")
+        require(capture_workspace(root).revision_id == capture.revision_id, "strict_basis_changed")
+        if view is not None:
+            view.revalidate(root, config)
+    human = policy["human_review"] or any(row["required_review_role"] == "human-review" for row in rows)
+    known = all(row["contract_known"] for row in rows)
+    result = {"schema_version": "evidence-machine-review-policy/v1", "compatible": known and not human,
+        "outcome": "policy_incompatible" if human or not known else "machine_compatible",
+        "reason": "human_review_required" if human else "coverage_contract_unknown" if not known else "ordinary_evaluator_route",
+        "human_review": policy["human_review"], "questions": rows,
+        "policy_sha256": "sha256:" + hashlib.sha256(sibling("_evidence_revision").canonical_bytes(policy)).hexdigest(),
+        "authorized": False, "evidence_accepted": False}
+
+    sibling("_strict_contract").validate_shape(result, sibling("_strict_contract").schema_documents()[result["schema_version"]])
+    return result
+
+
+@typed
+def review_status(root, *, claim_id=None):
+    """Project current native review selection; historical records grant no approval."""
+    root = Path(root).resolve()
+    config = configuration(root)
+    policy = resolve_policy(root, config)
+    require(policy is not None, "strict_policy_missing")
+    usage = sibling("_evidence_usage")
+    with usage.current_view(root, config) as view:
+        result = evaluate(root, config, policy, view=view)
+        require(claim_id is None or type(claim_id) is str, "strict_claim_unknown")
+        selected = [row for row in result["claims"] if claim_id is None or row["claim"]["id"] == claim_id]
+        require(claim_id is None or bool(selected), "strict_claim_unknown")
+        rows = [{"claim_id": row["claim"]["id"], "accepted": row["accepted"],
+            "required_review_role": row["required_review_role"], "reasons": row["reasons"],
+            "review": row["review"]} for row in selected]
+        view.revalidate(root, config)
+        status = {"schema_version": "evidence-strict-review-status/v1", "basis_id": result["basis_id"],
+            "claims": rows, "selection": "latest_matching_current_basis",
+            "revocation_owner": "current_host_authority_and_source_usage",
+            "authorized": False, "evidence_accepted": False}
+        sibling("_strict_contract").validate_shape(status, sibling("_strict_contract").schema_documents()[status["schema_version"]])
+        return status
+
+
+
+@typed
 def prepare_review(root, claim_id):
     root = Path(root).resolve()
     config = configuration(root)

@@ -524,7 +524,7 @@ def _historical_read_allowed(key: tuple[str, str], kwargs: Mapping[str, Any]) ->
                ("source_inventory", "run_inventory_report"), ("normalize_sources", "run_normalization_report")}:
         return kwargs.get("dry_run", False) is True
     if key == ("strict_evidence", "run_operation"):
-        return kwargs.get("operation") in {"check", "prepare-review", "export"}
+        return kwargs.get("operation") in {"check", "prepare-review", "export", "review-status", "machine-compatibility"}
     if key in _READ_SEAMS or key in {("qualified_packet", "profiles"), ("evidence_snapshots", "run_verify")}:
         return True
     stem, seam = key
@@ -587,7 +587,7 @@ def checked_operation(stem: str, seam: str, args: tuple[Any, ...], kwargs: Mappi
             context.require_grant("normalize_sources.external")
     elif key == ("strict_evidence", "run_operation"):
         effect = kwargs.get("operation")
-        if effect not in {"check", "prepare-review", "review", "export"}:
+        if effect not in {"check", "prepare-review", "review", "export", "review-status", "machine-compatibility"}:
             _refuse("host_operation_unknown")
         operation += "." + effect
         write = effect == "review"
