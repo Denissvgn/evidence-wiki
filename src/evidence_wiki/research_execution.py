@@ -64,6 +64,17 @@ class ResearchExecution:
                 or not 32 <= len(observer_key) <= 128 or type(qualifications) is not QualifiedEvaluators
                 or type(review_signer) is not HostReviewSigner):
             refuse("EXECUTION_CONFIG_INVALID")
+        try:
+            generator_role = executor.profile.role(review_signer.generator.config_ref)
+            if (generator_role.role != "host_worker" or generator_role.controller_ref != review_signer.generator.controller_ref
+                    or qualifications.authority.generator_controller_ref != generator_role.controller_ref):
+                refuse("EXECUTION_SIGNER_MISMATCH")
+            for identity in review_signer.reviewers:
+                role = executor.profile.role(identity.config_ref)
+                if role.role != "evaluator" or role.controller_ref != identity.controller_ref:
+                    refuse("EXECUTION_SIGNER_MISMATCH")
+        except ValueError:
+            refuse("EXECUTION_SIGNER_MISMATCH")
         self._executor = executor
         self._profile = executor.profile
         self._qualifications = qualifications

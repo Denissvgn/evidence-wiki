@@ -21,6 +21,7 @@ from .onboarding_contract import _matches
 
 JOB = "research-host-job/v1"
 JOB_V2 = "research-host-job/v2"
+JOB_V3 = "research-host-job/v3"
 EXECUTION_OBSERVATION = "research-execution-observation/v1"
 RESULT = "research-host-result/v1"
 DECISION = "research-decision/v1"
@@ -259,8 +260,16 @@ def schemas() -> dict[str, dict[str, Any]]:
     for branch in job_v2["anyOf"]:
         branch["properties"]["schema_version"] = {"const": JOB_V2}
         branch["properties"]["expected_result_schema"] = {"const": EXECUTION_OBSERVATION}
+    job_v3 = copy.deepcopy(job_v2)
+    for branch in job_v3["anyOf"]:
+        branch["properties"]["schema_version"] = {"const": JOB_V3}
+        branch["properties"].update(task_role={"enum": ["planner", "researcher", "evaluator",
+            "critic", "adjudicator", "repair", "integration", "release"]},
+            role_scope_sha256={"type": "string", "pattern": r"^[a-f0-9]{64}$(?![\s\S])"},
+            context_id=_string(), packet_sha256={"type": "string", "pattern": r"^[a-f0-9]{64}$(?![\s\S])"})
+        branch["required"].extend(["task_role", "role_scope_sha256", "context_id", "packet_sha256"])
     return copy.deepcopy({name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape}
-                          for name, shape in ((JOB, job), (JOB_V2, job_v2), (RESULT, result), (DECISION, decision))})
+                          for name, shape in ((JOB, job), (JOB_V2, job_v2), (JOB_V3, job_v3), (RESULT, result), (DECISION, decision))})
 
 
 def schema_document(name: str) -> dict[str, Any]:
@@ -372,7 +381,7 @@ def _utc(value: str, field: str) -> datetime:
 
 
 def _semantic(name: str, value: dict[str, Any]) -> None:
-    if name in {JOB, JOB_V2}:
+    if name in {JOB, JOB_V2, JOB_V3}:
         issued = _utc(value["issued_utc"], "/issued_utc")
         deadline = _utc(value["deadline_utc"], "/deadline_utc")
         lease = (deadline - issued).total_seconds()
@@ -477,7 +486,7 @@ def validate_job(value: Any, *, now_utc: str, parent_job: Any = None) -> dict[st
     the clock, references or the caller's stored parent.
     """
     name = value.get("schema_version") if type(value) is dict else JOB
-    if name not in {JOB, JOB_V2}:
+    if name not in {JOB, JOB_V2, JOB_V3}:
         _refuse("VERSION_UNSUPPORTED", "/schema_version")
     job = validate_document(name, value)
     now = _utc(now_utc, "/now_utc")

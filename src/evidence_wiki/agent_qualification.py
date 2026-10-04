@@ -161,6 +161,8 @@ class QualificationAuthority:
                     and row["controller_ref"] == selected.controller_ref]
         if selected.role != "evaluator" or len(required) != 1 or required[0]["human_required"]:
             _fail("qualification_role_invalid")
+        if profile.role_scopes is not None and profile.role_scopes.scope(config_ref).task_role != required[0]["role"]:
+            _fail("qualification_role_scope_mismatch")
         cases, pairs = _cases(cases)
         if type(suite) is not dict or set(suite) != _SUITE_FIELDS:
             _fail("qualification_suite_invalid")

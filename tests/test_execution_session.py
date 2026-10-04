@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -21,6 +22,8 @@ from evidence_wiki import (
     ExecutionProfile,
     ExecutionRole,
     ExecutionRoleLimit,
+    ExecutionRoleRegistry,
+    ExecutionRoleScope,
     ExecutionSchedule,
     HostReviewSigner,
     QualificationAuthority,
@@ -40,6 +43,7 @@ from evidence_wiki.workflow_contracts import (
     EXECUTION_OBSERVATION,
     JOB,
     JOB_V2,
+    JOB_V3,
     RESULT,
     WorkflowContractError,
     validate_document,
@@ -107,6 +111,10 @@ def fixture(tmp_path, monkeypatch, request=None):
     directory = tmp_path / "authority"
     directory.mkdir()
     authority = UsageFixture(directory, monkeypatch)
+    if options.get("role_isolation"):
+        authority.policy["principals"]["counter-reviewer"] = {"controller": "counter-controller", "roles": ["evaluator"],
+            "keys": {"counter-key": "44" * 32}}
+        authority.save_policy()
     authority.root = root
     authority.binding = identifier("evidence-host-workspace/v1", {"root": str(root)})
     local_config = yaml.safe_load((root / "research.yml").read_bytes())
@@ -152,6 +160,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     policy.update(schema_version=POLICY_V2)
     policy["scope"] = {"question_ids": ["q"], "source_scope": [str(root / "raw")], "source_scope_kind": "native_extent"}
     policy["required_evaluators"][0]["controller_ref"] = "evaluator"
+    if options.get("role_isolation"):
+        policy["required_evaluators"].append(dict(policy["required_evaluators"][0],
+            role="critic", profile_ref="profile-b", controller_ref="counter-controller"))
     if options.get("partial"):
         policy["scope"]["question_ids"].append("unavailable")
         policy["source_rules"]["allow_partial"] = True
@@ -167,8 +178,13 @@ def fixture(tmp_path, monkeypatch, request=None):
             ExecutionRoleLimit("host_worker", "runner", 20, 20, 20000, "0", 1800),
             ExecutionRoleLimit("evaluator", "evaluator", 20, 20, 20000, "0", 1800)),
             ("worker_failed",), 1, (("researcher", "backup-researcher"),))
+    registry = None
+    if options.get("role_isolation"):
+        roles += (ExecutionRole("profile-b", "evaluator", "counter-controller", "controlled-counter-process", "review/v1"),)
+        registry = ExecutionRoleRegistry((ExecutionRoleScope("researcher", "researcher", ("model",)),
+            ExecutionRoleScope("profile-a", "evaluator", ("model",)), ExecutionRoleScope("profile-b", "critic", ("model",))))
     profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
-        roles, 1, 1, 1000, "0", 1, schedule)
+        roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else ())
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
     generator = "import json,sys; json.load(sys.stdin); print(" + repr(json.dumps(generated)) + ")"
     evaluator = (
@@ -193,47 +209,63 @@ def fixture(tmp_path, monkeypatch, request=None):
     worker = tmp_path / "workers"
     worker.mkdir()
     commands = {"researcher": (sys.executable, "-c", generator), "profile-a": (sys.executable, "-c", evaluator)}
+    if options.get("role_isolation"):
+        commands["profile-b"] = (sys.executable, "-c", evaluator)
     if options.get("worker_failover"):
         commands["backup-researcher"] = (sys.executable, "-c", generator)
         commands["researcher"] = (sys.executable, "-c", "raise SystemExit(1)")
     executor = BoundedSubprocessExecutor(profile, commands=commands,
         cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
-    calibration_executor = BoundedSubprocessExecutor(profile, commands={"researcher": (sys.executable, "-c", generator),
-        "profile-a": (sys.executable, "-c", evaluator)}, cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
+    calibration_commands = {config: (sys.executable, "-c", generator if config == "researcher" else evaluator)
+        for config in ["researcher", *[row["profile_ref"] for row in policy.to_dict()["required_evaluators"]]]}
     cases = [{"case_id": f"case-{index}", "family_id": f"family-{index // 10}",
         "input_document": {"case_id": f"case-{index}", "supported": index // 2 % 2 == 0, "wording": index % 2},
         "expected_label": "accept" if index // 2 % 2 == 0 else "reject", "critical": index // 2 % 2 != 0,
         "pair_id": f"pair-{index // 2}"} for index in range(100)]
     suite = reference_suite(cases, suite_ref="controlled-reference", split_ref="held-out", domain_ref="synthetic-study",
         rubric=config["strict_evidence"]["rubric"])
-    observations = []
-    for index, case in enumerate(cases):
-        now = datetime.now(timezone.utc)
-        job = reference_job("evaluate")
-        job.update(schema_version=JOB_V2, expected_result_schema=EXECUTION_OBSERVATION,
-            id=f"calibration-{index}", controller_ref="evaluator", prompt_version="review/v1", policy_id=policy.policy_id,
-            scope=policy.to_dict()["scope"]["question_ids"], issued_utc=now.isoformat(), deadline_utc=(now + timedelta(seconds=10)).isoformat(), timeout_seconds=5,
-            budgets=profile.document()["job_budgets"])
-        attempt = ExecutionAttempt.create(attempt_id=f"calibration-{index}", nonce=f"nonce-{index}", run_id="references",
-            binding_id="protected-reference", profile=profile, config_ref="profile-a", job=job, input_document=case["input_document"])
-        calibration_executor = (BoundedSubprocessExecutor(profile, commands={"researcher": (sys.executable, "-c", generator),
-            "profile-a": (sys.executable, "-c", evaluator)}, cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
-            if index and index % profile.total_steps == 0 else calibration_executor)
-        observed = calibration_executor.invoke(attempt)
-        while observed["state"] == "running":
-            time.sleep(0.005)
-            observed = calibration_executor.poll(attempt)
-        assert observed["state"] == "succeeded"
-        observations.append((attempt, observed))
     issuer = QualificationAuthority("reference-issuer", b"q" * 32, "runner")
     expires = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-    qualification = issuer.issue(policy, profile, "profile-a", suite, cases, observations, calibration_executor, expires_utc=expires)
+    qualifications, reviewers = [], []
+    for required in policy.to_dict()["required_evaluators"]:
+        config_ref = required["profile_ref"]
+        calibration_executor = BoundedSubprocessExecutor(profile, commands=calibration_commands,
+            cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
+        observations = []
+        for index, case in enumerate(cases):
+            now = datetime.now(timezone.utc)
+            job = reference_job("evaluate")
+            job.update(schema_version=JOB_V2, expected_result_schema=EXECUTION_OBSERVATION,
+                id=f"calibration-{index}", controller_ref=required["controller_ref"], prompt_version="review/v1", policy_id=policy.policy_id,
+                scope=policy.to_dict()["scope"]["question_ids"], issued_utc=now.isoformat(), deadline_utc=(now + timedelta(seconds=10)).isoformat(), timeout_seconds=5,
+                budgets=profile.document()["job_budgets"])
+            if registry:
+                job.update(schema_version=JOB_V3, task_role=required["role"], required_capabilities=["model"],
+                    role_scope_sha256=registry.scope(config_ref).sha256, context_id=f"reference-{index}",
+                    packet_sha256=hashlib.sha256(authenticated_bytes(case["input_document"])[:-1]).hexdigest())
+            attempt = ExecutionAttempt.create(attempt_id=f"calibration-{index}", nonce=f"nonce-{index}", run_id="references",
+                binding_id="protected-reference", profile=profile, config_ref=config_ref, job=job, input_document=case["input_document"])
+            if index and index % profile.total_steps == 0:
+                calibration_executor = BoundedSubprocessExecutor(profile, commands=calibration_commands,
+                    cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
+            observed = calibration_executor.invoke(attempt)
+            while observed["state"] == "running":
+                time.sleep(0.005)
+                observed = calibration_executor.poll(attempt)
+            assert observed["state"] == "succeeded"
+            observations.append((attempt, observed))
+        qualifications.append(issuer.issue(policy, profile, config_ref, suite, cases, observations,
+            calibration_executor, expires_utc=expires))
+        reviewers.append(SigningIdentity(config_ref, "evaluator" if config_ref == "profile-a" else "counter-reviewer",
+            "evaluator-key" if config_ref == "profile-a" else "counter-key", required["controller_ref"], "evaluator",
+            bytes.fromhex(KEYS["evaluator"] if config_ref == "profile-a" else "44" * 32)))
     signer = HostReviewSigner("lab-authority", "1", SigningIdentity("researcher", "runner", "runner-key", "runner", "generator", bytes.fromhex(KEYS["runner"])),
-        (SigningIdentity("profile-a", "evaluator", "evaluator-key", "evaluator", "evaluator", bytes.fromhex(KEYS["evaluator"])),), "2027-01-01T00:00:00Z")
-    execution = ResearchExecution(executor, qualifications=QualifiedEvaluators([qualification], issuer), review_signer=signer, observer_key=b"o" * 32)
+        reviewers, "2027-01-01T00:00:00Z")
+    execution = ResearchExecution(executor, qualifications=QualifiedEvaluators(qualifications, issuer), review_signer=signer, observer_key=b"o" * 32)
     context = HostContext([root], GRANTS, "caller", [root], authority_file=authority.policy_path,
         state_directory=authority.host, mutation_control_directory=control,
-        controller_refs={"host_worker": "runner", "generator": "runner", "evaluator": "evaluator"})
+        controller_refs={"host_worker": "runner", "generator": "runner", "evaluator": "evaluator"},
+        role_controller_refs=tuple((role.config_ref, role.role, role.controller_ref) for role in roles) if registry else ())
     return root, policy, execution, context
 
 

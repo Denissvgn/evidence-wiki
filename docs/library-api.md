@@ -58,6 +58,11 @@ absent. Scheduling pins aggregate limits for each role/controller across its
 configured worker backends. Authenticated final accounting and frozen policy
 permission are required before retry; unknown dispatch remains reserved.
 
+Version `23` adds optional explicit job-role scopes, exact configured controller
+selections and immutable blinded review contexts. Scoped v3 jobs bind task purpose,
+capabilities and exact input bytes. Native authenticated signing controllers must
+match their dispatched configuration. Legacy profiles retain their document identity.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -497,6 +502,44 @@ identity is retained for the selected backend. Evaluator fallback requires a
 qualified identity mapping and is currently refused by this scheduling profile.
 Backoff and predecessor identity remain in the canonical run history; restarting
 cannot reset consumption or refresh the original run deadline.
+
+`ExecutionRoleRegistry` assigns each configured worker an immutable
+`ExecutionRoleScope`. Task roles are `planner`, `researcher`, `evaluator`, `critic`,
+`adjudicator`, `repair`, `integration` and `release`. They propose structured work;
+they grant no canonical write, signing, acquisition or publication authority.
+Every configured worker must have an exact scope when `ExecutionProfile.role_scopes`
+is supplied. A repair requires a dedicated repair configuration. Scoped v3 jobs
+cannot be downgraded to an unscoped envelope or relabeled as another role.
+
+`HostContext.role_controller_refs` supplies `(config_ref, native_role, controller_ref)`
+triples; reviewer and critic configurations both use native role `evaluator`.
+An explicit mapping refuses omitted configurations rather than using a generic
+role fallback. Native principal authentication separately establishes the actual
+controller; matching reference strings alone does not authenticate an agent.
+The parent matches those authenticated signing controllers with the dispatched
+profile before registering a review and during replay.
+
+First-pass reviews receive `ReviewContext` packets containing the exact question,
+claim, premises, allowlisted scientific metadata, authorized source content and
+rubric. Opaque aliases mask generator/source identifiers; parent-retained seeded
+ordering and full owner/source commitments make reconstruction repeatable. Missing
+or truncated decisive evidence remains incomplete. Computational and missing
+premise-question context currently refuse completion in this projection.
+
+Provider adapters must send `ExecutionAttempt.worker_document()` for scoped jobs.
+The subprocess host uses this projection automatically. Its worker envelope omits
+parent run/request/binding identities, native scope, original accounting and
+signing/registration material. `document()` remains the full parent correlation
+record. A trusted adapter that ignores this contract is outside the isolation
+claim; process bounds alone do not restrict malicious filesystem or network access.
+
+`isolation_report` separately reports authenticated controller references, immutable
+context identities and observed model references. The calling owner authenticates
+receipts before reducing them. Credential custody, host conversation isolation,
+model-family diversity and semantic reliability remain unknown. Profile
+`required_diversity` can require distinct selected controller/model references and
+fresh bound contexts; unavailable selections block the run. These are bounded
+identity checks, not proof of independent reasoning.
 
 `DeterministicOfflineExecutor` consumes explicit host fixture outputs under
 reserved `offline/` model identities. It measures actual local elapsed work and

@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "22"
+LIBRARY_API_VERSION = "23"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -513,9 +513,11 @@ def contract() -> dict:
             "deadline": "job lease capped by the original canonical run deadline; calls do not reset the allowance",
             "model_executor": "host_selected",
             "execution_profile": "ExecutionProfile and ResearchExecution; no mandatory model SDK",
-            "execution_profile_schemas": ["research-execution-profile/v1", "research-execution-profile/v2"],
+            "execution_profile_schemas": ["research-execution-profile/v1", "research-execution-profile/v2", "research-execution-profile/v3"],
             "scheduling": "optional frozen role/controller aggregate caps, configured worker failover and bounded authenticated retry/backoff",
             "offline_executor": "DeterministicOfflineExecutor; measured local work, zero provider use, fixtures cannot qualify semantic review",
+            "role_isolation": "optional frozen role scopes and exact configured controllers; fresh blinded parent-bound review contexts; independent control/context/model dimensions remain separate",
+            "review_context": "research-review-context/v1; missing or truncated decisive evidence is incomplete",
             "execution_observation": "research-execution-observation/v1",
             "execution_report": "research-execution-report/v2",
             "execution_report_schema_accessor": "evidence_wiki.execution_reporting.schema_document",

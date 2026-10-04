@@ -142,6 +142,7 @@ class HostContext:
     state_directory: Path | None = field(default=None, repr=False)
     credential_refs: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     mutation_control_directory: Path | None = field(default=None, repr=False)
+    role_controller_refs: tuple[tuple[str, str, str], ...] = ()
     _root_bindings: tuple[tuple[Path, tuple[int, int]], ...] = field(init=False, repr=False)
     _write_bindings: tuple[tuple[Path, tuple[int, int]], ...] = field(init=False, repr=False)
 
@@ -155,6 +156,17 @@ class HostContext:
         object.__setattr__(self, "actor_ref", _reference(self.actor_ref))
         object.__setattr__(self, "grants", grants)
         object.__setattr__(self, "controller_refs", _references(self.controller_refs))
+        selected = self.role_controller_refs
+        if type(selected) not in (list, tuple) or len(selected) > 128:
+            _refuse("host_role_controllers_invalid")
+        rows = []
+        for row in selected:
+            if type(row) not in (list, tuple) or len(row) != 3 or type(row[1]) is not str or row[1] not in {"host_worker", "evaluator"}:
+                _refuse("host_role_controllers_invalid")
+            rows.append(tuple(_reference(value) for value in row))
+        if len({row[0] for row in rows}) != len(rows):
+            _refuse("host_role_controllers_duplicate")
+        object.__setattr__(self, "role_controller_refs", tuple(sorted(rows)))
         object.__setattr__(self, "credential_refs", _references(self.credential_refs))
         object.__setattr__(self, "allowed_roots", tuple(root for root, _ in roots))
         object.__setattr__(self, "writable_roots", tuple(root for root, _ in writes))
@@ -166,6 +178,13 @@ class HostContext:
                 object.__setattr__(self, field_name, _path(value))
         for root, _ in roots:
             self._protect(root)
+
+    def controller_for(self, role: str, config_ref: str) -> str | None:
+        """Select an exact configured controller; explicit mappings fail closed."""
+        if self.role_controller_refs:
+            return next((controller for config, selected_role, controller in self.role_controller_refs
+                         if config == config_ref and selected_role == role), None)
+        return dict(self.controller_refs).get(role)
 
     def _protect(self, path: Path) -> None:
         for selected in (self.authority_file, self.state_directory, self.mutation_control_directory):
@@ -363,6 +382,9 @@ def protected_paths() -> tuple[Path, ...]:
 
 def controller_allowed(role: str, controller: str) -> bool:
     context = current_context()
+    if context is not None and context.role_controller_refs and role == "evaluator":
+        return any(selected_role == role and selected == controller
+                   for _, selected_role, selected in context.role_controller_refs)
     expected = dict(context.controller_refs).get(role) if context is not None else None
     return expected is None or expected == controller
 

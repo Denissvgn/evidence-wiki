@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add frozen task-role scopes, exact controller selections and fresh blinded
+  review packets, with native authenticated signing-controller correlation.
+
 - Add frozen role execution limits, authenticated bounded retries and configured
   worker fallback without resetting run allowance; provide a deterministic
   offline host with explicit fixture provenance.

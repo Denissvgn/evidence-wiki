@@ -25,12 +25,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from .workflow_contracts import JOB, JOB_V2, MAX_BYTES, document_sha256, validate_document, validate_job
+from .workflow_contracts import JOB, JOB_V2, JOB_V3, MAX_BYTES, document_sha256, validate_document, validate_job
+
+if TYPE_CHECKING:
+    from .execution_roles import ExecutionRoleRegistry
 
 PROFILE = "research-execution-profile/v1"
 PROFILE_V2 = "research-execution-profile/v2"
+PROFILE_V3 = "research-execution-profile/v3"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -240,6 +244,8 @@ class ExecutionProfile:
     cost_limit: str
     cleanup_timeout_seconds: float = 2.0
     schedule: ExecutionSchedule | None = None
+    role_scopes: ExecutionRoleRegistry | None = None
+    required_diversity: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _ref(self.profile_ref)
@@ -273,6 +279,21 @@ class ExecutionProfile:
                         or len({role.controller_ref for role in selected}) != 1):
                     raise ExecutionError("execution_failover_identity_invalid")
 
+        if self.role_scopes is not None:
+            from .execution_roles import ExecutionRoleRegistry
+
+            if type(self.role_scopes) is not ExecutionRoleRegistry or ({role.config_ref for role in roles}
+                    != {scope.config_ref for scope in self.role_scopes.scopes}):
+                raise ExecutionError("execution_role_scopes_incomplete")
+            if any(self.role_scopes.scope(role.config_ref).authority_role != role.role for role in roles):
+                raise ExecutionError("execution_role_scope_mismatch")
+        if (type(self.required_diversity) not in (list, tuple)
+                or any(type(item) is not str or item not in {"control", "context", "model"} for item in self.required_diversity)
+                or len(set(self.required_diversity)) != len(self.required_diversity)
+                or self.required_diversity and self.role_scopes is None):
+            raise ExecutionError("execution_required_diversity_invalid")
+        object.__setattr__(self, "required_diversity", tuple(sorted(self.required_diversity)))
+
     def document(self) -> dict[str, Any]:
         result = {
             "schema_version": PROFILE, "profile_ref": self.profile_ref, "total_steps": self.total_steps,
@@ -284,6 +305,9 @@ class ExecutionProfile:
         }
         if self.schedule is not None:
             result.update(schema_version=PROFILE_V2, scheduling=self.schedule.document())
+        if self.role_scopes is not None:
+            result.update(schema_version=PROFILE_V3, role_scopes=self.role_scopes.document(),
+                          required_diversity=list(self.required_diversity))
         return result
 
     @property
@@ -295,6 +319,25 @@ class ExecutionProfile:
             if role.config_ref == config_ref:
                 return role
         raise ExecutionError("execution_role_unavailable")
+
+
+    def check_job_scope(self, config_ref: str, job: dict[str, Any], input_document: dict[str, Any]) -> None:
+        """Bind an explicit job purpose and immutable input to its frozen scope."""
+        if type(job) is not dict or type(input_document) is not dict:
+            raise ExecutionError("execution_attempt_invalid")
+        if self.role_scopes is None:
+            if job["schema_version"] == JOB_V3:
+                raise ExecutionError("execution_role_scope_unavailable")
+            return
+        if job["schema_version"] != JOB_V3:
+            raise ExecutionError("execution_role_scope_required")
+        self.role_scopes.scope(config_ref).check_job(job)
+        if job["packet_sha256"] != _digest(input_document):
+            raise ExecutionError("execution_context_mismatch")
+        packet = input_document.get("packet")
+        if type(packet) is dict and packet.get("schema_version") == "research-review-context/v1":
+            if packet.get("context_id") != job["context_id"] or packet.get("task_role") != job["task_role"]:
+                raise ExecutionError("execution_context_mismatch")
 
 
 @dataclass(frozen=True)
@@ -322,7 +365,7 @@ class ExecutionAttempt:
         try:
             raw_job = json.loads(self._job_bytes)
             version = raw_job.get("schema_version") if type(raw_job) is dict else None
-            if version not in {JOB, JOB_V2}:
+            if version not in {JOB, JOB_V2, JOB_V3}:
                 raise ExecutionError("execution_job_version_unsupported")
             job = validate_document(version, raw_job)
             supplied = json.loads(self._input_bytes)
@@ -337,8 +380,11 @@ class ExecutionAttempt:
                input_document: dict[str, Any] | None = None) -> ExecutionAttempt:
         profile.role(config_ref)
         version = job.get("schema_version") if type(job) is dict else None
-        if version not in {JOB, JOB_V2}:
+        if version not in {JOB, JOB_V2, JOB_V3}:
             raise ExecutionError("execution_job_version_unsupported")
+        selected_input = {} if input_document is None else input_document
+        job = validate_document(version, job)
+        profile.check_job_scope(config_ref, job, selected_input)
         return cls(attempt_id, nonce, run_id, binding_id, profile.sha256, config_ref,
                    _json(validate_document(version, job)), _json({} if input_document is None else input_document))
 
@@ -357,6 +403,20 @@ class ExecutionAttempt:
     @property
     def input_sha256(self) -> str:
         return hashlib.sha256(self._input_bytes).hexdigest()
+
+    def worker_document(self) -> dict[str, Any]:
+        """Project scoped worker input while retaining full correlation in the host.
+
+        Provider adapters must use this projection for scoped jobs. It never
+        establishes filesystem, network or host conversation isolation.
+        """
+        job = self.job
+        if job["schema_version"] != JOB_V3:
+            return self.document()
+        fields = ("operation", "role", "task_role", "required_capabilities", "context_id", "prompt_version",
+                  "issued_utc", "deadline_utc", "timeout_seconds", "budgets", "expected_result_schema")
+        return {"schema_version": "research-agent-input/v1", "job": {name: job[name] for name in fields},
+                "input": self.input_document}
 
     def document(self) -> dict[str, Any]:
         return {
@@ -530,6 +590,7 @@ class BoundedSubprocessExecutor:
         job = attempt.job
         if any(job[name] != getattr(role, name) for name in ("role", "controller_ref", "prompt_version")):
             raise ExecutionError("execution_role_mismatch")
+        self.profile.check_job_scope(attempt.config_ref, job, attempt.input_document)
         budgets = self.profile.document()["job_budgets"]
         if any(job["budgets"][name] > budgets[name] for name in ("model_calls", "tool_calls", "tokens")):
             raise ExecutionError("execution_job_budget_exceeded")
@@ -561,7 +622,7 @@ class BoundedSubprocessExecutor:
             if command is None:
                 return self._unavailable(attempt, "executor_unavailable")
             timeout = min(job["timeout_seconds"], (_utc(job["deadline_utc"]) - _utc(stamp)).total_seconds())
-            payload = _json(attempt.document())
+            payload = _json(attempt.worker_document())
             try:
                 process = subprocess.Popen(  # noqa: S603 - argv is an explicit trusted host selection.
                     command, cwd=self._cwd, env=self._environment, stdin=subprocess.PIPE,

@@ -127,14 +127,17 @@ def _host_selection() -> str:
             if (value["device"], value["inode"]) != tuple(str(item) for item in expected):
                 refuse("HOST_CONTEXT_CONFLICT", "/host_context")
             rows.append(value)
-    return digest({"actor_ref": context.actor_ref, "grants": sorted(context.grants),
+    selected_context = {"actor_ref": context.actor_ref, "grants": sorted(context.grants),
         "allowed_roots": sorted(roots, key=lambda row: row["path"]),
         "writable_roots": sorted(writes, key=lambda row: row["path"]),
         "controller_refs": [list(row) for row in context.controller_refs],
         "credential_refs": [list(row) for row in context.credential_refs],
         "authority_file": selected(context.authority_file, contents=True),
         "state_directory": selected(context.state_directory),
-        "control_directory": selected(context.mutation_control_directory)})
+        "control_directory": selected(context.mutation_control_directory)}
+    if context.role_controller_refs:
+        selected_context["role_controller_refs"] = [list(row) for row in context.role_controller_refs]
+    return digest(selected_context)
 
 
 def _store(root: Path, control: Path, intent=None):
