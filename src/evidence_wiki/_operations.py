@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "14"
+OPERATION_MATRIX_VERSION = "15"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -41,6 +41,9 @@ _ROWS = (
     ("source_requests.add", "scripts/source_requests.py add", "source request and activity log; log failure may follow durable mutation", "canonical request store lock and separate activity log lock", "none"),
     ("source_requests.list", "scripts/source_requests.py list", "none", "canonical request reader", "none"),
     ("source_requests.fulfill", "scripts/source_requests.py fulfill", "request state and activity log, or contingent delegated claim", "canonical request/claim locks and separate activity log lock", "none"),
+    ("source_requests.prepare_acquisition", None, "none; bounded current request and native alternatives", "captured scoped bytes; no fetch plan or log writes", "none"),
+    ("source_requests.reconcile_acquisition", None, "none; genuine capture receipt and current source observation", "historical private mutation custody plus current request/source scope", "none"),
+    ("source_requests.complete_acquisition", None, "intent-bound native strict fulfillment; replay preserves historical receipt", "existing private mutation custody and canonical request/usage owners", "none"),
     ("source_requests.current", None, "none; recorded fulfillment and current source readiness remain separate", "bounded native request/question/source reads and current permission checks", "none"),
     ("source_requests.link_current", None, "canonical request links and activity log; no scope expansion or evidence approval", "selected mutation workspace/request custody and native request lock", "none"),
     ("source_requests.fulfill_current", None, "native request bookkeeping only after current evidence and scope checks", "selected mutation workspace/request custody, current source/usage revalidation and canonical request locks", "none"),
@@ -68,6 +71,11 @@ _ROWS = (
     ("research.session.advance", None, "canonical run transitions, reservations, authenticated observations and owning research effects", "native workspace/run gates released during bounded host work", "explicit scoped host executor only with ResearchExecution"),
     ("research.session.run_until_terminal", None, "bounded advancing steps and complete original accounting", "same canonical owners; persisted finite step/time/resource limits", "explicit scoped host executor only with ResearchExecution"),
     ("research.session.run_cycle", None, "intent-bound finite canonical drive and durable terminal exhaustion", "existing run journal; exact request replay and unresolved reservation retention", "explicit scoped ResearchExecution only"),
+    ("research.session.prepare_acquisition", None, "none; observes current original and run acquisition allowance", "bounded authenticated native run histories and current request/provider facts", "none"),
+    ("research.session.run_acquisition", None, "one authenticated inert selection followed by fixed native evidence steps or finite refusal", "existing run/role/request/source budgets and canonical capture/fulfillment owners", "explicit configured proposer and authorized native web transport only"),
+    ("research.session.choose_acquisition", None, "one scoped authenticated proposer attempt and inert choice application", "existing native execution journal and role/run accounting; gates released for host work", "configured bounded AgentExecutor only; no tool or source authority in output"),
+    ("research.session.acquire_evidence", None, "retained transport, immutable capture, inventory, normalization and strict fulfillment", "same native run/mutation/source owners; exact workflow intent and result replay", "explicit configured native web transport; extraction through bounded native owner"),
+    ("research.session.acquire", None, "one retained native transport attempt and monotonic original budget reservation", "existing run journal and native provider ledger; all coordination gates released for transport", "configured bounded native HTTPS only; unknown work never refetched"),
     ("research.session.host_job", None, "retains an inert leased host job and immutable budget reservation", "selected native workspace gate then canonical run lock and event replay", "none; no default model executor"),
     ("research.session.pending", None, "none; observes retained lease without renewal", "bounded native run state and journal capture", "none"),
     ("research.session.reconcile_pending", None, "durable correlated pending/history observations or unknown fallback", "native gates released during bounded host polling", "explicit host poll; uncertain external completion stays unknown"),

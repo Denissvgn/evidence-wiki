@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "31"
+LIBRARY_API_VERSION = "32"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -86,6 +86,9 @@ LIBRARY_API_SURFACE = (
     "source_requests.list",
     "source_requests.fulfill",
     "source_requests.current",
+    "source_requests.prepare_acquisition",
+    "source_requests.reconcile_acquisition",
+    "source_requests.complete_acquisition",
     "source_requests.link_current",
     "source_requests.fulfill_current",
     "research.requirements.current",
@@ -110,6 +113,11 @@ LIBRARY_API_SURFACE = (
     "research.session.advance",
     "research.session.run_until_terminal",
     "research.session.run_cycle",
+    "research.session.acquire",
+    "research.session.acquire_evidence",
+    "research.session.choose_acquisition",
+    "research.session.run_acquisition",
+    "research.session.prepare_acquisition",
     "research.session.host_job",
     "research.session.pending",
     "research.session.reconcile_pending",
@@ -550,6 +558,15 @@ def contract() -> dict:
             "qualification": "host-authenticated protected references tied to exact policy, model, prompt, controller, rubric, domain and expiry; host must withdraw frozen services when qualification is revoked",
             "operational_limits": "configured host required; reference subprocess bounds do not establish malicious-worker isolation or general semantic quality",
             "acceptance": "current canonical release is separate from workflow qualification",
+        },
+        "acquisition": {
+            "schemas": ["evidence-acquisition-instruction/v1", "evidence-acquisition-agent-workflow-result/v1", "evidence-acquisition-agent-result/v1", "evidence-acquisition-workflow-result/v1", "evidence-acquisition-transport-result/v1", "evidence-acquisition-preparation/v1",
+                "evidence-acquisition-reconciliation/v1", "evidence-acquisition-fulfillment/v1"],
+            "schema_accessor": "evidence_wiki.acquisition_contracts.schema_document",
+            "receipt_owner": "existing private mutation capture and strict fulfillment intents",
+            "scope": "current frozen request/material/usage before fulfillment; historical receipts do not prove current usability",
+            "authority": "inert proposals and observations; native permission and budget owners remain required",
+            "transport": "explicit bound session native web GET; frozen original scope/aggregate byte/download reservation before transport; no implicit refetch of unobserved effects",
         },
         "research_setup": {
             "entry": "Onboarding.prepare, check_plan, apply, setup_status",

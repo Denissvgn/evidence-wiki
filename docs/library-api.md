@@ -132,6 +132,12 @@ owned mutations and review/release gates to a finite terminal outcome. Optional
 scoped planner proposals select only actions permitted by the deterministic
 owner; planner output carries no effect authority.
 
+Version `32` adds bounded native acquisition preparation, genuine capture
+reconciliation, strict completion and explicit session choice/transport/workflow
+methods, with operation matrix `15`. Original scope and aggregate acquisition
+budgets remain tied to frozen instruction custody across runs. An authenticated
+choice is inert until fixed native owners recheck scope, permissions and allowance.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -367,6 +373,9 @@ exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
 | `source_requests.add` | `ws.source_requests.add(*, kind, query_or_identifier, rationale, priority="medium", question_slugs=None, scope=None)` |
 | `source_requests.list` | `ws.source_requests.list(*, statuses=None, kinds=None, scope=None)` |
 | `source_requests.fulfill` | `ws.source_requests.fulfill(*, request_id, source_id, match_scope=None, require_scope=False)` |
+| `source_requests.prepare_acquisition` | `ws.source_requests.prepare_acquisition(*, request_id, alternative_ids=(), run_id=None)` |
+| `source_requests.reconcile_acquisition` | `ws.source_requests.reconcile_acquisition(*, request_id, acquisition_ref)` |
+| `source_requests.complete_acquisition` | `ws.source_requests.complete_acquisition(*, request_id, acquisition_ref, expected_request_basis, expected_material_basis, mutation_request_id)` |
 | `source_requests.current` | `ws.source_requests.current(*, request_ids=(), question_slugs=(), max_records=200)` |
 | `source_requests.link_current` | `ws.source_requests.link_current(request)` |
 | `source_requests.fulfill_current` | `ws.source_requests.fulfill_current(request)` |
@@ -611,6 +620,78 @@ publication remains unknown under the generic mutation protocol; search never
 repairs or rebuilds it implicitly. Historical read custody narrows all checked
 writer calls, including legacy/no-context routes and mixed cache-writing status
 operations, until the reader exits; its parent writer permission is then restored.
+
+Acquisition observations use the existing request, capture and fulfillment owners:
+
+```python
+prepared = ws.source_requests.prepare_acquisition(request_id=source_request_id)
+current = ws.source_requests.reconcile_acquisition(
+    request_id=source_request_id, acquisition_ref=capture_mutation_id,
+)
+result = ws.source_requests.complete_acquisition(
+    request_id=source_request_id, acquisition_ref=capture_mutation_id,
+    expected_request_basis=current["request_basis"],
+    expected_material_basis=current["source"]["material_basis"],
+    mutation_request_id="complete-capture",
+)
+```
+
+Read preparation never runs fetch planning or writes a log. Without a bound
+execution session its allowance requires a selected-session recheck. Genuine
+private capture intent, receipt, root, current host selection and exact sealed
+delivery/result identity are verified before current source scope/usability.
+Completion submits the existing strict fulfillment mutation. Its retained outer
+binding shares that mutation's private intent, not a new lifecycle store.
+Historical fulfillment remains distinct from current evidence usability; deleting
+an original does not erase or upgrade the old receipt.
+
+A configured session exposes `prepare_acquisition`, `choose_acquisition`,
+`acquire`, `acquire_evidence` and `run_acquisition`. Preparation is read-only and
+observes actual remaining original/per-run allowance. Choice requires an exact
+researcher scope with `model` and `acquisition.propose`, configured controller,
+current evaluation qualification and authenticated output/usage. Missing,
+malformed or stale choice results are finite refusals; completed refused attempts
+are settled durably and cannot enter draft admission.
+
+`acquire` performs one explicit configured native HTTPS GET. The frozen original
+instruction binds URI scope, original download/byte/source-request/time limits;
+configured provider and run limits tighten them. Initial, redirect and final URLs
+are checked against original scope before unauthorized response bodies are read.
+Maximum-byte reservations are spent before transport in the authenticated native
+run journal, including failed attempts. Request-wide history survives a fresh run
+and authorized derived-question appends, while provider caps remain per-run.
+Original time uses the signed baseline and sealed reservation clock. Unknown old
+custody refuses rather than becoming zero consumption. Gates are released during
+transport; exact retained replay does not refetch unobserved work.
+
+`acquire_evidence` joins permitted transport to immutable capture, inventory,
+normalization and strict current fulfillment. Host-provided capture metadata
+must declare exact origin, request, scope, completeness and rights; HTTP success
+cannot manufacture those facts. Native refusals and partial capture/normalization
+retain useful gaps and leave the request open. Known complete authentication
+notice wrappers cannot become full evidence through a plain-text declaration.
+Capture, permission, source usability and semantic approval remain separate.
+
+```python
+result = session.run_acquisition(
+    request_id="acquisition-1", instruction=closed_acquisition_instruction,
+    config_ref="configured-researcher", metadata=host_capture_metadata,
+    path="raw/web/acquired.txt",
+)
+```
+
+The composed route selects one authenticated inert choice and applies only the
+supported native-web alternative for the request's exact literal URL. Other URLs,
+connectors or unavailable protected sanitization produce explicit finite results;
+no ungranted connector or rights are inferred. This route starts no fresh run to
+reset original budgets. Every transport, capture and fulfillment effect is retained
+through its existing owner, including interruption recovery and exact replay.
+
+`evidence_wiki.acquisition_contracts.schema_document` exposes closed preparation,
+transport, reconciliation, fulfillment, agent and composed-workflow result shapes.
+Transport encoding validates exact bytes, count and SHA; all source-accepted and
+rights-inferred flags remain false. Local execution/reference fixtures qualify
+mechanics, not live remote-model quality, billing or general semantic truth.
 
 New source and authoring seams qualify actual configuration, store, question,
 output and lock paths before effects. A linked workspace folder cannot redirect

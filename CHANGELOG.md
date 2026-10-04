@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add scoped authenticated acquisition choice and bounded native evidence workflows
+  with original request budget custody, current source reconciliation and exact replay.
+
 - Add a bounded host research cycle with authenticated scoped planner proposals,
   current permitted worker evidence and durable terminal/replay accounting.
 

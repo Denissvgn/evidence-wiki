@@ -456,6 +456,7 @@ def call_binding() -> Iterator[None]:
 # Only known seam effects may run under an explicit context. The canonical
 # owners still validate their arguments and authenticate evidence independently.
 _READ_SEAMS = frozenset({
+    ("acquisition_operations", "prepare"), ("acquisition_operations", "reconcile"),
     ("retrieval_operations", "search"),
     ("source_usability_operations", "current"),
     ("request_lifecycle_operations", "current"),
@@ -472,6 +473,7 @@ _READ_SEAMS = frozenset({
     ("source_requests", "run_list_requests"),
 })
 _WRITE_SEAMS = frozenset({
+    ("acquisition_operations", "fulfill"),
     ("retrieval_operations", "build_index"),
     ("request_lifecycle_operations", "link_current"), ("request_lifecycle_operations", "fulfill_current"),
     ("request_lifecycle_operations", "block_current"), ("request_lifecycle_operations", "reopen_current"),
@@ -527,7 +529,7 @@ def _historical_read_allowed(key: tuple[str, str], kwargs: Mapping[str, Any]) ->
     if stem == "mutation_operations":
         return seam in {"revision", "inspect"}
     if stem == "research_session":
-        return seam in {"current", "next_work", "session", "pending", "report"}
+        return seam in {"current", "next_work", "session", "pending", "report", "prepare_acquisition"}
     if stem == "telemetry":
         return seam in {"report", "project"}
     if key == ("evidence_assessments", "run_operation"):
@@ -589,9 +591,9 @@ def checked_operation(stem: str, seam: str, args: tuple[Any, ...], kwargs: Mappi
         write = effect == "review"
     elif stem == "mutation_operations" and seam in {"revision", "prepare_request", "submit", "inspect", "reconcile"}:
         write = seam in {"submit", "reconcile"}
-    elif stem == "research_session" and seam in {"current", "next_work", "session", "advance", "run_until_terminal", "run_cycle", "host_job",
-                                               "pending", "reconcile_pending", "cancel_pending", "intake_observation", "report"}:
-        write = seam in {"advance", "run_until_terminal", "run_cycle", "host_job", "reconcile_pending", "cancel_pending", "intake_observation"}
+    elif stem == "research_session" and seam in {"current", "next_work", "session", "advance", "run_until_terminal", "run_cycle", "acquire", "acquire_evidence", "choose_acquisition", "run_acquisition", "host_job",
+                                               "pending", "reconcile_pending", "cancel_pending", "intake_observation", "report", "prepare_acquisition"}:
+        write = seam in {"advance", "run_until_terminal", "run_cycle", "acquire", "acquire_evidence", "choose_acquisition", "run_acquisition", "host_job", "reconcile_pending", "cancel_pending", "intake_observation"}
     elif stem == "telemetry" and seam in {"record", "report", "project"}:
         write = seam == "record"
     elif stem == "telemetry_delivery" and seam in {"deliver", "inspect", "retry"}:

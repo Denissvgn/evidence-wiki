@@ -76,7 +76,13 @@ def _shell(text):
     notices = normalizer.HTML_AUTHENTICATION_MESSAGES | normalizer.HTML_SHELL_NOTICES | {
         "access denied", "permission denied", "unauthorized", "403 forbidden", "401 unauthorized", "invalid credentials"}
     notices = {" ".join(item.strip().casefold().split()).strip(" .!:;?") for item in notices}
-    normalized = " ".join(text.casefold().split())
+    candidate=text
+    if re.fullmatch(r"\s*<html(?:\s[^<>]*)?>[\s\S]*</html>\s*",text,re.IGNORECASE):
+        tags=re.findall(r"<[^>]*>",text)
+        allowed={"html","body","div","p","span","br"}
+        if tags and all(re.fullmatch(r"</?\s*(?:"+"|".join(sorted(allowed))+r")(?:\s[^<>]*)?/?>",tag,re.IGNORECASE) for tag in tags):
+            candidate=re.sub(r"<[^>]*>"," ",text)
+    normalized = " ".join(candidate.casefold().split())
     if not normalized:
         return False
     pattern = re.compile(r"(?<!\w)(?:" + "|".join(re.escape(item) for item in sorted(notices,key=len,reverse=True)) + r")(?!\w)")

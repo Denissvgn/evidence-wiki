@@ -401,6 +401,7 @@ class ValidatingRedirectHandler(HTTPRedirectHandler):
         resolve_hostnames: bool = True,
         resolver: Resolver = socket.getaddrinfo,
         max_redirects: int = DEFAULT_MAX_REDIRECTS,
+        _url_guard=None,
     ) -> None:
         super().__init__()
         self.allowed_domains = allowed_domains
@@ -408,6 +409,7 @@ class ValidatingRedirectHandler(HTTPRedirectHandler):
         self.resolve_hostnames = resolve_hostnames
         self.resolver = resolver
         self.max_redirects = max_redirects
+        self._url_guard = _url_guard
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         if len(self.redirect_chain) >= self.max_redirects:
@@ -416,6 +418,8 @@ class ValidatingRedirectHandler(HTTPRedirectHandler):
                 f"Acquisition exceeded the redirect limit of {self.max_redirects}.",
                 remediation="Use the canonical final HTTPS URL or review the redirect chain manually.",
             )
+        if self._url_guard is not None:
+            self._url_guard(newurl)
         validate_https_url(
             newurl,
             allowed_domains=self.allowed_domains,
@@ -640,6 +644,7 @@ def build_default_opener(
     resolve_hostnames: bool = True,
     resolver: Resolver = socket.getaddrinfo,
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    _url_guard=None,
 ):
     if insecure_tls_reason is not None:
         raise AcquisitionTransportError(
@@ -657,6 +662,7 @@ def build_default_opener(
             resolve_hostnames=resolve_hostnames,
             resolver=resolver,
             max_redirects=max_redirects,
+            _url_guard=_url_guard,
         )
     ]
     opener = build_opener(*handlers)
@@ -678,6 +684,7 @@ def bounded_download(
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
     data: bytes | None = None,
     method: str | None = None,
+    _url_guard=None,
 ) -> DownloadResult:
     require_positive_limit(max_bytes)
     require_positive_timeout(timeout)
@@ -688,6 +695,8 @@ def bounded_download(
             "Automated acquisition cannot disable TLS certificate verification.",
             remediation="Use an endpoint with a valid, trusted TLS certificate chain.",
         )
+    if _url_guard is not None:
+        _url_guard(url)
     validate_https_url(url, allowed_domains=allowed_domains, resolve_hostnames=resolve_hostnames, resolver=resolver)
     redirect_chain: list[str] = []
     opener_fn = opener or build_default_opener(
@@ -697,6 +706,7 @@ def bounded_download(
         resolve_hostnames=resolve_hostnames,
         resolver=resolver,
         max_redirects=max_redirects,
+        _url_guard=_url_guard,
     )
     request_headers = {"User-Agent": DEFAULT_USER_AGENT}
     request_headers.update(headers or {})
@@ -711,6 +721,8 @@ def bounded_download(
     try:
         with opener_fn(request, timeout) as response:
             final_url = response_url(response, url)
+            if _url_guard is not None:
+                _url_guard(final_url)
             if final_url != url:
                 validate_https_url(
                     final_url,
@@ -1148,6 +1160,7 @@ def execute_planned_request(
     resolve_hostnames: bool = True,
     resolver: Resolver = socket.getaddrinfo,
     expected_content_types: tuple[str, ...] | list[str] = PLANNED_REQUEST_CONTENT_TYPES,
+    _url_guard=None,
 ) -> DownloadResult:
     """Execute one provider-planned request through the package's pinned transport.
 
@@ -1190,6 +1203,7 @@ def execute_planned_request(
             expected_content_types=expected_content_types,
             data=plan.body,
             method=plan.method,
+            _url_guard=_url_guard,
         )
     except AcquisitionTransportError as exc:
         # Re-raise through the redaction pass rather than chaining: a resolved credential

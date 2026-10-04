@@ -558,6 +558,45 @@ class ResearchSession:
         return result
 
     @_boundary
+    def prepare_acquisition(self, *, request_id, alternative_ids=()):
+        """Observe current original allowance without dispatching external work."""
+        self._check("prepare_acquisition")
+        from .acquisition_operations import prepare_session
+        return prepare_session(self, request_id=request_id, alternative_ids=alternative_ids)
+
+    @_boundary
+    def choose_acquisition(self, *, request_id, instruction, config_ref):
+        """Execute a scoped proposer; its result remains an inert owner-check choice."""
+        self._check("choose_acquisition", write=True)
+        from .acquisition_choice import choose
+        return choose(self,request_id=request_id,instruction=instruction,config_ref=config_ref)
+
+    @_boundary
+    def run_acquisition(self, *, request_id, instruction, config_ref, metadata, path):
+        """Select bounded acquisition work and apply only native authorized steps."""
+        self._check("run_acquisition", write=True)
+        from .acquisition_workflow import run
+        return run(self,request_id=request_id,instruction=instruction,config_ref=config_ref,metadata=metadata,path=path)
+
+    @_boundary
+    def acquire_evidence(self, *, request_id, source_request_id, expected_request_basis, metadata, path):
+        """Join explicitly permitted transport and native capture/source owners."""
+        self._check("acquire_evidence", write=True)
+        from .acquisition_workflow import acquire
+        return acquire(self, request_id=request_id, source_request_id=source_request_id,
+            expected_request_basis=expected_request_basis, metadata=metadata, path=path)
+
+    @_boundary
+    def acquire(self, *, request_id, source_request_id, expected_request_basis):
+        """Run one explicitly authorized native acquisition with retained budgets."""
+        self._check("acquire", write=True)
+        for grant in TERMINAL_GRANTS:
+            self.context.require_grant(grant)
+        from .acquisition_dispatch import dispatch
+        return dispatch(self, request_id=request_id, source_request_id=source_request_id,
+            expected_request_basis=expected_request_basis)
+
+    @_boundary
     def run_cycle(self, *, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None):
         """Drive one immutable host request to a finite canonical outcome."""
         self._check("run_cycle",write=True)

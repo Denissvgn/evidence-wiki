@@ -195,10 +195,17 @@ def fixture(tmp_path, monkeypatch, request=None):
             *(() if registry is not None else (ExecutionRoleScope("researcher", "researcher", ("model",)),
                 ExecutionRoleScope("profile-a", "evaluator", ("model",)))),
             ExecutionRoleScope("planner", "planner", ("model", "plan.propose"))))
+    if options.get("acquisition_choice"):
+        registry = ExecutionRoleRegistry((ExecutionRoleScope("researcher", "researcher", ("model", "acquisition.propose")),
+            ExecutionRoleScope("profile-a", "evaluator", ("model",))))
     profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
         roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
     generator = "import json,sys; json.load(sys.stdin); print(" + repr(json.dumps(generated)) + ")"
+    if options.get("acquisition_choice"):
+        generator = "import json,sys; d=json.load(sys.stdin)['input']; i=d['instruction']; print(json.dumps({'schema_version':'evidence-acquisition-choice/v1','request_id':i['request_id'],'request_basis':i['request_basis'],'action':'alternate' if i['alternatives'] else 'abstain','alternative_id':i['alternatives'][0]['alternative_id'] if i['alternatives'] else None,'reason':'Use a retained permitted source or abstain'}))"
+    if options.get("acquisition_choice_hostile"):
+        generator = "import json,sys; json.load(sys.stdin); print(json.dumps({'argv':['arbitrary-tool'],'authorized':True}))"
     evaluator = (
         "import json,sys; d=json.load(sys.stdin)['input']; "
         "r=({'case_id':d['case_id'],'label':'accept' if d['supported'] else 'reject'} if 'case_id' in d else "

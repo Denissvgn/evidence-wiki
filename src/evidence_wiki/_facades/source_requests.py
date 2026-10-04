@@ -19,6 +19,28 @@ class SourceRequestsNamespace(Namespace):
         return call_seam(load, "request_lifecycle_operations", "current", self._root,
             request_ids=request_ids, question_slugs=question_slugs, max_records=max_records)
 
+    def _acquisition(self, seam, **arguments):
+        self._workspace._check_open()
+        def load(_stem):
+            from .. import acquisition_operations
+            return acquisition_operations
+        return call_seam(load, "acquisition_operations", seam, self._root, **arguments)
+
+    def prepare_acquisition(self, *, request_id, alternative_ids=(), run_id=None):
+        """Observe bounded native alternatives without acquiring rights or evidence."""
+        return self._acquisition("prepare", request_id=request_id, alternative_ids=alternative_ids, run_id=run_id)
+
+    def reconcile_acquisition(self, *, request_id, acquisition_ref):
+        """Bind genuine retained capture custody to current request/source facts."""
+        return self._acquisition("reconcile", request_id=request_id, acquisition_ref=acquisition_ref)
+
+    def complete_acquisition(self, *, request_id, acquisition_ref, expected_request_basis,
+                             expected_material_basis, mutation_request_id):
+        """Apply exact current fulfillment through its existing serialized owner."""
+        return self._acquisition("fulfill", request_id=request_id, acquisition_ref=acquisition_ref,
+            expected_request_basis=expected_request_basis, expected_material_basis=expected_material_basis,
+            mutation_request_id=mutation_request_id)
+
     def link_current(self, request):
         """Submit a frozen compatible-scope request link through its native owner."""
         self._workspace._check_open()
