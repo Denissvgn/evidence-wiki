@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "19"
+OPERATION_MATRIX_VERSION = "20"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -53,6 +53,8 @@ _ROWS = (
     ("strict.diagnose", None, "none; bounded unaccepted per-claim mechanical diagnostics", "native captured source/original bytes and held current usage with closing revalidation", "none; no publication or semantic reviewer"),
     ("strict.admit", None, "configured unaccepted claim inventory and private immutable plan/receipt; no approval or question status", "native mutation workspace/request gates followed by canonical claims gate and prior-byte checks", "none"),
     ("strict.prepare_review", "evidence-wiki strict prepare-review", "none in live workspace", "current private host view and exact review basis", "none"),
+    ("strict.prepare_packet", None, "none; protected complete blinded page handle", "current native source/diagnostic/rights and closing material checks on every access", "none"),
+    ("strict.packet_schemas", None, "none; closed inert packet and delivery contracts", "none", "none"),
     ("strict.register_review", "evidence-wiki strict review", "authenticated review events in private host state", "canonical exclusive host state lock, checkpoint and request identity", "none"),
     ("strict.export", "evidence-wiki strict export", "none in live workspace; returns checked release", "current private host view and bounded private capture", "none"),
     ("mutations.revision", None, "private control gates only; observes workspace bytes", "native workspace gate in host-selected private control directory", "none"),
@@ -83,6 +85,7 @@ _ROWS = (
     ("research.session.recovery_status", None, "none; current holders, original deadline and unresolved effects", "authenticated native journal and closing basis checks", "none; no run start or dispatch"),
     ("research.session.reconcile_recovery", None, "append exact recovery intent and later owner receipt observations; terminal immutable", "native run gates, unchanged controls and exact prior effect identities", "none; no replacement effects or ownership transfer"),
     ("research.session.calculate", None, "retained current deterministic calculation observation", "same native run and current source/usage owners", "none; shared deterministic engine"),
+    ("research.session.assemble_review_packet", None, "authenticated complete required-page host delivery records; no approval", "native run reservation outside page reads; current rights/material and deadline rechecks", "none; worker consumption unobserved until actual dispatch"),
     ("research.session.propose_calculation", None, "one authenticated formula selection; independent v2 verifier required", "same native run and configured role budgets", "explicit scoped Calculation executor only"),
     ("research.session.choose_acquisition", None, "one scoped authenticated proposer attempt and inert choice application", "existing native execution journal and role/run accounting; gates released for host work", "configured bounded AgentExecutor only; no tool or source authority in output"),
     ("research.session.acquire_evidence", None, "retained transport, immutable capture, inventory, normalization and strict fulfillment", "same native run/mutation/source owners; exact workflow intent and result replay", "explicit configured native web transport; extraction through bounded native owner"),

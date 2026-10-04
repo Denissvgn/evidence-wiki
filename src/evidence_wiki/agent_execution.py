@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from .calibration_registry import CalibrationPlan
     from .disagreement_configuration import DisagreementPlan
     from .execution_roles import ExecutionRoleRegistry
+    from .review_delivery import ReviewDelivery
 
 PROFILE = "research-execution-profile/v1"
 PROFILE_V2 = "research-execution-profile/v2"
@@ -40,6 +41,7 @@ PROFILE_V3 = "research-execution-profile/v3"
 PROFILE_V4 = "research-execution-profile/v4"
 PROFILE_V5 = "research-execution-profile/v5"
 PROFILE_V6 = "research-execution-profile/v6"
+PROFILE_V7 = "research-execution-profile/v7"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -253,6 +255,7 @@ class ExecutionProfile:
     required_diversity: tuple[str, ...] = ()
     calibration: CalibrationPlan | None = None
     disagreement: DisagreementPlan | None = None
+    review_delivery: ReviewDelivery | None = None
 
     def __post_init__(self) -> None:
         _ref(self.profile_ref)
@@ -312,6 +315,10 @@ class ExecutionProfile:
             if type(self.disagreement) is not DisagreementPlan:
                 raise ExecutionError("disagreement_profile_invalid")
             self.disagreement.check_profile(self)
+        if self.review_delivery is not None:
+            from .review_delivery import ReviewDelivery
+            if type(self.review_delivery) is not ReviewDelivery or self.role_scopes is None:
+                raise ExecutionError("execution_complete_review_scope_required")
 
 
     def document(self) -> dict[str, Any]:
@@ -334,6 +341,8 @@ class ExecutionProfile:
             result.update(schema_version=PROFILE_V5, disagreement=self.disagreement.document())
         if self.role_scopes is not None and any(scope.task_role == "calculation" for scope in self.role_scopes.scopes):
             result["schema_version"] = PROFILE_V6
+        if self.review_delivery is not None:
+            result.update(schema_version=PROFILE_V7, review_delivery=self.review_delivery.document())
         return result
 
     @property

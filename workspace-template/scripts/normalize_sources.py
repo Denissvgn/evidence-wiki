@@ -4385,8 +4385,13 @@ def frontmatter_for(
 
 
 def render_yaml(frontmatter: dict[str, Any]) -> str:
-    return yaml.safe_dump(
+    class AliasFreeDumper(yaml.SafeDumper):
+        def ignore_aliases(self, _data):
+            return True
+
+    return yaml.dump(
         frontmatter,
+        Dumper=AliasFreeDumper,
         sort_keys=False,
         allow_unicode=True,
         default_flow_style=False,

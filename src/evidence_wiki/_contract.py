@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "36"
+LIBRARY_API_VERSION = "37"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -97,6 +97,8 @@ LIBRARY_API_SURFACE = (
     "strict.check",
     "strict.admit",
     "strict.diagnose",
+    "strict.prepare_packet",
+    "strict.packet_schemas",
     "strict.prepare_review",
     "strict.register_review",
     "strict.export",
@@ -128,6 +130,7 @@ LIBRARY_API_SURFACE = (
     "research.session.reconcile_recovery",
     "research.session.calculate",
     "research.session.propose_calculation",
+    "research.session.assemble_review_packet",
     "research.session.prepare_acquisition",
     "research.session.host_job",
     "research.session.pending",
@@ -595,6 +598,15 @@ def contract() -> dict:
             "owner": "shared deterministic computation engine; native values, inputs, definitions, rounding, units and invariants remain authoritative",
             "roles": "explicit scoped Calculation proposer and separately configured native evaluator",
             "acceptance": "formula selection and agent agreement supply no semantic approval; strict v2 requires current owner results and authenticated independent reviews",
+        },
+        "machine_review_delivery": {
+            "schema_accessor": "evidence_wiki.review_packet_contracts.schema_document",
+            "profile": "research-execution-profile/v7 only with explicit immutable ReviewDelivery; older documents unchanged",
+            "packet": "complete blinded sources, native computations when configured, mechanical diagnostics and current bounded counter context",
+            "scope": "protected native owner revalidation per page, before dispatch, signing and application",
+            "delivery": "bounded host-assembled input and authenticated attempt digest; header alone is a planned descriptor",
+            "unknown": "missing, truncated, stale, withdrawn or oversized decisive context cannot authorize review application",
+            "semantics": "delivery proves provided bytes only; worker comprehension and genuine model quality remain unobserved",
         },
         "claim_diagnostics": {
             "schema": "evidence-claim-diagnostics/v1",

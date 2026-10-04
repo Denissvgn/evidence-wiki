@@ -623,6 +623,9 @@ def reserve(session, request_id, action, view):
     operation = "evaluate" if action["operation"] in {"evaluate", "adjudicate"} else "generate"
     session.context.require_grant("research_session.host_job." + operation)
     purpose = action.get("retry_purpose", action.get("purpose", operation))
+    if (getattr(session.execution.profile, "review_delivery", None) is not None and operation == "evaluate"
+            and purpose != "adjudicate" and "review_assembly_request_id" not in action):
+        refuse("COMPLETE_REVIEW_DELIVERY_REQUIRED")
     if purpose in {"repair", "adjudicate"} and getattr(session.execution.profile, "disagreement", None) is not None:
         effect = "revise" if purpose == "repair" else "adjudicate"
         if effect not in frozen["allowed_effects"] or frozen["host_capability_refs"][effect] is None:
@@ -653,13 +656,20 @@ def reserve(session, request_id, action, view):
         if not sources <= {row["source_id"] for row in bindings}:
             refuse("SOURCE_SCOPE_UNSUPPORTED")
         evidence_ids = {item["source_id"] for claim in [packet["claim"], *packet["premises"]] for item in claim["evidence"]}
+        if "review_assembly_request_id" in action and packet.get("computation") is not None:
+            evidence_ids.update(row["source_id"] for row in packet["computation"]["sources"])
         required_role = "critic" if purpose == "counterevidence" else "adjudicator" if purpose == "adjudicate" else next(item["role"]
             for item in frozen["required_evaluators"] if item["profile_ref"] == config_ref)
         if scope is not None and scope.task_role != required_role:
             refuse("HOST_CAPABILITY_UNAVAILABLE")
-        review_context = create_review_context(context_id="context-" + secrets.token_hex(16), task_role=required_role,
+        if "review_assembly_request_id" in action:
+            from .review_packet_execution import context_parameters
+            context_args = context_parameters(session, action["review_assembly_request_id"])
+        else:
+            context_args = {"context_id": "context-" + secrets.token_hex(16), "order_seed": secrets.token_bytes(32)}
+        review_context = create_review_context(context_id=context_args["context_id"], task_role=required_role,
             basis_id=prepared["result"]["basis_id"], owner_snapshot=packet, rubric=prepared["rubric"],
-            sources=[item for item in packets if item["source_id"] in evidence_ids], order_seed=secrets.token_bytes(32))
+            sources=[item for item in packets if item["source_id"] in evidence_ids], order_seed=context_args["order_seed"])
         if not review_context.document()["manifest"]["context_complete"]:
             refuse("REVIEW_CONTEXT_INCOMPLETE")
         input_document = {"packet": review_context.document(),
@@ -802,6 +812,12 @@ def reserve(session, request_id, action, view):
     if (cap["model_calls"] < 1 or cap["tokens"] < 1 or any(cap[key] > remaining[key] for key in ("model_calls", "tool_calls", "tokens"))
             or Decimal(cap["cost"]) > Decimal(remaining["cost"])):
         refuse("BUDGET_EXHAUSTED")
+    if "review_assembly_request_id" in action:
+        if operation != "evaluate" or scope is None or review_context is None:
+            refuse("HOST_CAPABILITY_UNAVAILABLE")
+        from .review_packet_execution import bind_input
+        input_document = bind_input(session, assembly_request_id=action["review_assembly_request_id"],
+            claim_id=action["claim_id"], context=review_context, input_document=input_document)
     context_id = review_context.document()["context_id"] if review_context is not None else "context-" + secrets.token_hex(16)
     scope_fields = {} if scope is None else {"task_role": scope.task_role, "role_scope_sha256": scope.sha256,
         "context_id": context_id, "packet_sha256": hashlib.sha256(canonical(input_document)).hexdigest()}
@@ -826,6 +842,8 @@ def reserve(session, request_id, action, view):
     if current(session)["basis_id"] != view["basis_id"]:
         refuse("BASIS_CHANGED")
     extras = {}
+    if "review_assembly_request_id" in action:
+        extras["review_assembly_request_id"] = action["review_assembly_request_id"]
     if purpose == "calculation":
         extras.update(calculation_result=detached(action["calculation_result"]))
     if purpose in {"coverage", "counterevidence"}:
@@ -1173,6 +1191,9 @@ def _validate_application(session, attempt, observation, application, *, allow_r
     records = retained(session)
     view = current(session)
     row = _attempt_rows(records)[attempt.attempt_id]
+    if "review_assembly_request_id" in row:
+        from .review_packet_execution import require_current
+        require_current(session, attempt, row)
     if row.get("retry_purpose", row.get("purpose")) == "adjudicate" and not any(
             item["profile_ref"] == attempt.config_ref and item["qualified"] is True and item["independent"] is True
             for item in view["qualification"].get("auxiliary_profiles", [])):
@@ -1361,6 +1382,9 @@ def _apply(session, attempt_id):
                     output = {key: findings[key] for key in ("verdicts", "rationale")}
                 elif type(output) is not dict or set(output) != {"verdicts", "rationale"}:
                     refuse("RESULT_INVALID")
+                if "review_assembly_request_id" in row:
+                    from .review_packet_execution import require_current
+                    require_current(session, attempt, row)
                 envelope = session.execution.review_signer.registration(prepared, output["verdicts"], output["rationale"],
                     child_id(attempt_id, "review"), now_utc(), config_ref=attempt.config_ref)
                 _verify_review_controller(session, attempt, envelope)
@@ -1520,6 +1544,8 @@ def advance(session, *, request_id, expected_basis_id):
         if needs_probe:
             from .calibration_probes import refresh
             refresh(session, request_id)
+    from .review_packet_execution import automatic
+    complete_delivery = automatic(session, request_id=request_id, expected_basis_id=expected_basis_id)
     attempt, action, replay = None, None, None
     with gate(session):
         records = retained(session)
@@ -1597,6 +1623,16 @@ def advance(session, *, request_id, expected_basis_id):
             append(session, "execution_advance", child_id(request_id, "advance_intent"), {"advance_id": request_id,
                 "before_basis_id": expected_basis_id, "action": action,
                 "consumes_step": view["execution"]["steps_used"] < session.execution.profile.total_steps})
+        if complete_delivery is not None and action["operation"] != "terminal":
+            if complete_delivery.get("unavailable"):
+                append(session, "execution_reservation_failed", child_id(request_id, "complete_context_failure"),
+                    {"operation": action["operation"], "error_code": complete_delivery["error_code"], "field": complete_delivery["field"]})
+                action = _terminal_action(session, view, "blocked_external", "executor_unavailable")
+            elif (action["operation"] != complete_delivery["operation"] or action.get("claim_id") != complete_delivery["claim_id"]
+                    or action.get("original_id") != complete_delivery["original_id"] or action.get("config_ref") != complete_delivery["config_ref"]):
+                refuse("BASIS_CHANGED")
+            else:
+                action = {**action, "review_assembly_request_id": complete_delivery["assembly_request_id"]}
         if action["operation"] in {"generate", "repair", "evaluate", "adjudicate", "plan"}:
             try:
                 prior = next((row["data"] for row in records if row["kind"] == "execution_attempt"

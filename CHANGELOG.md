@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add protected blinded review pages and opt-in complete host delivery with frozen
+  packet/input bounds, current source rights, shared context identities and native
+  computation, mechanical and counter context. Missing decisive pages block review;
+  host delivery remains separate from worker understanding and accepted release.
+
 - Add current restart inspection and exact retained-effect reconciliation without
   repeating model or fetch work, changing ownership or reopening terminal runs.
 

@@ -169,6 +169,15 @@ postconditions under unchanged host controls, policy and execution identity.
 It does not repeat model or fetch work, renew allowance, transfer foreign
 ownership or reopen terminal runs.
 
+Version `37` adds `strict.prepare_packet`, `strict.packet_schemas` and
+`session.assemble_review_packet`, with operation matrix `20`. Optional
+`ReviewDelivery` produces profile/v7 and freezes complete host delivery bounds.
+Automatic Evidence and Critic attempts share one blinded context and exact
+required pages. Current native evidence and permissions are checked on every
+page access and before dispatch, signing and application. Host delivery does
+not establish worker consumption, comprehension, semantic correctness or
+accepted release.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -742,6 +751,8 @@ commit outcome instead of implying rollback.
 | `strict.check` | `ws.strict.check()` |
 | `strict.admit` | `ws.strict.admit(proposal, *, request_id, expected_revision)` |
 | `strict.prepare_review` | `ws.strict.prepare_review(claim_id)` |
+| `strict.prepare_packet` | `ws.strict.prepare_packet(claim_id, *, context_id, task_role="evaluator", source_ids=(), page_chars=4096)` |
+| `strict.packet_schemas` | `ws.strict.packet_schemas()` |
 | `strict.register_review` | `ws.strict.register_review(envelope)` |
 | `strict.export` | `ws.strict.export()` |
 
@@ -890,6 +901,7 @@ The schema is available through `evidence_wiki.claim_diagnostics.schema_document
 | `research.session` | `ws.research.session(policy, *, run_id, execution=None)` |
 | calculation observation | `session.calculate(*, request_id, as_of=None)` |
 | formula interpretation | `session.propose_calculation(*, request_id, original_id, config_ref, as_of=None)` |
+| complete review assembly | `session.assemble_review_packet(*, request_id, claim_id, task_role="evaluator", page_chars=4096)` |
 | recovery observation | `session.recovery_status(*, after_sequence=0, max_effects=32)` |
 | retained-effect reconciliation | `session.reconcile_recovery(*, request_id, expected_basis_id)` |
 | session observation | `session.current()` and `session.next()` |
@@ -2023,3 +2035,59 @@ context is refused rather than silently omitted. Completed examination replay
 preserves its historical effect records, then rechecks current exact material
 before returning quotations. Withdrawn access or a changed source returns
 blocked metadata with no cached findings or query text.
+
+
+### Complete Blinded Review Delivery
+
+`ws.strict.prepare_packet` returns a protected handle. Its bounded `context_id`
+is a host correlation label: the library combines it with a private random seed
+to produce an opaque worker context ID. Automatic delivery derives one shared
+opaque context from its parent binding. Caller labels stay with the parent.
+`handle.header()` lists
+blinded claim, premise, source and required page descriptors. `handle.page(page_id)`
+returns the exact named source or decisive section slice. `handle.complete(pages)`
+checks the supplied pages against that immutable manifest and returns missing
+page IDs. The handle stays bound to its original open workspace and active
+`HostContext`; closing the workspace or changing the host selection invalidates
+access. Each operation checks current native material, source permissions,
+mechanical diagnostics and calculation inputs. Cached pages grant no later
+access to withdrawn evidence.
+
+The header is a delivery plan: `complete_evidence_delivered` remains false.
+`complete.complete` establishes that every required page was supplied and no
+known decisive section is missing. It does not establish an exhaustive
+counterevidence search. A standalone packet with no alternative source selector
+has no observed counter context; the automatic route supplies the permitted run
+source set and requires the supported native examination configuration.
+Mechanical matches and bounded search results supply no semantic approval.
+
+For automatic delivery, construct the final `ExecutionProfile` with
+`review_delivery=ReviewDelivery(page_chars=4096, max_packet_bytes=196608,
+max_input_bytes=524288)` before issuing its exact evaluator qualifications.
+Each required Evidence or Critic configuration needs a frozen scope and exact
+current qualification, together with current native source and examination owners. The page width accepts 256–16384
+characters; packet bounds accept 4096–196608 bytes and complete input bounds
+4096–524288 bytes. The input bound must accommodate the packet bound. These
+frozen limits apply to the complete worker input, including instructions.
+Existing profiles retain their original encodings and behavior.
+
+Grant `review_page_operations.prepare` and `review_page_operations.page` for
+protected reads. Session assembly additionally requires
+`research_session.assemble_review_packet`, `research_session.advance` and
+`review_page_session.assembled`;
+configured evaluator delivery uses `review_packet_execution.bind` plus the
+existing execution and native review grants. Automatic first-pass Evidence and
+Critic reservations require complete delivery. Direct job submission cannot
+bypass that requirement. Regular and paged context identities, source aliases
+and input digests are pinned together; computation is a required decisive
+section when configured.
+
+Session assembly records host delivery in the existing run journal and charges
+its native read reservation. Repeating the exact request rechecks retained
+material; it does not dispatch a model. New assembly intents are refused after
+terminal completion. Missing pages, stale sources, withdrawn permissions,
+unsupported examination context or exceeded bounds cannot authorize review
+application. The canonical drive stops finitely when complete delivery is
+unavailable. `worker_consumption` and `worker_comprehension` remain
+`not_observed`; `semantic_approval` remains `not_evaluated`. Only independently
+qualified current reviews and the native release owner decide acceptance.

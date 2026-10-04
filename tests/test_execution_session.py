@@ -29,6 +29,7 @@ from evidence_wiki import (
     QualificationAuthority,
     QualifiedEvaluators,
     ResearchExecution,
+    ReviewDelivery,
     RunPolicy,
     SigningIdentity,
     Workspace,
@@ -234,7 +235,8 @@ def fixture(tmp_path, monkeypatch, request=None):
             role.prompt_version) for role in roles)
     selected_meter = HostProtocolSimulationMeter if options.get("simulated_model_usage") else LocalMeter
     profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
-        roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement)
+        roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement,
+        review_delivery=ReviewDelivery(**options.get("review_delivery_limits", {})) if options.get("review_delivery") else None)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
     generator = "import json,sys; json.load(sys.stdin); print(" + repr(json.dumps(generated)) + ")"
     if options.get("acquisition_choice"):
@@ -264,6 +266,10 @@ def fixture(tmp_path, monkeypatch, request=None):
     worker = tmp_path / "workers"
     worker.mkdir()
     commands = {"researcher": (sys.executable, "-c", generator), "profile-a": (sys.executable, "-c", evaluator)}
+    if options.get("complete_packet_capture"):
+        capture_path = worker / "complete-input.json"
+        capture_reader = "envelope=json.load(sys.stdin); __import__('pathlib').Path(" + repr(str(capture_path)) + ").write_text(json.dumps(envelope)); d=envelope['input']; "
+        commands["profile-a"] = (sys.executable, "-c", evaluator.replace("d=json.load(sys.stdin)['input']; ", capture_reader))
     if options.get("role_isolation"):
         commands["profile-b"] = (sys.executable, "-c", evaluator)
     if options.get("disagreement"):
@@ -329,7 +335,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     signer = HostReviewSigner("lab-authority", "1", SigningIdentity("researcher", "runner", "runner-key", "runner", "generator", bytes.fromhex(KEYS["runner"])),
         reviewers, "2027-01-01T00:00:00Z")
     execution = ResearchExecution(executor, qualifications=QualifiedEvaluators(qualifications, issuer), review_signer=signer, observer_key=b"o" * 32)
-    context = HostContext([root], GRANTS, "caller", [root], authority_file=authority.policy_path,
+    context = HostContext([root], GRANTS | ({"review_page_operations.prepare", "review_page_operations.page",
+        "review_page_session.assembled", "review_packet_execution.bind", "review_packet_execution.reserve",
+        "coverage_observation.observe", "research_session.assemble_review_packet"} if options.get("review_delivery") else set()), "caller", [root], authority_file=authority.policy_path,
         state_directory=authority.host, mutation_control_directory=control,
         controller_refs={"host_worker": "runner", "generator": "runner", "evaluator": "evaluator"},
         role_controller_refs=tuple((role.config_ref, role.role, role.controller_ref) for role in roles) if registry else ())

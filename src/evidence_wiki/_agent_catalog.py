@@ -10,6 +10,9 @@ STRICT_SCHEMAS = tuple(f"evidence-strict-{name}/v{version}" for name, version in
 COMPUTATION_SCHEMAS = ("evidence-computation-definition/v1", "evidence-computation-result/v1")
 RECOVERY_SCHEMAS = ("research-recovery-status/v1",)
 CALCULATION_SCHEMAS = ("evidence-calculation-proposal/v1", "evidence-calculation-selection/v1", "research-calculation-context/v1")
+REVIEW_PACKET_SCHEMAS = ("research-review-delivery/v1", "research-review-page/v1", "research-paged-review/v1",
+    "research-review-packet/v1", "research-host-assembled-review/v1", "research-complete-review-delivery/v1",
+    "research-review-sections/v1", "research-blinded-review-input/v1")
 GUIDES = {
     "bootstrap": "docs/installed-agent.md", "pack-authoring": "skills/domain-pack-create.md",
     "initialization": "skills/research-init.md", "init-profile": "docs/workspace-init-profile.md",
@@ -30,7 +33,7 @@ def resource_paths() -> dict[str, str]:
     """Return fixed IDs; caller data can never add an inventory entry."""
     paths = {f"guide/{name}/v1": f"workspace-template/{path}" for name, path in GUIDES.items()}
     paths["guide/orchestrator/v1"] = "orchestrator/skills/research-orchestrate.md"
-    for schema_id in (*schema_ids(), *STRICT_SCHEMAS, *COMPUTATION_SCHEMAS, *CALCULATION_SCHEMAS, *RECOVERY_SCHEMAS):
+    for schema_id in (*schema_ids(), *STRICT_SCHEMAS, *COMPUTATION_SCHEMAS, *CALCULATION_SCHEMAS, *RECOVERY_SCHEMAS, *REVIEW_PACKET_SCHEMAS):
         paths[schema_id] = "workspace-template/docs/agent-resources/" + schema_id.replace("/", "--") + ".json"
     for stem in (*COMPUTATION_SCRIPTS, "_strict_contract", "_strict_evidence", "strict_evidence"):
         paths[f"script/{stem}/v1"] = f"workspace-template/scripts/{stem}.py"

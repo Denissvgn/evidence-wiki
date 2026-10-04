@@ -71,6 +71,12 @@ def examine(session, *, request_id, question_slug, config_ref, kind, source_ids=
         if row is None:
             fail("owned_examination_attempt_missing")
         return settle(session, request_id, session.execution.attempt(row["attempt"]), row["original_id"], saved)
+    complete_assembly = None
+    if kind == "counterevidence" and row is None and getattr(session.execution.profile, "review_delivery", None) is not None:
+        from .review_page_session import assembled
+        complete_assembly = native.child_id(request_id, "complete_review")
+        assembled(session, request_id=complete_assembly, claim_id=claim_id, task_role="critic",
+            page_chars=session.execution.profile.review_delivery.page_chars)
     with native.gate(session):
         native._begin(session)
         current = native.current(session)
@@ -92,6 +98,8 @@ def examine(session, *, request_id, question_slug, config_ref, kind, source_ids=
                 if claim_id not in {claim["id"] for claim in instruction["claims"]}:
                     fail("claim_outside_frozen_question")
                 action["claim_id"] = claim_id
+                if complete_assembly is not None:
+                    action["review_assembly_request_id"] = complete_assembly
             attempt = native.reserve(session, attempt_id, action, current)
         else:
             attempt = session.execution.attempt(row["attempt"])
@@ -130,13 +138,16 @@ def examine(session, *, request_id, question_slug, config_ref, kind, source_ids=
                         verify_controller(session, attempt)
                         records = native.retained(session)
                         owned = next(item["data"] for item in records if item["kind"] == "execution_attempt" and item["data"]["attempt"]["attempt_id"] == attempt_id)
+                        if "review_assembly_request_id" in owned:
+                            from .review_packet_execution import require_current
+                            require_current(session, attempt, owned)
                         context = ReviewContext.restore(attempt.input_document["packet"], owned["review_context"])
                         findings = translate(instruction, context, observed["output"])
                     result = {"status": "observed", "reason": "owner_effect_and_semantic_checks_required", "accepted": False, "findings": findings,
                         "instruction_basis": instruction["basis_id"], "attempt_ref": digest(attempt.document()), "searches": []}
                 except UsageError as error:
                     reason = error.details.get("reason")
-                    result["reason"] = reason if error.error_code == "COVERAGE_EXAMINATION_INVALID" and type(reason) is str else "examination_output_invalid"
+                    result["reason"] = "examination_complete_context_unavailable" if error.error_code == "REVIEW_PAGE_REFUSED" else reason if error.error_code == "COVERAGE_EXAMINATION_INVALID" and type(reason) is str else "examination_output_invalid"
                 except (ValueError, KeyError, TypeError):
                     result["reason"] = "examination_output_invalid"
         if result["status"] == "observed":
@@ -151,6 +162,9 @@ def apply_findings(session, request_id, attempt, result):
     instruction = row["examination_instruction"]
     def check():
         session._check("advance", write=True)
+        if "review_assembly_request_id" in row:
+            from .review_packet_execution import require_current
+            require_current(session, attempt, row)
         fresh = observe(session.root, question_slug=instruction["question_slug"],
             source_ids=[source["source_id"] for source in instruction["source_contexts"]])
         if (fresh["basis_id"] != instruction["basis_id"]

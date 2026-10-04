@@ -19,6 +19,7 @@ from evidence_wiki._agent_catalog import (  # noqa: E402
     CALCULATION_SCHEMAS,
     CATALOG_PATH,
     RECOVERY_SCHEMAS,
+    REVIEW_PACKET_SCHEMAS,
     resource_paths,
 )
 from evidence_wiki._contract import LIBRARY_API_VERSION  # noqa: E402
@@ -27,6 +28,7 @@ from evidence_wiki.calculation_contracts import schema_document as calculation_s
 from evidence_wiki.frameworks import portable_bundle, tool_schemas, validate_bundle  # noqa: E402
 from evidence_wiki.onboarding_schemas import schema_document, schema_ids  # noqa: E402
 from evidence_wiki.recovery_contracts import schema_document as recovery_schema
+from evidence_wiki.review_packet_contracts import schema_document as review_packet_schema
 
 
 def encoded(value: dict) -> bytes:
@@ -43,6 +45,7 @@ def exports() -> dict[str, bytes]:
     schemas.update(strict.schema_documents())
     schemas.update(computation.schemas())
     schemas.update({key:calculation_schema(key) for key in CALCULATION_SCHEMAS})
+    schemas.update({key:review_packet_schema(key) for key in REVIEW_PACKET_SCHEMAS})
     schemas.update({key:recovery_schema() for key in RECOVERY_SCHEMAS})
     schemas.update(tool_schemas())
     output = {paths[key]: encoded(value) for key, value in schemas.items()}

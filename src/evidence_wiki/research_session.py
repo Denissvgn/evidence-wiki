@@ -634,6 +634,14 @@ class ResearchSession:
 
     @_boundary
     @_serialized
+    def assemble_review_packet(self, *, request_id, claim_id, task_role="evaluator", page_chars=4096):
+        """Retain complete host delivery; no model comprehension is inferred."""
+        self._check("assemble_review_packet", write=True)
+        from .review_page_session import assembled
+        return assembled(self, request_id=request_id, claim_id=claim_id, task_role=task_role, page_chars=page_chars)
+
+    @_boundary
+    @_serialized
     def propose_calculation(self, *, request_id, original_id, config_ref, as_of=None):
         """Run a scoped formula interpreter; native arithmetic remains authoritative."""
         self._check("propose_calculation", write=True)

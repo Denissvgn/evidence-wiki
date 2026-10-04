@@ -20,6 +20,14 @@ DOMAIN_PACKS_DIR = "domain-packs"
 ORCHESTRATOR_DIR = "orchestrator"
 ORCHESTRATOR_SKILL = "research-orchestrate"
 REQUIRED_STARTER_ASSETS = (
+    "docs/agent-resources/research-review-delivery--v1.json",
+    "docs/agent-resources/research-review-page--v1.json",
+    "docs/agent-resources/research-paged-review--v1.json",
+    "docs/agent-resources/research-review-packet--v1.json",
+    "docs/agent-resources/research-host-assembled-review--v1.json",
+    "docs/agent-resources/research-complete-review-delivery--v1.json",
+    "docs/agent-resources/research-review-sections--v1.json",
+    "docs/agent-resources/research-blinded-review-input--v1.json",
     "scripts/_native_fs.py",
     "scripts/_host_context.py",
     "scripts/_owner_paths.py",

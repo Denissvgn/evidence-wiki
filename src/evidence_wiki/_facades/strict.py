@@ -59,6 +59,24 @@ class StrictNamespace(Namespace):
         return self._call("strict_evidence", "run_operation", self._root,
                           operation="prepare-review", claim_id=claim_id)
 
+    def prepare_packet(self, claim_id, *, context_id, task_role="evaluator", source_ids=(), page_chars=4096):
+        """Return protected blinded pages; each access rechecks current owners."""
+        self._workspace._check_open()
+        from ._base import call_seam
+        def load(_stem):
+            from .. import review_page_operations
+            return review_page_operations
+        handle = call_seam(load, "review_page_operations", "prepare", self._root, claim_id=claim_id,
+            context_id=context_id, task_role=task_role, source_ids=source_ids, page_chars=page_chars)
+        from dataclasses import replace
+        return replace(handle, _workspace=self._workspace)
+
+    def packet_schemas(self):
+        """Return closed machine packet, page and delivery contracts."""
+        self._workspace._check_open()
+        from ..review_packet_contracts import schemas
+        return schemas()
+
     def register_review(self, envelope: dict[str, Any]) -> dict[str, Any]:
         """Register an existing host-signed envelope through the authenticated owner.
 
