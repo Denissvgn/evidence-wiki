@@ -43,6 +43,16 @@ class ResearchNamespace(Namespace):
         with self.session(policy, run_id=run_id, execution=execution) as selected:
             return selected.propose_calculation(request_id=request_id, original_id=original_id, config_ref=config_ref, as_of=as_of)
 
+    def recovery_status(self, policy, *, run_id, execution, after_sequence=0, max_effects=32):
+        """Observe bounded retained effects and current holders through the session."""
+        with self.session(policy, run_id=run_id, execution=execution) as selected:
+            return selected.recovery_status(after_sequence=after_sequence, max_effects=max_effects)
+
+    def reconcile_recovery(self, policy, *, run_id, execution, request_id, expected_basis_id):
+        """Reconcile exact retained custody using the original immutable binding."""
+        with self.session(policy, run_id=run_id, execution=execution) as selected:
+            return selected.reconcile_recovery(request_id=request_id, expected_basis_id=expected_basis_id)
+
     def run_cycle(self, policy, *, run_id, execution, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None):
         """One host invocation over existing session and authenticated effect owners."""
         with self.session(policy,run_id=run_id,execution=execution) as selected:

@@ -1039,7 +1039,7 @@ def _recover_history(session):
             continue
         data = row["data"]
         identifier = data["reservation"]["attempt_id"]
-        if identifier in observed | failed:
+        if identifier in observed:
             continue
         operation, arguments = data["operation"], data["arguments"]
         def recover(control, operation=operation, arguments=arguments, identifier=identifier):
@@ -1056,8 +1056,9 @@ def _recover_history(session):
             _native_call(session, identifier, operation, arguments, None, recover=recover)
         except (Exception, SystemExit) as error:
             with gate(session):
-                append(session, "execution_native_history_unknown", child_id(identifier, "history_unknown"),
-                    {"attempt_id": identifier, "reason": getattr(error, "error_code", "native_history_unavailable")})
+                if identifier not in failed:
+                    append(session, "execution_native_history_unknown", child_id(identifier, "history_unknown"),
+                        {"attempt_id": identifier, "reason": getattr(error, "error_code", "native_history_unavailable")})
 
 
 def _source_prepare(session):

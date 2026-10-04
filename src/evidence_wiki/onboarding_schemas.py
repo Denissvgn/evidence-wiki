@@ -27,7 +27,7 @@ LIMITS = {
     "routes": 256,
     "steps": 64,
     "files": 4096,
-    "resources": 64,
+    "resources": 96,
     "impact_items": 1000,
 }
 

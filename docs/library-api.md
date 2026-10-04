@@ -153,6 +153,22 @@ queries, source slices and exclusions; unresolved objections stop release.
 Current host model usage, calibration, source rights and the existing producer
 attestation are required. Empty bounded search remains unknown.
 
+Version `35` adds `research.calculate`, `research.propose_calculation` and
+matching session methods, with operation matrix `18`. A scoped formula agent
+selects exact native values and references; the shared computation engine owns
+arithmetic, input lineage, units, rounding and invariants. Selected references
+must appear in the same original question's inference before admission, review
+or release. Calculation profiles use job/v4, review-context/v2 and next/v4;
+previous profile encodings remain supported.
+
+Version `36` adds `research.recovery_status`, `research.reconcile_recovery` and
+matching session methods, with operation matrix `19`. Inspection returns current
+holders, unresolved reservations, the original deadline and a bounded retained
+effect page. Reconciliation observes exact existing receipts or question
+postconditions under unchanged host controls, policy and execution identity.
+It does not repeat model or fetch work, renew allowance, transfer foreign
+ownership or reopen terminal runs.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -872,6 +888,10 @@ The schema is available through `evidence_wiki.claim_diagnostics.schema_document
 | `research.next` | `ws.research.next(policy, *, run_id=None, execution=None)` |
 | `research.run_cycle` | `ws.research.run_cycle(policy, *, run_id, execution, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None)` |
 | `research.session` | `ws.research.session(policy, *, run_id, execution=None)` |
+| calculation observation | `session.calculate(*, request_id, as_of=None)` |
+| formula interpretation | `session.propose_calculation(*, request_id, original_id, config_ref, as_of=None)` |
+| recovery observation | `session.recovery_status(*, after_sequence=0, max_effects=32)` |
+| retained-effect reconciliation | `session.reconcile_recovery(*, request_id, expected_basis_id)` |
 | session observation | `session.current()` and `session.next()` |
 | session advance | `session.advance(*, request_id, expected_basis_id)` |
 | bounded terminal route | `session.run_until_terminal(*, request_id, expected_basis_id, max_steps=1)` |
@@ -948,6 +968,21 @@ result = workspace.research.run_cycle(
     planner_config_ref="configured-planner",  # omit for deterministic selection
 )
 ```
+
+Restart with the same policy, run ID, host context and `ResearchExecution`.
+Grant `research_session.recovery_status` for inspection and
+`research_session.reconcile_recovery` for explicit reconciliation. The facade
+methods accept `policy`, `run_id` and `execution` and delegate to this same
+session owner. `after_sequence` is a full native journal sequence cursor;
+`max_effects` is between 1 and 64. `truncated` and `next_sequence` identify the
+remaining effect page. Status values are `not_started`, `reconcilable`,
+`ownership_blocked` and `terminal`; advice is never an authorization.
+
+Changed instructions, policy or private control selection refuse the original
+binding. Use a correctly authorized new run or requirement revision rather
+than altering the retained run. Unknown external work stays reserved for its
+original pending owner. A later exact native receipt can settle historical
+unknown custody, preserving the earlier unknown event and original deadline.
 
 The host grants `research_session.run_cycle` plus the existing session,
 current-view, advancement, intake and native lifecycle/effect grants. A selected

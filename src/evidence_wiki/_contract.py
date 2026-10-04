@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "35"
+LIBRARY_API_VERSION = "36"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -107,6 +107,8 @@ LIBRARY_API_SURFACE = (
     "mutations.reconcile",
     "research.current",
     "research.next",
+    "research.recovery_status",
+    "research.reconcile_recovery",
     "research.calculate",
     "research.propose_calculation",
     "research.run_cycle",
@@ -122,6 +124,8 @@ LIBRARY_API_SURFACE = (
     "research.session.run_acquisition",
     "research.session.examine_coverage",
     "research.session.examine_counterevidence",
+    "research.session.recovery_status",
+    "research.session.reconcile_recovery",
     "research.session.calculate",
     "research.session.propose_calculation",
     "research.session.prepare_acquisition",
@@ -573,6 +577,14 @@ def contract() -> dict:
             "release": "current qualified independent findings and producer provenance; material objections block; bounded absence remains unknown",
             "next_schema": "research-session-next/v3 for examination work; existing next/v2 retains its operation enum",
             "acceptance": "no semantic approval or rights conferred by proposal, anchor match, query result or coverage link",
+        },
+        "research_recovery": {
+            "schema": "research-recovery-status/v1",
+            "schema_accessor": "evidence_wiki.recovery_contracts.schema_document",
+            "owner": "existing authenticated native run journal, original immutable host/policy/execution binding and current question holders",
+            "status": "read-only bounded effect inventory and current next work; terminal observation cannot reopen a run",
+            "reconcile": "observe exact retained receipts or question postconditions; no model/fetch redispatch, lease renewal or foreign ownership transfer",
+            "unknown": "unobserved external effects remain occupied; history_unknown may later acquire an exact owner receipt",
         },
         "calculation_interpretation": {
             "schemas": ["evidence-calculation-proposal/v1", "evidence-calculation-selection/v1", "research-calculation-context/v1"],

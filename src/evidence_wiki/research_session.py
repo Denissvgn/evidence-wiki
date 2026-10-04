@@ -641,6 +641,19 @@ class ResearchSession:
         return propose(self, request_id=request_id, original_id=original_id, config_ref=config_ref, as_of=as_of)
 
     @_boundary
+    def recovery_status(self, *, after_sequence=0, max_effects=32):
+        """Observe current retained custody without beginning or modifying a run."""
+        from .research_recovery import status
+        return status(self, after_sequence=after_sequence, max_effects=max_effects)
+
+    @_boundary
+    @_serialized
+    def reconcile_recovery(self, *, request_id, expected_basis_id):
+        """Observe exact retained effects without repeating model or source work."""
+        from .research_recovery import reconcile
+        return reconcile(self, request_id=request_id, expected_basis_id=expected_basis_id)
+
+    @_boundary
     @_serialized
     def host_job(self, *, request_id, operation, payload, original_text=None):
         """Retain an inert bounded job; execution and authentication stay in the host."""

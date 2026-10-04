@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "18"
+OPERATION_MATRIX_VERSION = "19"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -65,6 +65,8 @@ _ROWS = (
     ("research.requirements.prepare_revision", None, "private mutation-control gates only; inert exact-scope revision request", "native workspace gate and frozen envelope grant", "none"),
     ("research.requirements.revise", None, "owned append-only requirements, new question/coverage artifacts and historical mutation receipt; no acceptance", "existing native workspace/request gates, staged prior-byte checks and requirements published last", "none"),
     ("research.next", None, "none; inert typed next work", "bounded canonical observations", "none"),
+    ("research.recovery_status", None, "none; bounded current custody and retained-effect inventory", "existing authenticated run journal and closing current basis", "none; no dispatch or polling"),
+    ("research.reconcile_recovery", None, "retained exact receipt observations; terminal reads only", "same native workspace/run journal and original immutable binding", "none; no model or fetch redispatch"),
     ("research.calculate", None, "retained current deterministic calculation observation", "same native run and current source/usage owners", "none; shared deterministic engine"),
     ("research.propose_calculation", None, "one authenticated inert formula selection; no acceptance", "same native run and configured role budgets", "explicit scoped Calculation executor only"),
     ("research.run_cycle", None, "finite canonical research drive, current original accounting and terminal closure", "existing workspace/run/effect owners; gates released during host execution", "explicit scoped ResearchExecution only"),
@@ -78,6 +80,8 @@ _ROWS = (
     ("research.session.run_acquisition", None, "one authenticated inert selection followed by fixed native evidence steps or finite refusal", "existing run/role/request/source budgets and canonical capture/fulfillment owners", "explicit configured proposer and authorized native web transport only"),
     ("research.session.examine_coverage", None, "authenticated bounded coverage proposal and canonical links/evaluation", "existing native run and mutation owners; current frozen requirements and admitted anchors", "explicit scoped coverage executor; no reviewer approval"),
     ("research.session.examine_counterevidence", None, "authenticated blinded findings and observed bounded queries", "existing native run journal and current source/producer/evaluator authority; material objection release stops", "explicit independent scoped critic; bounded absence remains unknown"),
+    ("research.session.recovery_status", None, "none; current holders, original deadline and unresolved effects", "authenticated native journal and closing basis checks", "none; no run start or dispatch"),
+    ("research.session.reconcile_recovery", None, "append exact recovery intent and later owner receipt observations; terminal immutable", "native run gates, unchanged controls and exact prior effect identities", "none; no replacement effects or ownership transfer"),
     ("research.session.calculate", None, "retained current deterministic calculation observation", "same native run and current source/usage owners", "none; shared deterministic engine"),
     ("research.session.propose_calculation", None, "one authenticated formula selection; independent v2 verifier required", "same native run and configured role budgets", "explicit scoped Calculation executor only"),
     ("research.session.choose_acquisition", None, "one scoped authenticated proposer attempt and inert choice application", "existing native execution journal and role/run accounting; gates released for host work", "configured bounded AgentExecutor only; no tool or source authority in output"),

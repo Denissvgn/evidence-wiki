@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Add current restart inspection and exact retained-effect reconciliation without
+  repeating model or fetch work, changing ownership or reopening terminal runs.
+
+- Integrate scoped coverage and counterevidence examination plus current native
+  calculation references with independently authenticated review and release.
+
 - Expose read-only per-claim native source and anchor diagnostics while keeping
   mechanical matching, current usage, semantic review and accepted release distinct.
 

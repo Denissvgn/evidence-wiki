@@ -19,7 +19,7 @@ from ._filesystem import os
 from .errors import UsageError
 
 MAX_BYTES = 1_048_576
-MAX_RESOURCES = 64
+MAX_RESOURCES = 96
 
 
 def _refuse(reason: str, *, unknown: bool = False) -> None:
