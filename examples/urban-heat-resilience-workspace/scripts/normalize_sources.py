@@ -681,6 +681,8 @@ def is_stale(
     ``missing_structured_view_key``.
     """
     frontmatter = read_output_frontmatter(output_path)
+    if record.get("kind") == "host_capture" and load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization").requires_refresh(record, frontmatter):
+        return True
     profile = evaluate_html_usability(
         frontmatter, source_kind=record.get("kind"), effective_method=effective_method,
     )
@@ -954,7 +956,8 @@ def normalization_method(
     built-in extractor. Callers that pass no adapters get the pre-adapter behaviour.
     """
     if record.get("kind") == "host_capture":
-        return "host_text"
+        host = load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization")
+        return host.format_method(record) or "host_text"
     try:
         execution_profile = _execution_evidence.profile_for(record)
     except _execution_evidence.EvidenceInvalid:
@@ -1097,8 +1100,8 @@ def normalize_selected_record(
 ) -> NormalizedSource:
 
     require_host_intake(config, [item.record])
-    if item.method == "host_text":
-        return normalize_host_capture_record(project_root, item.record)
+    if item.record.get("kind") == "host_capture":
+        return normalize_host_capture_record(project_root, item.record, pdf_extractor=pdf_extractor)
     if pdftotext_path is not None:
         if pdf_extractor is not None:
             raise TypeError("pass pdf_extractor or pdftotext_path, not both")
@@ -1136,7 +1139,10 @@ def record_raw_paths(record: dict[str, Any]) -> list[str]:
     return [path for path in value if isinstance(path, str) and path]
 
 
-def normalize_host_capture_record(project_root: Path, record: dict[str, Any]) -> NormalizedSource:
+def normalize_host_capture_record(project_root: Path, record: dict[str, Any], *, pdf_extractor=None) -> NormalizedSource:
+    profile = record.get("provenance", {}).get("host_capture", {})
+    if profile.get("schema_version") == "evidence-host-capture/v2":
+        return load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization").normalize(project_root, record, pdf_extractor=pdf_extractor)
     capture = load_workspace_module(_SCRIPT_DIR, "_host_capture")
     metadata = record.setdefault("metadata", {})
     warnings = manifest_warnings(record)
@@ -2637,6 +2643,7 @@ def normalize_pdf_record(
     project_root: Path,
     record: dict[str, Any],
     extractor: PdfExtractor | str,
+    *, _extraction: PdfExtractionResult | None = None,
 ) -> NormalizedSource:
     source_id = str(record.get("id", "unknown"))
     warnings = manifest_warnings(record)
@@ -2648,7 +2655,7 @@ def normalize_pdf_record(
     if pdf_path is None or not pdf_path.is_file():
         raise RuntimeError(f"{source_id}: raw PDF file not found: {raw_pdf}")
 
-    extraction = extract_pdf(pdf_path, raw_pdf, extractor)
+    extraction = _extraction if _extraction is not None else extract_pdf(pdf_path, raw_pdf, extractor)
     extracted_text = extraction.reading_text
     warnings.extend(extraction.warnings)
     if not extraction.extractor_ran:
@@ -4287,7 +4294,9 @@ def frontmatter_for(
         "normalized_format": NORMALIZED_FORMAT_VERSION,
         "source_id": record.get("id"),
         "source_kind": record.get("kind"),
-        **({"host_capture": metadata.get("host_capture")} if source.extraction_method == "host_text" else {}),
+        **({"host_capture": metadata.get("host_capture")} if record.get("kind") == "host_capture" else {}),
+        **({"host_capture_normalization_version": 1}
+           if record.get("kind") == "host_capture" and metadata.get("host_capture", {}).get("schema_version") == "evidence-host-capture/v2" else {}),
         "status": status_for(source),
         "evidence_usable": not unusable_reasons,
         "unusable_evidence_reasons": unusable_reasons or None,
@@ -4967,7 +4976,7 @@ def _normalization_operation(
                                         exit_code=2, recoverable=False, details={"field": "qualified_snapshot"})
         for item in selected:
             paths = record_raw_paths(item.record)
-            if item.method == "host_text":
+            if item.record.get("kind") == "host_capture":
                 if len(paths) != 1:
                     raise ScriptRefusal("SOURCE_SCOPE_INVALID", "A host capture must declare one direct original.",
                                         exit_code=2, recoverable=False)

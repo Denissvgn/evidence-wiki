@@ -98,6 +98,12 @@ def _source(view, record, records):
     if error or metadata is None:
         row.update(extraction="invalid", reasons=[*row["reasons"], "normalized_record_invalid"])
         return row
+    if record.get("kind") == "host_capture" and record.get("provenance", {}).get("host_capture", {}).get("schema_version") == "evidence-host-capture/v2":
+        version = metadata.get("host_capture_normalization_version")
+        row["capture_normalization_version"] = version
+        row["capture_normalization_currency"] = "current" if type(version) is int and version == 1 else "stale" if version is None else "unsupported"
+        if row["capture_normalization_currency"] != "current":
+            row["reasons"].append("capture_normalization_refresh_required" if version is None else "capture_normalization_revision_unsupported")
     profile = owner("_html_usability_profile").evaluate_html_usability(
         metadata, source_kind=record.get("kind") if isinstance(record.get("kind"), str) else "",
         effective_method=method or "unsupported")
@@ -143,7 +149,7 @@ def _source(view, record, records):
         if record.get("kind") == "host_capture":
             inspected = owner("_host_capture").inspect_record(root, record)
             row["host_capture"] = inspected["profile"]
-            row["complete"] = inspected["complete"]
+            row["complete"] = inspected["complete"] and metadata.get("status") == "content_extracted"
             row["completeness_basis"] = "caller_declared_capture"
         else:
             row["complete"] = metadata.get("status") == "content_extracted"
@@ -156,7 +162,9 @@ def _source(view, record, records):
     if isinstance(coverage, dict) and isinstance(coverage.get("ratio"), (int, float)) and coverage["ratio"] < 1:
         row["reasons"].append("partial_rendered_table_or_values")
         row["complete"] = False
-    row["evidence_usable"] = metadata.get("evidence_usable") is not False and record.get("evidence_usable") is not False
+    deferred = (record.get("kind") == "host_capture" and row.get("capture_normalization_currency") == "current"
+        and owner("_host_capture_normalization").format_deferral_only(record))
+    row["evidence_usable"] = metadata.get("evidence_usable") is not False and (record.get("evidence_usable") is not False or deferred)
     if not row["evidence_usable"]:
         row["reasons"].extend(metadata.get("unusable_evidence_reasons") or ["evidence_marked_unusable"])
     if row["extraction"] in {"stubbed", "failed"}:

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Normalize bounded native text, JSON, CSV and PDF captures with retained
+  structured/page anchors, producer currency and read-only current usability.
+
 - Expose current evidence-request readiness, compatible request links and checked
   fulfillment/block/reopen operations over canonical native records and permissions.
 

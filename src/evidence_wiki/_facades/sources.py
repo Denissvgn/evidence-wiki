@@ -69,6 +69,15 @@ class SourcesNamespace(Namespace):
             return mutation_capture_recovery
         return call_seam(load, "mutation_capture_recovery", "resume", self._root, request_id)
 
+    def usability(self, source_ids):
+        """Read current extraction and native consistency without accepting claims."""
+        from ._base import call_seam
+        self._workspace._check_open()
+        def load(_):
+            from .. import source_usability_operations
+            return source_usability_operations
+        return call_seam(load, "source_usability_operations", "current", self._root, source_ids=source_ids)
+
     def inventory(
         self, *, dry_run: bool = False, append_log: bool = False,
         require_checksum: bool = False, reject_mismatch: bool = False,

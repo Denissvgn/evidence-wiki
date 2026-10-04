@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "11"
+OPERATION_MATRIX_VERSION = "12"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -30,6 +30,7 @@ _ROWS = (
     ("normalize.validate_execution", "evidence-wiki normalize execution", "none", "bounded original closure capture; external host authority checked at one current clock", "none"),
     ("normalize.validate_market", "evidence-wiki normalize market", "none", "bounded inert original closure capture; no provider authority promotion", "none"),
     ("sources.inventory", "scripts/source_inventory.py", "admitted source manifest and optional activity log; checksum refusal may follow writes", "canonical acquisition barrier and atomic manifest replacement; separate activity lock; bounded inputs", "none"),
+    ("sources.usability", None, "none; current extraction/currency, stored consistency and native rights remain separate", "bounded selected originals/normalized records plus current native usage and closing workspace revision", "none; does not rerun extraction"),
     ("sources.capture_bytes_document", None, "none; inert bounded bytes and detached provenance", "none", "none"),
     ("sources.capture_path_document", None, "none; observes explicitly approved original bytes", "native anchored no-follow read and root/content identity revalidation", "none"),
     ("sources.prepare_capture", None, "private control gates only; exact capture request", "native workspace gate with captured original identity; no raw publication", "none"),

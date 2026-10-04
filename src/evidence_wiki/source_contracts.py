@@ -87,6 +87,8 @@ def schemas():
                                ("evidence-host-delivery-result/v1", delivered))}
     from .source_capture_contracts import schemas as capture_schemas
     result.update(capture_schemas())
+    from .source_usability_operations import schema as usability_schema
+    result["evidence-source-usability-view/v1"] = usability_schema()
     result["evidence-host-delivery-result/v2"] = {"$schema": "https://json-schema.org/draft/2020-12/schema",
         **obj(**{**delivered["properties"], "schema_version": {"const": "evidence-host-delivery-result/v2"},
             "content_bytes": {"type": "integer", "minimum": 1, "maximum": 8_388_608},
@@ -164,4 +166,10 @@ def contract_index():
             "recovery": "explicit retained pair repair; preserves original partial receipt and proves desired state only",
             "protected_capture": "native signed usage deposit, scrub and ancestry; no inferred grant or raw publication",
             "extraction": "not_run; capture never qualifies source usability or semantic acceptance"},
+        "current_usability": {"operation": "sources.usability", "schema": "evidence-source-usability-view/v1",
+            "route": "explicit sources.inventory then normalize.sources, followed by read-only current usability",
+            "bounds": {"source_ids": 32, "selected_bytes": 33_554_432, "per_file_bytes": 16_777_216},
+            "qualification": "native stored consistency and current rights; semantic adequacy remains not_evaluated",
+            "normalization_currency": "host_capture_normalization_version 1 for explicit v2 captures; stale/future observations refuse readiness",
+            "pdf": "one explicit bounded native extraction; retained page consistency checks never rerun parser or prove extraction fidelity"},
         "provider_enablement": False, "truth_guarantee": False}

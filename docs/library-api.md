@@ -113,6 +113,12 @@ checked fulfillment/block/reopen mutations. Operation matrix `11` distinguishes
 historical bookkeeping from current original, normalized, scope and permission
 checks. Existing request APIs retain their legacy behavior.
 
+Version `29` adds `sources.usability` and operation matrix `12`. Explicit v2
+capture normalization supports text/Markdown, JSON, CSV and PDF with current
+producer revision, retained originals and precise structured/page locations.
+Extraction and stored consistency remain separate from current rights and
+semantic claim approval.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -336,6 +342,7 @@ exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
 | Operation | Signature |
 | --- | --- |
 | `sources.inventory` | `ws.sources.inventory(*, dry_run=False, append_log=False, require_checksum=False, reject_mismatch=False, max_records=1000, max_entries=10000, max_input_bytes=16777216)` |
+| `sources.usability` | `ws.sources.usability(source_ids: list[str]) -> dict` |
 | `sources.capture_bytes_document` | `ws.sources.capture_bytes_document(content: bytes, metadata: dict) -> dict` |
 | `sources.capture_path_document` | `ws.sources.capture_path_document(*, root, relative, metadata, expected_content_sha256, expected_bytes) -> dict` |
 | `sources.prepare_capture` | `ws.sources.prepare_capture(*, request_id, path, delivery) -> dict` |
@@ -466,6 +473,61 @@ revocation. Always request a new current view before treating evidence as ready.
 An interrupted owner result remains partial or unknown under the mutation
 contract; absence of a receipt does not prove non-execution. Current readiness
 and transport completion never imply accepted claim support or release.
+
+For supported v2 captures, use the existing inventory and normalization owners
+explicitly, then observe usability without starting extraction:
+
+```python
+ws.sources.inventory()
+ws.normalize.sources(source_ids=[source_id])
+view = ws.sources.usability([source_id])
+source = view["sources"][0]
+rights = view["current_rights"][0]
+```
+
+Hosts that need retained transaction outcomes can prepare `sources.inventory`
+and `normalize.sources` through `ws.mutations` instead. No source request is
+fulfilled by normalization. Current usability requires the
+`source_usability_operations.current` and `normalize_verify.run_verify` grants,
+1–32 unique source IDs, at most 32 MiB of selected input and 16 MiB per file.
+The returned view is limited to one MiB. Host path denials remain fatal before
+verification can reread selected evidence.
+
+JSON retains exact parsed data under `/data/<JSON pointer>`. CSV retains exact
+scalar cells under `/rows/<zero-based logical row>/<column>`, with its header
+and multiline cells. PDF retains parser-reported page text under
+`/pages/<zero-based page>/text` and explicit one-based page locations. Only
+offered measurement shapes with `value` and `unit`/`units` receive a missing-unit
+gap; arbitrary numeric fields receive no scientific or units inference.
+
+Known finite authentication/error-only text, closed structured error envelopes
+and all-error CSV rows remain unusable. Mixed measurement/error data is not
+rejected just because it contains an error word. This syntactic check does not
+detect every authentication message or establish semantic source suitability.
+Incomplete captures, partial rendered tables, OCR requirements, malformed
+originals and failed extraction retain precise gaps and original bytes.
+
+PDF extraction uses the explicitly selected available native backend once.
+Read-only verification checks retained original identity, pages, sidecar and
+body consistency without rerunning the parser. `mechanical_stored_consistency`
+is not independent PDF glyph extraction fidelity. Unavailable capabilities are
+reported finitely and are never installed implicitly; declared host titles
+remain separate from parser-derived titles.
+
+V2 normalized records carry `host_capture_normalization_version=1`. A missing
+version requires an explicit normalization refresh; future or invalid versions
+refuse current readiness and replacement before writes. Legacy v1 output keeps
+its existing contract. Only the exact inventory deferral for normalization not
+yet run is retired after current successful native validation; unrelated refusal
+reasons and explicit denials remain intact.
+
+The view reports usable, partial or not-ready content, aggregate stored consistency
+and current rights separately. Native signed eligibility binds its exact usage
+revision; ordinary legacy compatibility keeps that revision null. Revocation
+changes current eligibility without rewriting retained evidence. Permission
+to retrieve a protected normalized revision does not grant raw normalization.
+`authorized`, `evidence_accepted` and `claim_support_eligible` remain false;
+strict claim/release owners still perform their own checks.
 
 New source and authoring seams qualify actual configuration, store, question,
 output and lock paths before effects. A linked workspace folder cannot redirect

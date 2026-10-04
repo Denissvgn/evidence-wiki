@@ -219,6 +219,8 @@ def inspect_record(root: Path, record, *, read_input=None):
 
 
 def normalized_issues(root, record, frontmatter, body):
+    if type(record.get("provenance")) is dict and record["provenance"].get("host_capture", {}).get("schema_version") == "evidence-host-capture/v2":
+        return load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization").issues(root, record, frontmatter, body)
     try:
         require(root is not None, "capture_original_root_missing")
         inspected = inspect_record(root, record)

@@ -56,6 +56,7 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/_coverage_revision.py",
     "scripts/_pack_selection.py",
     "scripts/_host_capture.py",
+    "scripts/_host_capture_normalization.py",
     "scripts/_capture_bridge.py",
     "scripts/_html_usability_profile.py",
     "scripts/_normalized_contract.py",
