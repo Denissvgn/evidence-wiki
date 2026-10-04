@@ -48,6 +48,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "CalibrationAuthority": (".qualification_calibration", "CalibrationAuthority"),
     "CalibrationSelection": (".calibration_registry", "CalibrationSelection"),
     "CalibrationPlan": (".calibration_registry", "CalibrationPlan"),
+    "DisagreementPlan": (".disagreement_configuration", "DisagreementPlan"),
     "CalibratedEvaluators": (".calibration_registry", "CalibratedEvaluators"),
     "calibration_suite": (".qualification_calibration", "calibration_suite"),
     "ExecutionRoleScope": (".execution_roles", "ExecutionRoleScope"),

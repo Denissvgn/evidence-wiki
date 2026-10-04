@@ -103,12 +103,19 @@ class CalibratedEvaluators:
             "authority_key_sha256": hashlib.sha256(self.authority._key).hexdigest()})
 
     def observations(self, policy, profile, now_utc, rubric_id, *, rubric_sha256=None,
-                     domain=None, probe=None, rubric=None, **_):
+                     domain=None, probe=None, rubric=None, selected_profiles=None, auxiliary=False, **_):
         """Pure gate over a current canonical domain and retained host probe."""
         frozen = policy.to_dict()
         records = {row["binding"]["config_ref"]: self.authority.verify(row) for row in json.loads(self._records)}
         result = []
-        for wanted in frozen["required_evaluators"]:
+        selected_profiles = frozen["required_evaluators"] if selected_profiles is None else selected_profiles
+        if auxiliary:
+            expected = None if profile.disagreement is None else profile.disagreement.auxiliary_profile(policy, profile)
+            if expected is None or selected_profiles != [expected]:
+                raise ExecutionError("calibration_auxiliary_selection_invalid")
+        elif selected_profiles != frozen["required_evaluators"]:
+            raise ExecutionError("calibration_required_selection_changed")
+        for wanted in selected_profiles:
             row = {**wanted, "qualification_ref": None, "qualified": None, "independent": None,
                 "assurance": frozen["assurance"], "reference_cases": None, "families": None,
                 "critical_false_acceptances": None, "positive_acceptance": None, "meaning_preserving_flip": None}
@@ -124,7 +131,9 @@ class CalibratedEvaluators:
                 continue
             row.update(qualification_ref="calibration-" + record["record_ref"], independent=record["independent"])
             if (not domain or domain.get("state") != "observed" or domain.get("domain_ref") != DOMAIN
-                    or not probe or probe.get("reasons") or probe.get("semantic_basis_id") != domain["semantic_basis_id"]
+                    or not probe or probe.get("reasons")
+                    or probe.get("configuration_reasons", {}).get(wanted["profile_ref"])
+                    or probe.get("semantic_basis_id") != domain["semantic_basis_id"]
                     or probe.get("profile_sha256") != profile.sha256 or probe.get("registry_sha256") != self.sha256
                     or not _utc(probe["observed_utc"]) <= _utc(now_utc) < _utc(probe["expires_utc"])):
                 result.append(row)
@@ -150,7 +159,7 @@ class CalibratedEvaluators:
                 continue
             current = self.authority.current(record, policy=policy, profile=profile, config_ref=wanted["profile_ref"],
                 rubric=selected["rubric"] if rubric is None else rubric, model_settings=selected["model_settings"], domain_ref=DOMAIN, now_utc=now_utc,
-                drift_ref=selected["drift_ref"])
+                drift_ref=selected["drift_ref"], auxiliary=auxiliary)
             if current["state"] == "qualified":
                 metrics = record["domains"][DOMAIN]
                 row.update(qualified=True, reference_cases=metrics["counts"]["observed_cases"], families=metrics["families"],

@@ -68,6 +68,20 @@ Version `24` adds an opt-in protected calibration profile. Profile v4 requires
 The supported reference domain is exact finite structured observations. Missing
 or unsupported domain/configuration/model evidence remains `qualification_unknown`.
 
+Version `25` adds optional `DisagreementPlan` in execution profile v5. Separate
+Evidence and Critic first passes must cover every rubric criterion. Each claim
+has at most two targeted repair cycles and one investigation, subordinate to
+the frozen run allowances. Repairs preserve claim identity and peers, must
+change relevant material, and require fresh first passes. Transport retries
+retain their continuation cycle while every attempt remains charged.
+An optional `adjudicator_config_ref` requires its own protected calibration and
+current configuration observation, separately from required first-pass profiles.
+Issue its calibration with `auxiliary=True`; an auxiliary record cannot qualify
+a required vote. The investigator returns only scoped repair or abstention
+findings and cannot register a review, approve a claim, or override native gates.
+Unsupported source acquisition remains an explicit finite abstention until an
+authorized acquisition route is available.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived

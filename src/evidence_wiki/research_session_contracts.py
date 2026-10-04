@@ -78,6 +78,8 @@ def schemas():
     current_v2["properties"]["schema_version"] = {"const": CURRENT_V2}
     current_v2["properties"]["qualification"] = _obj(state={"enum": ["qualified", "unknown", "unqualified"]},
         reason=_text(), profiles={"type": "array", "items": opaque, "maxItems": 8})
+    current_v2["properties"]["qualification"]["properties"]["auxiliary_profiles"] = {
+        "type": "array", "items": opaque, "maxItems": 1}
     current_v2["properties"]["usage"]["properties"]["seconds"] = _nullable({"type": "number", "minimum": 0})
     current_v2["properties"]["execution"] = opaque
     current_v2["required"].append("execution")

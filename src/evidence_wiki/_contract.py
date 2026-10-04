@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "24"
+LIBRARY_API_VERSION = "25"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -513,7 +513,7 @@ def contract() -> dict:
             "deadline": "job lease capped by the original canonical run deadline; calls do not reset the allowance",
             "model_executor": "host_selected",
             "execution_profile": "ExecutionProfile and ResearchExecution; no mandatory model SDK",
-            "execution_profile_schemas": ["research-execution-profile/v1", "research-execution-profile/v2", "research-execution-profile/v3", "research-execution-profile/v4"],
+            "execution_profile_schemas": ["research-execution-profile/v1", "research-execution-profile/v2", "research-execution-profile/v3", "research-execution-profile/v4", "research-execution-profile/v5"],
             "scheduling": "optional frozen role/controller aggregate caps, configured worker failover and bounded authenticated retry/backoff",
             "offline_executor": "DeterministicOfflineExecutor; measured local work, zero provider use, fixtures cannot qualify semantic review",
             "role_isolation": "optional frozen role scopes and exact configured controllers; fresh blinded parent-bound review contexts; independent control/context/model dimensions remain separate",
@@ -525,6 +525,7 @@ def contract() -> dict:
             "source_scope": "v1 exact identities; policy v2 permits frozen native extents with owner-derived complete source bindings",
             "calibration": "optional profile v4 with protected finite executable references, independent material counts, abstention and five sensitivity axes; exact current domain/settings/host withdrawal probes; no legacy qualification promotion",
             "calibration_domain": "finite-structured-observation; unrestricted prose and unsupported data remain qualification_unknown",
+            "disagreement": "optional DisagreementPlan profile v5; independent Evidence and Critic first passes, at most two targeted repairs and one qualified auxiliary investigation per claim, subordinate to frozen run allowances; no adjudicator approval or native failure override",
             "qualification": "host-authenticated protected references tied to exact policy, model, prompt, controller, rubric, domain and expiry; host must withdraw frozen services when qualification is revoked",
             "operational_limits": "configured host required; reference subprocess bounds do not establish malicious-worker isolation or general semantic quality",
             "acceptance": "current canonical release is separate from workflow qualification",

@@ -77,7 +77,17 @@ def refresh(session, request_id):
     elif not callable(function):
         probe["reasons"].append("qualification_service_unavailable")
     else:
-        for selection in plan.selections:
+        optional = getattr(session.execution.profile, "disagreement", None)
+        auxiliary = None if optional is None else optional.adjudicator_config_ref
+        if auxiliary is not None:
+            probe["configuration_reasons"] = {}
+        for selection in sorted(plan.selections, key=lambda row: (row.config_ref == auxiliary, row.config_ref)):
+            def failure(reason, selection=selection):
+                if selection.config_ref == auxiliary:
+                    probe["configuration_reasons"].setdefault(selection.config_ref, []).append(reason)
+                    return False
+                probe["reasons"].append(reason)
+                return True
             remaining = min(until - time.monotonic(), session.execution.profile.cleanup_timeout_seconds)
             request = {"schema_version": "research-qualification-probe-request/v1", "nonce": secrets.token_hex(16),
                 "config_ref": selection.config_ref, "profile_sha256": probe["profile_sha256"],
@@ -85,18 +95,20 @@ def refresh(session, request_id):
                 "expires_utc": probe["expires_utc"]}
             returned, reason = bounded_host_call(function, (detached(request),), remaining)
             if reason is not None:
-                probe["reasons"].append(reason)
-                break
+                if failure(reason):
+                    break
+                continue
             try:
                 returned = detached(returned)
                 if (type(returned) is not dict or set(returned) != {"request", "configuration"}
                         or returned["request"] != request or type(returned["configuration"]) is not dict):
-                    probe["reasons"].append("qualification_probe_uncorrelated")
-                    break
+                    if failure("qualification_probe_uncorrelated"):
+                        break
+                    continue
                 probe["configurations"][selection.config_ref] = configuration_document(returned["configuration"])
             except (Exception, SystemExit):
-                probe["reasons"].append("qualification_probe_invalid")
-                break
+                if failure("qualification_probe_invalid"):
+                    break
     with driver.gate(session):
         current_domain = domain_observation(session)
         if current_domain["semantic_basis_id"] != probe["semantic_basis_id"]:

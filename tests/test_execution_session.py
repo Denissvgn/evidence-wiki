@@ -183,8 +183,14 @@ def fixture(tmp_path, monkeypatch, request=None):
         roles += (ExecutionRole("profile-b", "evaluator", "counter-controller", "controlled-counter-process", "review/v1"),)
         registry = ExecutionRoleRegistry((ExecutionRoleScope("researcher", "researcher", ("model",)),
             ExecutionRoleScope("profile-a", "evaluator", ("model",)), ExecutionRoleScope("profile-b", "critic", ("model",))))
+    disagreement = None
+    if options.get("disagreement"):
+        from evidence_wiki.disagreement_configuration import DisagreementPlan
+        disagreement = DisagreementPlan()
+        roles += (ExecutionRole("repairer", "host_worker", "runner", "controlled-repair-process", "generate/v1"),)
+        registry = ExecutionRoleRegistry((*registry.scopes, ExecutionRoleScope("repairer", "repair", ("model",))))
     profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
-        roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else ())
+        roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
     generator = "import json,sys; json.load(sys.stdin); print(" + repr(json.dumps(generated)) + ")"
     evaluator = (
@@ -196,7 +202,8 @@ def fixture(tmp_path, monkeypatch, request=None):
     if options.get("repair"):
         unsupported = json.loads(json.dumps(generated))
         unsupported["proposal"]["inventory"]["claims"][0]["text"] = "Solar reflectance is always 0.74."
-        generator = ("import json,sys; d=json.load(sys.stdin)['input']; print(json.dumps(" + repr(generated)
+        repaired = dict(generated, coverage_links=[]) if options.get("disagreement") else generated
+        generator = ("import json,sys; d=json.load(sys.stdin)['input']; print(json.dumps(" + repr(repaired)
             + " if d['purpose']=='repair' else " + repr(unsupported) + "))")
         evaluator = (
             "import json,sys; d=json.load(sys.stdin)['input']; "
@@ -211,6 +218,8 @@ def fixture(tmp_path, monkeypatch, request=None):
     commands = {"researcher": (sys.executable, "-c", generator), "profile-a": (sys.executable, "-c", evaluator)}
     if options.get("role_isolation"):
         commands["profile-b"] = (sys.executable, "-c", evaluator)
+    if options.get("disagreement"):
+        commands["repairer"] = (sys.executable, "-c", generator)
     if options.get("worker_failover"):
         commands["backup-researcher"] = (sys.executable, "-c", generator)
         commands["researcher"] = (sys.executable, "-c", "raise SystemExit(1)")

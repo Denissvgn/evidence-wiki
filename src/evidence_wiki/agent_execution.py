@@ -31,12 +31,14 @@ from .workflow_contracts import JOB, JOB_V2, JOB_V3, MAX_BYTES, document_sha256,
 
 if TYPE_CHECKING:
     from .calibration_registry import CalibrationPlan
+    from .disagreement_configuration import DisagreementPlan
     from .execution_roles import ExecutionRoleRegistry
 
 PROFILE = "research-execution-profile/v1"
 PROFILE_V2 = "research-execution-profile/v2"
 PROFILE_V3 = "research-execution-profile/v3"
 PROFILE_V4 = "research-execution-profile/v4"
+PROFILE_V5 = "research-execution-profile/v5"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -249,6 +251,7 @@ class ExecutionProfile:
     role_scopes: ExecutionRoleRegistry | None = None
     required_diversity: tuple[str, ...] = ()
     calibration: CalibrationPlan | None = None
+    disagreement: DisagreementPlan | None = None
 
     def __post_init__(self) -> None:
         _ref(self.profile_ref)
@@ -303,6 +306,11 @@ class ExecutionProfile:
                     or {row.config_ref for row in self.calibration.selections}
                     != {role.config_ref for role in roles if role.role == "evaluator"}):
                 raise ExecutionError("calibration_profile_incomplete")
+        if self.disagreement is not None:
+            from .disagreement_configuration import DisagreementPlan
+            if type(self.disagreement) is not DisagreementPlan:
+                raise ExecutionError("disagreement_profile_invalid")
+            self.disagreement.check_profile(self)
 
 
     def document(self) -> dict[str, Any]:
@@ -321,6 +329,8 @@ class ExecutionProfile:
                           required_diversity=list(self.required_diversity))
         if self.calibration is not None:
             result.update(schema_version=PROFILE_V4, calibration=self.calibration.document())
+        if self.disagreement is not None:
+            result.update(schema_version=PROFILE_V5, disagreement=self.disagreement.document())
         return result
 
     @property

@@ -64,9 +64,10 @@ def retry_work(profile, records, pending):
             break
     purpose = previous.get("retry_purpose", previous.get("purpose", previous["attempt"]["job"]["operation"]))
     ready = datetime.fromisoformat(final["observed_utc"].replace("Z", "+00:00")) + timedelta(seconds=schedule.backoff_seconds)
-    return {"operation": "repair" if purpose == "repair" else previous["attempt"]["job"]["operation"],
+    return {"operation": purpose if purpose in {"repair", "adjudicate"} else previous["attempt"]["job"]["operation"],
         "purpose": "retry", "retry_purpose": purpose, "original_id": previous["original_id"],
         "claim_id": previous.get("claim_id"), "config_ref": config_ref,
         "defects": detached(previous["attempt"].get("input", {}).get("defects", [])),
         "predecessor_attempt_id": identifier, "predecessor_observation_ref": digest(final),
-        "retry_after_utc": ready.isoformat(), "reason": "bounded_retry"}
+        "retry_after_utc": ready.isoformat(), "reason": "bounded_retry",
+        **{key: detached(previous[key]) for key in ("disagreement", "target_claim_id") if key in previous}}

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add bounded per-claim disagreement repair and separately qualified optional
+  investigation, preserving retry spend, claim identity and fresh review gates.
+
 - Add opt-in protected finite evaluator calibration, abstention and sensitivity
   metrics, exact current domain/configuration/withdrawal checks and drift invalidation.
 
