@@ -18,6 +18,8 @@ from .agent_execution import ExecutionError, _digest, _integer, _json, _ref
 
 REVIEW_CONTEXT = "research-review-context/v1"
 CONTEXT_BINDING = "research-review-context-binding/v1"
+REVIEW_CONTEXT_V2 = "research-review-context/v2"
+CONTEXT_BINDING_V2 = "research-review-context-binding/v2"
 MAX_CONTEXT_BYTES = 262144
 _HASH = re.compile(r"^sha256:[a-f0-9]{64}$")
 _CLAIM_FIELDS = ("text", "scope", "time", "units", "derivation", "limitations")
@@ -49,10 +51,14 @@ def _projection(packet: dict[str, Any]) -> None:
             or question["slug"] != "question-1" or question["original_id"] != "original-1"):
         raise ExecutionError("review_context_question_invalid")
     _text(question["question"])
-    if type(packet["premises"]) is not list or len(packet["premises"]) > 32 or packet["computation"] is not None:
+    if type(packet["premises"]) is not list or len(packet["premises"]) > 32 or (packet["schema_version"] == REVIEW_CONTEXT and packet["computation"] is not None):
         raise ExecutionError("review_context_inputs_invalid")
+    computed = packet["schema_version"] == REVIEW_CONTEXT_V2
+    if computed:
+        from .calculation_context import validate_context
+        validate_context(packet["computation"])
     for claim in [packet["claim"], *packet["premises"]]:
-        if (type(claim) is not dict or set(claim) != {"id", "question_slug", "kind", "premises", "evidence", *_CLAIM_FIELDS}
+        if (type(claim) is not dict or set(claim) != {"id", "question_slug", "kind", "premises", "evidence", *_CLAIM_FIELDS, *({"calculations"} if computed else set())}
                 or type(claim["id"]) is not str or re.fullmatch(r"claim-[1-9][0-9]{0,3}", claim["id"]) is None
                 or type(claim["question_slug"]) is not str or re.fullmatch(r"question-[1-9][0-9]?", claim["question_slug"]) is None
                 or claim["kind"] not in {"assertion", "inference"}
@@ -60,6 +66,9 @@ def _projection(packet: dict[str, Any]) -> None:
                 or any(type(item) is not str or re.fullmatch(r"claim-[1-9][0-9]{0,3}", item) is None for item in claim["premises"])
                 or type(claim["evidence"]) is not list or len(claim["evidence"]) > 16):
             raise ExecutionError("review_context_claim_invalid")
+        if computed:
+            from .calculation_context import validate_references
+            validate_references(claim["calculations"], packet["computation"])
         for name in _CLAIM_FIELDS:
             if name == "limitations":
                 if type(claim[name]) is not list or len(claim[name]) > 16:
@@ -188,9 +197,9 @@ class ReviewContext:
         except (ValueError, UnicodeError, RecursionError):
             raise ExecutionError("review_context_invalid") from None
         if (type(packet) is not dict or set(packet) != _PACKET_FIELDS
-                or packet["schema_version"] != REVIEW_CONTEXT or _json(packet) != self._packet_bytes
+                or packet["schema_version"] not in {REVIEW_CONTEXT, REVIEW_CONTEXT_V2} or _json(packet) != self._packet_bytes
                 or type(binding) is not dict or set(binding) != _BINDING_FIELDS
-                or binding["schema_version"] != CONTEXT_BINDING or _json(binding) != self._binding_bytes
+                or binding["schema_version"] != (CONTEXT_BINDING_V2 if packet["schema_version"] == REVIEW_CONTEXT_V2 else CONTEXT_BINDING) or _json(binding) != self._binding_bytes
                 or len(self._packet_bytes) > MAX_CONTEXT_BYTES):
             raise ExecutionError("review_context_invalid")
         _ref(packet["context_id"])
@@ -228,6 +237,8 @@ class ReviewContext:
                 or any(re.fullmatch(r"source-[1-9][0-9]?", item) is None for item in required)):
             raise ExecutionError("review_context_manifest_invalid")
         references = {item["source_id"] for claim in [packet["claim"], *packet["premises"]] for item in claim["evidence"]}
+        if packet["schema_version"] == REVIEW_CONTEXT_V2:
+            references.update(row["source_id"] for row in packet["computation"]["sources"])
         if references != set(required):
             raise ExecutionError("review_context_manifest_invalid")
         claims = [packet["claim"], *packet["premises"]]
@@ -332,6 +343,8 @@ def create_review_context(*, context_id: str, task_role: str, basis_id: str, own
         if type(subject) is not dict or type(question) is not dict or type(premises) is not list or len(premises) > 32 or type(revisions) is not dict:
             raise ExecutionError("review_context_inputs_invalid")
         claims = [subject, *premises]
+        computation = owner_snapshot.get("computation")
+        computed = computation is not None
         _ref(question["slug"])
         _ref(question["original_id"])
         if subject["question_slug"] != question["slug"]:
@@ -346,6 +359,8 @@ def create_review_context(*, context_id: str, task_role: str, basis_id: str, own
             _ref(claim["question_slug"])
             premise_ids.update(_ref(item) for item in claim["premises"])
             source_ids.update(_ref(item["source_id"]) for item in claim["evidence"])
+        if computed:
+            source_ids.update(row["source_id"] for row in computation["sources"])
         if len(source_ids) > 64 or len(premise_ids) > 1024:
             raise ExecutionError("review_context_bound_invalid")
         claim_aliases = {identifier: f"claim-{index + 1}" for index, identifier in enumerate(claim_ids + sorted(premise_ids - set(claim_ids)))}
@@ -353,6 +368,11 @@ def create_review_context(*, context_id: str, task_role: str, basis_id: str, own
         question_ids = [question["slug"], *sorted({claim["question_slug"] for claim in claims} - {question["slug"]})]
         question_aliases = {identifier: f"question-{index + 1}" for index, identifier in enumerate(question_ids)}
         projected_claims = [_claim(claim, claim_aliases, source_aliases, question_aliases) for claim in claims]
+        if computed:
+            for projected, claim in zip(projected_claims, claims, strict=True):
+                projected["calculations"] = json.loads(_json(claim.get("calculations", [])))
+            from .calculation_context import project
+            computation = project(computation, source_aliases)
         projected_sources, seen, missing = [], set(), []
         for source in sources:
             identifier = _ref(source["source_id"])
@@ -376,12 +396,12 @@ def create_review_context(*, context_id: str, task_role: str, basis_id: str, own
             limitations.append("premise_context_missing")
         if len(question_ids) > 1:
             limitations.append("premise_question_context_missing")
-        if owner_snapshot.get("computation") is not None or any(claim.get("calculations") for claim in claims):
+        if not computed and any(claim.get("calculations") for claim in claims):
             limitations.append("computation_context_unavailable")
-        packet = {"schema_version": REVIEW_CONTEXT, "context_id": context_id, "task_role": task_role,
+        packet = {"schema_version": REVIEW_CONTEXT_V2 if computed else REVIEW_CONTEXT, "context_id": context_id, "task_role": task_role,
             "basis_id": basis_id, "rubric": projected_rubric, "claim": projected_claims[0],
             "question": {"slug": "question-1", "original_id": "original-1", "question": _text(question["question"])},
-            "premises": projected_claims[1:], "sources": projected_sources, "computation": None,
+            "premises": projected_claims[1:], "sources": projected_sources, "computation": computation,
             "manifest": {"required_source_ids": sorted(source_aliases.values()),
                 "included_source_ids": [row["source_id"] for row in projected_sources], "missing_source_ids": missing,
                 "omitted_source_ids": [], "context_complete": not limitations, "truncated": False,
@@ -401,7 +421,7 @@ def create_review_context(*, context_id: str, task_role: str, basis_id: str, own
             next(item for item in sections if item["section_id"] == removed["source_id"])["included"] = False
         if len(_json(packet)) > max_bytes:
             raise ExecutionError("review_context_bound_invalid")
-        binding = {"schema_version": CONTEXT_BINDING, "context_id": context_id, "task_role": task_role,
+        binding = {"schema_version": CONTEXT_BINDING_V2 if computed else CONTEXT_BINDING, "context_id": context_id, "task_role": task_role,
             "basis_id": basis_id, "packet_sha256": "sha256:" + _digest(packet),
             "owner_snapshot_sha256": "sha256:" + _digest(owner_snapshot), "rubric_sha256": "sha256:" + _digest(projected_rubric),
             "source_input_sha256": "sha256:" + _digest(sources), "max_bytes": max_bytes,

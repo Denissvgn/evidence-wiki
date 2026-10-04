@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from .workflow_contracts import JOB, JOB_V2, JOB_V3, MAX_BYTES, document_sha256, validate_document, validate_job
+from .workflow_contracts import JOB, JOB_V2, JOB_V3, JOB_V4, MAX_BYTES, document_sha256, validate_document, validate_job
 
 if TYPE_CHECKING:
     from .calibration_registry import CalibrationPlan
@@ -39,6 +39,7 @@ PROFILE_V2 = "research-execution-profile/v2"
 PROFILE_V3 = "research-execution-profile/v3"
 PROFILE_V4 = "research-execution-profile/v4"
 PROFILE_V5 = "research-execution-profile/v5"
+PROFILE_V6 = "research-execution-profile/v6"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -331,6 +332,8 @@ class ExecutionProfile:
             result.update(schema_version=PROFILE_V4, calibration=self.calibration.document())
         if self.disagreement is not None:
             result.update(schema_version=PROFILE_V5, disagreement=self.disagreement.document())
+        if self.role_scopes is not None and any(scope.task_role == "calculation" for scope in self.role_scopes.scopes):
+            result["schema_version"] = PROFILE_V6
         return result
 
     @property
@@ -349,16 +352,16 @@ class ExecutionProfile:
         if type(job) is not dict or type(input_document) is not dict:
             raise ExecutionError("execution_attempt_invalid")
         if self.role_scopes is None:
-            if job["schema_version"] == JOB_V3:
+            if job["schema_version"] in {JOB_V3, JOB_V4}:
                 raise ExecutionError("execution_role_scope_unavailable")
             return
-        if job["schema_version"] != JOB_V3:
+        if job["schema_version"] not in {JOB_V3, JOB_V4}:
             raise ExecutionError("execution_role_scope_required")
         self.role_scopes.scope(config_ref).check_job(job)
         if job["packet_sha256"] != _digest(input_document):
             raise ExecutionError("execution_context_mismatch")
         packet = input_document.get("packet")
-        if type(packet) is dict and packet.get("schema_version") == "research-review-context/v1":
+        if type(packet) is dict and packet.get("schema_version") in {"research-review-context/v1", "research-review-context/v2"}:
             if packet.get("context_id") != job["context_id"] or packet.get("task_role") != job["task_role"]:
                 raise ExecutionError("execution_context_mismatch")
 
@@ -388,7 +391,7 @@ class ExecutionAttempt:
         try:
             raw_job = json.loads(self._job_bytes)
             version = raw_job.get("schema_version") if type(raw_job) is dict else None
-            if version not in {JOB, JOB_V2, JOB_V3}:
+            if version not in {JOB, JOB_V2, JOB_V3, JOB_V4}:
                 raise ExecutionError("execution_job_version_unsupported")
             job = validate_document(version, raw_job)
             supplied = json.loads(self._input_bytes)
@@ -403,7 +406,7 @@ class ExecutionAttempt:
                input_document: dict[str, Any] | None = None) -> ExecutionAttempt:
         profile.role(config_ref)
         version = job.get("schema_version") if type(job) is dict else None
-        if version not in {JOB, JOB_V2, JOB_V3}:
+        if version not in {JOB, JOB_V2, JOB_V3, JOB_V4}:
             raise ExecutionError("execution_job_version_unsupported")
         selected_input = {} if input_document is None else input_document
         job = validate_document(version, job)
@@ -434,7 +437,7 @@ class ExecutionAttempt:
         establishes filesystem, network or host conversation isolation.
         """
         job = self.job
-        if job["schema_version"] != JOB_V3:
+        if job["schema_version"] not in {JOB_V3, JOB_V4}:
             return self.document()
         fields = ("operation", "role", "task_role", "required_capabilities", "context_id", "prompt_version",
                   "issued_utc", "deadline_utc", "timeout_seconds", "budgets", "expected_result_schema")

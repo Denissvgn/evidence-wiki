@@ -453,7 +453,7 @@ def evaluate(project_root, *, as_of=None, config=None, capture=None, view=None, 
         ):
             result = Computation(materialized, capture, config, definition, inputs["selected"] if inputs else None).result(as_of, completed=completed)
         if current is not None:
-            current.revalidate(root, config)
+            current.revalidate(current.state.root if borrowed is current else root, config)
         require(capture_workspace(root).revision_id == capture.revision_id, "computation_inputs_changed")
         require(selected.producer_identity() == result["engine_id"], "computation_engine_changed")
         return result

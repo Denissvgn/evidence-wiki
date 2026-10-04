@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 
 from . import execution_accounting as accounting
 from .agent_execution import ExecutionAttempt, ExecutionError
+from .errors import UsageError
 from .execution_scheduling import retry_work, role_projection
 from .mutation_contracts import canonical, detached, digest, validate_request_id
 from .mutation_store import MutationStore
@@ -21,10 +22,10 @@ from .pack_discovery import owner
 from .research_execution import SCOPE, bounded_host_call, now_utc
 from .research_observation import ResearchObservation
 from .research_observation import reason as owner_reason
-from .research_session_contracts import CURRENT_V2, NEXT_V2, NEXT_V3, STEP_V2, checked, refuse
+from .research_session_contracts import CURRENT_V2, NEXT_V2, NEXT_V3, NEXT_V4, STEP_V2, checked, refuse
 from .review_context import ReviewContext, create_review_context
 from .run_policy import DECISION, OBSERVATION, OBSERVATION_V2, POLICY_V2, validate_document
-from .workflow_contracts import EXECUTION_OBSERVATION, JOB_V2, JOB_V3, WorkflowContractError, validate_job
+from .workflow_contracts import EXECUTION_OBSERVATION, JOB_V2, JOB_V3, JOB_V4, WorkflowContractError, validate_job
 
 
 def child_id(identifier, label):
@@ -160,6 +161,9 @@ def current(session):
     packets, bindings = _sources(session, observed)
     qualification = _qualifications(session, observed, originals=view["accounting"]["original_outcomes"],
         packets=packets, records=records)
+    if observed.config.get("computation") is not None:
+        from .calculation_session import project_intent
+        project_intent(session, view, observed, records)
     observed.finish()
     plan = session.execution.ledger(session, records)
     projection = None if plan is None else accounting.projection(plan, limits=_limits(session))
@@ -468,9 +472,34 @@ def _owner_action(session, view, records, *, resuming=False):
             continue
         slugs = {row["slug"] for row in original["questions"]}
         rows = [row for row in strict.get("claims", []) if row["claim"]["question_slug"] in slugs]
+        if observed.computation is not None and any(record["kind"] == "execution_calculation_refused"
+                and record["data"]["identity"]["original_id"] == original["original_id"]
+                and record["data"]["result_id"] == observed.computation["result_id"] for record in records):
+            return _terminal_action(session, view, "abstained", "unsupported_claim")
         claimed = any(row["kind"] == "execution_prepared" and row["data"]["original_id"] == original["original_id"] for row in records)
         if not claimed and any(questions[slug]["status"] != "answered" for slug in slugs):
             return {"operation": "prepare", "original_id": original["original_id"], "reason": "claim_original_questions"}
+        if observed.config.get("computation") is not None:
+            registry = session.execution.profile.role_scopes
+            if registry is None or not any(scope.task_role == "calculation" for scope in registry.scopes):
+                return _terminal_action(session, view, "blocked_external", "qualification_unknown")
+            if observed.computation is None or observed.computation.get("status") != "passed":
+                return _terminal_action(session, view, "abstained", "mechanical_failure")
+            result_id = observed.computation["result_id"]
+            if not any(record["kind"] == "execution_calculation_selection"
+                    and record["data"]["selection"]["reference"]["result_id"] == result_id
+                    and any(attempt["kind"] == "execution_attempt" and attempt["data"]["original_id"] == original["original_id"]
+                        and digest(attempt["data"]["attempt"]) == record["data"]["attempt_ref"] for attempt in records)
+                    for record in records):
+                return {"operation": "calculate", "original_id": original["original_id"],
+                    "config_ref": registry.select("calculation").config_ref, "reason": "quantitative_interpretation_required"}
+            from .calculation_contracts import require_selected_references
+            from .calculation_session import selected
+            selections = selected(session, original_id=original["original_id"], result_id=result_id, records=records)
+            try:
+                require_selected_references({"inventory":{"claims":[row["claim"] for row in rows]}}, selections, slugs)
+            except UsageError:
+                return {"operation":"generate", "original_id":original["original_id"], "purpose":"generate", "reason":"quantitative_inference_required"}
         if not rows:
             return {"operation": "generate", "original_id": original["original_id"], "purpose": "generate", "reason": "draft_required"}
         for row in rows:
@@ -536,6 +565,13 @@ def _action(session, view, records, *, resuming=False):
     pending_work = view["execution"]["pending"]
     if pending_work and not pending_work["applied"]:
         pending_row = _attempt_rows(records)[pending_work["attempt_id"]]
+        if pending_row.get("purpose") == "calculation":
+            retained_request = next(record["request_id"] for record in records
+                if record["kind"] == "execution_calculation_instruction"
+                and child_id(record["request_id"], "calculation-agent") == pending_work["attempt_id"])
+            return {"operation": "calculate", "original_id": pending_row["original_id"],
+                "config_ref": pending_row["attempt"]["config_ref"], "calculation_request_id": retained_request,
+                "reason": "retained_calculation_reconciliation"}
         if pending_row.get("purpose") in {"coverage", "counterevidence"}:
             retained_request = next(row["request_id"] for row in records if row["kind"] == "execution_coverage_instruction"
                 and child_id(row["request_id"], "examination") == pending_work["attempt_id"])
@@ -555,7 +591,7 @@ def _action(session, view, records, *, resuming=False):
 def next_work(session):
     view = current(session)
     action = _action(session, view, retained(session))
-    version = NEXT_V3 if action["operation"] == "examine" else NEXT_V2
+    version = NEXT_V4 if action["operation"] == "calculate" else NEXT_V3 if action["operation"] == "examine" else NEXT_V2
     return checked(version, {"schema_version": version, "current": view, "decision": action.get("decision"),
         "actions": [{"operation": action["operation"], "owner": "canonical_research_owners", "arguments": action,
             "preconditions": ["current_basis", "frozen_policy", "scoped_capabilities", "remaining_allowance"],
@@ -597,7 +633,7 @@ def reserve(session, request_id, action, view):
         refuse("HOST_CAPABILITY_UNAVAILABLE")
     registry = session.execution.profile.role_scopes
     scope = None if registry is None else registry.scope(config_ref)
-    if scope is not None and operation == "generate" and scope.task_role != ("coverage" if purpose == "coverage" else "planner" if purpose == "plan" else "repair" if purpose == "repair" else "researcher"):
+    if scope is not None and operation == "generate" and scope.task_role != ("calculation" if purpose == "calculation" else "coverage" if purpose == "coverage" else "planner" if purpose == "plan" else "repair" if purpose == "repair" else "researcher"):
         refuse("HOST_CAPABILITY_UNAVAILABLE")
     review_context = None
     original = next(row for row in view["accounting"]["original_outcomes"] if row["original_id"] == action["original_id"])
@@ -683,7 +719,28 @@ def reserve(session, request_id, action, view):
             "omit or return an empty list; no coverage changes allowed" if purpose == "repair"
             and getattr(session.execution.profile, "disagreement", None) is not None else "optional declared facet/source links"}
         payload = {"question": original["original_text"]}
-    if purpose == "coverage":
+    if operation == "generate" and purpose not in {"plan", "acquisition", "coverage", "calculation"} and observed.config.get("computation") is not None:
+        from .calculation_session import scope_inputs
+        scope_inputs(session)
+        input_document["computation"] = owner("_computation_service").required(session.root, observed.config)
+        from .calculation_session import selected
+        input_document["calculation_selections"] = selected(session, original_id=action["original_id"],
+            result_id=input_document["computation"]["result_id"])
+        slugs = {question["slug"] for question in original["questions"]}
+        input_document["existing_source_premises"] = [row["claim"] for row in observed.strict.get("result", {}).get("claims", [])
+            if row["claim"]["question_slug"] in slugs and not row["claim"].get("premises") and not row["claim"].get("calculations")]
+        input_document["instructions"] += " Quantitative claims require strict v2 calculation references to this exact native result. Arithmetic, units and invariant outcomes cannot be changed by model agreement. Preserve every existing_source_premises entry exactly."
+    if purpose == "calculation":
+        if scope is None or scope.task_role != "calculation":
+            refuse("HOST_CAPABILITY_UNAVAILABLE")
+        scope.require("model")
+        scope.require("calculation.propose")
+        from .calculation_contracts import PROPOSAL, checked_result
+        calculated = checked_result(action["calculation_result"])
+        input_document = {"calculation": calculated, "purpose": "calculation",
+            "instructions": "Propose a configured graph formula, output pointer and unit with explicit time/interpretation assumptions. Native arithmetic is authoritative. Never propose a new executable definition, result value, rights or acceptance.",
+            "output_contract": {"schema_version": PROPOSAL, "fields": "result_id/definition_id/pointer/form/expression/unit/as_of/assumptions/rationale"}}
+    elif purpose == "coverage":
         if scope is None or scope.task_role != "coverage":
             refuse("HOST_CAPABILITY_UNAVAILABLE")
         scope.require("model")
@@ -748,12 +805,12 @@ def reserve(session, request_id, action, view):
     context_id = review_context.document()["context_id"] if review_context is not None else "context-" + secrets.token_hex(16)
     scope_fields = {} if scope is None else {"task_role": scope.task_role, "role_scope_sha256": scope.sha256,
         "context_id": context_id, "packet_sha256": hashlib.sha256(canonical(input_document)).hexdigest()}
-    job = validate_job({"schema_version": JOB_V2 if scope is None else JOB_V3, "id": request_id, "operation": operation, "role": role.role,
+    job = validate_job({"schema_version": JOB_V2 if scope is None else JOB_V4 if purpose == "calculation" or review_context is not None and review_context.document()["schema_version"] == "research-review-context/v2" else JOB_V3, "id": request_id, "operation": operation, "role": role.role,
         "controller_ref": role.controller_ref, "grant_ref": frozen["host_capability_refs"]["model"],
         "input_id": session.binding["request_binding"], "basis_id": view["basis_id"], "policy_id": session.policy.policy_id,
         "policy_version": "2" if frozen["schema_version"] == POLICY_V2 else "1", "prompt_version": role.prompt_version,
         "revision_precondition": view["basis_id"], "original_text": original["original_text"], "scope": [original["original_id"]],
-        "required_capabilities": ["model", "coverage.propose"] if purpose == "coverage" else ["model", "objection.propose"] if purpose == "counterevidence" else ["model", "plan.propose"] if purpose == "plan" else ["model", "acquisition.propose"] if purpose == "acquisition" else ["model"], "payload": payload, "issued_utc": now.isoformat(),
+        "required_capabilities": ["model", "calculation.propose"] if purpose == "calculation" else ["model", "coverage.propose"] if purpose == "coverage" else ["model", "objection.propose"] if purpose == "counterevidence" else ["model", "plan.propose"] if purpose == "plan" else ["model", "acquisition.propose"] if purpose == "acquisition" else ["model"], "payload": payload, "issued_utc": now.isoformat(),
         "deadline_utc": (now + timedelta(seconds=timeout)).isoformat(), "timeout_seconds": timeout, "max_attempts": 1,
         "expected_result_schema": EXECUTION_OBSERVATION, "budgets": cap,
         "qualifications": {"assurance": frozen["assurance"], "status": "unknown", "evaluator_ref": None,
@@ -769,13 +826,15 @@ def reserve(session, request_id, action, view):
     if current(session)["basis_id"] != view["basis_id"]:
         refuse("BASIS_CHANGED")
     extras = {}
+    if purpose == "calculation":
+        extras.update(calculation_result=detached(action["calculation_result"]))
     if purpose in {"coverage", "counterevidence"}:
         extras.update(examination_instruction=detached(action["examination_instruction"]))
     if purpose == "acquisition":
         extras.update(acquisition_instruction=detached(action["acquisition_instruction"]))
     if purpose == "plan":
         extras.update(owner_action=detached(action["owner_action"]), selection_key=action["selection_key"])
-    if purpose not in {"plan", "acquisition", "coverage", "counterevidence"} and getattr(session.execution.profile, "disagreement", None) is not None:
+    if purpose not in {"plan", "acquisition", "coverage", "counterevidence", "calculation"} and getattr(session.execution.profile, "disagreement", None) is not None:
         from .execution_disagreement import attempt_metadata, material_basis
         if operation == "evaluate":
             extras["review_material_basis"] = material_basis(prepared["snapshot"], prepared["rubric"],
@@ -1167,6 +1226,12 @@ def _validate_application(session, attempt, observation, application, *, allow_r
         _verify_review_controller(session, attempt, application["envelope"])
     if application is not None and application.get("operation") == "generate":
         _proposal_limits(session, application["proposal"], view["execution"]["source_bindings"])
+        from .calculation_contracts import require_selected_references
+        allowed = {question["slug"] for original in view["accounting"]["original_outcomes"]
+            if original["original_id"] == application["original_id"] for question in original["questions"]}
+        require_selected_references(application["proposal"], attempt.input_document.get("calculation_selections", []), allowed)
+        from .calculation_contracts import require_source_premises
+        require_source_premises(application["proposal"], attempt.input_document.get("existing_source_premises", []))
 
 
 def _proposal_limits(session, proposal, bindings):
@@ -1196,6 +1261,8 @@ def _apply(session, attempt_id):
         from .calibration_probes import refresh
         refresh(session, child_id(attempt_id, "application_probe"))
     _validate_application(session, attempt, observation, application)
+    if row.get("retry_purpose", row.get("purpose")) == "calculation":
+        refuse("CALCULATION_OWNER_REQUIRED")
     if row.get("retry_purpose", row.get("purpose")) in {"coverage", "counterevidence"}:
         refuse("COVERAGE_EXAMINATION_OWNER_REQUIRED")
     if row.get("retry_purpose", row.get("purpose")) == "acquisition":
@@ -1238,6 +1305,10 @@ def _apply(session, attempt_id):
                     validate_targeted_repair(previous_claims, proposal["inventory"]["claims"],
                         target_claim_id=row["target_claim_id"])
                 _proposal_limits(session, proposal, view["execution"]["source_bindings"])
+                from .calculation_contracts import require_selected_references
+                require_selected_references(proposal, attempt.input_document.get("calculation_selections", []), allowed)
+                from .calculation_contracts import require_source_premises
+                require_source_premises(proposal, attempt.input_document.get("existing_source_premises", []))
                 observed.finish()
                 links = detached(output.get("coverage_links", []))
                 if type(links) is not list or len(links) > 64 or any(type(link) is not dict
@@ -1259,11 +1330,11 @@ def _apply(session, attempt_id):
                     context.check(prepared["snapshot"], prepared["rubric"], [item for item in packets if item["source_id"] in source_ids])
                     if not context.document()["manifest"]["context_complete"]:
                         refuse("REVIEW_CONTEXT_INCOMPLETE")
-                    if attempt.job["schema_version"] == JOB_V3 and context.packet_id != attempt.job["payload"]["packet_id"]:
+                    if attempt.job["schema_version"] in {JOB_V3, JOB_V4} and context.packet_id != attempt.job["payload"]["packet_id"]:
                         refuse("PACKET_CHANGED")
-                elif attempt.job["schema_version"] == JOB_V3:
+                elif attempt.job["schema_version"] in {JOB_V3, JOB_V4}:
                     refuse("REVIEW_CONTEXT_MISSING")
-                if attempt.job["schema_version"] != JOB_V3 and digest(prepared["snapshot"]) != attempt.job["payload"]["packet_id"]:
+                if attempt.job["schema_version"] not in {JOB_V3, JOB_V4} and digest(prepared["snapshot"]) != attempt.job["payload"]["packet_id"]:
                     refuse("PACKET_CHANGED")
                 if row.get("retry_purpose", row.get("purpose")) == "adjudicate":
                     if (type(output) is not dict or set(output) != {"schema_version", "recommendation", "rationale"}
@@ -1330,6 +1401,12 @@ def _apply(session, attempt_id):
 
 
 def _counter_stop(session, *, question_slug=None, original_ids=None):
+    from .calculation_session import stop as calculation_stop
+    if any(row["kind"] == "execution_calculation_selection" for row in retained(session)):
+        if original_ids is None:
+            original_ids = [row["original_id"] for row in current(session)["accounting"]["original_outcomes"]
+                if any(question["slug"] == question_slug for question in row["questions"])]
+        calculation_stop(session, original_ids=original_ids)
     from .coverage_gate import stop
     return stop(session, question_slug=question_slug, original_ids=original_ids)
 
@@ -1565,6 +1642,10 @@ def advance(session, *, request_id, expected_basis_id):
                 action = _terminal_action(session, current(session), "blocked_external", "executor_unavailable")
             else:
                 intake(session, observation, request_id=child_id(request_id, "observation"))
+        elif operation == "calculate":
+            from .calculation_agent import propose
+            propose(session, request_id=action.get("calculation_request_id", child_id(request_id, "calculation_work")),
+                original_id=action["original_id"], config_ref=action["config_ref"])
         elif operation == "examine":
             from .coverage_session import examine
             examined = examine(session, request_id=action.get("examination_request_id", child_id(request_id, "examination_work")),
@@ -1731,7 +1812,7 @@ def control_pending(session, *, request_id, cancel=False):
 
 def _host_request_payload(row):
     job = row["attempt"]["job"]
-    if job["operation"] == "evaluate" and job["schema_version"] == JOB_V3 and "review_context" in row:
+    if job["operation"] == "evaluate" and job["schema_version"] in {JOB_V3, JOB_V4} and "review_context" in row:
         return {"claim_id": row["claim_id"], "packet_id": row["review_context"]["owner_snapshot_sha256"]}
     return detached(job["payload"])
 

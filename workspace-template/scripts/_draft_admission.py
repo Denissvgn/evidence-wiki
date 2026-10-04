@@ -378,8 +378,7 @@ def prepare_admission(root, proposal, *, observed_at):
     config = configuration(capture)
     policy = sibling("_strict_evidence").resolve_policy(root, config)
     require(policy is not None, "strict_policy_missing")
-    require(config.get("computation") is None and not any(claim.get("calculations") for claim in proposal["inventory"]["claims"]),
-            "computation_admission_unsupported", unsupported=True)
+    sibling("_draft_computation").check(root, config, proposal)
     relative = target(root, config, policy)
     for path, expected in policy["instructions"].items():
         require(path in capture.files and sibling("_requirements_bridge").instruction_matches(root, path, capture.files[path], expected), "instructions_changed")
@@ -443,6 +442,7 @@ def check_current_sources(root, proposal, plan, capture, view):
     policy = sibling("_strict_evidence").resolve_policy(root, config)
     scopes = originals(capture, root, config, policy, proposal)
     _count, binding = source_checks(root, config, policy, capture, proposal, clock(current_time()), scopes, _live_view=view)
+    sibling("_draft_computation").check(root, config, proposal, view=view)
     require(binding == plan["private_view"], "source_authority_changed")
     if view is not None:
         view.revalidate(root, config)

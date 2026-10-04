@@ -13,8 +13,11 @@ from .agent_execution import ExecutionError, ExecutionRole, _digest, _ref, valid
 
 ROLE_SCOPE = "research-execution-role-scope/v1"
 ROLE_REGISTRY = "research-execution-role-registry/v1"
+ROLE_SCOPE_V2 = "research-execution-role-scope/v2"
+ROLE_REGISTRY_V2 = "research-execution-role-registry/v2"
 ISOLATION_REPORT = "research-execution-isolation-report/v1"
 _ROLES = {
+    "calculation": ("host_worker", frozenset({"model", "evidence.read", "calculation.propose"})),
     "coverage": ("host_worker", frozenset({"model", "objective.read", "evidence.read", "coverage.propose"})),
     "planner": ("host_worker", frozenset({"model", "objective.read", "plan.propose"})),
     "researcher": ("host_worker", frozenset({"model", "objective.read", "evidence.read", "claim.propose", "acquisition.propose"})),
@@ -61,7 +64,7 @@ class ExecutionRoleScope:
             raise ExecutionError("execution_role_capability_refused")
 
     def document(self) -> dict[str, Any]:
-        return {"schema_version": ROLE_SCOPE, "config_ref": self.config_ref, "task_role": self.task_role,
+        return {"schema_version": ROLE_SCOPE_V2 if self.task_role == "calculation" else ROLE_SCOPE, "config_ref": self.config_ref, "task_role": self.task_role,
                 "authority_role": self.authority_role, "capabilities": list(self.capabilities)}
 
     @property
@@ -184,7 +187,7 @@ class ExecutionRoleRegistry:
         return selected[0]
 
     def document(self) -> dict[str, Any]:
-        return {"schema_version": ROLE_REGISTRY, "scopes": [scope.document() for scope in self.scopes]}
+        return {"schema_version": ROLE_REGISTRY_V2 if any(scope.task_role == "calculation" for scope in self.scopes) else ROLE_REGISTRY, "scopes": [scope.document() for scope in self.scopes]}
 
     @property
     def sha256(self) -> str:

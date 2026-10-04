@@ -14,6 +14,7 @@ STEP = "research-session-step/v1"
 CURRENT_V2 = "research-session-current/v2"
 NEXT_V2 = "research-session-next/v2"
 NEXT_V3 = "research-session-next/v3"
+NEXT_V4 = "research-session-next/v4"
 BINDING_V2 = "research-session-binding/v2"
 STEP_V2 = "research-session-step/v2"
 MAX_BYTES = 262_144
@@ -93,6 +94,9 @@ def schemas():
     next_v3 = json.loads(json.dumps(next_v2))
     next_v3["properties"]["schema_version"] = {"const": NEXT_V3}
     next_v3["properties"]["actions"]["items"]["properties"]["operation"]["enum"].append("examine")
+    next_v4 = json.loads(json.dumps(next_v3))
+    next_v4["properties"]["schema_version"] = {"const": NEXT_V4}
+    next_v4["properties"]["actions"]["items"]["properties"]["operation"]["enum"].append("calculate")
     binding_v2 = json.loads(json.dumps(binding))
     binding_v2["properties"]["schema_version"] = {"const": BINDING_V2}
     for key in ("execution_profile_id", "qualification_id", "signer_id", "observer_id"):
@@ -106,7 +110,7 @@ def schemas():
     step_v2["required"].extend(["action", "attempt_id"])
     return {name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape}
         for name, shape in ((CURRENT, current), (NEXT, next_), (BINDING, binding), (STEP, step),
-                            (CURRENT_V2, current_v2), (NEXT_V2, next_v2), (NEXT_V3, next_v3), (BINDING_V2, binding_v2), (STEP_V2, step_v2))}
+                            (CURRENT_V2, current_v2), (NEXT_V2, next_v2), (NEXT_V3, next_v3), (NEXT_V4, next_v4), (BINDING_V2, binding_v2), (STEP_V2, step_v2))}
 
 
 def schema_document(name):
@@ -136,9 +140,9 @@ def checked(name, value):
             if (len(ids) != len(set(ids)) or accounting["accepted_count"] + accounting["unresolved_count"] != len(ids)
                     or [row.get("original_id") for row in accounting["original_outcomes"]] != ids):
                 refuse("INVALID", "/accounting")
-        if name in {NEXT_V2, NEXT_V3}:
+        if name in {NEXT_V2, NEXT_V3, NEXT_V4}:
             checked(CURRENT_V2, value["current"])
-        if name in {NEXT, STEP, NEXT_V2, NEXT_V3, STEP_V2} and value["decision"] is not None:
+        if name in {NEXT, STEP, NEXT_V2, NEXT_V3, NEXT_V4, STEP_V2} and value["decision"] is not None:
             from .run_policy import DECISION, validate_document
             validate_document(DECISION, value["decision"])
         if name in {STEP, STEP_V2} and value["job"] is not None:

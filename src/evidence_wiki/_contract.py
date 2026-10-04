@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "34"
+LIBRARY_API_VERSION = "35"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -107,6 +107,8 @@ LIBRARY_API_SURFACE = (
     "mutations.reconcile",
     "research.current",
     "research.next",
+    "research.calculate",
+    "research.propose_calculation",
     "research.run_cycle",
     "research.session",
     "research.session.current",
@@ -120,6 +122,8 @@ LIBRARY_API_SURFACE = (
     "research.session.run_acquisition",
     "research.session.examine_coverage",
     "research.session.examine_counterevidence",
+    "research.session.calculate",
+    "research.session.propose_calculation",
     "research.session.prepare_acquisition",
     "research.session.host_job",
     "research.session.pending",
@@ -522,14 +526,14 @@ def contract() -> dict:
             "original_source_scope": "frozen native absolute files/directories inside the original workspace; URI, relative and external extents unsupported",
             "publication_eligibility": "current source age and usage permission rechecked before new publication",
             "report_clock": "admitted_at is the retained plan validation clock; actual completion timing is not reconstructed",
-            "computation": "unsupported in the initial native admission profile",
+            "computation": "strict v2 calculation references reproduced by the current deterministic native owner",
             "multi_origin_question_mapping": "unsupported; explicit refusal",
         },
         "research_sessions": {
             "schemas": ["research-session-current/v1", "research-session-next/v1",
                         "research-session-binding/v1", "research-session-step/v1",
                         "research-session-current/v2", "research-session-next/v2",
-                        "research-session-binding/v2", "research-session-step/v2", "research-session-next/v3"],
+                        "research-session-binding/v2", "research-session-step/v2", "research-session-next/v3", "research-session-next/v4"],
             "schema_accessor": "evidence_wiki.research_session_contracts.schema_document",
             "work_cycle_result": "research-work-cycle-result/v1",
             "work_cycle_result_schema_accessor": "evidence_wiki.cycle_result_contracts.schema_document",
@@ -545,11 +549,11 @@ def contract() -> dict:
             "deadline": "job lease capped by the original canonical run deadline; calls do not reset the allowance",
             "model_executor": "host_selected",
             "execution_profile": "ExecutionProfile and ResearchExecution; no mandatory model SDK",
-            "execution_profile_schemas": ["research-execution-profile/v1", "research-execution-profile/v2", "research-execution-profile/v3", "research-execution-profile/v4", "research-execution-profile/v5"],
+            "execution_profile_schemas": ["research-execution-profile/v1", "research-execution-profile/v2", "research-execution-profile/v3", "research-execution-profile/v4", "research-execution-profile/v5", "research-execution-profile/v6"],
             "scheduling": "optional frozen role/controller aggregate caps, configured worker failover and bounded authenticated retry/backoff",
             "offline_executor": "DeterministicOfflineExecutor; measured local work, zero provider use, fixtures cannot qualify semantic review",
             "role_isolation": "optional frozen role scopes and exact configured controllers; fresh blinded parent-bound review contexts; independent control/context/model dimensions remain separate",
-            "review_context": "research-review-context/v1; missing or truncated decisive evidence is incomplete",
+            "review_context": "research-review-context/v1 and v2; v2 retains deterministic calculation inputs and references; missing or truncated decisive evidence is incomplete",
             "execution_observation": "research-execution-observation/v1",
             "execution_report": "research-execution-report/v2",
             "execution_report_schema_accessor": "evidence_wiki.execution_reporting.schema_document",
@@ -569,6 +573,16 @@ def contract() -> dict:
             "release": "current qualified independent findings and producer provenance; material objections block; bounded absence remains unknown",
             "next_schema": "research-session-next/v3 for examination work; existing next/v2 retains its operation enum",
             "acceptance": "no semantic approval or rights conferred by proposal, anchor match, query result or coverage link",
+        },
+        "calculation_interpretation": {
+            "schemas": ["evidence-calculation-proposal/v1", "evidence-calculation-selection/v1", "research-calculation-context/v1"],
+            "schema_accessor": "evidence_wiki.calculation_contracts.schema_document",
+            "execution_profile": "research-execution-profile/v6 only for scoped calculation; prior profile documents unchanged",
+            "job_schema": "research-host-job/v4",
+            "review_context": "research-review-context/v2",
+            "owner": "shared deterministic computation engine; native values, inputs, definitions, rounding, units and invariants remain authoritative",
+            "roles": "explicit scoped Calculation proposer and separately configured native evaluator",
+            "acceptance": "formula selection and agent agreement supply no semantic approval; strict v2 requires current owner results and authenticated independent reviews",
         },
         "claim_diagnostics": {
             "schema": "evidence-claim-diagnostics/v1",

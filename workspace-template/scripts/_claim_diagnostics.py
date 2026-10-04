@@ -102,8 +102,7 @@ def _current(root, proposal):
     config = draft.configuration(capture)
     policy = sibling("_strict_evidence").resolve_policy(root, config)
     draft.require(policy is not None, "strict_policy_missing")
-    draft.require(config.get("computation") is None and not any(claim.get("calculations")
-        for claim in proposal["inventory"]["claims"]), "computation_admission_unsupported", unsupported=True)
+    sibling("_draft_computation").check(root, config, proposal)
     for relative, expected in policy["instructions"].items():
         draft.require(relative in capture.files and sibling("_requirements_bridge").instruction_matches(
             root, relative, capture.files[relative], expected), "instructions_changed")

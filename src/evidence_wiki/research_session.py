@@ -626,6 +626,22 @@ class ResearchSession:
 
     @_boundary
     @_serialized
+    def calculate(self, *, request_id, as_of=None):
+        """Observe reproducible native values within the existing run allowance."""
+        self._check("calculate", write=True)
+        from .calculation_session import current
+        return current(self, request_id=request_id, as_of=as_of)
+
+    @_boundary
+    @_serialized
+    def propose_calculation(self, *, request_id, original_id, config_ref, as_of=None):
+        """Run a scoped formula interpreter; native arithmetic remains authoritative."""
+        self._check("propose_calculation", write=True)
+        from .calculation_agent import propose
+        return propose(self, request_id=request_id, original_id=original_id, config_ref=config_ref, as_of=as_of)
+
+    @_boundary
+    @_serialized
     def host_job(self, *, request_id, operation, payload, original_text=None):
         """Retain an inert bounded job; execution and authentication stay in the host."""
         self._check("host_job", write=True)
