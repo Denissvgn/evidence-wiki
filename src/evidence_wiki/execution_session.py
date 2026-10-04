@@ -176,14 +176,23 @@ def _sources(session, observed=None):
     return packets, bindings
 
 
-def _qualifications(session, observed):
+def _qualifications(session, observed, *, originals=None, packets=None, records=None):
     policy = observed.policy
     if policy is None:
         return {"state": "unknown", "reason": "strict_policy_missing", "profiles": []}
     rubric = policy["rubric"]
+    extra = {}
+    if getattr(getattr(session.execution, "profile", None), "calibration", None) is not None:
+        from .finite_domain import observe_domain
+
+        domain = observe_domain(originals=originals or [],
+            strict_claims=[row["claim"] for row in observed.strict.get("result", {}).get("claims", [])],
+            rubric=rubric, sources=packets or [])
+        probes = [row["data"]["probe"] for row in records or [] if row["kind"] == "execution_qualification_probe"]
+        extra = {"domain": domain, "probe": probes[-1] if probes else None, "rubric": rubric}
     try:
         profiles = session.execution.qualifications.observations(session.policy, session.execution.profile,
-            now_utc(), rubric["id"], rubric_sha256=hashlib.sha256(canonical(rubric)).hexdigest())
+            now_utc(), rubric["id"], rubric_sha256=hashlib.sha256(canonical(rubric)).hexdigest(), **extra)
     except ValueError:
         return {"state": "unknown", "reason": "qualification_invalid_or_expired", "profiles": []}
     qualified = all(row["qualified"] is True and row["independent"] is True for row in profiles)
@@ -208,7 +217,8 @@ def current(session):
         session.run_id if document is not None else None, observed)
     view["basis_id"] = input_basis(observed)
     packets, bindings = _sources(session, observed)
-    qualification = _qualifications(session, observed)
+    qualification = _qualifications(session, observed, originals=view["accounting"]["original_outcomes"],
+        packets=packets, records=records)
     observed.finish()
     plan = session.execution.ledger(session, records)
     projection = None if plan is None else accounting.projection(plan, limits=_limits(session))
@@ -432,7 +442,7 @@ def _action(session, view, records, *, resuming=False):
             return _terminal_action(session, view, "stop_budget", "usage_unknown")
         if projection["overrun"]:
             return _terminal_action(session, view, "stop_budget", "budget_exhausted")
-    if view["qualification"]["state"] != "qualified":
+    if view["qualification"]["state"] != "qualified" and getattr(getattr(session.execution, "profile", None), "calibration", None) is None:
         return _terminal_action(session, view, "blocked_external", "qualification_unknown")
     observation = policy_observation(session, view)
     if observation["selected_outcomes"]:
@@ -459,6 +469,9 @@ def _action(session, view, records, *, resuming=False):
             and observed.policy["claims_path"] in observed.capture.files):
         observed.finish()
         return _terminal_action(session, view, "abstained", "unsupported_claim")
+    if strict.get("claims") and view["qualification"]["state"] != "qualified":
+        observed.finish()
+        return _terminal_action(session, view, "blocked_external", "qualification_unknown")
     questions = {row["slug"]: row for row in observed.questions}
     for original in view["accounting"]["original_outcomes"]:
         if original["accepted"]:
@@ -921,6 +934,19 @@ def intake(session, observation, *, request_id):
         return detached(verified)
 
 
+def _semantic_required(session, attempt):
+    return getattr(getattr(session.execution, "profile", None), "calibration", None) is None or attempt.job["operation"] != "generate"
+
+
+def _model_review_observed(session, attempt, observation):
+    if getattr(getattr(session.execution, "profile", None), "calibration", None) is None or attempt.job["operation"] == "generate":
+        return True
+    usage = observation.get("observed_usage", {})
+    return (type(usage.get("model_calls")) is int and usage["model_calls"] > 0
+        and observation.get("reason") != "offline_fixture" and observation.get("started_utc") is not None
+        and not session.execution.profile.role(attempt.config_ref).model_ref.startswith("offline/"))
+
+
 def _verify_review_controller(session, attempt, envelope):
     """Compare native authenticated principals with the dispatched controller."""
     authority = owner("_evidence_authority")
@@ -942,8 +968,10 @@ def _validate_application(session, attempt, observation, application, *, allow_r
     """Check current effect eligibility, allowing only exact retained owned progress."""
     records = retained(session)
     view = current(session)
+    if not _model_review_observed(session, attempt, observation):
+        refuse("MODEL_REVIEW_UNOBSERVED")
     if (datetime.now(timezone.utc) >= datetime.fromisoformat(attempt.job["deadline_utc"])
-            or view["qualification"]["state"] != "qualified"):
+            or _semantic_required(session, attempt) and view["qualification"]["state"] != "qualified"):
         refuse("RESULT_INELIGIBLE")
     unchanged = view["basis_id"] == attempt.job["basis_id"]
     owned_progress = False
@@ -966,7 +994,8 @@ def _validate_application(session, attempt, observation, application, *, allow_r
                         owned_progress = owned_progress or receipt.get("status") in {"committed", "reconciled"} and receipt.get("after_revision") == revision
     if (not (unchanged or owned_progress) or datetime.now(timezone.utc) >= datetime.fromisoformat(attempt.job["deadline_utc"])
             or observation["state"] != "succeeded" or not observation["final_accounting"]
-            or view["qualification"]["state"] != "qualified" or view["execution"]["accounting"]["overrun"]):
+            or _semantic_required(session, attempt) and view["qualification"]["state"] != "qualified"
+            or view["execution"]["accounting"]["overrun"]):
         refuse("RESULT_INELIGIBLE")
     for key in ("claims", "sources"):
         if view["usage"][key] is not None and view["usage"][key] > session.policy.to_dict()["budgets"][key]:
@@ -1000,13 +1029,17 @@ def _apply(session, attempt_id):
     observation = session.execution.authenticate(_latest_observation(records, attempt_id), attempt)
     application = next((item["data"] for item in records if item["kind"] == "execution_application"
         and item["data"]["attempt_id"] == attempt_id), None)
+    if getattr(getattr(session.execution, "profile", None), "calibration", None) is not None and attempt.job["operation"] == "evaluate":
+        from .calibration_probes import refresh
+        refresh(session, child_id(attempt_id, "application_probe"))
     _validate_application(session, attempt, observation, application)
     if application is None:
         with gate(session):
             view = current(session)
             if (view["basis_id"] != attempt.job["basis_id"] or datetime.now(timezone.utc) >=
                     datetime.fromisoformat(attempt.job["deadline_utc"]) or observation["state"] != "succeeded"
-                    or not observation["final_accounting"] or view["qualification"]["state"] != "qualified"):
+                    or not observation["final_accounting"]
+                    or _semantic_required(session, attempt) and view["qualification"]["state"] != "qualified"):
                 refuse("RESULT_INELIGIBLE")
             output = observation["output"]
             operation = attempt.job["operation"]
@@ -1161,6 +1194,29 @@ def _close(session, step):
 def advance(session, *, request_id, expected_basis_id):
     request_id = validate_request_id(request_id)
     session.context.require_grant("research_session.intake_observation")
+    if getattr(getattr(session.execution, "profile", None), "calibration", None) is not None:
+        needs_probe = True
+        with gate(session):
+            existing = retained(session)
+            old_step = next((row["data"]["step"] for row in reversed(existing) if row["kind"] == "execution_step"
+                and (row["data"]["step"]["request_id"] == request_id or row["data"].get("revalidates_request_id") == request_id)), None)
+            if old_step is not None:
+                if old_step["before_basis_id"] != expected_basis_id:
+                    refuse("REQUEST_CONFLICT")
+                needs_probe = bool(old_step["terminal"] and old_step["decision"]["outcome"] in {"accepted", "partial"}
+                    and _document(session)["state"]["current"] not in owner("run_controller").TERMINAL_STATES)
+            else:
+                old_intent = next((row["data"] for row in existing if row["kind"] == "execution_advance"
+                    and row["data"]["advance_id"] == request_id), None)
+                if old_intent is not None and old_intent["before_basis_id"] != expected_basis_id:
+                    refuse("REQUEST_CONFLICT")
+                if old_intent is None and current(session)["basis_id"] != expected_basis_id:
+                    refuse("BASIS_CHANGED")
+                if existing and _document(session)["state"]["current"] in owner("run_controller").TERMINAL_STATES:
+                    refuse("RUN_TERMINAL")
+        if needs_probe:
+            from .calibration_probes import refresh
+            refresh(session, request_id)
     attempt, action, replay = None, None, None
     with gate(session):
         records = retained(session)
@@ -1403,19 +1459,44 @@ def control_pending(session, *, request_id, cancel=False):
     return pending(session)
 
 
+def _host_request_payload(row):
+    job = row["attempt"]["job"]
+    if job["operation"] == "evaluate" and job["schema_version"] == JOB_V3 and "review_context" in row:
+        return {"claim_id": row["claim_id"], "packet_id": row["review_context"]["owner_snapshot_sha256"]}
+    return detached(job["payload"])
+
+
 def host_job(session, *, request_id, operation, payload, original_text=None):
     request_id = validate_request_id(request_id)
     if type(operation) is not str:
         refuse("JOB_PAYLOAD_INVALID")
     if type(payload) is not dict or operation not in {"generate", "evaluate"}:
         refuse("SOURCE_MAPPING_UNSUPPORTED" if operation == "acquire" else "JOB_PAYLOAD_INVALID")
+    if getattr(getattr(session.execution, "profile", None), "calibration", None) is not None and operation == "evaluate":
+        with gate(session):
+            existing = retained(session)
+            old_row = next((row["data"] for row in existing if row["kind"] == "execution_attempt"
+                and row["data"]["attempt"]["job"]["id"] == request_id), None)
+            if old_row is not None:
+                old = old_row["attempt"]
+                if (old["job"]["operation"] != operation or _host_request_payload(old_row) != payload
+                        or original_text is not None and old["job"]["original_text"] != original_text):
+                    refuse("REQUEST_CONFLICT")
+                return detached(old["job"])
+            if existing and _document(session)["state"]["current"] in owner("run_controller").TERMINAL_STATES:
+                refuse("RUN_TERMINAL")
+            if (pending_work := pending(session, existing)) is not None and not pending_work["applied"]:
+                refuse("JOB_RESERVATION_PENDING")
+        from .calibration_probes import refresh
+        refresh(session, request_id)
     with gate(session):
         document = _begin(session)
         records = retained(session)
-        old = next((row["data"]["attempt"] for row in records if row["kind"] == "execution_attempt"
+        old_row = next((row["data"] for row in records if row["kind"] == "execution_attempt"
             and row["data"]["attempt"]["job"]["id"] == request_id), None)
-        if old is not None:
-            if (old["job"]["operation"] != operation or old["job"]["payload"] != payload
+        if old_row is not None:
+            old = old_row["attempt"]
+            if (old["job"]["operation"] != operation or _host_request_payload(old_row) != payload
                     or original_text is not None and (type(original_text) is not str or old["job"]["original_text"] != original_text)):
                 refuse("REQUEST_CONFLICT")
             return detached(old["job"])
@@ -1430,7 +1511,7 @@ def host_job(session, *, request_id, operation, payload, original_text=None):
         if boundary["operation"] in {"terminal", "release"}:
             refuse("BUDGET_EXHAUSTED" if boundary["reason"] in {"budget_exhausted", "usage_unknown"}
                 else "HOST_CAPABILITY_UNAVAILABLE")
-        if view["qualification"]["state"] != "qualified":
+        if view["qualification"]["state"] != "qualified" and (operation == "evaluate" or getattr(getattr(session.execution, "profile", None), "calibration", None) is None):
             refuse("QUALIFICATION_UNKNOWN")
         if operation == "generate":
             if set(payload) != {"question"}:

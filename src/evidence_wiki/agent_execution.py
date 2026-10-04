@@ -30,11 +30,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 from .workflow_contracts import JOB, JOB_V2, JOB_V3, MAX_BYTES, document_sha256, validate_document, validate_job
 
 if TYPE_CHECKING:
+    from .calibration_registry import CalibrationPlan
     from .execution_roles import ExecutionRoleRegistry
 
 PROFILE = "research-execution-profile/v1"
 PROFILE_V2 = "research-execution-profile/v2"
 PROFILE_V3 = "research-execution-profile/v3"
+PROFILE_V4 = "research-execution-profile/v4"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -246,6 +248,7 @@ class ExecutionProfile:
     schedule: ExecutionSchedule | None = None
     role_scopes: ExecutionRoleRegistry | None = None
     required_diversity: tuple[str, ...] = ()
+    calibration: CalibrationPlan | None = None
 
     def __post_init__(self) -> None:
         _ref(self.profile_ref)
@@ -293,6 +296,14 @@ class ExecutionProfile:
                 or self.required_diversity and self.role_scopes is None):
             raise ExecutionError("execution_required_diversity_invalid")
         object.__setattr__(self, "required_diversity", tuple(sorted(self.required_diversity)))
+        if self.calibration is not None:
+            from .calibration_registry import CalibrationPlan
+
+            if (type(self.calibration) is not CalibrationPlan or self.role_scopes is None
+                    or {row.config_ref for row in self.calibration.selections}
+                    != {role.config_ref for role in roles if role.role == "evaluator"}):
+                raise ExecutionError("calibration_profile_incomplete")
+
 
     def document(self) -> dict[str, Any]:
         result = {
@@ -308,6 +319,8 @@ class ExecutionProfile:
         if self.role_scopes is not None:
             result.update(schema_version=PROFILE_V3, role_scopes=self.role_scopes.document(),
                           required_diversity=list(self.required_diversity))
+        if self.calibration is not None:
+            result.update(schema_version=PROFILE_V4, calibration=self.calibration.document())
         return result
 
     @property

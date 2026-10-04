@@ -59,11 +59,14 @@ class ResearchExecution:
 
     def __init__(self, executor, *, qualifications, review_signer, observer_key: bytes):
         from .agent_qualification import HostReviewSigner, QualifiedEvaluators
+        from .calibration_registry import CalibratedEvaluators
 
         if (type(executor.profile) is not ExecutionProfile or type(observer_key) is not bytes
-                or not 32 <= len(observer_key) <= 128 or type(qualifications) is not QualifiedEvaluators
+                or not 32 <= len(observer_key) <= 128 or type(qualifications) not in {QualifiedEvaluators, CalibratedEvaluators}
                 or type(review_signer) is not HostReviewSigner):
             refuse("EXECUTION_CONFIG_INVALID")
+        if (executor.profile.calibration is None) != (type(qualifications) is QualifiedEvaluators):
+            refuse("CALIBRATION_REGISTRY_REQUIRED")
         try:
             generator_role = executor.profile.role(review_signer.generator.config_ref)
             if (generator_role.role != "host_worker" or generator_role.controller_ref != review_signer.generator.controller_ref

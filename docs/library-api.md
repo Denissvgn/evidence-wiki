@@ -63,6 +63,11 @@ selections and immutable blinded review contexts. Scoped v3 jobs bind task purpo
 capabilities and exact input bytes. Native authenticated signing controllers must
 match their dispatched configuration. Legacy profiles retain their document identity.
 
+Version `24` adds an opt-in protected calibration profile. Profile v4 requires
+`CalibrationPlan` and `CalibratedEvaluators`; older qualifications are not promoted.
+The supported reference domain is exact finite structured observations. Missing
+or unsupported domain/configuration/model evidence remains `qualification_unknown`.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -559,6 +564,52 @@ Missing or insufficient reference coverage stays unknown. The protected signer
 supplies the existing strict attestation format; canonical owners still check
 controller independence, current evidence and release eligibility. Qualification
 for one domain does not establish general semantic correctness.
+
+For stricter empirical qualification, `calibration_suite` freezes protected
+logical reference units, rubric, effective settings and held-out split.
+`CalibrationSelection` independently reproduces finite executable references and
+pins actual oracle/scorer/classifier source plus arithmetic environment. The
+reference language covers sum, difference, product, mean, ratio and declared
+units/scope/time/contradiction/insufficiency. It cannot qualify unrestricted prose
+or a different domain by changing a pack label. Fixed external public labels and
+new domains require their own qualified provenance owner; unsupported references
+refuse this finite selection.
+
+`CalibrationAuthority` scores actual authenticated correlated observations.
+Independent baseline counts exclude presentation variants and duplicate material;
+critical false acceptance, necessary/unnecessary abstention, repeat stability and
+meaning/identity/position/verbosity sensitivity remain separate. Existing frozen
+thresholds still decide adequacy. Scored reports and agent-generated exploratory
+labels convey no permission or accepted evidence. Insufficient cases, families,
+classes or complete axis coverage remain unknown.
+
+A `CalibrationPlan` pins each configured evaluator's `CalibrationSelection`,
+including exact model revision/settings, suite/split and domain descriptor. The
+host supplies `calibration_configuration(config_ref)` for issuance and
+`qualification_configuration(request)` for current use. The latter echoes the
+fresh request nonce, execution-profile/registry identities and canonical semantic
+basis, and returns the exact effective configuration and typed active status.
+Absent, mismatched, timed-out, expired or withdrawn observations cannot qualify.
+Callbacks run outside coordination locks; owner gates then check pure exact
+correlation before semantic dispatch/application/release and unfinished accepted
+recovery. A finite status snapshot cannot promise instantaneous future withdrawal.
+
+Current domain derives from actual authorized source closures, strict claims,
+original question grammar and exact rubric. Native bookkeeping changes do not
+relabel that domain. Supported finite sources use `finite-structured-observation/v1`
+JSON and exact declared observation grammar; free prose, missing context,
+computational premise graphs and incompatible data remain unknown. Unaccepted
+generation proposals may proceed under the original model grants and budgets;
+evaluation and release still require current qualified profiles. Completed
+historical replay does not refresh host status or grow the journal.
+
+The integrating host must actually execute and meter its selected models.
+Deterministic fixtures, scripted reference calculations, model self-confidence
+and majority agreement do not establish live semantic model reliability. Missing
+provider execution evidence remains unknown; the core discovers no credentials,
+network destinations or additional permission. Control-plane host reads and
+calibration preparation are outside session-work accounting and must not be
+presented as a zero whole-execution cost.
 
 Qualification records are immutable scoped snapshots. The host must withdraw or
 invalidate the bound execution services when it revokes a qualification. Close
