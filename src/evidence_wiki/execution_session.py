@@ -21,7 +21,7 @@ from .pack_discovery import owner
 from .research_execution import SCOPE, bounded_host_call, now_utc
 from .research_observation import ResearchObservation
 from .research_observation import reason as owner_reason
-from .research_session_contracts import CURRENT_V2, NEXT_V2, STEP_V2, checked, refuse
+from .research_session_contracts import CURRENT_V2, NEXT_V2, NEXT_V3, STEP_V2, checked, refuse
 from .review_context import ReviewContext, create_review_context
 from .run_policy import DECISION, OBSERVATION, OBSERVATION_V2, POLICY_V2, validate_document
 from .workflow_contracts import EXECUTION_OBSERVATION, JOB_V2, JOB_V3, WorkflowContractError, validate_job
@@ -433,6 +433,11 @@ def _owner_action(session, view, records, *, resuming=False):
     if observation["selected_outcomes"]:
         decision = session.policy.decide(observation)
         if decision["outcome"] in {"accepted", "partial"}:
+            from .coverage_gate import next_examination
+            selected = [row["original_id"] for row in view["accounting"]["original_outcomes"] if row["accepted"]]
+            examination = next_examination(session, view, records, original_ids=selected)
+            if examination is not None:
+                return examination
             return {"operation": "release", "reason": decision["reason"], "decision": decision}
         if decision["terminal"] and getattr(profile, "disagreement", None) is None:
             return {"operation": "terminal", "reason": decision["reason"], "decision": decision, "decision_input": observation}
@@ -515,6 +520,10 @@ def _owner_action(session, view, records, *, resuming=False):
                     return {"operation": "repair", "purpose": "repair", "original_id": original["original_id"],
                         "defects": failures, "reason": "bounded_claim_repair"}
                 return _terminal_action(session, view, "abstained", "unsupported_claim")
+        from .coverage_gate import next_examination
+        examination = next_examination(session, view, records, original_ids=[original["original_id"]])
+        if examination is not None:
+            return examination
         if any(questions[slug]["status"] != "answered" for slug in slugs):
             return {"operation": "resolve", "original_id": original["original_id"], "reason": "reviewed_question_resolution"}
         return _terminal_action(session, view, "abstained", "current_outcomes")
@@ -524,6 +533,17 @@ def _owner_action(session, view, records, *, resuming=False):
 def _action(session, view, records, *, resuming=False):
     from .execution_planning import proposed_action
 
+    pending_work = view["execution"]["pending"]
+    if pending_work and not pending_work["applied"]:
+        pending_row = _attempt_rows(records)[pending_work["attempt_id"]]
+        if pending_row.get("purpose") in {"coverage", "counterevidence"}:
+            retained_request = next(row["request_id"] for row in records if row["kind"] == "execution_coverage_instruction"
+                and child_id(row["request_id"], "examination") == pending_work["attempt_id"])
+            return {"operation": "examine", "kind": pending_row["purpose"],
+                "question_slug": pending_row["examination_instruction"]["question_slug"],
+                "claim_id": pending_row.get("claim_id"), "config_ref": pending_row["attempt"]["config_ref"],
+                "original_id": pending_row["original_id"], "examination_request_id": retained_request,
+                "reason": "retained_examination_reconciliation"}
     action = _owner_action(session, view, records, resuming=resuming)
     if action.get("retry_purpose") == "plan" and action["operation"] != "reconcile":
         prior = _attempt_rows(records)[view["execution"]["pending"]["attempt_id"]]
@@ -535,7 +555,8 @@ def _action(session, view, records, *, resuming=False):
 def next_work(session):
     view = current(session)
     action = _action(session, view, retained(session))
-    return checked(NEXT_V2, {"schema_version": NEXT_V2, "current": view, "decision": action.get("decision"),
+    version = NEXT_V3 if action["operation"] == "examine" else NEXT_V2
+    return checked(version, {"schema_version": version, "current": view, "decision": action.get("decision"),
         "actions": [{"operation": action["operation"], "owner": "canonical_research_owners", "arguments": action,
             "preconditions": ["current_basis", "frozen_policy", "scoped_capabilities", "remaining_allowance"],
             "effects": ["durable_correlated_transition"], "required_grants": ["research_session.advance"],
@@ -576,7 +597,7 @@ def reserve(session, request_id, action, view):
         refuse("HOST_CAPABILITY_UNAVAILABLE")
     registry = session.execution.profile.role_scopes
     scope = None if registry is None else registry.scope(config_ref)
-    if scope is not None and operation == "generate" and scope.task_role != ("planner" if purpose == "plan" else "repair" if purpose == "repair" else "researcher"):
+    if scope is not None and operation == "generate" and scope.task_role != ("coverage" if purpose == "coverage" else "planner" if purpose == "plan" else "repair" if purpose == "repair" else "researcher"):
         refuse("HOST_CAPABILITY_UNAVAILABLE")
     review_context = None
     original = next(row for row in view["accounting"]["original_outcomes"] if row["original_id"] == action["original_id"])
@@ -596,7 +617,7 @@ def reserve(session, request_id, action, view):
         if not sources <= {row["source_id"] for row in bindings}:
             refuse("SOURCE_SCOPE_UNSUPPORTED")
         evidence_ids = {item["source_id"] for claim in [packet["claim"], *packet["premises"]] for item in claim["evidence"]}
-        required_role = "adjudicator" if purpose == "adjudicate" else next(item["role"]
+        required_role = "critic" if purpose == "counterevidence" else "adjudicator" if purpose == "adjudicate" else next(item["role"]
             for item in frozen["required_evaluators"] if item["profile_ref"] == config_ref)
         if scope is not None and scope.task_role != required_role:
             refuse("HOST_CAPABILITY_UNAVAILABLE")
@@ -662,7 +683,29 @@ def reserve(session, request_id, action, view):
             "omit or return an empty list; no coverage changes allowed" if purpose == "repair"
             and getattr(session.execution.profile, "disagreement", None) is not None else "optional declared facet/source links"}
         payload = {"question": original["original_text"]}
-    if purpose == "acquisition":
+    if purpose == "coverage":
+        if scope is None or scope.task_role != "coverage":
+            refuse("HOST_CAPABILITY_UNAVAILABLE")
+        scope.require("model")
+        scope.require("coverage.propose")
+        from .coverage_examination import check_instruction
+        instruction = check_instruction(action["examination_instruction"])
+        input_document = {"instruction": instruction, "purpose": "coverage",
+            "instructions": "Compare exact frozen facets with mechanically observed claims. Propose bounded links or missing evidence only. No grants, writes or acceptance.",
+            "output_contract": {"schema_version": "evidence-coverage-proposal/v1", "basis_id": instruction["basis_id"],
+                "links": "facet_id/claim_ids/source_ids", "missing": "facet_id/query"}}
+    elif purpose == "counterevidence":
+        if scope is None or scope.task_role != "critic" or review_context is None:
+            refuse("HOST_CAPABILITY_UNAVAILABLE")
+        scope.require("model")
+        scope.require("objection.propose")
+        from .counter_context import packet as counter_packet
+        projected = counter_packet(action["examination_instruction"], review_context)
+        input_document = {**projected, "purpose": "counterevidence",
+            "instructions": "Independently examine original context and alternative hypotheses. Return exact blinded aliases, queries, exclusions and opposing evidence. Bounded no results remain unknown. No review registration, grants or acceptance.",
+            "output_contract": {"schema_version": "evidence-counterevidence-proposal/v1", "basis_id": review_context.sha256,
+                "findings": "claim_id/facet_id/kind/query/exclusions/source_ids/evidence/rationale; exact source slices start/end"}}
+    elif purpose == "acquisition":
         if scope is None or scope.task_role != "researcher":
             refuse("HOST_CAPABILITY_UNAVAILABLE")
         scope.require("model")
@@ -710,7 +753,7 @@ def reserve(session, request_id, action, view):
         "input_id": session.binding["request_binding"], "basis_id": view["basis_id"], "policy_id": session.policy.policy_id,
         "policy_version": "2" if frozen["schema_version"] == POLICY_V2 else "1", "prompt_version": role.prompt_version,
         "revision_precondition": view["basis_id"], "original_text": original["original_text"], "scope": [original["original_id"]],
-        "required_capabilities": ["model", "plan.propose"] if purpose == "plan" else ["model", "acquisition.propose"] if purpose == "acquisition" else ["model"], "payload": payload, "issued_utc": now.isoformat(),
+        "required_capabilities": ["model", "coverage.propose"] if purpose == "coverage" else ["model", "objection.propose"] if purpose == "counterevidence" else ["model", "plan.propose"] if purpose == "plan" else ["model", "acquisition.propose"] if purpose == "acquisition" else ["model"], "payload": payload, "issued_utc": now.isoformat(),
         "deadline_utc": (now + timedelta(seconds=timeout)).isoformat(), "timeout_seconds": timeout, "max_attempts": 1,
         "expected_result_schema": EXECUTION_OBSERVATION, "budgets": cap,
         "qualifications": {"assurance": frozen["assurance"], "status": "unknown", "evaluator_ref": None,
@@ -726,11 +769,13 @@ def reserve(session, request_id, action, view):
     if current(session)["basis_id"] != view["basis_id"]:
         refuse("BASIS_CHANGED")
     extras = {}
+    if purpose in {"coverage", "counterevidence"}:
+        extras.update(examination_instruction=detached(action["examination_instruction"]))
     if purpose == "acquisition":
         extras.update(acquisition_instruction=detached(action["acquisition_instruction"]))
     if purpose == "plan":
         extras.update(owner_action=detached(action["owner_action"]), selection_key=action["selection_key"])
-    if purpose not in {"plan", "acquisition"} and getattr(session.execution.profile, "disagreement", None) is not None:
+    if purpose not in {"plan", "acquisition", "coverage", "counterevidence"} and getattr(session.execution.profile, "disagreement", None) is not None:
         from .execution_disagreement import attempt_metadata, material_basis
         if operation == "evaluate":
             extras["review_material_basis"] = material_basis(prepared["snapshot"], prepared["rubric"],
@@ -1151,6 +1196,8 @@ def _apply(session, attempt_id):
         from .calibration_probes import refresh
         refresh(session, child_id(attempt_id, "application_probe"))
     _validate_application(session, attempt, observation, application)
+    if row.get("retry_purpose", row.get("purpose")) in {"coverage", "counterevidence"}:
+        refuse("COVERAGE_EXAMINATION_OWNER_REQUIRED")
     if row.get("retry_purpose", row.get("purpose")) == "acquisition":
         refuse("ACQUISITION_CHOICE_OWNER_REQUIRED")
     if row.get("retry_purpose", row.get("purpose")) == "plan":
@@ -1282,6 +1329,11 @@ def _apply(session, attempt_id):
         append(session, "execution_applied", child_id(attempt_id, "applied"), applied)
 
 
+def _counter_stop(session, *, question_slug=None, original_ids=None):
+    from .coverage_gate import stop
+    return stop(session, question_slug=question_slug, original_ids=original_ids)
+
+
 def _resolve(session, original_id):
     from ._facades._base import call_seam
     from .research_session import _load
@@ -1308,7 +1360,8 @@ def _resolve(session, original_id):
                 control.checkpoint("before_reviewed_resolution")
                 return call_seam(lambda stem: _load(session.root, stem), "question_resolve", "run_answer", session.root,
                     slug=question["slug"], agent_id=session.context.actor_ref, answer_page=page.relative_to(session.root).as_posix(),
-                    source_id=source_ids, grounding_file=str(path), require_coverage=True, require_grounding=True)
+                    source_id=source_ids, grounding_file=str(path), require_coverage=True, require_grounding=True,
+                    _before_write=lambda: _counter_stop(session, question_slug=question["slug"]))
         _native_call(session, identifier, "question_resolve.run_answer", arguments, invoke,
             recover=lambda control, arguments=arguments: _recover_question(session, "question_resolve.run_answer", arguments, control))
 
@@ -1332,12 +1385,15 @@ def _finish(session, decision):
     controller = _load(session.root, "run_controller")
     if document["state"]["current"] in controller.TERMINAL_STATES:
         return document
+    if decision["outcome"] in {"accepted", "partial"}:
+        _counter_stop(session, original_ids=[row["original_id"] for row in current(session)["accounting"]["original_outcomes"] if row["accepted"]])
     if decision["outcome"] == "accepted":
         if document["state"]["current"] == "answering":
             document = _owner(session.root, "run_session_transition", run_id=session.run_id,
                 agent_id=session.context.actor_ref, to_state="verifying", reason="current strict release verified")
         return _owner(session.root, "run_session_finish", run_id=session.run_id, agent_id=session.context.actor_ref,
-            final_verdict="complete", reason=decision["reason"])
+            final_verdict="complete", reason=decision["reason"],
+            _before_write=lambda: _counter_stop(session, original_ids=[row["original_id"] for row in current(session)["accounting"]["original_outcomes"] if row["accepted"]]))
     return session._finish(document, decision["reason"])
 
 
@@ -1509,6 +1565,12 @@ def advance(session, *, request_id, expected_basis_id):
                 action = _terminal_action(session, current(session), "blocked_external", "executor_unavailable")
             else:
                 intake(session, observation, request_id=child_id(request_id, "observation"))
+        elif operation == "examine":
+            from .coverage_session import examine
+            examined = examine(session, request_id=action.get("examination_request_id", child_id(request_id, "examination_work")),
+                question_slug=action["question_slug"], config_ref=action["config_ref"], kind=action["kind"], claim_id=action.get("claim_id"))
+            if examined["status"] != "observed":
+                action = _terminal_action(session, current(session), "abstained", "unsupported_claim")
         elif operation == "prepare":
             _prepare(session, action["original_id"])
         elif operation == "normalize":

@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "16"
+OPERATION_MATRIX_VERSION = "17"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -74,6 +74,8 @@ _ROWS = (
     ("research.session.run_cycle", None, "intent-bound finite canonical drive and durable terminal exhaustion", "existing run journal; exact request replay and unresolved reservation retention", "explicit scoped ResearchExecution only"),
     ("research.session.prepare_acquisition", None, "none; observes current original and run acquisition allowance", "bounded authenticated native run histories and current request/provider facts", "none"),
     ("research.session.run_acquisition", None, "one authenticated inert selection followed by fixed native evidence steps or finite refusal", "existing run/role/request/source budgets and canonical capture/fulfillment owners", "explicit configured proposer and authorized native web transport only"),
+    ("research.session.examine_coverage", None, "authenticated bounded coverage proposal and canonical links/evaluation", "existing native run and mutation owners; current frozen requirements and admitted anchors", "explicit scoped coverage executor; no reviewer approval"),
+    ("research.session.examine_counterevidence", None, "authenticated blinded findings and observed bounded queries", "existing native run journal and current source/producer/evaluator authority; material objection release stops", "explicit independent scoped critic; bounded absence remains unknown"),
     ("research.session.choose_acquisition", None, "one scoped authenticated proposer attempt and inert choice application", "existing native execution journal and role/run accounting; gates released for host work", "configured bounded AgentExecutor only; no tool or source authority in output"),
     ("research.session.acquire_evidence", None, "retained transport, immutable capture, inventory, normalization and strict fulfillment", "same native run/mutation/source owners; exact workflow intent and result replay", "explicit configured native web transport; extraction through bounded native owner"),
     ("research.session.acquire", None, "one retained native transport attempt and monotonic original budget reservation", "existing run journal and native provider ledger; all coordination gates released for transport", "configured bounded native HTTPS only; unknown work never refetched"),

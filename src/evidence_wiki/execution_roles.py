@@ -15,6 +15,7 @@ ROLE_SCOPE = "research-execution-role-scope/v1"
 ROLE_REGISTRY = "research-execution-role-registry/v1"
 ISOLATION_REPORT = "research-execution-isolation-report/v1"
 _ROLES = {
+    "coverage": ("host_worker", frozenset({"model", "objective.read", "evidence.read", "coverage.propose"})),
     "planner": ("host_worker", frozenset({"model", "objective.read", "plan.propose"})),
     "researcher": ("host_worker", frozenset({"model", "objective.read", "evidence.read", "claim.propose", "acquisition.propose"})),
     "evaluator": ("evaluator", frozenset({"model", "review.read", "verdict.propose"})),

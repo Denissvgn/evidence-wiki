@@ -2493,6 +2493,7 @@ def run_answer(
     require_grounding: bool = False,
     coverage_manifest: str | None = None,
     grounding_file: str | None = None,
+    _before_write=None,
 ) -> dict[str, Any]:
     """Resolve a question as answered. Keyword arguments mirror the ``answer`` flags one for one."""
     return _run_command(
@@ -2511,6 +2512,7 @@ def run_answer(
             require_grounding=require_grounding,
             coverage_manifest=coverage_manifest,
             grounding_file=grounding_file,
+            _before_write=_before_write,
         ),
     )
 

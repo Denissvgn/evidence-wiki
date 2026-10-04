@@ -1670,10 +1670,10 @@ def run_session_transition(project_root: Path, *, run_id: str, agent_id: str, to
 
 
 def run_session_finish(project_root: Path, *, run_id: str, agent_id: str, final_verdict: str,
-                       reason: str) -> dict[str, Any]:
+                       reason: str, _before_write=None) -> dict[str, Any]:
     """Use current canonical completion/readiness checks for the terminal state."""
     project_root = _session_host(project_root, "run_session_finish", agent_id=agent_id)
-    args = SimpleNamespace(run_id=run_id, agent_id=agent_id, final_verdict=final_verdict, reason=reason)
+    args = SimpleNamespace(run_id=run_id, agent_id=agent_id, final_verdict=final_verdict, reason=reason, _before_write=_before_write)
     for name in ("questions_processed_this_run", "source_requests_opened_this_run", "releases_this_run",
                  "discovery_results_this_run", "acquisition_downloads_this_run", "github_archive_bytes_this_run",
                  "academic_provider_requests_this_run", "web_downloads_this_run", "manual_url_deliveries_this_run"):
@@ -2220,6 +2220,8 @@ def run_finish(project_root: Path, args: argparse.Namespace) -> dict[str, Any]:
                 else None
             ),
         )
+        if getattr(args, "_before_write", None) is not None:
+            args._before_write()
         commit_run_mutation(project_root, run_id, document, event)
         return document
 

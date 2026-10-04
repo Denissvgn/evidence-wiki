@@ -263,7 +263,7 @@ def schemas() -> dict[str, dict[str, Any]]:
     job_v3 = copy.deepcopy(job_v2)
     for branch in job_v3["anyOf"]:
         branch["properties"]["schema_version"] = {"const": JOB_V3}
-        branch["properties"].update(task_role={"enum": ["planner", "researcher", "evaluator",
+        branch["properties"].update(task_role={"enum": ["coverage", "planner", "researcher", "evaluator",
             "critic", "adjudicator", "repair", "integration", "release"]},
             role_scope_sha256={"type": "string", "pattern": r"^[a-f0-9]{64}$(?![\s\S])"},
             context_id=_string(), packet_sha256={"type": "string", "pattern": r"^[a-f0-9]{64}$(?![\s\S])"})

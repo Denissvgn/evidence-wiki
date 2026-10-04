@@ -608,6 +608,24 @@ class ResearchSession:
 
     @_boundary
     @_serialized
+    def examine_coverage(self, *, request_id, question_slug, config_ref, source_ids=()):
+        """Run a scoped coverage worker and apply its mechanically checked links."""
+        self._check("advance", write=True)
+        from .coverage_session import examine
+        return examine(self, request_id=request_id, question_slug=question_slug,
+            config_ref=config_ref, source_ids=source_ids, kind="coverage")
+
+    @_boundary
+    @_serialized
+    def examine_counterevidence(self, *, request_id, question_slug, claim_id, config_ref, source_ids=()):
+        """Run an independent critic; qualified findings can block release."""
+        self._check("advance", write=True)
+        from .coverage_session import examine
+        return examine(self, request_id=request_id, question_slug=question_slug,
+            config_ref=config_ref, claim_id=claim_id, source_ids=source_ids, kind="counterevidence")
+
+    @_boundary
+    @_serialized
     def host_job(self, *, request_id, operation, payload, original_text=None):
         """Retain an inert bounded job; execution and authentication stay in the host."""
         self._check("host_job", write=True)

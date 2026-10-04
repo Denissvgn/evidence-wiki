@@ -592,9 +592,9 @@ def checked_operation(stem: str, seam: str, args: tuple[Any, ...], kwargs: Mappi
         write = effect == "review"
     elif stem == "mutation_operations" and seam in {"revision", "prepare_request", "submit", "inspect", "reconcile"}:
         write = seam in {"submit", "reconcile"}
-    elif stem == "research_session" and seam in {"current", "next_work", "session", "advance", "run_until_terminal", "run_cycle", "acquire", "acquire_evidence", "choose_acquisition", "run_acquisition", "host_job",
+    elif stem == "research_session" and seam in {"current", "next_work", "session", "advance", "run_until_terminal", "run_cycle", "acquire", "acquire_evidence", "choose_acquisition", "run_acquisition", "examine_coverage", "examine_counterevidence", "host_job",
                                                "pending", "reconcile_pending", "cancel_pending", "intake_observation", "report", "prepare_acquisition"}:
-        write = seam in {"advance", "run_until_terminal", "run_cycle", "acquire", "acquire_evidence", "choose_acquisition", "run_acquisition", "host_job", "reconcile_pending", "cancel_pending", "intake_observation"}
+        write = seam in {"advance", "run_until_terminal", "run_cycle", "acquire", "acquire_evidence", "choose_acquisition", "run_acquisition", "examine_coverage", "examine_counterevidence", "host_job", "reconcile_pending", "cancel_pending", "intake_observation"}
     elif stem == "telemetry" and seam in {"record", "report", "project"}:
         write = seam == "record"
     elif stem == "telemetry_delivery" and seam in {"deliver", "inspect", "retry"}:

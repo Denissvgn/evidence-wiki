@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "33"
+LIBRARY_API_VERSION = "34"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -118,6 +118,8 @@ LIBRARY_API_SURFACE = (
     "research.session.acquire_evidence",
     "research.session.choose_acquisition",
     "research.session.run_acquisition",
+    "research.session.examine_coverage",
+    "research.session.examine_counterevidence",
     "research.session.prepare_acquisition",
     "research.session.host_job",
     "research.session.pending",
@@ -527,7 +529,7 @@ def contract() -> dict:
             "schemas": ["research-session-current/v1", "research-session-next/v1",
                         "research-session-binding/v1", "research-session-step/v1",
                         "research-session-current/v2", "research-session-next/v2",
-                        "research-session-binding/v2", "research-session-step/v2"],
+                        "research-session-binding/v2", "research-session-step/v2", "research-session-next/v3"],
             "schema_accessor": "evidence_wiki.research_session_contracts.schema_document",
             "work_cycle_result": "research-work-cycle-result/v1",
             "work_cycle_result_schema_accessor": "evidence_wiki.cycle_result_contracts.schema_document",
@@ -559,6 +561,14 @@ def contract() -> dict:
             "qualification": "host-authenticated protected references tied to exact policy, model, prompt, controller, rubric, domain and expiry; host must withdraw frozen services when qualification is revoked",
             "operational_limits": "configured host required; reference subprocess bounds do not establish malicious-worker isolation or general semantic quality",
             "acceptance": "current canonical release is separate from workflow qualification",
+        },
+        "coverage_examination": {
+            "schemas": ["evidence-coverage-instruction/v1", "evidence-coverage-proposal/v1", "evidence-counterevidence-proposal/v1"],
+            "roles": "explicit coverage worker and independent scoped critic; measured non-offline host output required",
+            "effects": "canonical coverage links/evaluation only; counter findings retain actual bounded retrieval observations",
+            "release": "current qualified independent findings and producer provenance; material objections block; bounded absence remains unknown",
+            "next_schema": "research-session-next/v3 for examination work; existing next/v2 retains its operation enum",
+            "acceptance": "no semantic approval or rights conferred by proposal, anchor match, query result or coverage link",
         },
         "claim_diagnostics": {
             "schema": "evidence-claim-diagnostics/v1",

@@ -143,6 +143,16 @@ per-claim native findings preserve source revisions, declared quote/anchor
 locations, current usage and mechanical results without publishing or accepting
 a claim. Admission and semantic review retain their owning gates.
 
+Version `34` adds `session.examine_coverage` and
+`session.examine_counterevidence`, with operation matrix `17`. A dedicated
+coverage profile schedules both roles automatically in the canonical drive.
+Examination work uses `research-session-next/v3`; existing next/v2 retains its
+operation enum. Coverage proposals can only create mechanically checked links
+through the native coverage owner. Independent critic findings retain bounded
+queries, source slices and exclusions; unresolved objections stop release.
+Current host model usage, calibration, source rights and the existing producer
+attestation are required. Empty bounded search remains unknown.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -1959,3 +1969,22 @@ Absences worth stating, so they are not read as gaps:
   `coverage.evaluate` reads and writes.
 - [Workspace status](../workspace-template/docs/workspace-status.md) — the
   document `status()` returns.
+
+A bound session can call
+`examine_coverage(request_id=..., question_slug=..., config_ref=..., source_ids=...)`
+and
+`examine_counterevidence(request_id=..., question_slug=..., claim_id=..., config_ref=..., source_ids=...)`.
+The host grants `coverage_session.examine`, `coverage_observation.observe`,
+`retrieval_operations.search`, existing execution grants and the native coverage
+mutation grants. The coverage worker requires `coverage.propose`; a separately
+controlled critic requires `objection.propose`. A critic-only invocation also
+activates the terminal objection gate. Findings never register strict reviews.
+Repeated requests retain the original attempt and exact native effect intents;
+completed results are historical and confer no fresh release eligibility.
+
+Examination uses the whole permitted run-source binding set when no source
+selector is supplied. Context is bounded to 32 sources; a larger decisive
+context is refused rather than silently omitted. Completed examination replay
+preserves its historical effect records, then rechecks current exact material
+before returning quotations. Withdrawn access or a changed source returns
+blocked metadata with no cached findings or query text.

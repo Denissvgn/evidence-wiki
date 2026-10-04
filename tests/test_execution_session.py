@@ -72,6 +72,13 @@ class LocalMeter:
         return {"seconds": summary["seconds"], "model_calls": 0, "tool_calls": 1, "tokens": 0, "cost": "0"}
 
 
+class HostProtocolSimulationMeter(LocalMeter):
+    """Simulate a host model meter for protocol mechanics, never real model use."""
+
+    def finalize(self, attempt, summary):
+        return {**super().finalize(attempt, summary), "model_calls": 1}
+
+
 @pytest.fixture
 def fixture(tmp_path, monkeypatch, request=None):
     if os.name != "posix":
@@ -156,6 +163,16 @@ def fixture(tmp_path, monkeypatch, request=None):
         "evidence_path": "official_guidance", "source_policy": "primary_or_official", "freshness_policy": "no_staleness_check",
         "identity_policy": "none", "min_sources": 1}]}
     owner("coverage_manifest").run_init_inline(root, slug="q", template=template)
+    if options.get("coverage_examination"):
+        from tests.test_research_planning import question_plan
+        requirements_path = root / "docs/research-requirements.json"
+        requirements = json.loads(requirements_path.read_bytes())
+        plan = question_plan("q")
+        plan["facets"] = [{**facet, "required": True} for facet in template["required_facets"]]
+        plan["criteria"][0]["required_scope"] = []
+        requirements["decisions"] = {"mode": "legacy", "question_plans": [plan]}
+        requirements_path.write_bytes(authenticated_bytes(requirements))
+        update_policy(root)
     policy = policy_document()
     policy.update(schema_version=POLICY_V2)
     policy["scope"] = {"question_ids": ["q"], "source_scope": [str(root / "raw")], "source_scope_kind": "native_extent"}
@@ -198,6 +215,24 @@ def fixture(tmp_path, monkeypatch, request=None):
     if options.get("acquisition_choice"):
         registry = ExecutionRoleRegistry((ExecutionRoleScope("researcher", "researcher", ("model", "acquisition.propose")),
             ExecutionRoleScope("profile-a", "evaluator", ("model",))))
+    if options.get("coverage_examination"):
+        assert options.get("role_isolation")
+        if not options.get("counter_only"):
+            roles += (ExecutionRole("coverage-worker", "host_worker", "runner", "controlled-coverage-process", "coverage/v1"),)
+        examination_scopes = [ExecutionRoleScope(scope.config_ref, scope.task_role,
+            (*scope.capabilities, "objection.propose") if scope.task_role == "critic" else scope.capabilities)
+            for scope in registry.scopes]
+        if not options.get("counter_only"):
+            examination_scopes.append(ExecutionRoleScope("coverage-worker", "coverage", ("model", "coverage.propose")))
+        registry = ExecutionRoleRegistry(examination_scopes)
+    if options.get("simulated_model_usage"):
+        roles = tuple(ExecutionRole(role.config_ref, role.role, role.controller_ref,
+            "simulated/" + role.model_ref, role.prompt_version) for role in roles)
+    if options.get("counter_offline"):
+        roles = tuple(ExecutionRole(role.config_ref, role.role, role.controller_ref,
+            "offline/" + role.model_ref if role.config_ref == "profile-b" else role.model_ref,
+            role.prompt_version) for role in roles)
+    selected_meter = HostProtocolSimulationMeter if options.get("simulated_model_usage") else LocalMeter
     profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
         roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
@@ -239,9 +274,16 @@ def fixture(tmp_path, monkeypatch, request=None):
     if options.get("planner"):
         planner = "import json,sys; d=json.load(sys.stdin)['input']; a=d['owner_actions'][0]; print(json.dumps({'schema_version':'research-work-proposal/v1','basis_id':d['basis_id'],'candidates':[dict(a,candidate_id='next',rationale='Exact permitted action')]}))"
         commands["planner"] = (sys.executable, "-c", planner)
+    if options.get("coverage_examination"):
+        if not options.get("counter_only"):
+            commands["coverage-worker"] = (sys.executable, "-c", "import json,sys; i=json.load(sys.stdin)['input']['instruction']; a=i['anchors'][0]; f=i['facets'][0]['facet_id']; print(json.dumps({'schema_version':'evidence-coverage-proposal/v1','basis_id':i['basis_id'],'links':[{'facet_id':f,'claim_ids':[a['claim_id']],'source_ids':[a['source_id']]}],'missing':[]}))")
+        critic = "import json,sys; d=json.load(sys.stdin)['input'];\n"
+        critic += "if d.get('purpose')=='counterevidence':\n p=d['packet']; s=p['sources'][0]; q=s['content'].strip().split('\\n')[0]; b=s['content'].index(q); f={'claim_id':p['claim']['id'],'facet_id':d['examination']['criteria'][0]['facet_id'],'kind':" + repr(options.get("counter_disposition", "opposing")) + ",'query':'opposing retained observations','exclusions':[],'source_ids':[s['source_id']],'evidence':[{'source_id':s['source_id'],'record_sha256':s['record_sha256'],'quote':q,'start':b,'end':b+len(q)}],'rationale':'An unresolved contrary interpretation needs examination.'}; print(json.dumps({'schema_version':'evidence-counterevidence-proposal/v1','basis_id':d['examination']['basis_id'],'findings':[f]}))\n"
+        critic += "else:\n " + evaluator.split("d=json.load(sys.stdin)['input']; ", 1)[1] + "\n"
+        commands["profile-b"] = (sys.executable, "-c", critic)
     executor = BoundedSubprocessExecutor(profile, commands=commands,
-        cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
-    calibration_commands = {config: (sys.executable, "-c", generator if config == "researcher" else evaluator)
+        cwd=worker, receipt_key=b"e" * 32, meter=selected_meter())
+    calibration_commands = {config: commands[config]
         for config in ["researcher", *[row["profile_ref"] for row in policy.to_dict()["required_evaluators"]]]}
     cases = [{"case_id": f"case-{index}", "family_id": f"family-{index // 10}",
         "input_document": {"case_id": f"case-{index}", "supported": index // 2 % 2 == 0, "wording": index % 2},
@@ -255,7 +297,7 @@ def fixture(tmp_path, monkeypatch, request=None):
     for required in policy.to_dict()["required_evaluators"]:
         config_ref = required["profile_ref"]
         calibration_executor = BoundedSubprocessExecutor(profile, commands=calibration_commands,
-            cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
+            cwd=worker, receipt_key=b"e" * 32, meter=selected_meter())
         observations = []
         for index, case in enumerate(cases):
             now = datetime.now(timezone.utc)
@@ -272,7 +314,7 @@ def fixture(tmp_path, monkeypatch, request=None):
                 binding_id="protected-reference", profile=profile, config_ref=config_ref, job=job, input_document=case["input_document"])
             if index and index % profile.total_steps == 0:
                 calibration_executor = BoundedSubprocessExecutor(profile, commands=calibration_commands,
-                    cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
+                    cwd=worker, receipt_key=b"e" * 32, meter=selected_meter())
             observed = calibration_executor.invoke(attempt)
             while observed["state"] == "running":
                 time.sleep(0.005)
