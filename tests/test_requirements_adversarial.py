@@ -252,3 +252,29 @@ def test_noncanonical_original_bytes_refuse_before_native_revision_effects(setup
         with pytest.raises(EvidenceWikiError):
             mutations.submit(root, value)
     assert workspace_bytes(root) == before
+
+
+@native_storage
+@pytest.mark.parametrize("borrow", [False, True])
+def test_historical_request_cannot_publish_executing_revision(setup, borrow):
+    root, control, proposal, envelope, selected, _ = setup
+    with selected.activate():
+        request = mutations.prepare_request(root, request_id=proposal["request_id"], operation="requirements.revise",
+            arguments={"proposal": proposal, "envelope": envelope})
+        captured = capture_revision(root, excluded=(".locks", "raw/.locks"))
+        expected = make_intent(request, captured["workspace_binding"])
+        with MutationStore(root, control, expected).locked() as writer:
+            writer.prepare(expected)
+            writer.write(state(expected, "prepared"))
+            basis = recovery.prepare(root, expected, writer)
+            checkpoint = writer.read()
+            checkpoint.update(status="executing", owner_basis=basis)
+            writer.write(checkpoint, expected_sha256=writer.state_sha256())
+        before = workspace_bytes(root)
+        from contextlib import nullcontext
+        custody = MutationStore(root, control).workspace_locked() if borrow else nullcontext()
+        with custody, MutationStore(root, control).historical_locked(proposal["request_id"], borrow_workspace=borrow) as reader:
+            with pytest.raises((EvidenceWikiError, ExecutionError)):
+                operations.revise(root, proposal, envelope, _store=reader, _basis=basis)
+            assert reader.read() == checkpoint and reader.receipt() is None
+        assert workspace_bytes(root) == before

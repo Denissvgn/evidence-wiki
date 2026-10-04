@@ -257,11 +257,12 @@ class _MutationWorkspaceGate:
     descriptor_identity: tuple[int, int]
     execution_owner: tuple[int, object | None]
     active: bool = True
+    read_only: bool = False
 
 
 @contextmanager
 def _mutation_workspace_gate(workspace_root: Path, control_root: Path, *, workspace_binding: Mapping[str, str],
-                             control_identity: Mapping[str, str], gate_descriptor: int) -> Iterator[None]:
+                             control_identity: Mapping[str, str], gate_descriptor: int, read_only: bool = False) -> Iterator[None]:
     """Bind one acquired native store gate to its current execution and selection."""
     if _MUTATION_GATE.get() is not None:
         _refuse("host_mutation_gate_nested")
@@ -270,6 +271,7 @@ def _mutation_workspace_gate(workspace_root: Path, control_root: Path, *, worksp
         (workspace_binding["device"], workspace_binding["inode"]),
         (control_identity["device"], control_identity["inode"]), gate_descriptor,
         (info.st_dev, info.st_ino), _execution_owner())
+    gate.read_only = read_only
     token = _MUTATION_GATE.set(gate)
     try:
         yield
@@ -278,7 +280,7 @@ def _mutation_workspace_gate(workspace_root: Path, control_root: Path, *, worksp
         _MUTATION_GATE.reset(token)
 
 
-def _require_mutation_workspace_gate(root: Path) -> None:
+def _require_mutation_workspace_gate(root: Path, *, allow_read_only: bool = False) -> None:
     """Refuse direct serialized writers without the exact live private native gate."""
     import hashlib
 
@@ -289,6 +291,8 @@ def _require_mutation_workspace_gate(root: Path) -> None:
     if (gate is None or not gate.active or gate.context is not context or gate.workspace_root != root
             or gate.execution_owner[0] != execution[0] or gate.execution_owner[1] is not execution[1]):
         _refuse("host_mutation_workspace_gate_required")
+    if gate.read_only and not allow_read_only:
+        _refuse("host_mutation_workspace_gate_read_only")
     os = _host_os()
     try:
         from .pack_discovery import owner
@@ -324,7 +328,7 @@ def _require_borrowed_mutation_workspace_gate(root: Path, control: Path) -> None
     if (context is None or context.mutation_control_directory is None
             or context.mutation_control_directory.resolve(strict=True) != control):
         _refuse("host_mutation_workspace_gate_required")
-    _require_mutation_workspace_gate(root)
+    _require_mutation_workspace_gate(root, allow_read_only=True)
 
 
 def require_actor(value: Any) -> None:

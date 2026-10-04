@@ -302,7 +302,7 @@ class MutationStore:
                 if not borrow:
                     custody.enter_context(_mutation_workspace_gate(self.workspace_root, self.control_root,
                         workspace_binding=self.workspace_binding, control_identity=self.control_identity,
-                        gate_descriptor=gate))
+                        gate_descriptor=gate, read_only=self._historical_readonly))
                 try:
                     yield self
                 except BaseException:

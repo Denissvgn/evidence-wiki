@@ -45,6 +45,17 @@ def test_exact_current_context_borrows_real_workspace_gate_for_historical_receip
     assert snapshot(control) == before
 
 
+def test_standalone_historical_custody_cannot_supply_native_workspace_write_gate(stored):
+    root, control, _, context = stored
+    before = snapshot(control)
+    with context.activate(), MutationStore(root, control).historical_locked("historical"):
+        host._require_mutation_workspace_gate(root, allow_read_only=True)
+        with pytest.raises(EvidenceWikiError) as error:
+            host._require_mutation_workspace_gate(root)
+        assert error.value.details["reason"] == "host_mutation_workspace_gate_read_only"
+    assert snapshot(control) == before
+
+
 @pytest.mark.parametrize("case", ["no-context", "no-gate", "other-workspace", "other-control", "other-context"])
 def test_borrow_requires_exact_live_context_workspace_and_control(stored, tmp_path, case):
     root, control, _, context = stored

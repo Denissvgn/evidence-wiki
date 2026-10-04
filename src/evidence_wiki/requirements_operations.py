@@ -362,7 +362,7 @@ def revise(root, proposal, envelope, *, _store=None, _basis=None):
     root, context = _host(root, envelope)
     from .mutation_requirements_recovery import load_plan
     from .mutation_store import MutationStore
-    if (type(_store) is not MutationStore or not _store._active or _store.workspace_root != root
+    if (type(_store) is not MutationStore or not _store._active or _store._historical_readonly or _store.workspace_root != root
             or _store.control_root != context.mutation_control_directory.resolve(strict=True)):
         _refuse("staged_request_gate_required")
     _store._require_locked()
