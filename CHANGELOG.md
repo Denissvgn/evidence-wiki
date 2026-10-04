@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Retain bounded text, structured and PDF host captures as immutable original
+  revisions, with approved-path reads and explicit recovery of interrupted
+  original/provenance publication.
+
 - Expose original research obligations and bounded append-only requirement
   revisions through native staged transactions and protected historical proof.
 

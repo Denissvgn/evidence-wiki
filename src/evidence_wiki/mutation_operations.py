@@ -51,6 +51,7 @@ OWNER_OPERATIONS = {
     "source_requests.fulfill": ("source_requests", "run_fulfill_request"),
     "sources.inventory": ("source_inventory", "run_inventory_report"),
     "sources.capture": ("source_delivery", "deliver"),
+    "sources.capture_revision": ("source_capture_operations", "deliver"),
     "strict.register_review": ("strict_evidence", "run_operation"),
     "strict.admit": ("strict_evidence", "run_admit_document"),
     "telemetry.record": ("run_controller", "run_telemetry_record"),
@@ -62,10 +63,14 @@ STAGED_SOURCES = frozenset({"sources.inventory", "normalize.sources"})
 STAGED_COVERAGE = frozenset({"coverage.revision", "coverage.evaluate"})
 STAGED_DRAFTS = frozenset({"strict.admit"})
 STAGED_REQUIREMENTS = frozenset({"requirements.revise"})
-STAGED_OPERATIONS = STAGED_SOURCES | STAGED_COVERAGE | STAGED_DRAFTS | STAGED_REQUIREMENTS
+STAGED_CAPTURES = frozenset({"sources.capture_revision"})
+STAGED_OPERATIONS = STAGED_SOURCES | STAGED_COVERAGE | STAGED_DRAFTS | STAGED_REQUIREMENTS | STAGED_CAPTURES
 
 
 def _recovery_module(operation):
+    if operation in STAGED_CAPTURES:
+        from . import mutation_capture_recovery
+        return mutation_capture_recovery
     if operation in STAGED_REQUIREMENTS:
         from . import mutation_requirements_recovery
         return mutation_requirements_recovery
@@ -929,7 +934,8 @@ def reconcile(project_root: str | Path, request_id: str, *,
                 try:
                     if operation in STAGED_OPERATIONS:
                         supported = True
-                        kind = ("requirements_postconditions" if operation in STAGED_REQUIREMENTS else
+                        kind = ("capture_pair" if operation in STAGED_CAPTURES else
+                                "requirements_postconditions" if operation in STAGED_REQUIREMENTS else
                                 "draft_postconditions" if operation in STAGED_DRAFTS else
                                 "source_postconditions" if operation in STAGED_SOURCES else "coverage_postconditions")
                         options = {"operation_control": operation_control} if operation in STAGED_SOURCES and operation_control is not None else {}

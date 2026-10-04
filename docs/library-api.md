@@ -101,6 +101,13 @@ reservations are refused explicitly. Legacy unprotected base documents are
 identified as host declarations. Neither a revision receipt nor its transport
 status approves research evidence.
 
+Version `27` adds core source capture document builders, `prepare_capture`,
+`capture_revision` and `resume_capture`; the operation matrix is version `10`.
+The explicit v2 delivery supports text, Markdown, JSON, CSV and PDF originals.
+Capture metadata and exact bytes establish a retained revision, while inventory,
+extraction, current rights, request fulfillment and semantic acceptance remain
+separate outcomes. Existing v1 text delivery retains its contract.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -324,6 +331,11 @@ exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
 | Operation | Signature |
 | --- | --- |
 | `sources.inventory` | `ws.sources.inventory(*, dry_run=False, append_log=False, require_checksum=False, reject_mismatch=False, max_records=1000, max_entries=10000, max_input_bytes=16777216)` |
+| `sources.capture_bytes_document` | `ws.sources.capture_bytes_document(content: bytes, metadata: dict) -> dict` |
+| `sources.capture_path_document` | `ws.sources.capture_path_document(*, root, relative, metadata, expected_content_sha256, expected_bytes) -> dict` |
+| `sources.prepare_capture` | `ws.sources.prepare_capture(*, request_id, path, delivery) -> dict` |
+| `sources.capture_revision` | `ws.sources.capture_revision(request) -> dict` |
+| `sources.resume_capture` | `ws.sources.resume_capture(request_id) -> dict` |
 | `normalize.sources` | `ws.normalize.sources(source_ids=None, *, all_sources=False, dry_run=False, force=False, append_log=False, pdf_extractor=None, max_sources=128, allow_external=False, max_manifest_bytes=1048576, max_manifest_records=1000, max_entries=10000, max_input_bytes=16777216, operation_control=None)` |
 | `source_requests.add` | `ws.source_requests.add(*, kind, query_or_identifier, rationale, priority="medium", question_slugs=None, scope=None)` |
 | `source_requests.list` | `ws.source_requests.list(*, statuses=None, kinds=None, scope=None)` |
@@ -340,6 +352,55 @@ currently refuses configured external extractors and execution/market closures;
 qualified packet extraction also requires a supported snapshot bridge. Explicit
 opt-in does not make those paths enforceable. Their legacy CLI routes remain
 available under their existing contracts.
+
+Capture builders consume the closed `evidence-source-capture-input/v1`
+metadata schema exposed by `evidence-wiki agent source-schemas`. A delivery
+binds origin, retrieval time, tool identity, rights declarations, scope,
+completeness and original content identity. Those declarations confer no rights
+or semantic approval. Inline content is limited to 49,152 bytes; an approved
+path permits up to 512 KiB of text, 1 MiB of JSON/CSV or 8 MiB of PDF.
+The path builder requires an active `HostContext` and the
+`source_capture_contracts.from_path` grant, plus a permitted native source path.
+It checks expected bytes and SHA before returning an inert descriptor; submission
+rechecks that origin before retaining immutable execution bytes.
+
+```python
+delivery = ws.sources.capture_bytes_document(original_bytes, capture_metadata)
+request = ws.sources.prepare_capture(
+    request_id="capture-1", path="raw/papers/original.json", delivery=delivery,
+)
+receipt = ws.sources.capture_revision(request)
+# Retain this exact request for replay and the receipt for historical inspection.
+```
+
+Publication requires selected private mutation custody, the existing mutation
+prepare/submit grants and `source_capture_operations.deliver`. A source revision
+binds both exact original bytes and immutable provenance. Different provenance
+needs a separate immutable path even when content bytes are identical.
+Capture returns `inventory` and `extraction` as `not_run`; request fulfillment
+and evidence acceptance remain false. PDF signature validation establishes no
+extraction fidelity.
+
+Provision `source_capture_operations.resume` plus mutation inspect/reconcile
+grants in the same original host selection if pair repair will be needed.
+`resume_capture` only completes its retained sealed outputs. It preserves the
+original partial receipt and reports desired-state proof separately from unknown
+original completion. It cannot adopt an orphan original, overwrite foreign
+bytes or refetch a missing source. Protected sources require the existing signed
+usage deposit, scrub and ancestry route; capture metadata cannot supply authority
+for ordinary raw publication.
+
+Capture preparation and publication share the native raw acquisition barrier
+with inventory and legacy delivery. Lock order is workspace/request custody,
+then raw acquisition custody. Provenance is published before the original, so
+an interrupted pair leaves no unprovenanced original for inventory to consume.
+Contention refuses before original publication. The host must inspect retained
+state; a prepared checkpoint remains unknown under the general mutation
+contract and exact resubmission does not automatically repeat preparation. Lock
+directories and the empty coordination file may be retained even when a new
+capture cannot complete. Known conflicting or orphan pairs refuse before
+creating that coordination state. Named directory/lock identity is rechecked
+throughout pair publication and desired-state reconciliation.
 
 New source and authoring seams qualify actual configuration, store, question,
 output and lock paths before effects. A linked workspace folder cannot redirect

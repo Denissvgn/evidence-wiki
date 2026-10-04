@@ -27,6 +27,7 @@ OPERATIONS = (
     "strict.admit",
     "telemetry.record",
     "requirements.revise",
+    "sources.capture_revision",
 )
 
 
@@ -79,6 +80,7 @@ def argument_schemas() -> dict[str, dict[str, Any]]:
         "sources.inventory": _obj(dry_run=boolean, append_log=boolean, require_checksum=boolean, reject_mismatch=boolean,
             max_records=integer(10_000), max_entries=integer(100_000), max_input_bytes=integer(67_108_864)),
         "sources.capture": _obj(path=_text(512), delivery=opaque),
+        "sources.capture_revision": _obj(path=_text(512), delivery=opaque),
         "strict.register_review": _obj(envelope=opaque),
         "strict.admit": _obj(proposal=opaque),
         "telemetry.record": _obj(run_id=_text(96), agent_id=_text(128), event=opaque),
@@ -102,7 +104,7 @@ def arguments(operation: str, value: Any) -> dict[str, Any]:
         "source_requests.fulfill": {"match_scope": None, "require_scope": False},
         "sources.inventory": {"dry_run": False, "append_log": False, "require_checksum": False,
             "reject_mismatch": False, "max_records": 1000, "max_entries": 10_000, "max_input_bytes": 16_777_216},
-        "sources.capture": {},
+        "sources.capture": {}, "sources.capture_revision": {},
         "strict.register_review": {},
         "strict.admit": {},
         "telemetry.record": {},
@@ -123,6 +125,12 @@ def arguments(operation: str, value: Any) -> dict[str, Any]:
         try:
             decode(DELIVERY, canonical(result["delivery"]))
         except UsageError:
+            refuse("INPUT_INVALID", "/arguments/delivery")
+    if operation == "sources.capture_revision":
+        from .source_capture_contracts import validate
+        try:
+            validate(result["delivery"])
+        except (ValueError, UsageError):
             refuse("INPUT_INVALID", "/arguments/delivery")
     if operation == "strict.register_review":
         payload = result["envelope"].get("payload")

@@ -80,6 +80,8 @@ def origin(value):
 
 
 def validate(value):
+    if type(value) is dict and value.get("schema_version") == "evidence-host-capture/v2":
+        return copy.deepcopy(load_workspace_module(_SCRIPT_DIR, "_capture_bridge").validate(value))
     require(isinstance(value, dict) and set(value) == FIELDS and value.get("schema_version") == SCHEMA, "capture_shape_invalid")
     for key in ("capture_id", "tool_id"):
         identifier(value[key])
@@ -178,6 +180,10 @@ def inspect_record(root: Path, record, *, read_input=None):
     The private reader must return exact bytes and enforce its own cumulative
     capture budget. Default callers retain the legacy anchored read path.
     """
+    if type(record.get("provenance")) is dict and record["provenance"].get("host_capture", {}).get("schema_version") == "evidence-host-capture/v2":
+        from types import SimpleNamespace
+        native = SimpleNamespace(read=read, require=require, sidecar=sidecar)
+        return load_workspace_module(_SCRIPT_DIR, "_capture_bridge").inspect(root, record, native, read_input=read_input)
     provenance = record.get("provenance")
     require(isinstance(provenance, dict) and "host_capture" in provenance, "capture_metadata_missing")
     profile = validate(provenance["host_capture"])

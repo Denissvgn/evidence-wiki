@@ -466,6 +466,7 @@ _READ_SEAMS = frozenset({
     ("source_requests", "run_list_requests"),
 })
 _WRITE_SEAMS = frozenset({
+    ("mutation_capture_recovery", "resume"),
     ("requirements_operations", "revise"),
     ("run_controller", "run_telemetry_record"),
     ("run_controller", "run_session_start"), ("run_controller", "run_session_record"),
@@ -505,6 +506,8 @@ def checked_operation(stem: str, seam: str, args: tuple[Any, ...], kwargs: Mappi
     key, operation = (stem, seam), f"{stem}.{seam}"
     if key == ("coverage_manifest", "run_evaluate_checked"):
         operation = "coverage_manifest.run_evaluate"
+    elif key == ("mutation_capture_recovery", "resume"):
+        operation = "source_capture_operations.resume"
     write = key in _WRITE_SEAMS
     roots = args[:1]
     rootless = key in {("qualified_packet", "profiles"), ("evidence_snapshots", "run_verify")}

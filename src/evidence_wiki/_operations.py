@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "9"
+OPERATION_MATRIX_VERSION = "10"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -30,6 +30,11 @@ _ROWS = (
     ("normalize.validate_execution", "evidence-wiki normalize execution", "none", "bounded original closure capture; external host authority checked at one current clock", "none"),
     ("normalize.validate_market", "evidence-wiki normalize market", "none", "bounded inert original closure capture; no provider authority promotion", "none"),
     ("sources.inventory", "scripts/source_inventory.py", "admitted source manifest and optional activity log; checksum refusal may follow writes", "canonical acquisition barrier and atomic manifest replacement; separate activity lock; bounded inputs", "none"),
+    ("sources.capture_bytes_document", None, "none; inert bounded bytes and detached provenance", "none", "none"),
+    ("sources.capture_path_document", None, "none; observes explicitly approved original bytes", "native anchored no-follow read and root/content identity revalidation", "none"),
+    ("sources.prepare_capture", None, "private control gates only; exact capture request", "native workspace gate with captured original identity; no raw publication", "none"),
+    ("sources.capture_revision", None, "raw acquisition coordination files, immutable original/provenance pair and retained mutation receipt; no usability or approval", "native workspace/request gates then shared raw acquisition barrier, immutable staged bytes and prior-byte CAS", "none"),
+    ("sources.resume_capture", None, "exact retained pair completion, raw coordination and reconciliation; original receipt preserved", "native workspace/request custody then shared raw barrier and explicit repair grant; no reacquisition", "none"),
     ("source_requests.add", "scripts/source_requests.py add", "source request and activity log; log failure may follow durable mutation", "canonical request store lock and separate activity log lock", "none"),
     ("source_requests.list", "scripts/source_requests.py list", "none", "canonical request reader", "none"),
     ("source_requests.fulfill", "scripts/source_requests.py fulfill", "request state and activity log, or contingent delegated claim", "canonical request/claim locks and separate activity log lock", "none"),

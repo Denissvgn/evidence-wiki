@@ -224,7 +224,7 @@ PROVENANCE_COMPANION_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 #: on. A declaration the fingerprint could not carry would be a promise -- edit this and
 #: normalization re-runs -- that the record has no way to keep.
 RAW_FINGERPRINT_CAPTURE_SUFFIXES = {
-    "host_capture": {".md", ".markdown", ".mdown", ".txt"},
+    "host_capture": {".md", ".markdown", ".mdown", ".txt", ".json", ".csv", ".pdf"},
     "pdf": PDF_EXTENSIONS,
     "html": HTML_EXTENSIONS,
     "docx": DOCX_EXTENSIONS,
